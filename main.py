@@ -3,20 +3,17 @@ import logging
 import asyncio
 import sqlite3
 import requests
-import os
-from dotenv import load_dotenv
-
-# Load environment variables
-load_dotenv()
-
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, Router, types
 from aiogram.filters import Command
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.client.session.aiohttp import AiohttpSession
+import os
 
-# ТВО йТОКЕН (готов к использованию!)
-BOT_TOKEN = "8968196261:AAGjxaTy_evirnWDAO124vmkbbDFy03kekY"
+# ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ
+BOT_TOKEN = os.getenv('TELEGRAM_TOKEN', '8968196261:AAGjxaTy_evirnWDAO124vmkbbDFy03kekY')
+OPENSKY_CLIENT_ID = os.getenv('OPENSKY_USERNAME', 'dimakaplya-api-client')
+OPENSKY_CLIENT_SECRET = os.getenv('OPENSKY_PASSWORD', 'yrYDUumSAh6ZFlPJM2keFIKGiM8EdwBN')
 
 # ЛОГИРОВАНИЕ
 logging.basicConfig(
@@ -25,19 +22,16 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# БЕСПЛАТНЫЕ ПРОКСИ (опционально, для OpenSky)
-FREE_PROXIES = [
-    "http://104.21.24.66:8080",
-    "http://154.12.227.102:80",
-    "http://185.221.116.106:3128",
-    "http://45.142.106.97:1080",
-]
-
+# OPENSKY API И КЕШИРОВАНИЕ ТОКЕНА
 OPENSKY_API = 'https://opensky-network.org/api'
+opensky_token_cache = {
+    'access_token': None,
+    'expires_at': None
+}
 
-airports_info = {
+AIRPORTS_INFO = {
     'moscow': [
-        {'name': 'SVO B C (Шереметьево)', 'emoji': '✈️', 'icao': 'UUWW', 'iata': 'SVO'},
+        {'name': 'SVO (Шереметьево)', 'emoji': '✈️', 'icao': 'UUWW', 'iata': 'SVO'},
         {'name': 'DME (Домодедово)', 'emoji': '✈️', 'icao': 'UUDD', 'iata': 'DME'},
         {'name': 'VKO (Внуково)', 'emoji': '✈️', 'icao': 'UUWL', 'iata': 'VKO'},
     ],
@@ -76,20 +70,63 @@ airports_info = {
     ]
 }
 
-categories = {
+CATEGORIES = {
     'taxi': {'name': 'ТАКСИ', 'tariffs': ['Эконом', 'Комфорт', 'Комфорт+', 'Минивэн']},
     'ultima': {'name': 'ТАКСИ ULTIMA', 'tariffs': ['Business', 'Premier', 'Elite', 'Cruise']},
     'courier': {'name': 'КУРЬЕР', 'tariffs': ['Пеший', 'Авто']},
     'cargo': {'name': 'ГРУЗОВОЕ ТАКСИ', 'tariffs': []}
 }
 
-all_tariffs = ['Эконом', 'Комфорт', 'Комфорт+', 'Минивэн', 'Business', 'Premier', 'Elite', 'Cruise']
-queue_positions = ['1-5', '6-10', '11-15', '16-20', '21-25', '26-30', '31-35', '36-40',
+ALL_TARIFFS = ['Эконом', 'Комфорт', 'Комфорт+', 'Минивэн', 'Business', 'Premier', 'Elite', 'Cruise']
+QUEUE_POSITIONS = ['1-5', '6-10', '11-15', '16-20', '21-25', '26-30', '31-35', '36-40',
                    '41-45', '46-50', '51-55', '56-60', '61-65', '66-70', '71-75', '76-80',
                    '81-85', '86-90', '91-95', '96-100', '100+']
 
 DB_FILE = 'taxi_queue.db'
 user_state = {}
+
+# ==================== OAuth2 ФУНКЦИИ ====================
+
+def get_opensky_access_token():
+    """Получить access token из OpenSky API с кешированием"""
+    global opensky_token_cache
+
+    # Проверяем, есть ли валидный кешированный token
+    if opensky_token_cache['access_token'] and opensky_token_cache['expires_at']:
+        if datetime.now() < opensky_token_cache['expires_at']:
+            logger.info("✅ Используем кешированный OpenSky token")
+            return opensky_token_cache['access_token']
+
+    # Token истёк или отсутствует - запрашиваем новый
+    try:
+        logger.info("📡 Запрашиваю новый OpenSky access token...")
+        response = requests.post(
+            'https://opensky-network.org/oauth/token',
+            auth=(OPENSKY_CLIENT_ID, OPENSKY_CLIENT_SECRET),
+            data={'grant_type': 'client_credentials'},
+            timeout=10
+        )
+
+        if response.status_code == 200:
+            data = response.json()
+            token = data.get('access_token')
+            expires_in = data.get('expires_in', 3600)
+
+            # Кешируем token
+            opensky_token_cache['access_token'] = token
+            opensky_token_cache['expires_at'] = datetime.now() + timedelta(seconds=expires_in - 60)
+
+            logger.info(f"✅ Получен новый OpenSky token (срок действия: {expires_in}s)")
+            return token
+        else:
+            logger.error(f"❌ Ошибка OAuth2: статус {response.status_code}")
+            logger.error(f"   Ответ: {response.text}")
+            return None
+    except Exception as e:
+        logger.error(f"❌ Ошибка при получении OpenSky token: {e}")
+        return None
+
+# ==================== БАЗА ДАННЫХ ====================
 
 def init_db():
     conn = sqlite3.connect(DB_FILE)
@@ -141,141 +178,108 @@ def get_load_emoji(load):
     else:
         return '🔴'
 
+# ==================== OPENSKY API ====================
 
 def get_departures(airport_icao):
-    """Получить вылеты из аэропорта"""
+    """Получить вылеты из аэропорта через OAuth2"""
     try:
+        access_token = get_opensky_access_token()
+        if not access_token:
+            logger.error(f"❌ Не удалось получить token для запроса вылетов {airport_icao}")
+            return []
+
         now = datetime.utcnow()
         begin = int(now.timestamp())
         end = int((now + timedelta(hours=6)).timestamp())
 
         logger.info(f"📡 Запрос вылетов {airport_icao} из OpenSky API")
 
-        # Используем аутентификацию если доступна
-        auth = None
-        opensky_username = os.getenv('OPENSKY_USERNAME')
-        opensky_password = os.getenv('OPENSKY_PASSWORD')
-        
-        if opensky_username and opensky_password:
-            auth = (opensky_username, opensky_password)
-            logger.info(f"   ✓ Используется аутентификация OpenSky")
+        headers = {
+            'Authorization': f'Bearer {access_token}',
+            'User-Agent': 'TaxiHelperBot/1.0'
+        }
 
         response = requests.get(
             f'{OPENSKY_API}/flights/departure',
             params={'airport': airport_icao, 'begin': begin, 'end': end},
-            auth=auth,
-            timeout=15,
-            verify=True,
-            headers={'User-Agent': 'TaxiHelperBot/1.0'}
+            headers=headers,
+            timeout=15
         )
 
         if response.status_code == 200:
-            data = response.json()
-            if data:
-                logger.info(f"✅ Получены вылеты {airport_icao}: {len(data)} рейсов")
-            else:
-                logger.info(f"⚠️ Нет данных о вылетах {airport_icao}")
-            return data[:10] if data else []
+            data = response.json()[:10]
+            logger.info(f"✅ Получены вылеты {airport_icao}: {len(data)} рейсов")
+            return data
         elif response.status_code == 401:
-            logger.error(f"❌ Ошибка аутентификации OpenSky (401). Проверьте OPENSKY_USERNAME и OPENSKY_PASSWORD")
-        elif response.status_code == 404:
-            logger.warning(f"⚠️ Аэропорт {airport_icao} не найден (404)")
-        elif response.status_code == 429:
-            logger.warning(f"⚠️ Лимит запросов OpenSky достигнут (429)")
+            logger.warning(f"⚠️ OpenSky: 401 Unauthorized - очищаем token кеш")
+            opensky_token_cache['access_token'] = None
+            return []
         else:
             logger.warning(f"⚠️ OpenSky API вернул код {response.status_code}")
-        
-        return []
-
     except Exception as e:
         logger.error(f"❌ Ошибка при получении вылетов {airport_icao}: {e}")
-        return []
 
+    return []
 
 def get_arrivals(airport_icao):
-    """Получить прилеты в аэропорт"""
+    """Получить прилеты в аэропорт через OAuth2"""
     try:
+        access_token = get_opensky_access_token()
+        if not access_token:
+            logger.error(f"❌ Не удалось получить token для запроса прилетов {airport_icao}")
+            return []
+
         now = datetime.utcnow()
         begin = int((now - timedelta(hours=1)).timestamp())
         end = int((now + timedelta(hours=5)).timestamp())
 
         logger.info(f"📡 Запрос прилетов {airport_icao} из OpenSky API")
 
-        # Используем аутентификацию если доступна
-        auth = None
-        opensky_username = os.getenv('OPENSKY_USERNAME')
-        opensky_password = os.getenv('OPENSKY_PASSWORD')
-        
-        if opensky_username and opensky_password:
-            auth = (opensky_username, opensky_password)
-            logger.info(f"   ✓ Используется аутентификация OpenSky")
+        headers = {
+            'Authorization': f'Bearer {access_token}',
+            'User-Agent': 'TaxiHelperBot/1.0'
+        }
 
         response = requests.get(
             f'{OPENSKY_API}/flights/arrival',
             params={'airport': airport_icao, 'begin': begin, 'end': end},
-            auth=auth,
-            timeout=15,
-            verify=True,
-            headers={'User-Agent': 'TaxiHelperBot/1.0'}
+            headers=headers,
+            timeout=15
         )
 
         if response.status_code == 200:
-            data = response.json()
-            if data:
-                logger.info(f"✅ Получены прилеты {airport_icao}: {len(data)} рейсов")
-            else:
-                logger.info(f"⚠️ Нет данных о прилетах {airport_icao}")
-            return data[:10] if data else []
+            data = response.json()[:10]
+            logger.info(f"✅ Получены прилеты {airport_icao}: {len(data)} рейсов")
+            return data
         elif response.status_code == 401:
-            logger.error(f"❌ Ошибка аутентификации OpenSky (401). Проверьте OPENSKY_USERNAME и OPENSKY_PASSWORD")
-        elif response.status_code == 404:
-            logger.warning(f"⚠️ Аэропорт {airport_icao} не найден (404)")
-        elif response.status_code == 429:
-            logger.warning(f"⚠️ Лимит запросов OpenSky достигнут (429)")
+            logger.warning(f"⚠️ OpenSky: 401 Unauthorized - очищаем token кеш")
+            opensky_token_cache['access_token'] = None
+            return []
         else:
             logger.warning(f"⚠️ OpenSky API вернул код {response.status_code}")
-        
-        return []
-
     except Exception as e:
         logger.error(f"❌ Ошибка при получении прилетов {airport_icao}: {e}")
-        return []
 
+    return []
 
-# Глобальный бот
+# ==================== БОТ ====================
+
 bot = None
 dp = Dispatcher()
 router = Router()
 
 async def initialize_bot_with_proxy():
-    """Инициализировать бота с поддержкой прокси для Telegram API"""
+    """Инициализировать бота"""
     global bot
 
-    # Пробуем с прокси
-    for proxy_url in FREE_PROXIES:
-        try:
-            logger.info(f"📡 Попытка подключения с прокси {proxy_url}...")
-            session = AiohttpSession(proxy=proxy_url)
-            bot = Bot(token=BOT_TOKEN, session=session)
-
-            # Тестируем соединение
-            me = await bot.get_me()
-            logger.info(f"✅ Бот успешно подключен: @{me.username} (прокси {proxy_url})")
-            return True
-        except Exception as e:
-            logger.warning(f"⚠️ Прокси {proxy_url} не сработал: {e}")
-            bot = None
-
-    # Пробуем без прокси как fallback
     try:
-        logger.info("📡 Попытка подключения без прокси...")
+        logger.info("📡 Инициализирую Telegram бота...")
         bot = Bot(token=BOT_TOKEN)
         me = await bot.get_me()
-        logger.info(f"✅ Бот успешно подключен (без прокси): @{me.username}")
+        logger.info(f"✅ Бот успешно подключен: @{me.username}")
         return True
     except Exception as e:
         logger.error(f"❌ Не удалось подключить бота к Telegram API: {e}")
-        logger.error("⚠️ Проверьте что VPN включен и интернет работает")
         return False
 
 @router.message(Command("start"))
@@ -320,7 +324,7 @@ async def select_city(message: types.Message):
     text = f"Вы выбрали {message.text}\n\nВыбери категорию 👇"
 
     keyboard_buttons = []
-    for cat_key, cat_data in categories.items():
+    for cat_key, cat_data in CATEGORIES.items():
         if cat_data['tariffs']:
             tariffs_text = ', '.join(cat_data['tariffs'])
             button_text = f"{cat_data['name']} ({tariffs_text})"
@@ -333,7 +337,7 @@ async def select_city(message: types.Message):
     keyboard = ReplyKeyboardMarkup(resize_keyboard=True, keyboard=keyboard_buttons)
     await message.answer(text, reply_markup=keyboard)
 
-@router.message(lambda message: any(cat_data['name'] in message.text for cat_data in categories.values()))
+@router.message(lambda message: any(cat_data['name'] in message.text for cat_data in CATEGORIES.values()))
 async def select_category(message: types.Message):
     user_id = message.from_user.id
     if user_id not in user_state:
@@ -341,7 +345,7 @@ async def select_category(message: types.Message):
         return
 
     selected_category = None
-    for cat_key, cat_data in categories.items():
+    for cat_key, cat_data in CATEGORIES.items():
         if cat_data['name'] in message.text:
             selected_category = cat_key
             break
@@ -352,7 +356,7 @@ async def select_category(message: types.Message):
 
     user_state[user_id]['category'] = selected_category
 
-    text = f"Вы выбрали {categories[selected_category]['name']}\n\nВыбери услугу 👇"
+    text = f"Вы выбрали {CATEGORIES[selected_category]['name']}\n\nВыбери услугу 👇"
 
     keyboard = ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[
         [KeyboardButton(text="Куда поехать")],
@@ -387,7 +391,7 @@ async def show_current_info(callback_query: types.CallbackQuery):
         return
 
     city = user_state[user_id]['city']
-    airports = airports_info.get(city, [])
+    airports = AIRPORTS_INFO.get(city, [])
 
     if not airports:
         await callback_query.answer("Аэропорты не найдены", show_alert=True)
@@ -415,7 +419,7 @@ async def show_airport_details(callback_query: types.CallbackQuery):
     city = data_parts[2]
     airport_idx = int(data_parts[3])
 
-    airport = airports_info[city][airport_idx]
+    airport = AIRPORTS_INFO[city][airport_idx]
 
     text = f"⏳ Загружаю расписание {airport['name']}...\n\n"
     msg = await callback_query.message.edit_text(text)
@@ -468,7 +472,7 @@ async def show_queue_menu(callback_query: types.CallbackQuery):
         return
 
     city = user_state[user_id]['city']
-    airports = airports_info.get(city, [])
+    airports = AIRPORTS_INFO.get(city, [])
 
     if not airports:
         await callback_query.answer("Аэропорты не найдены", show_alert=True)
@@ -491,7 +495,7 @@ async def show_queue_options(callback_query: types.CallbackQuery):
     user_id = callback_query.from_user.id
     user_state[user_id]['queue_airport'] = (city, airport_idx)
 
-    airport = airports_info[city][airport_idx]
+    airport = AIRPORTS_INFO[city][airport_idx]
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📋 Текущая очередь", callback_data=f"view_queue_{city}_{airport_idx}")],
@@ -507,7 +511,7 @@ async def view_queue_stats(callback_query: types.CallbackQuery):
     city = data_parts[2]
     airport_idx = int(data_parts[3])
 
-    airport = airports_info[city][airport_idx]
+    airport = AIRPORTS_INFO[city][airport_idx]
     airport_name = airport['name']
 
     stats = get_queue_stats(city, airport_name)
@@ -522,10 +526,10 @@ async def view_queue_stats(callback_query: types.CallbackQuery):
                 current_data[tariff] = {}
             current_data[tariff][position] = count
 
-        for tariff in all_tariffs:
+        for tariff in ALL_TARIFFS:
             if tariff in current_data:
                 text += f"*{tariff}:*\n"
-                for position in queue_positions:
+                for position in QUEUE_POSITIONS:
                     if position in current_data[tariff]:
                         count = current_data[tariff][position]
                         text += f"  {position}: {count} чел.\n"
@@ -547,7 +551,7 @@ async def select_tariff(callback_query: types.CallbackQuery):
     text = "Выбери тариф 👇"
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[])
-    for tariff in all_tariffs:
+    for tariff in ALL_TARIFFS:
         keyboard.inline_keyboard.append([InlineKeyboardButton(text=tariff, callback_data=f"tariff_{tariff}")])
 
     await callback_query.message.edit_text(text, reply_markup=keyboard)
@@ -563,7 +567,7 @@ async def select_position(callback_query: types.CallbackQuery):
     text = f"Тариф: *{tariff}*\n\nВыбери позицию в очереди 👇"
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[])
-    for position in queue_positions:
+    for position in QUEUE_POSITIONS:
         keyboard.inline_keyboard.append([InlineKeyboardButton(text=position, callback_data=f"position_{position}")])
 
     await callback_query.message.edit_text(text, reply_markup=keyboard, parse_mode='Markdown')
@@ -583,12 +587,12 @@ async def confirm_queue(callback_query: types.CallbackQuery):
         await callback_query.answer("Ошибка данных", show_alert=True)
         return
 
-    airport_name = airports_info[city][airport_idx]['name']
+    airport_name = AIRPORTS_INFO[city][airport_idx]['name']
 
     add_to_queue(user_id, city, airport_name, tariff, position)
     logger.info(f"✅ Пользователь {user_id} занял очередь")
 
-    text = "✅ спасибо вы заняли очередь спасибо за выбор!"
+    text = "✅ Спасибо! Вы заняли очередь. Спасибо за выбор!"
 
     await callback_query.message.edit_text(text)
     await callback_query.answer()
@@ -630,7 +634,7 @@ async def main():
 
     dp.include_router(router)
     logger.info("🤖 Бот запущен и готов к работе!")
-    logger.info("💡 Советы: Держите VPN включен, бот будет работать 24/7")
+    logger.info("✅ OAuth2 аутентификация включена для OpenSky API")
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
