@@ -3,6 +3,12 @@ import logging
 import asyncio
 import sqlite3
 import requests
+import os
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
+
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, Router, types
 from aiogram.filters import Command
@@ -135,6 +141,7 @@ def get_load_emoji(load):
     else:
         return '🔴'
 
+
 def get_departures(airport_icao):
     """Получить вылеты из аэропорта"""
     try:
@@ -144,23 +151,46 @@ def get_departures(airport_icao):
 
         logger.info(f"📡 Запрос вылетов {airport_icao} из OpenSky API")
 
+        # Используем аутентификацию если доступна
+        auth = None
+        opensky_username = os.getenv('OPENSKY_USERNAME')
+        opensky_password = os.getenv('OPENSKY_PASSWORD')
+        
+        if opensky_username and opensky_password:
+            auth = (opensky_username, opensky_password)
+            logger.info(f"   ✓ Используется аутентификация OpenSky")
+
         response = requests.get(
             f'{OPENSKY_API}/flights/departure',
             params={'airport': airport_icao, 'begin': begin, 'end': end},
+            auth=auth,
             timeout=15,
-            verify=False
+            verify=True,
+            headers={'User-Agent': 'TaxiHelperBot/1.0'}
         )
 
         if response.status_code == 200:
-            data = response.json()[:10]
-            logger.info(f"✅ Получены вылеты {airport_icao}: {len(data)} рейсов")
-            return data
+            data = response.json()
+            if data:
+                logger.info(f"✅ Получены вылеты {airport_icao}: {len(data)} рейсов")
+            else:
+                logger.info(f"⚠️ Нет данных о вылетах {airport_icao}")
+            return data[:10] if data else []
+        elif response.status_code == 401:
+            logger.error(f"❌ Ошибка аутентификации OpenSky (401). Проверьте OPENSKY_USERNAME и OPENSKY_PASSWORD")
+        elif response.status_code == 404:
+            logger.warning(f"⚠️ Аэропорт {airport_icao} не найден (404)")
+        elif response.status_code == 429:
+            logger.warning(f"⚠️ Лимит запросов OpenSky достигнут (429)")
         else:
             logger.warning(f"⚠️ OpenSky API вернул код {response.status_code}")
+        
+        return []
+
     except Exception as e:
         logger.error(f"❌ Ошибка при получении вылетов {airport_icao}: {e}")
+        return []
 
-    return []
 
 def get_arrivals(airport_icao):
     """Получить прилеты в аэропорт"""
@@ -171,23 +201,46 @@ def get_arrivals(airport_icao):
 
         logger.info(f"📡 Запрос прилетов {airport_icao} из OpenSky API")
 
+        # Используем аутентификацию если доступна
+        auth = None
+        opensky_username = os.getenv('OPENSKY_USERNAME')
+        opensky_password = os.getenv('OPENSKY_PASSWORD')
+        
+        if opensky_username and opensky_password:
+            auth = (opensky_username, opensky_password)
+            logger.info(f"   ✓ Используется аутентификация OpenSky")
+
         response = requests.get(
             f'{OPENSKY_API}/flights/arrival',
             params={'airport': airport_icao, 'begin': begin, 'end': end},
+            auth=auth,
             timeout=15,
-            verify=False
+            verify=True,
+            headers={'User-Agent': 'TaxiHelperBot/1.0'}
         )
 
         if response.status_code == 200:
-            data = response.json()[:10]
-            logger.info(f"✅ Получены прилеты {airport_icao}: {len(data)} рейсов")
-            return data
+            data = response.json()
+            if data:
+                logger.info(f"✅ Получены прилеты {airport_icao}: {len(data)} рейсов")
+            else:
+                logger.info(f"⚠️ Нет данных о прилетах {airport_icao}")
+            return data[:10] if data else []
+        elif response.status_code == 401:
+            logger.error(f"❌ Ошибка аутентификации OpenSky (401). Проверьте OPENSKY_USERNAME и OPENSKY_PASSWORD")
+        elif response.status_code == 404:
+            logger.warning(f"⚠️ Аэропорт {airport_icao} не найден (404)")
+        elif response.status_code == 429:
+            logger.warning(f"⚠️ Лимит запросов OpenSky достигнут (429)")
         else:
             logger.warning(f"⚠️ OpenSky API вернул код {response.status_code}")
+        
+        return []
+
     except Exception as e:
         logger.error(f"❌ Ошибка при получении прилетов {airport_icao}: {e}")
+        return []
 
-    return []
 
 # Глобальный бот
 bot = None
