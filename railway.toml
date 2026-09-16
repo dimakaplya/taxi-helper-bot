@@ -1,0 +1,5 @@
+[build]
+builder = "nix"
+
+[deploy]
+startCommand = "python main.py"
