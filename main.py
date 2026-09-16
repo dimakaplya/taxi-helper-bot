@@ -13,7 +13,7 @@ import os
 # ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ
 BOT_TOKEN = os.getenv('TELEGRAM_TOKEN', '8968196261:AAGjxaTy_evirnWDAO124vmkbbDFy03kekY')
 OPENSKY_CLIENT_ID = os.getenv('OPENSKY_USERNAME', 'dimakaplya-api-client')
-OPENSKY_CLIENT_SECRET = os.getenv('OPENSKY_PASSWORD', 'yrYDUumSAh6ZFlPJM2keFIKGiM8EdwBN')
+OPENSKY_CLIENT_SECRET = os.getenv('OPENSKY_PASSWORD', '4XaH3JsAubg8CWfSbGknt5IA2eizIrWC')
 
 # ЛОГИРОВАНИЕ
 logging.basicConfig(
@@ -101,9 +101,12 @@ def get_opensky_access_token():
     try:
         logger.info("📡 Запрашиваю новый OpenSky access token...")
         response = requests.post(
-            'https://opensky-network.org/oauth/token',
-            auth=(OPENSKY_CLIENT_ID, OPENSKY_CLIENT_SECRET),
-            data={'grant_type': 'client_credentials'},
+            'https://auth.opensky-network.org/auth/realms/opensky-network/protocol/openid-connect/token',
+            data={
+                'grant_type': 'client_credentials',
+                'client_id': OPENSKY_CLIENT_ID,
+                'client_secret': OPENSKY_CLIENT_SECRET
+            },
             timeout=10
         )
 
