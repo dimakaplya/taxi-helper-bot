@@ -465,17 +465,9 @@ async def show_airport_info(callback_query: types.CallbackQuery):
     msg = await callback_query.message.edit_text(f"⏳ Загружаю {flight_label.lower()}...")
     keyboard = InlineKeyboardMarkup(inline_keyboard=[])
     for i, airport in enumerate(airports):
-        flights = get_airport_flights(airport['icao'], flight_type)
-        capacity = AIRPORT_CAPACITY.get(airport['icao'], 1000)
-        relevant_cap = {'economy': capacity * ECONOMY_SHARE, 'business': capacity * BUSINESS_SHARE, 'total': capacity}[relevant_class]
-        if flights:
-            key = {'economy': 'passengers_economy', 'business': 'passengers_business', 'total': 'passengers'}[relevant_class]
-            total_passengers = sum(f.get(key, 0) for f in flights)
-            avg_load = (total_passengers / len(flights) / relevant_cap) * 100
-        else:
-            avg_load = 0
-        emoji = get_load_emoji(avg_load)
-        button_text = f"{airport['emoji']} {airport['name']} {emoji} {avg_load:.0f}%"
+        current_load, _, _ = compute_current_hour_load(airport['icao'], flight_type, relevant_class)
+        emoji = get_load_emoji(current_load)
+        button_text = f"{airport['emoji']} {airport['name']} {emoji} {current_load:.0f}%"
         keyboard.inline_keyboard.append([InlineKeyboardButton(text=button_text, callback_data=f"airport_details_{city}_{i}_{flight_type}")])
     await msg.edit_text(f"✅ Аэропорты ({flight_label.lower()}):", reply_markup=keyboard)
     await callback_query.answer()
@@ -555,6 +547,24 @@ async def show_airport_details(callback_query: types.CallbackQuery):
         text += "_🔴0-50% НЕ ЕХАТЬ | 🟡51-70% ОЧЕРЕДЬ | 🟢71-100% ЕХАТЬ | 🟣>100% СРОЧНО_"
     await msg.edit_text(text, parse_mode='Markdown')
     await callback_query.answer()
+
+def compute_current_hour_load(airport_icao, flight_type, relevant_class):
+    """Загрузка на ТЕКУЩИЙ час для ОДНОГО направления (только прилёты или только
+    вылеты) - используется в списке аэропортов (show_airport_info). Для вылетов
+    берётся час +DEPARTURE_LEAD_TIME_HOURS: спрос на заказы в городе сейчас
+    соответствует рейсам, которые улетят примерно через 2 часа, а не рейсам,
+    улетающим прямо в этот час (пассажир уже давно уехал бы в аэропорт)."""
+    now = datetime.now()
+    current_hour = now.hour
+    target_hour = (current_hour + DEPARTURE_LEAD_TIME_HOURS) % 24 if flight_type == 'departures' else current_hour
+    flights = get_airport_flights(airport_icao, flight_type)
+    capacity = AIRPORT_CAPACITY.get(airport_icao, 1000)
+    relevant_cap = {'economy': capacity * ECONOMY_SHARE, 'business': capacity * BUSINESS_SHARE, 'total': capacity}[relevant_class]
+    key = {'economy': 'passengers_economy', 'business': 'passengers_business', 'total': 'passengers'}[relevant_class]
+    flights_now = [f for f in flights if datetime.fromtimestamp(f.get('firstSeen', 0)).hour == target_hour]
+    total_passengers = sum(f.get(key, 0) for f in flights_now)
+    load = (total_passengers / relevant_cap) * 100 if total_passengers > 0 else 0
+    return load, len(flights_now), target_hour
 
 def compute_current_availability(airport_icao, relevant_class):
     """Загруженность аэропорта ПРЯМО СЕЙЧАС для конкретного класса (эконом/бизнес/все):
