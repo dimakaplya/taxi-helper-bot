@@ -92,6 +92,10 @@ TRAINS_UPDATE_INTERVAL_HOURS = 12  # 2 запуска/сутки
 # вперёд (было 8, увеличено по просьбе пользователя). У аэропортов свой,
 # отдельный 8-часовой прогноз (см. show_airport_details) - не путать.
 TRAIN_FORECAST_HOURS = 12
+# Гранулярность прогноза - блоками по TRAIN_FORECAST_PERIOD_MINUTES минут
+# (было по часу целиком, уменьшено до получаса по просьбе пользователя).
+# Число периодов на весь прогноз = TRAIN_FORECAST_HOURS*60/TRAIN_FORECAST_PERIOD_MINUTES.
+TRAIN_FORECAST_PERIOD_MINUTES = 30
 
 # Расчёт по квоте (500 запросов/сутки на ключ, общий для fetch_yandex_data.py
 # и fetch_trains_data.py - см. их докстринги; доступ к общему счётчику
@@ -511,21 +515,48 @@ def get_trains_for_station(station_code, category):
         return None, None
     return station['name'], station.get('arrivals', [])
 
-def compute_current_train_hour_load(station_code, category, hour_offset=0):
-    """Загрузка вокзала на ЗАДАННЫЙ час (по умолчанию текущий, МСК) - по той же
+def _minutes_in_period(train_minutes, period_start_minutes, period_length, day_minutes=24 * 60):
+    """train_minutes/period_start_minutes - минуты от полуночи (0-1439).
+    Обрабатывает переход через полночь (период может начинаться в 23:45 и
+    заканчиваться в 00:15 следующих суток) - без этого последние периоды
+    прогноза перед полуночью теряли бы поезда, приходящиеся на начало
+    следующих суток."""
+    period_end_minutes = period_start_minutes + period_length
+    if period_end_minutes <= day_minutes:
+        return period_start_minutes <= train_minutes < period_end_minutes
+    return train_minutes >= period_start_minutes or train_minutes < (period_end_minutes - day_minutes)
+
+def compute_current_train_period_load(station_code, category, period_offset=0):
+    """Загрузка вокзала на ЗАДАННЫЙ TRAIN_FORECAST_PERIOD_MINUTES-минутный
+    период (по умолчанию текущий получас, округлённый вниз, МСК) - по той же
     логике, что compute_current_hour_load для аэропортов: сумма оценки
-    пассажиров прибывающих в этот час поездов / STATION_CAPACITY * 100.
-    Пассажиры считаются по СЕРЕДИНЕ диапазона оценки (passengers_min/max),
-    как единственно разумный способ свести диапазон к одному числу."""
+    пассажиров прибывающих в этот период поездов / (часовая ёмкость,
+    пропорционально урезанная под длину периода) * 100. Раньше период был
+    целый час (см. историю) - уменьшен до получаса по просьбе пользователя,
+    поэтому емкость STATION_CAPACITY (задана как пас/ЧАС) тоже делим
+    пропорционально - иначе один и тот же поезд в получасовом окне давал бы
+    вдвое заниженный % по сравнению со старой часовой версией. Пассажиры
+    считаются по СЕРЕДИНЕ диапазона оценки (passengers_min/max), как
+    единственно разумный способ свести диапазон к одному числу."""
     _, arrivals = get_trains_for_station(station_code, category)
     arrivals = arrivals or []
     now = datetime.now(ZoneInfo('Europe/Moscow'))
-    target_hour = (now.hour + hour_offset) % 24
-    trains_in_hour = [t for t in arrivals if int(t['time'].split(':')[0]) == target_hour]
-    total_passengers = sum((t['passengers_min'] + t['passengers_max']) / 2 for t in trains_in_hour)
-    capacity = STATION_CAPACITY.get(station_code, 1000)
-    load = (total_passengers / capacity) * 100 if total_passengers > 0 else 0
-    return load, trains_in_hour, target_hour
+    now_minutes = now.hour * 60 + (now.minute // TRAIN_FORECAST_PERIOD_MINUTES) * TRAIN_FORECAST_PERIOD_MINUTES
+    period_start_minutes = (now_minutes + TRAIN_FORECAST_PERIOD_MINUTES * period_offset) % (24 * 60)
+
+    def _train_minutes(t):
+        h, m = t['time'].split(':')
+        return int(h) * 60 + int(m)
+
+    trains_in_period = [
+        t for t in arrivals
+        if _minutes_in_period(_train_minutes(t), period_start_minutes, TRAIN_FORECAST_PERIOD_MINUTES)
+    ]
+    total_passengers = sum((t['passengers_min'] + t['passengers_max']) / 2 for t in trains_in_period)
+    hourly_capacity = STATION_CAPACITY.get(station_code, 1000)
+    period_capacity = hourly_capacity * (TRAIN_FORECAST_PERIOD_MINUTES / 60)
+    load = (total_passengers / period_capacity) * 100 if total_passengers > 0 else 0
+    return load, trains_in_period, period_start_minutes
 
 # Такси эконом/комфорт видит ВСЕ мероприятия города без разбора категорий.
 # Ultima видит только "значимые" - те, где цена входа от ULTIMA_MIN_PRICE
@@ -564,6 +595,10 @@ def get_events_for_user(city, category, limit=5):
     city_events = data.get('cities', {}).get(city, [])
     now_ts = datetime.now(ZoneInfo('UTC')).timestamp()
     upcoming = [e for e in city_events if e.get('start', 0) >= now_ts]
+    # Показываем только события с указанным адресом площадки - водителю без
+    # адреса ехать некуда, а "🚗 Поехали" всё равно требует координат
+    # (place_lat/place_lon), которые у KudaGo почти всегда идут вместе с адресом.
+    upcoming = [e for e in upcoming if e.get('place_address')]
     if category == 'ultima':
         upcoming = [e for e in upcoming if (parse_min_price(e) or 0) >= ULTIMA_MIN_PRICE]
     return upcoming[:limit], True
@@ -639,10 +674,8 @@ def build_event_message(event, city):
         lines.append("📍 " + " · ".join(place_bits))
     lines.append(f"👥 ~{lo}–{hi} чел. _(оценка)_")
     lines.append(f"🗓 {date_str}")
-    if event.get('is_free'):
-        lines.append("💰 Бесплатно")
-    elif event.get('price'):
-        lines.append(f"💰 {event['price']}")
+    # Цену билета не показываем - водителям она не нужна (используется только
+    # внутри parse_min_price для фильтра Ultima, см. get_events_for_user).
     text = '\n'.join(lines)
 
     buttons = []
@@ -1528,7 +1561,7 @@ async def show_airport_menu(message: types.Message):
 
 def build_train_stations_keyboard(category, city):
     """Список вокзалов ДАННОГО ГОРОДА (фильтр по STATION_CITY) - у каждого
-    символ+% загрузки текущего часа (бинарная индикация вокзалов - см.
+    символ+% загрузки ТЕКУЩЕГО получаса (бинарная индикация вокзалов - см.
     get_train_load_symbol, отличается от 4-уровневой шкалы аэропортов)."""
     data = load_trains_data()
     keyboard = InlineKeyboardMarkup(inline_keyboard=[])
@@ -1538,7 +1571,7 @@ def build_train_stations_keyboard(category, city):
     if not city_stations:
         return keyboard, False
     for code, station in city_stations.items():
-        load, trains_in_hour, _ = compute_current_train_hour_load(code, category)
+        load, trains_in_period, _ = compute_current_train_period_load(code, category)
         symbol = get_train_load_symbol(load)
         button_text = f"🚆 {station['name']} {symbol} {load:.0f}%"
         keyboard.inline_keyboard.append([InlineKeyboardButton(text=button_text, callback_data=f"train_station_{code}")])
@@ -1573,18 +1606,19 @@ async def show_train_stations_menu(message: types.Message):
 
 @router.callback_query(lambda c: c.data.startswith('train_station_'))
 async def show_train_station_arrivals(callback_query: types.CallbackQuery):
-    """Прогноз загруженности вокзала - TRAIN_FORECAST_HOURS часов вперёд
-    (12 - увеличено по просьбе пользователя, было 8), у каждого часа
-    символ+%/бинарная рекомендация (см. get_train_load_symbol - у вокзалов, в
-    отличие от аэропортов, только 2 состояния "ехать"/"не ехать"), а внутри
-    часа - сами поезда (время, откуда, статус - без числа пассажиров в
-    отображении, убрано по просьбе пользователя, хотя сама оценка всё ещё
-    считается под капотом для расчёта Загрузки). И Такси, и
-    Ultima видят ОДИНАКОВЫЙ список - ВСЕ поезда дальнего следования, кроме
-    пригородных электричек (их вообще не собираем - см. fetch_trains_data.py).
-    Разница только в подаче: у Ultima Сапсаны и фирменные/премиальные поезда
-    идут ПЕРВЫМИ в списке часа (акцент на премиальном сегменте), у Такси
-    порядок - просто по времени. Только прибытия - вылеты не собираются."""
+    """Прогноз загруженности вокзала - TRAIN_FORECAST_HOURS часов вперёд (12),
+    блоками по TRAIN_FORECAST_PERIOD_MINUTES минут (30 - уменьшено с целого
+    часа по просьбе пользователя), у каждого блока символ+%/бинарная
+    рекомендация (см. get_train_load_symbol - у вокзалов, в отличие от
+    аэропортов, только 2 состояния "ехать"/"не ехать"), а внутри блока - сами
+    поезда (время, откуда, статус - без числа пассажиров в отображении,
+    убрано по просьбе пользователя, хотя сама оценка всё ещё считается под
+    капотом для расчёта Загрузки). И Такси, и Ultima видят ОДИНАКОВЫЙ список -
+    ВСЕ поезда дальнего следования, кроме пригородных электричек (их вообще
+    не собираем - см. fetch_trains_data.py). Разница только в подаче: у
+    Ultima Сапсаны и фирменные/премиальные поезда идут ПЕРВЫМИ в списке блока
+    (акцент на премиальном сегменте), у Такси порядок - просто по времени.
+    Только прибытия - вылеты не собираются."""
     code = callback_query.data[len('train_station_'):]
     user_id = callback_query.from_user.id
     category = user_state.get(user_id, {}).get('category', 'taxi')
@@ -1603,20 +1637,26 @@ async def show_train_station_arrivals(callback_query: types.CallbackQuery):
     text += f"_Обновлено: {now.strftime('%H:%M:%S')} (МСК)_\n"
     text += f"_Ориентировочная пропускная способность: ~{capacity} пас/час (оценка)_\n\n"
 
+    # Текущее время округляем вниз до получаса - первый блок прогноза должен
+    # начинаться с него же, а не с произвольной минуты нажатия кнопки.
+    period_base = now.replace(minute=(now.minute // TRAIN_FORECAST_PERIOD_MINUTES) * TRAIN_FORECAST_PERIOD_MINUTES, second=0, microsecond=0)
+    total_periods = (TRAIN_FORECAST_HOURS * 60) // TRAIN_FORECAST_PERIOD_MINUTES
+
     any_trains = False
-    for hour_offset in range(TRAIN_FORECAST_HOURS):
-        load, trains_in_hour, target_hour = compute_current_train_hour_load(code, category, hour_offset)
-        hour_time = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=hour_offset)
-        hour_display = hour_time.strftime('%H:00')
+    for period_offset in range(total_periods):
+        load, trains_in_period, _ = compute_current_train_period_load(code, category, period_offset)
+        block_start = period_base + timedelta(minutes=TRAIN_FORECAST_PERIOD_MINUTES * period_offset)
+        block_end = block_start + timedelta(minutes=TRAIN_FORECAST_PERIOD_MINUTES - 1)
+        block_display = f"{block_start.strftime('%H:%M')}–{block_end.strftime('%H:%M')}"
         symbol = get_train_load_symbol(load)
         label = get_train_load_label(load)
-        text += f"{symbol} *{hour_display}* | Загрузка: *{load:.0f}%* - *{label}*\n"
-        if trains_in_hour:
+        text += f"{symbol} *{block_display}* | Загрузка: *{load:.0f}%* - *{label}*\n"
+        if trains_in_period:
             any_trains = True
             if category == 'ultima':
                 # Сапсан/фирменные - первыми в списке (акцент для Ultima)
-                trains_in_hour = sorted(trains_in_hour, key=lambda t: (not t.get('is_sapsan'), not t.get('is_firmenny'), t['time']))
-            for t in trains_in_hour:
+                trains_in_period = sorted(trains_in_period, key=lambda t: (not t.get('is_sapsan'), not t.get('is_firmenny'), t['time']))
+            for t in trains_in_period:
                 if t.get('is_sapsan'):
                     status = "🚄 Сапсан"
                 elif t.get('is_firmenny'):

@@ -185,6 +185,7 @@ def parse_trains(schedule_items):
     только transport_types=train - пригородные электрички не запрашиваются
     вообще, см. fetch_station_arrivals)."""
     trains = []
+    seen_keys = set()
     for item in schedule_items:
         thread = item.get('thread', {}) or {}
         time_str = item.get('arrival')
@@ -199,19 +200,43 @@ def parse_trains(schedule_items):
         number = thread.get('number', '')
         title = thread.get('title', '')
         short_title = thread.get('short_title', '')
+
+        # Дедупликация - Yandex Rasp /schedule/ иногда отдаёт ОДНУ И ТУ ЖЕ
+        # нитку дважды в ответе (замечено на живых данных пользователя -
+        # Адлер/Сириус, у сквозных поездов не со старта маршрута). thread.uid -
+        # самый надёжный идентификатор нитки, если он есть в ответе; если нет -
+        # запасной ключ (время прибытия + номер поезда) ловит подавляющее
+        # большинство настоящих дублей, не путая два РАЗНЫХ поезда, которые
+        # случайно прибывают в одну минуту (у тех номер будет другой).
+        dedup_key = thread.get('uid') or (dt.strftime('%Y-%m-%d %H:%M'), number)
+        if dedup_key in seen_keys:
+            continue
+        seen_keys.add(dedup_key)
+
         is_sapsan = is_sapsan_thread(thread, number, title, short_title)
         # Фирменный проверяем только если это не Сапсан - Сапсан и так
         # приоритетнее любого другого "фирменного" статуса.
         is_firmenny = (not is_sapsan) and is_firmenny_thread(thread, number, title, short_title)
         pax_min, pax_max = estimate_train_passengers(is_sapsan, is_firmenny)
 
-        # Направление - откуда идёт поезд (для arrival - departure_from)
+        # Направление - откуда идёт поезд (для arrival - departure_from). Если
+        # Yandex не отдал departure_from (бывает у сквозных поездов не со
+        # старта маршрута - тоже замечено на Адлере/Сириусе) - берём title
+        # нитки, но он обычно выглядит как "Город А — Город Б" (маршрут
+        # целиком, а не только пункт отправления) - в этом случае оставляем
+        # только часть ДО тире. Разделители с пробелами вокруг ("Город —
+        # Город", "Город - Город"), а не голый дефис - иначе сломались бы
+        # названия городов с дефисом без пробелов ("Ростов-на-Дону").
         point = item.get('departure_from')
         point_title = None
         if isinstance(point, dict):
             point_title = point.get('title')
         if not point_title:
-            point_title = title  # fallback на название нитки маршрута
+            point_title = title
+            for dash in (' — ', ' - '):
+                if dash in point_title:
+                    point_title = point_title.split(dash)[0].strip()
+                    break
 
         trains.append({
             'time': dt.strftime('%H:%M'),
