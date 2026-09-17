@@ -331,7 +331,9 @@ async def select_category(message: types.Message):
     if user_id not in user_state:
         await message.answer("Сначала выбери город!")
         return
-    for cat_key, cat_data in CATEGORIES.items():
+    # Сортируем по длине названия по убыванию - иначе "ТАКСИ" (подстрока
+    # "ТАКСИ ULTIMA") матчится раньше и категория Ultima никогда не выбирается
+    for cat_key, cat_data in sorted(CATEGORIES.items(), key=lambda kv: -len(kv[1]['name'])):
         if cat_data['name'] in message.text:
             user_state[user_id]['category'] = cat_key
             break
