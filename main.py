@@ -480,69 +480,66 @@ async def show_airport_details(callback_query: types.CallbackQuery):
     msg = await callback_query.message.edit_text(text)
 
     departures = get_departures(airport['icao'])
-    arrivals = get_arrivals(airport['icao'])
 
     text = f"*{airport['emoji']} {airport['name']}*
 "
     text += f"_Обновлено: {datetime.now().strftime('%H:%M:%S')}_
+"
+    text += "
+*📊 ПРОГНОЗ ЗАГРУЖЕННОСТИ (8 часов):*
 
 "
 
     now = datetime.now()
-    end_time = now + timedelta(hours=8)
-
-    if departures:
-        text += "*✈️ ВЫЛЕТЫ (следующие 8 часов):*
+    
+    # Проходим по каждому часу (6 часов)
+    for hour in range(8):
+        hour_time = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=hour)
+        hour_str = hour_time.strftime('%H:00')
+        
+        # Считаем рейсы в этот час
+        flights_in_hour = 0
+        for flight in departures:
+            flight_time = datetime.fromtimestamp(flight.get('firstSeen', 0))
+            if flight_time.hour == hour_time.hour:
+                flights_in_hour += 1
+        
+        # Калькулируем загруженность (случайно для примера)
+        import random
+        load = random.randint(50, 250)
+        
+        # Определяем цвет и рекомендацию
+        if load <= 75:
+            emoji = '🔴'
+            action = 'НЕ ЕХАТЬ'
+        elif load <= 100:
+            emoji = '🟠'
+            action = 'НЕ ЕХАТЬ'
+        elif load <= 125:
+            emoji = '🟡'
+            action = 'НЕ ЕХАТЬ'
+        elif load <= 200:
+            emoji = '🟢'
+            action = '✅ ЕХАТЬ'
+        else:
+            emoji = '🟣'
+            action = '✅ ЕХАТЬ'
+        
+        # Разбор пассажиров (85% емкости)
+        total_capacity = 100
+        econom = int(total_capacity * 0.85 * (load / 200))
+        business = int(total_capacity * 0.15 * (load / 200))
+        
+        text += f"{emoji} *{hour_str}* | Нагрузка: *{load}%*
 "
-        for i, flight in enumerate(departures[:10], 1):
-            callsign = flight.get('callsign', 'N/A').strip()
-            dest = flight.get('estArrivalAirport', 'N/A')
-            scheduled = flight.get('firstSeen', 0)
-            if scheduled:
-                flight_time = datetime.fromtimestamp(scheduled)
-                # Показываем только рейсы на следующие 8 часов
-                if now <= flight_time <= end_time:
-                    time_str = flight_time.strftime('%H:%M')
-                    # Калькулируем загруженность (85% от емкости)
-                    load = int(50 + i * 10)  # Примерная загруженность
-                    emoji = '🟢' if load >= 125 else ('🟡' if load >= 85 else '🔴')
-                    text += f"  {i}. {callsign} → {dest} в {time_str} {emoji} {load}%
+        text += f"   Рекомендация: *{action}*
+"
+        text += f"   🛬 Рейсов: {flights_in_hour}  |  ✈️ Пассажиры: Эконом {econom}, Бизнес {business}
 "
         text += "
 "
-    else:
-        text += "*✈️ ВЫЛЕТЫ:* Нет данных
-
-"
-
-    if arrivals:
-        text += "*🛬 ПРИЛЕТЫ (следующие 8 часов):*
-"
-        for i, flight in enumerate(arrivals[:10], 1):
-            callsign = flight.get('callsign', 'N/A').strip()
-            origin = flight.get('estDepartureAirport', 'N/A')
-            scheduled = flight.get('lastSeen', 0)
-            if scheduled:
-                flight_time = datetime.fromtimestamp(scheduled)
-                if now <= flight_time <= end_time:
-                    time_str = flight_time.strftime('%H:%M')
-                    load = int(50 + i * 10)
-                    emoji = '🟢' if load >= 125 else ('🟡' if load >= 85 else '🔴')
-                    text += f"  {i}. {callsign} ← {origin} в {time_str} {emoji} {load}%
-"
-        text += "
-"
-    else:
-        text += "*🛬 ПРИЛЕТЫ:* Нет данных
-
-"
-
-    if not departures and not arrivals:
-        text += "⚠️ Данные о рейсах временно недоступны
-"
-
-    text += "
-_🟢 ≥125% | 🟡 ≥85% | 🔴 <85%_"
+    
+    text += "_Легенда: 🔴≤75% 🟠75-100% 🟡100-125% 🟢125-200% 🟣≥200%_"
 
     await msg.edit_text(text, parse_mode='Markdown')
     await callback_query.answer()
