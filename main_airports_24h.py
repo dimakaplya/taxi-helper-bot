@@ -716,10 +716,10 @@ CATEGORIES_WITHOUT_AIRPORTS = {'courier', 'cargo'}
 FUEL_BOT_URL = "https://t.me/gde_benzin_rubot"
 
 def services_keyboard(category=None):
-    # "Куда поехать", "Аэропорты" и "Где бензин" - навигационный блок сверху
-    # (куда сейчас ехать/что с топливом), "Повышенный спрос" и "Дорожные
-    # события" - блок прогнозов/уведомлений снизу.
-    buttons = [[KeyboardButton(text="Куда поехать")]]
+    # "Аэропорты" и "Где бензин" - навигационный блок сверху (куда сейчас
+    # ехать/что с топливом), "Повышенный спрос" и "Дорожные события" - блок
+    # прогнозов/уведомлений снизу.
+    buttons = []
     if category not in CATEGORIES_WITHOUT_AIRPORTS:
         buttons.append([KeyboardButton(text="Аэропорты")])
     buttons.append([KeyboardButton(text="⛽ Где бензин")])
