@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+api_usage_log.json
+main.py.backup_opensky
+stations_list_raw.json
+stations_cache.json
+.env
