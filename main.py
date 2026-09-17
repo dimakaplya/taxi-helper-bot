@@ -10,6 +10,7 @@ from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMar
 import os
 
 import fetch_yandex_data  # логика похода в Yandex Rasp API, запускается фоново прямо на Railway
+import fetch_favt_notices  # логика сбора уведомлений Росавиации (@favt_info), тоже фоново
 
 BOT_TOKEN = os.getenv('TELEGRAM_TOKEN', '8968196261:AAGjxaTy_evirnWDAO124vmkbbDFy03kekY')
 
@@ -19,6 +20,11 @@ BOT_TOKEN = os.getenv('TELEGRAM_TOKEN', '8968196261:AAGjxaTy_evirnWDAO124vmkbbDF
 FLIGHTS_DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'flights_data.json')
 FLIGHTS_DATA_MAX_AGE_HOURS = 26  # если данные старше - считаем их устаревшими
 FLIGHTS_UPDATE_INTERVAL_HOURS = 2  # см. расчёт квоты 500 запросов/сутки в fetch_yandex_data.py
+
+# Уведомления Росавиации об ограничениях в аэропортах (@favt_info) - публичная
+# веб-страница, лимита запросов нет, поэтому обновляем чаще, чем расписание рейсов.
+FAVT_NOTICES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'favt_notices.json')
+FAVT_UPDATE_INTERVAL_MINUTES = 15
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -191,6 +197,34 @@ def load_flights_data():
     except Exception as e:
         logger.error(f"❌ Ошибка чтения flights_data.json: {e}")
         return None
+
+_favt_notices_cache = None
+_favt_notices_mtime = None
+
+def load_favt_notices():
+    """Загружает favt_notices.json (уведомления Росавиации об ограничениях)."""
+    global _favt_notices_cache, _favt_notices_mtime
+    try:
+        mtime = os.path.getmtime(FAVT_NOTICES_FILE)
+        if _favt_notices_cache is not None and mtime == _favt_notices_mtime:
+            return _favt_notices_cache
+        with open(FAVT_NOTICES_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        _favt_notices_cache = data
+        _favt_notices_mtime = mtime
+        return data
+    except FileNotFoundError:
+        return None
+    except Exception as e:
+        logger.error(f"❌ Ошибка чтения favt_notices.json: {e}")
+        return None
+
+def get_notices_for_airport(icao):
+    """Уведомления Росавиации за последние 12ч, касающиеся конкретного аэропорта."""
+    data = load_favt_notices()
+    if not data:
+        return []
+    return [n for n in data.get('notices', []) if icao in n.get('airports', [])]
 
 def get_airport_flights(airport_icao, flight_type='departures'):
     """Получить рейсы аэропорта из реальных данных (flights_data.json).
@@ -488,7 +522,24 @@ async def show_airport_availability(callback_query: types.CallbackQuery):
         text += f"{airport['emoji']} *{airport['name']}*\n"
         text += f"  {load_emoji} {status}\n"
         text += f"  📊 Загруженность: {current_load:.0f}%\n"
-        text += f"  ✈️ Рейсов: {len(arrivals + departures)}\n\n"
+        text += f"  ✈️ Рейсов: {len(arrivals + departures)}\n"
+
+        notices = get_notices_for_airport(airport['icao'])
+        if notices:
+            latest = notices[0]
+            notice_time = datetime.fromisoformat(latest['time']).astimezone().strftime('%H:%M')
+            restricted = 'ВВЕДЕНЫ' in latest['text'].upper() and 'СНЯТ' not in latest['text'].upper()
+            notice_emoji = '🚫' if restricted else 'ℹ️'
+            text += f"  {notice_emoji} *Росавиация ({notice_time}):* {latest['text'][:150]}\n"
+            if len(notices) > 1:
+                text += f"  _(+{len(notices) - 1} за последние 12ч)_\n"
+        text += "\n"
+
+    all_notices = (load_favt_notices() or {}).get('notices', [])
+    other_notices = [n for n in all_notices if not any(a['icao'] in n.get('airports', []) for a in airports)]
+    if other_notices:
+        text += f"_ℹ️ Ещё {len(other_notices)} уведомлений Росавиации за 12ч по другим городам (см. канал @favt_info)_\n"
+
     await msg.edit_text(text, parse_mode='Markdown')
     await callback_query.answer()
 
@@ -539,6 +590,20 @@ async def flights_data_updater():
             logger.error(f"❌ Ошибка фонового обновления flights_data.json: {e}")
         await asyncio.sleep(FLIGHTS_UPDATE_INTERVAL_HOURS * 3600)
 
+async def favt_notices_updater():
+    """Фоновая задача: раз в FAVT_UPDATE_INTERVAL_MINUTES минут читает публичную
+    веб-версию канала @favt_info (Росавиация) и обновляет favt_notices.json.
+    Это не API с лимитом запросов - просто HTML-страница, поэтому можно обновлять
+    часто. Уведомления об ограничениях в аэропортах критичны по времени."""
+    while True:
+        try:
+            logger.info("🔄 Обновляю favt_notices.json из канала Росавиации...")
+            await asyncio.to_thread(fetch_favt_notices.main)
+            logger.info("✅ favt_notices.json обновлён")
+        except Exception as e:
+            logger.error(f"❌ Ошибка фонового обновления favt_notices.json: {e}")
+        await asyncio.sleep(FAVT_UPDATE_INTERVAL_MINUTES * 60)
+
 async def main():
     global bot
     if not await initialize_bot():
@@ -548,6 +613,7 @@ async def main():
         asyncio.create_task(flights_data_updater())
     else:
         logger.warning("⚠️ YANDEX_RASP_API_KEY не задан в переменных окружения Railway - flights_data.json не будет обновляться автоматически")
+    asyncio.create_task(favt_notices_updater())
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
