@@ -12,6 +12,7 @@ import os
 
 import fetch_yandex_data  # логика похода в Yandex Rasp API, запускается фоново прямо на Railway
 import fetch_favt_notices  # логика сбора уведомлений Росавиации (@favt_info), тоже фоново
+import fetch_events_data  # афиша города (KudaGo) для кнопки "🎭 События города", тоже фоново
 
 BOT_TOKEN = os.getenv('TELEGRAM_TOKEN', '8968196261:AAGjxaTy_evirnWDAO124vmkbbDFy03kekY')
 
@@ -26,6 +27,11 @@ FLIGHTS_UPDATE_INTERVAL_HOURS = 2  # см. расчёт квоты 500 запр�
 # веб-страница, лимита запросов нет, поэтому обновляем чаще, чем расписание рейсов.
 FAVT_NOTICES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'favt_notices.json')
 FAVT_UPDATE_INTERVAL_MINUTES = 15
+
+# Афиша города (KudaGo) - события меняются медленно (не по минутам, как
+# рейсы/статусы), поэтому обновляем редко и не тратим лишние запросы.
+EVENTS_DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'events_data.json')
+EVENTS_UPDATE_INTERVAL_HOURS = 3
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -359,6 +365,82 @@ def get_notices_for_airport(icao):
     if not data:
         return []
     return [n for n in data.get('notices', []) if icao in n.get('airports', [])]
+
+_events_data_cache = None
+_events_data_mtime = None
+
+def load_events_data():
+    """Загружает events_data.json (афиша KudaGo, см. fetch_events_data.py)."""
+    global _events_data_cache, _events_data_mtime
+    try:
+        mtime = os.path.getmtime(EVENTS_DATA_FILE)
+        if _events_data_cache is not None and mtime == _events_data_mtime:
+            return _events_data_cache
+        with open(EVENTS_DATA_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        _events_data_cache = data
+        _events_data_mtime = mtime
+        return data
+    except FileNotFoundError:
+        return None
+    except Exception as e:
+        logger.error(f"❌ Ошибка чтения events_data.json: {e}")
+        return None
+
+# Какие категории KudaGo показываем какому классу такси. Ultima - "значимые"
+# события (концерты, спектакли), эконом/комфорт - более массовые (выставки,
+# фестивали). Курьер/Грузовое такси эту кнопку вообще не видят (см.
+# CATEGORIES_WITHOUT_EVENTS ниже) - события не про их профиль работы.
+CATEGORY_TO_EVENT_CATEGORIES = {
+    'taxi': ['exhibition', 'festival'],
+    'ultima': ['concert', 'theater'],
+}
+CATEGORIES_WITHOUT_EVENTS = {'courier', 'cargo'}
+
+def get_events_for_user(city, category, limit=5):
+    """Ближайшие события города под класс водителя. Возвращает (events, city_supported) -
+    city_supported=False значит KudaGo вообще не покрывает этот город (нужно
+    отдельное сообщение "нет данных", а не пустой список - это разные вещи)."""
+    if city not in fetch_events_data.KUDAGO_CITY_MAP:
+        return [], False
+    data = load_events_data()
+    if not data:
+        return [], True
+    city_events = data.get('cities', {}).get(city, [])
+    wanted_categories = set(CATEGORY_TO_EVENT_CATEGORIES.get(category, []))
+    now_ts = datetime.now(ZoneInfo('UTC')).timestamp()
+    filtered = [
+        e for e in city_events
+        if e.get('start', 0) >= now_ts and wanted_categories & set(e.get('categories', []))
+    ]
+    return filtered[:limit], True
+
+def format_event_line(event, city):
+    """Одна строка события: дата/время в часовом поясе города (см.
+    EVENT_CITY_TIMEZONE - отдельная таблица от AIRPORT_TIMEZONE, та привязана
+    к конкретным аэропортам, а не к городам), название, место, цена."""
+    tz = ZoneInfo(EVENT_CITY_TIMEZONE.get(city, 'Europe/Moscow'))
+    dt_local = datetime.fromtimestamp(event['start'], tz)
+    date_str = dt_local.strftime('%d.%m %H:%M')
+    line = f"🎫 *{event['title']}*\n   🗓 {date_str}"
+    if event.get('place_title'):
+        line += f" · 📍 {event['place_title']}"
+    if event.get('is_free'):
+        line += "\n   💰 Бесплатно"
+    elif event.get('price'):
+        line += f"\n   💰 {event['price']}"
+    if event.get('url'):
+        line += f"\n   [Подробнее]({event['url']})"
+    return line
+
+# Часовой пояс городов, покрытых KudaGo (используется только для афиши - не
+# путать с AIRPORT_TIMEZONE, который привязан к конкретным аэропортам).
+EVENT_CITY_TIMEZONE = {
+    'moscow': 'Europe/Moscow',
+    'spb': 'Europe/Moscow',
+    'ekb': 'Asia/Yekaterinburg',
+    'kazan': 'Europe/Moscow',
+}
 
 # Аэропорты, закрытые для гражданских полётов постоянно (не зависит от
 # уведомлений Росавиации, которые могут вообще не упоминать их) - Платов
@@ -717,16 +799,18 @@ FUEL_BOT_URL = "https://t.me/gde_benzin_rubot"
 
 def services_keyboard(category=None):
     # Итоговый набор кнопок меню услуг (по заданному порядку). "Заказы
-    # города" (было "Повышенный спрос") и "🎭 События города" - пока
-    # заглушки без своей логики: первая ждёт переработки под общегородской
-    # спрос (сейчас спрос по часам смотрится внутри "Аэропорты"), вторая -
-    # будущую интеграцию афиши (см. отдельное обсуждение источников данных).
-    # "Дорожные события" тоже пока без обработчика - как было.
+    # города" (было "Повышенный спрос") - пока заглушка без своей логики,
+    # ждёт переработки под общегородской спрос (сейчас спрос по часам
+    # смотрится внутри "Аэропорты"). "Дорожные события" тоже пока без
+    # обработчика - как было. "🎭 События города" (афиша KudaGo) - только
+    # у Такси/Ultima, курьеру и грузовому такси не актуальна (см.
+    # CATEGORIES_WITHOUT_EVENTS).
     buttons = [[KeyboardButton(text="Заказы города")]]
     if category not in CATEGORIES_WITHOUT_AIRPORTS:
         buttons.append([KeyboardButton(text="Аэропорты")])
     buttons.append([KeyboardButton(text="⛽ Где бензин")])
-    buttons.append([KeyboardButton(text="🎭 События города")])
+    if category not in CATEGORIES_WITHOUT_EVENTS:
+        buttons.append([KeyboardButton(text="🎭 События города")])
     buttons.append([KeyboardButton(text="Дорожные события")])
     buttons.append([KeyboardButton(text="← Назад")])
     return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=buttons)
@@ -800,6 +884,46 @@ async def show_fuel_bot(message: types.Message):
         "Нажми кнопку ниже, чтобы открыть его."
     )
     await message.answer(text, reply_markup=keyboard, parse_mode='Markdown')
+
+@router.message(lambda message: message.text == "🎭 События города")
+async def show_city_events(message: types.Message):
+    """Афиша (концерты/спектакли для Ultima, выставки/фестивали для
+    эконом/комфорт) - источник KudaGo, см. fetch_events_data.py. Покрывает
+    только 4 из 12 городов бота (Москва/СПб/Екатеринбург/Казань) - для
+    остальных явно говорим "нет данных", а не показываем пустой экран."""
+    user_id = message.from_user.id
+    if user_id not in user_state or 'city' not in user_state[user_id]:
+        await message.answer("Сначала выбери город!")
+        return
+    city = user_state[user_id]['city']
+    category = user_state[user_id].get('category', 'taxi')
+
+    events, city_supported = get_events_for_user(city, category, limit=5)
+
+    if not city_supported:
+        text = (
+            "🎭 *События города*\n\n"
+            "Для этого города пока нет данных об афише - источник событий "
+            "(KudaGo) покрывает только Москву, СПб, Екатеринбург и Казань. "
+            "Будем искать источник и для остальных городов."
+        )
+        await message.answer(text, reply_markup=services_keyboard(category), parse_mode='Markdown')
+        return
+
+    if not events:
+        text = (
+            "🎭 *События города*\n\n"
+            "На ближайшее время подходящих событий не нашлось. Загляни позже - "
+            "афиша обновляется каждые несколько часов."
+        )
+        await message.answer(text, reply_markup=services_keyboard(category), parse_mode='Markdown')
+        return
+
+    class_label = CATEGORIES.get(category, {}).get('name', '')
+    lines = [f"🎭 *События города* ({class_label.title() if class_label else 'все'})\n"]
+    lines.extend(format_event_line(e, city) for e in events)
+    text = '\n\n'.join(lines)
+    await message.answer(text, reply_markup=services_keyboard(category), parse_mode='Markdown', disable_web_page_preview=True)
 
 @router.message(lambda message: message.text == "Аэропорты")
 async def show_airport_menu(message: types.Message):
@@ -1494,6 +1618,20 @@ async def favt_notices_updater():
             logger.error(f"❌ Ошибка фонового обновления favt_notices.json: {e}")
         await asyncio.sleep(FAVT_UPDATE_INTERVAL_MINUTES * 60)
 
+async def events_data_updater():
+    """Фоновая задача: раз в EVENTS_UPDATE_INTERVAL_HOURS часов обновляет
+    events_data.json из KudaGo (афиша города). Публичный API без ключа и без
+    строгого лимита запросов, но события не нужно тянуть часто - раз в
+    несколько часов более чем достаточно."""
+    while True:
+        try:
+            logger.info("🔄 Обновляю events_data.json из KudaGo...")
+            await asyncio.to_thread(fetch_events_data.main)
+            logger.info("✅ events_data.json обновлён")
+        except Exception as e:
+            logger.error(f"❌ Ошибка фонового обновления events_data.json: {e}")
+        await asyncio.sleep(EVENTS_UPDATE_INTERVAL_HOURS * 3600)
+
 async def main():
     global bot
     if not await initialize_bot():
@@ -1506,6 +1644,7 @@ async def main():
         logger.warning("⚠️ YANDEX_RASP_API_KEY не задан в переменных окружения Railway - flights_data.json не будет обновляться автоматически")
     asyncio.create_task(favt_notices_updater())
     asyncio.create_task(high_demand_alert_checker())
+    asyncio.create_task(events_data_updater())
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
