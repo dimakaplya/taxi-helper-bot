@@ -4,6 +4,7 @@ import asyncio
 import sqlite3
 import json
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from aiogram import Bot, Dispatcher, Router, types
 from aiogram.filters import Command
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
@@ -36,6 +37,29 @@ AIRPORT_CAPACITY = {
     'UNOO': 183, 'UWWW': 411, 'URRP': 171, 'UWUU': 559,
     'URKK': 525, 'URSS': 1427,
 }
+
+# Часовой пояс каждого аэропорта (расписание Yandex Rasp API приходит в
+# МЕСТНОМ времени аэропорта, а не в UTC/московском). Сервер Railway обычно
+# работает по UTC, поэтому "текущий час" нужно считать именно в поясе
+# конкретного аэропорта, а не по системному времени сервера - иначе все
+# расчёты "сейчас"/"через 2 часа" будут сдвинуты на несколько часов.
+AIRPORT_TIMEZONE = {
+    'UUWW': 'Europe/Moscow', 'UUDD': 'Europe/Moscow', 'UUWL': 'Europe/Moscow',
+    'UULP': 'Europe/Moscow', 'UWKD': 'Europe/Moscow', 'URRP': 'Europe/Moscow',
+    'URKK': 'Europe/Moscow', 'URSS': 'Europe/Moscow',
+    'UNNT': 'Asia/Novosibirsk',
+    'USSS': 'Asia/Yekaterinburg', 'UUCC': 'Asia/Yekaterinburg', 'UWUU': 'Asia/Yekaterinburg',
+    'UNOO': 'Asia/Omsk',
+    'UWWW': 'Europe/Samara',
+}
+
+def get_airport_now(airport_icao):
+    """Текущее время в часовом поясе конкретного аэропорта."""
+    tz_name = AIRPORT_TIMEZONE.get(airport_icao, 'Europe/Moscow')
+    try:
+        return datetime.now(ZoneInfo(tz_name))
+    except Exception:
+        return datetime.now()  # fallback, если tzdata почему-то недоступна
 
 # Разбивка пассажиропотока по классам обслуживания (совпадает с fetch_yandex_data.py)
 ECONOMY_SHARE = 0.85
@@ -225,6 +249,30 @@ def get_notices_for_airport(icao):
     if not data:
         return []
     return [n for n in data.get('notices', []) if icao in n.get('airports', [])]
+
+def get_airport_status(icao):
+    """Статус аэропорта по последнему уведомлению Росавиации за 12ч:
+    'closed' (ВВЕДЕНЫ ограничения), 'coordinated' (работает по согласованию),
+    'open' (СНЯТЫ ограничения), или 'open' по умолчанию, если уведомлений нет
+    вообще (не значит 100% гарантию - просто нет свежих данных об ограничениях)."""
+    notices = get_notices_for_airport(icao)
+    if not notices:
+        return 'open', None
+    latest = notices[0]  # notices уже отсортированы по времени, свежие первые
+    text_upper = latest['text'].upper()
+    if 'ПО СОГЛАСОВАНИЮ' in text_upper:
+        return 'coordinated', latest
+    if 'СНЯТ' in text_upper:
+        return 'open', latest
+    if 'ВВЕДЕН' in text_upper:
+        return 'closed', latest
+    return 'open', latest
+
+AIRPORT_STATUS_DISPLAY = {
+    'open': ('🟢', 'ОТКРЫТ'),
+    'coordinated': ('🟡', 'РАБОТАЕТ ПО СОГЛАСОВАНИЮ'),
+    'closed': ('🔴', 'ЗАКРЫТ (ограничения)'),
+}
 
 def escape_md(text):
     """Экранирует спецсимволы legacy Markdown (parse_mode='Markdown'), чтобы
@@ -492,8 +540,9 @@ async def show_airport_details(callback_query: types.CallbackQuery):
     flights = get_airport_flights(airport['icao'], flight_type)
     flight_label = '📥 Прилеты' if flight_type == 'arrivals' else '📤 Вылеты'
     class_label = {'economy': 'Эконом-класс', 'business': 'Бизнес-класс', 'total': 'Все классы'}[relevant_class]
+    now = get_airport_now(airport['icao'])  # местное время АЭРОПОРТА, не сервера
     text = f"*{airport['emoji']} {airport['name']} - {flight_label}*\n"
-    text += f"_Обновлено: {datetime.now().strftime('%H:%M:%S')}_\n"
+    text += f"_Обновлено: {now.strftime('%H:%M:%S')} (местное время аэропорта)_\n"
     text += f"_Пропускная способность: {capacity} пас/час (эконом {economy_capacity:.0f} / бизнес {business_capacity:.0f})_\n"
     text += f"_Рекомендации рассчитаны для: {class_label}_\n"
     if is_departure:
@@ -501,7 +550,6 @@ async def show_airport_details(callback_query: types.CallbackQuery):
         text += "*🏙️ ПРОГНОЗ СПРОСА НА ЗАКАЗЫ ПО ГОРОДУ (текущее время +8 часов):*\n\n"
     else:
         text += "\n*📊 ПРОГНОЗ ЗАГРУЖЕННОСТИ АЭРОПОРТА (текущее время +8 часов):*\n\n"
-    now = datetime.now()
     current_hour = now.hour
     for hour_offset in range(8):
         # Для вылетов "час на табло" - это час, КОГДА ВОДИТЕЛЮ ИСКАТЬ ЗАКАЗ В ГОРОДЕ,
@@ -554,7 +602,7 @@ def compute_current_hour_load(airport_icao, flight_type, relevant_class):
     берётся час +DEPARTURE_LEAD_TIME_HOURS: спрос на заказы в городе сейчас
     соответствует рейсам, которые улетят примерно через 2 часа, а не рейсам,
     улетающим прямо в этот час (пассажир уже давно уехал бы в аэропорт)."""
-    now = datetime.now()
+    now = get_airport_now(airport_icao)
     current_hour = now.hour
     target_hour = (current_hour + DEPARTURE_LEAD_TIME_HOURS) % 24 if flight_type == 'departures' else current_hour
     flights = get_airport_flights(airport_icao, flight_type)
@@ -572,7 +620,7 @@ def compute_current_availability(airport_icao, relevant_class):
     вылеты через DEPARTURE_LEAD_TIME_HOURS (эти пассажиры заказывают такси в городе
     прямо сейчас). Сравнивается с ЧАСОВОЙ пропускной способностью - раньше тут по
     ошибке складывались пассажиры ВСЕХ рейсов за весь день, что давало 1000-2000%+."""
-    now = datetime.now()
+    now = get_airport_now(airport_icao)
     current_hour = now.hour
     arrivals = get_airport_flights(airport_icao, 'arrivals')
     departures = get_airport_flights(airport_icao, 'departures')
@@ -593,6 +641,7 @@ def compute_current_availability(airport_icao, relevant_class):
         'arrivals_now': arrivals_now,
         'departures_soon': departures_soon,
         'total_passengers': total_passengers,
+        'now': now,
         'current_hour': current_hour,
         'departure_order_hour': departure_order_hour,
     }
@@ -619,7 +668,10 @@ async def show_airport_availability(callback_query: types.CallbackQuery):
         for i, airport in enumerate(airports):
             info = compute_current_availability(airport['icao'], relevant_class)
             emoji = get_load_emoji(info['load'])
-            button_text = f"{airport['emoji']} {airport['name']} {emoji} {info['load']:.0f}%"
+            airport_status, _ = get_airport_status(airport['icao'])
+            status_icon, _ = AIRPORT_STATUS_DISPLAY[airport_status]
+            # Если аэропорт закрыт/по согласованию - это важнее, чем % загрузки, ставим первым
+            button_text = f"{status_icon} {airport['emoji']} {airport['name']} {emoji} {info['load']:.0f}%"
             keyboard.inline_keyboard.append([InlineKeyboardButton(text=button_text, callback_data=f"availability_details_{city}_{i}")])
         await msg.edit_text("🔄 *Доступность аэропортов*\nВыбери аэропорт для подробностей 👇", reply_markup=keyboard, parse_mode='Markdown')
     except Exception as e:
@@ -659,8 +711,19 @@ async def show_availability_details(callback_query: types.CallbackQuery):
         else:
             status, load_emoji = "🔴 Перегруженный", "🔴"
 
+        airport_status, status_notice = get_airport_status(airport['icao'])
+        status_icon, status_text = AIRPORT_STATUS_DISPLAY[airport_status]
+
         text = f"*{airport['emoji']} {airport['name']} - Доступность*\n"
-        text += f"_Обновлено: {datetime.now().strftime('%H:%M:%S')} | Класс: {class_label}_\n\n"
+        text += f"_Обновлено: {info['now'].strftime('%H:%M:%S')} (местное время) | Класс: {class_label}_\n\n"
+        text += f"{status_icon} *АЭРОПОРТ {status_text}*\n"
+        if status_notice:
+            try:
+                snt = datetime.fromisoformat(status_notice['time']).astimezone().strftime('%H:%M')
+            except Exception:
+                snt = '??:??'
+            text += f"_по данным Росавиации на {snt}_\n"
+        text += "\n"
         text += f"{load_emoji} *{status}*\n"
         text += f"📊 Загруженность сейчас: *{load:.0f}%* (от {info['relevant_cap']:.0f} пас/час)\n\n"
         text += f"🛬 Прилетает в {info['current_hour']:02d}:00-{(info['current_hour']+1)%24:02d}:00: {len(info['arrivals_now'])} рейсов\n"
