@@ -82,7 +82,19 @@ def fetch_city_events(timepad_city):
     skip = 0
     limit = 100
     max_pages = 5  # защита от бесконечной пагинации (до 500 событий на город)
-    headers = {'Authorization': f'Bearer {TIMEPAD_TOKEN}'}
+    # TimePad стоит за Cloudflare - запрос с дефолтным User-Agent библиотеки
+    # requests ("python-requests/2.x") ловил 403 Forbidden от бот-защиты
+    # Cloudflare (проверено живым запросом с Railway - тот же токен и
+    # параметры из браузера отвечали 200, а с Railway - 403). Обычный
+    # браузерный User-Agent (+Accept/Accept-Language, как у настоящего
+    # браузера) решает проблему.
+    headers = {
+        'Authorization': f'Bearer {TIMEPAD_TOKEN}',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                       '(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
+        'Accept': 'application/json',
+        'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+    }
 
     for _ in range(max_pages):
         try:
