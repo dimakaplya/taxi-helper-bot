@@ -1100,15 +1100,14 @@ FUEL_BOT_URL = "https://t.me/gde_benzin_rubot"
 
 def services_keyboard(category=None, city=None):
     # Итоговый набор кнопок меню услуг (по заданному порядку). "Заказы
-    # города" (было "Повышенный спрос") - пока заглушка без своей логики,
-    # ждёт переработки под общегородской спрос (сейчас спрос по часам
-    # смотрится внутри "Аэропорты"). "Дорожные события" тоже пока без
+    # города" (было "Повышенный спрос") убрана по просьбе пользователя - была
+    # заглушкой без своей логики. "Дорожные события" тоже пока без
     # обработчика - как было. "🎭 События города" (афиша KudaGo) - только
     # у Такси/Ultima, курьеру и грузовому такси не актуальна (см.
     # CATEGORIES_WITHOUT_EVENTS). "🚆 Вокзалы" - только в городах из
     # TRAIN_CITIES (см. STATION_CITY), той же категории, что и аэропорты.
     # "🔄 Отдать заказ" - только Такси/Ultima (см. SHARED_ORDER_CATEGORIES).
-    buttons = [[KeyboardButton(text="Заказы города")]]
+    buttons = []
     if category in SHARED_ORDER_CATEGORIES:
         buttons.append([KeyboardButton(text="🔄 Отдать заказ")])
     if category not in CATEGORIES_WITHOUT_AIRPORTS:
