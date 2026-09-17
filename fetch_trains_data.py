@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """
-Поезда дальнего следования по избранным вокзалам Москвы (Казанский,
-Ленинградский) - для оценки пассажиропотока/спроса на такси у вокзалов, по
-аналогии с fetch_yandex_data.py для аэропортов.
+Поезда дальнего следования по избранным вокзалам 6 городов бота - Москва
+(Казанский, Ленинградский), Санкт-Петербург (Московский), Краснодар
+(Краснодар-1), Сочи (Адлер), Нижний Новгород (Московский), Казань
+(Казань-Пасс.) - для оценки пассажиропотока/спроса на такси у вокзалов, по
+аналогии с fetch_yandex_data.py для аэропортов. Привязка станция -> город
+бота вынесена в STATION_CITY в main_airports_24h.py (используется для
+фильтрации кнопки "🚆 Вокзалы" и списка вокзалов по городу).
 
 ⚠️ ВАЖНО: используется ТОТ ЖЕ ключ YANDEX_RASP_API_KEY и та же дневная квота
 (500 запросов/сутки) что и у fetch_yandex_data.py - поэтому вся логика учёта
@@ -22,6 +26,10 @@ suburban (электрички) - электричек на порядок бо�
 понадобятся другие вокзалы - коды станций (система "yandex", префикс "s")
 можно посмотреть на rasp.yandex.ru/station/<numeric_id>/ (без префикса s
 в URL, добавить вручную при использовании в API).
+
+Только ПРИБЫТИЯ (event=arrival) - водителю такси интересны пассажиры,
+которые ПРИЕЗЖАЮТ и ищут машину, а не уезжающие. Заодно это вдвое дешевле по
+квоте, чем тянуть ещё и отправления.
 """
 import os
 import time
@@ -42,16 +50,22 @@ logger = logging.getLogger(__name__)
 OUTPUT_FILE = os.path.join(DATA_DIR, 'trains_data.json')
 
 # Коды станций (система "yandex", префикс "s") - найдены по rasp.yandex.ru/station/<id>/
+# и проверены по прямым ссылкам вида rasp.yandex.ru/station/<id>/?event=arrival.
 STATIONS = [
     {'name': 'Казанский вокзал', 'code': 's2000003'},
     {'name': 'Ленинградский вокзал', 'code': 's2006004'},
+    {'name': 'Московский вокзал (СПб)', 'code': 's9602494'},
+    {'name': 'Краснодар-1', 'code': 's9613602'},
+    {'name': 'Адлер', 'code': 's9613054'},
+    {'name': 'Московский вокзал (Нижний Новгород)', 'code': 's9612089'},
+    {'name': 'Казань-Пасс.', 'code': 's9623141'},
 ]
 
 REQUEST_COUNT = 0  # счётчик реальных запросов к API за этот запуск (см. quota-комментарий выше)
 
 
-def fetch_station_schedule(station_code, event, date_str):
-    """event: 'arrival' или 'departure'. Только поезда дальнего следования
+def fetch_station_arrivals(station_code, date_str):
+    """Только прибытия (event=arrival), только поезда дальнего следования
     (transport_types=train, БЕЗ электричек). Пагинация - на случай если
     вдруг рейсов окажется больше лимита страницы (для двух вокзалов дальнего
     следования это маловероятно, но не будем на это полагаться молча)."""
@@ -68,7 +82,7 @@ def fetch_station_schedule(station_code, event, date_str):
                     'apikey': API_KEY,
                     'station': station_code,
                     'date': date_str,
-                    'event': event,
+                    'event': 'arrival',
                     'transport_types': 'train',
                     'lang': 'ru_RU',
                     'limit': page_limit,
@@ -80,7 +94,7 @@ def fetch_station_schedule(station_code, event, date_str):
             resp.raise_for_status()
             data = resp.json()
         except Exception as e:
-            logger.error(f"❌ Ошибка запроса schedule ({event}, {station_code}, offset={offset}): {e}")
+            logger.error(f"❌ Ошибка запроса schedule (arrival, {station_code}, offset={offset}): {e}")
             break
 
         batch = data.get('schedule', [])
@@ -112,11 +126,68 @@ def is_sapsan_thread(thread, number, title, short_title):
     return 'сапсан' in haystack
 
 
-def parse_trains(schedule_items, event):
+# Известные "фирменные" (премиальные/брендовые) поезда дальнего следования по
+# направлениям НАШИХ вокзалов - Москва-Казань, Москва-СПб, Москва-Н.Новгород,
+# Москва-Краснодар/Адлер и т.п. Сознательно НЕ включены названия городов
+# (Москва, Казань, Сочи...) - они попадаются в title/short_title КАЖДОГО
+# поезда как часть маршрута ("Москва Казанская - Казань"), а не только у
+# фирменных, и дали бы массу ложных срабатываний. Список собран по открытым
+# данным о фирменных поездах РЖД на этих направлениях - наверняка неполный,
+# и без доступа к живому API не проверялся на реальных ответах Yandex Rasp -
+# после первого реального запуска стоит свериться и дополнить.
+FIRMENNY_TRAIN_NAMES = {
+    'татарстан', 'кама', 'стриж', 'буревестник', 'красная стрела',
+    'николаевский экспресс', 'мегаполис', 'смена', 'юность',
+    'северная пальмира', 'кубань', 'ставрополье', 'жигули', 'лев толстой',
+    'чувашия', 'волга',
+}
+
+
+def is_firmenny_thread(thread, number, title, short_title):
+    """"Фирменный" поезд - между обычным и Сапсаном по статусу (см.
+    FIRMENNY_TRAIN_NAMES выше про источник и ограничения списка). Сапсан
+    проверяем ОТДЕЛЬНО и раньше (is_sapsan_thread) - эта функция для
+    остальных "именных" поездов повышенной комфортности."""
+    express_type = (thread.get('express_type') or '').lower()
+    if any(k in express_type for k in ('firm', 'фирм', 'premium')):
+        return True
+    subtype_title = ((thread.get('transport_subtype') or {}).get('title') or '').lower()
+    if 'фирменный' in subtype_title:
+        return True
+    haystack = f"{title} {short_title} {number}".lower()
+    return any(name in haystack for name in FIRMENNY_TRAIN_NAMES)
+
+
+# Оценка пассажиропотока - у API нет поля вместимости поезда (в отличие от
+# самолётов, где есть тип борта - см. AIRCRAFT_CAPACITY в fetch_yandex_data.py),
+# поэтому это ГРУБАЯ прикидка по типу поезда, явно помеченная как оценка:
+#   - Сапсан: стандартный состав ~604 места, в пиковые дни пускают сдвоенные
+#     составы (~1200 мест) - берём широкий диапазон.
+#   - Фирменный: состав обычно полный (плацкарт+купе+СВ), но без удвоения
+#     как у Сапсана - диапазон между Сапсаном и обычным поездом.
+#   - Обычный поезд дальнего следования: состав сильно варьируется (от
+#     нескольких вагонов до полноразмерного ночного поезда) - тоже диапазон.
+SAPSAN_PASSENGERS = (600, 1000)
+FIRMENNY_PASSENGERS = (400, 700)
+REGULAR_TRAIN_PASSENGERS = (300, 600)
+
+
+def estimate_train_passengers(is_sapsan, is_firmenny):
+    if is_sapsan:
+        return SAPSAN_PASSENGERS
+    if is_firmenny:
+        return FIRMENNY_PASSENGERS
+    return REGULAR_TRAIN_PASSENGERS
+
+
+def parse_trains(schedule_items):
+    """schedule_items - результат fetch_station_arrivals (только прибытия,
+    только transport_types=train - пригородные электрички не запрашиваются
+    вообще, см. fetch_station_arrivals)."""
     trains = []
     for item in schedule_items:
         thread = item.get('thread', {}) or {}
-        time_str = item.get(event)
+        time_str = item.get('arrival')
         if not time_str:
             continue
         try:
@@ -128,9 +199,14 @@ def parse_trains(schedule_items, event):
         number = thread.get('number', '')
         title = thread.get('title', '')
         short_title = thread.get('short_title', '')
+        is_sapsan = is_sapsan_thread(thread, number, title, short_title)
+        # Фирменный проверяем только если это не Сапсан - Сапсан и так
+        # приоритетнее любого другого "фирменного" статуса.
+        is_firmenny = (not is_sapsan) and is_firmenny_thread(thread, number, title, short_title)
+        pax_min, pax_max = estimate_train_passengers(is_sapsan, is_firmenny)
 
-        # Направление: для arrival - откуда идёт поезд, для departure - куда
-        point = item.get('departure_from') if event == 'arrival' else item.get('destination_to')
+        # Направление - откуда идёт поезд (для arrival - departure_from)
+        point = item.get('departure_from')
         point_title = None
         if isinstance(point, dict):
             point_title = point.get('title')
@@ -142,9 +218,13 @@ def parse_trains(schedule_items, event):
             'point': point_title,
             'carrier': carrier,
             'number': number,
-            'is_sapsan': is_sapsan_thread(thread, number, title, short_title),
             'title': title,
+            'is_sapsan': is_sapsan,
+            'is_firmenny': is_firmenny,
+            'passengers_min': pax_min,
+            'passengers_max': pax_max,
         })
+    trains.sort(key=lambda t: t['time'])
     return trains
 
 
@@ -175,14 +255,12 @@ def main():
     for station in STATIONS:
         name, code = station['name'], station['code']
         logger.info(f"🚆 Обрабатываю {name}...")
-        arrivals = parse_trains(fetch_station_schedule(code, 'arrival', today), 'arrival')
-        departures = parse_trains(fetch_station_schedule(code, 'departure', today), 'departure')
+        arrivals = parse_trains(fetch_station_arrivals(code, today))
         result['stations'][code] = {
             'name': name,
             'arrivals': arrivals,
-            'departures': departures,
         }
-        logger.info(f"✅ {name}: {len(arrivals)} прибытий, {len(departures)} отправлений")
+        logger.info(f"✅ {name}: {len(arrivals)} прибытий")
         time.sleep(0.3)
 
     with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:

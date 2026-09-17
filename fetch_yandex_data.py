@@ -16,10 +16,11 @@
     pip install requests
     python3 fetch_yandex_data.py
 
-При лимите ключа 500 запросов/сутки и ~28-45 запросов за один запуск (14 аэропортов x
-2 направления + пагинация для крупных) реально помещается максимум ~12-15 запусков в
-сутки - то есть НЕ чаще раза в 30 минут, а примерно раз в 1.5-2 часа. Точное число
-запросов конкретно у тебя скрипт печатает в конце каждого запуска ("Потрачено запросов").
+Только ПРИЛЁТЫ (вылеты убраны ради экономии квоты) - при лимите ключа 500
+запросов/сутки и ~14-25 запросов за один запуск (13 активных аэропортов x 1
+направление + пагинация для крупных) помещается заметно больше запусков в
+сутки, чем раньше (когда тянули оба направления). Точное число запросов
+конкретно у тебя скрипт печатает в конце каждого запуска ("Потрачено запросов").
 
 Рекомендуется гонять по крону раз в 2 часа:
     crontab -e
@@ -108,7 +109,7 @@ AIRPORTS = [
     {'iata': 'OMS', 'icao': 'UNOO', 'name': 'Омск',              'yandex_code': 's9600390'},
     {'iata': 'KUF', 'icao': 'UWWW', 'name': 'Курумоч',           'yandex_code': 's9600380'},
     {'iata': 'RND', 'icao': 'URRP', 'name': 'Платов (Ростов)',   'yandex_code': 's9866615', 'closed': True},  # ⚠️ закрыт для гражданских полётов - данные не собираем, экономим квоту
-    {'iata': 'UFA', 'icao': 'UWUU', 'name': 'Уфа',               'yandex_code': 's9600393'},
+    {'iata': 'GOJ', 'icao': 'UWGG', 'name': 'Стригино (Нижний Новгород)', 'yandex_code': 's9623052'},  # заменил Уфу по просьбе пользователя (11-й город бота)
     {'iata': 'KRR', 'icao': 'URKK', 'name': 'Пашковский (Краснодар)', 'yandex_code': 's9623123'},  # вновь открыт с 11.09.2025 (был закрыт с 2022) - запросы к API не пропускаем
     {'iata': 'AER', 'icao': 'URSS', 'name': 'Сочи',              'yandex_code': 's9623547'},
 ]
@@ -318,23 +319,21 @@ def main():
 
         if airport.get('closed'):
             logger.info(f"⏭️  {name} ({iata}) закрыт - пропускаю без единого запроса к API")
-            result['airports'][icao] = {'iata': iata, 'arrivals': [], 'departures': [], 'closed': True}
+            result['airports'][icao] = {'iata': iata, 'arrivals': [], 'closed': True}
             continue
 
         if not station_code:
             logger.warning(f"⚠️  Нет кода станции для {iata}, пропускаю")
-            result['airports'][icao] = {'iata': iata, 'arrivals': [], 'departures': []}
+            result['airports'][icao] = {'iata': iata, 'arrivals': []}
             continue
 
         arrivals_today = parse_flights(fetch_schedule(station_code, 'arrival', today), 'arrival')
-        departures_today = parse_flights(fetch_schedule(station_code, 'departure', today), 'departure')
 
         result['airports'][icao] = {
             'iata': iata,
             'arrivals': arrivals_today,
-            'departures': departures_today,
         }
-        logger.info(f"✅ {name}: {len(arrivals_today)} прилётов, {len(departures_today)} вылетов")
+        logger.info(f"✅ {name}: {len(arrivals_today)} прилётов")
         time.sleep(0.3)  # не долбим API слишком часто
 
     with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:

@@ -28,6 +28,52 @@ BOT_TOKEN = os.getenv('TELEGRAM_TOKEN', '8968196261:AAGjxaTy_evirnWDAO124vmkbbDF
 DATA_DIR = os.getenv('DATA_DIR') or os.path.dirname(os.path.abspath(__file__))
 FLIGHTS_DATA_FILE = os.path.join(DATA_DIR, 'flights_data.json')
 FLIGHTS_DATA_MAX_AGE_HOURS = 26  # если данные старше - считаем их устаревшими
+TRAINS_DATA_FILE = os.path.join(DATA_DIR, 'trains_data.json')
+# Вокзалы теперь не только в Москве - у каждой станции (см. STATIONS в
+# fetch_trains_data.py) есть свой город бота. Кнопка "🚆 Вокзалы" видна в
+# городе, только если для него есть хотя бы одна станция здесь.
+STATION_CITY = {
+    's2000003': 'moscow',     # Казанский вокзал
+    's2006004': 'moscow',     # Ленинградский вокзал
+    's9602494': 'spb',        # Московский вокзал (Санкт-Петербург)
+    's9613602': 'krasnodar',  # Краснодар-1
+    's9613054': 'sochi',      # Адлер (часть Большого Сочи - см. решение пользователя)
+    's9612089': 'nnovgorod',  # Московский вокзал (Нижний Новгород)
+    's9623141': 'kazan',      # Казань-Пасс.
+}
+TRAIN_CITIES = set(STATION_CITY.values())
+
+# Ориентировочная "пропускная способность" вокзала (пас/час) - используется
+# как база для % загрузки, ТОЧНО ПО ТОЙ ЖЕ ЛОГИКЕ, что и AIRPORT_CAPACITY для
+# аэропортов. У РЖД нет открытой ПОЧАСОВОЙ статистики по вокзалам, а
+# по-станционной разбивки именно ДАЛЬНЕГО следования (без пригородных
+# электричек) свежее 2014 года найти не удалось несмотря на поиск - поэтому
+# базой по-прежнему служат помесячные цифры 2014 года (РЖД, через tutu.ru) -
+# Казанский ~1.2 млн/мес, Ленинградский ~751 тыс/мес, Московский (СПб) ~1
+# млн/мес - но ОТМАСШТАБИРОВАНЫ на +25% под текущий уровень пассажиропотока
+# дальнего следования по сети РЖД. Множитель взят из открытой статистики
+# роста: сеть РЖД в дальнем следовании выросла на 12,7% в 2023 г. к 2022 г.
+# (Интерфакс), и ещё раньше отмечался рост на 16% в первой половине 2023 к
+# 2022 (Ведомости) - к 2024-2025 рост уже почти остановился (+0,3% по данным
+# Ведомостей за май-август 2025 к 2024) - то есть основной прирост пришёлся на
+# 2022-2023 год. +25% - консервативная оценка суммарного роста с 2014 по
+# 2023-2025 (а не точный станционный расчёт, которого просто нет в открытых
+# источниках). Для остальных 4 станций (Краснодар-1, Адлер, Нижний Новгород,
+# Казань-Пасс.) станционных данных нет вообще ни за один год - цифры это
+# ГРУБАЯ прикидка по размеру вокзала/города относительно откалиброванных
+# московских, в тех же пропорциях что и раньше (Адлер - с поправкой на резкий
+# рост в курортный сезон). Как и у аэропортов, это ориентир для "выше/ниже
+# обычного", а не точная цифра - поправить, если найдутся более свежие
+# станционные данные.
+STATION_CAPACITY = {
+    's2000003': 2100,  # Казанский вокзал (1,2 млн/мес, 2014, +25%)
+    's2006004': 1300,  # Ленинградский вокзал (751 тыс/мес, 2014, +25%)
+    's9602494': 1750,  # Московский вокзал (СПб) (1 млн/мес, 2014, +25%)
+    's9613602': 700,   # Краснодар-1 - оценка (пропорция к Казанскому)
+    's9613054': 950,   # Адлер - оценка (пропорция к Казанскому, курортный сезон)
+    's9612089': 850,   # Московский вокзал (Нижний Новгород) - оценка
+    's9623141': 1100,  # Казань-Пасс. - оценка
+}
 
 # Аэропорты: ночью (00:00-06:00 МСК) рейсов мало - вообще НЕ обновляем в этом
 # окне (0 запусков), а не просто реже, как было раньше. Днём (06:00-24:00) -
@@ -36,10 +82,10 @@ FLIGHTS_NIGHT_START_HOUR = 0
 FLIGHTS_NIGHT_END_HOUR = 6  # [0, 6) - ночь (обновлений нет), [6, 24) - день
 FLIGHTS_DAY_INTERVAL_HOURS = 2  # днём - каждые 2 часа (06,08,...,22 = 9 запусков/сутки)
 
-# Поезда (Казанский/Ленинградский): отдельный, не завязанный на день/ночь
-# график - раз в TRAINS_UPDATE_INTERVAL_HOURS часов, круглосуточно (Сапсаны и
-# дальние поезда ходят и вечером/рано утром, а объём запросов по 2 вокзалам
-# небольшой - не жалко гонять и ночью).
+# Поезда (7 вокзалов по 6 городам - см. STATION_CITY): отдельный, не
+# завязанный на день/ночь график - раз в TRAINS_UPDATE_INTERVAL_HOURS часов,
+# круглосуточно (Сапсаны и дальние поезда ходят и вечером/рано утром, а объём
+# запросов по 7 вокзалам всё ещё небольшой - не жалко гонять и ночью).
 TRAINS_UPDATE_INTERVAL_HOURS = 12  # 2 запуска/сутки
 
 # Расчёт по квоте (500 запросов/сутки на ключ, общий для fetch_yandex_data.py
@@ -48,13 +94,13 @@ TRAINS_UPDATE_INTERVAL_HOURS = 12  # 2 запуска/сутки
 # читали устаревший остаток друг у друга одновременно):
 # Аэропорты: 9 дневных запусков x ~45 (13 активных x 2 направления +
 # пагинация для крупных, худший случай) = 405.
-# Поезда: 2 запуска x ~8 (2 вокзала x 2 направления, пагинация маловероятна,
-# но берём с запасом) = 16.
-# Итого худший случай: 405+16=421 из 500 (порог безопасности - 450) - запас
-# ~29 запросов. Немного, но это именно ХУДШИЙ случай (по факту обычно сильно
-# меньше, см. докстринг fetch_yandex_data.py: "~28-45" - это верхняя граница,
-# а не типичный расход), а DAILY_SAFETY_LIMIT в обоих скриптах в любом случае
-# не даст ключ заблокировать - просто пропустит лишний запуск ближе к концу
+# Поезда: только прибытия (см. fetch_trains_data.py), 2 запуска x ~4
+# (2 вокзала x 1 направление, пагинация маловероятна, но берём с запасом) = 8.
+# Итого худший случай: 405+8=413 из 500 (порог безопасности - 450) - запас
+# ~37 запросов. Это именно ХУДШИЙ случай (по факту обычно сильно меньше, см.
+# докстринг fetch_yandex_data.py: "~28-45" - это верхняя граница, а не
+# типичный расход), а DAILY_SAFETY_LIMIT в обоих скриптах в любом случае не
+# даст ключ заблокировать - просто пропустит лишний запуск ближе к концу
 # суток, если расход неожиданно окажется выше обычного.
 
 # Уведомления Росавиации об ограничениях в аэропортах (@favt_info) - публичная
@@ -71,10 +117,16 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # ==================== ПРОПУСКНАЯ СПОСОБНОСТЬ ====================
+# UWUU (Уфа) заменён на UWGG (Стригино, Нижний Новгород) - Уфа убрана из
+# бота (см. STATIONS/nnovgorod выше). Значение для UWGG - оценка по годовому
+# пассажиропотоку (~1.48 млн пасс/год, Коммерсантъ, рекордный год) в той же
+# пропорции к остальным аэропортам этого списка, что и у них; поправить, если
+# найдётся более точный источник или другая методика калибровки исходного
+# словаря.
 AIRPORT_CAPACITY = {
     'UUWW': 4966, 'UUDD': 1586, 'UUWL': 1838, 'UULP': 2373,
     'UNNT': 1084, 'USSS': 947, 'UWKD': 616, 'UUCC': 251,
-    'UNOO': 183, 'UWWW': 411, 'URRP': 171, 'UWUU': 559,
+    'UNOO': 183, 'UWWW': 411, 'URRP': 171, 'UWGG': 400,
     'URKK': 525, 'URSS': 1427,
 }
 
@@ -86,9 +138,9 @@ AIRPORT_CAPACITY = {
 AIRPORT_TIMEZONE = {
     'UUWW': 'Europe/Moscow', 'UUDD': 'Europe/Moscow', 'UUWL': 'Europe/Moscow',
     'UULP': 'Europe/Moscow', 'UWKD': 'Europe/Moscow', 'URRP': 'Europe/Moscow',
-    'URKK': 'Europe/Moscow', 'URSS': 'Europe/Moscow',
+    'URKK': 'Europe/Moscow', 'URSS': 'Europe/Moscow', 'UWGG': 'Europe/Moscow',
     'UNNT': 'Asia/Novosibirsk',
-    'USSS': 'Asia/Yekaterinburg', 'UUCC': 'Asia/Yekaterinburg', 'UWUU': 'Asia/Yekaterinburg',
+    'USSS': 'Asia/Yekaterinburg', 'UUCC': 'Asia/Yekaterinburg',
     'UNOO': 'Asia/Omsk',
     'UWWW': 'Europe/Samara',
 }
@@ -146,8 +198,10 @@ AIRPORTS_INFO = {
         # экономим квоту), бот показывает статичную заглушку "закрыт".
         {'name': 'RND (Ростов-на-Дону)', 'emoji': '✈️', 'icao': 'URRP', 'iata': 'RND', 'closed': True},
     ],
-    'ufa': [
-        {'name': 'UFA (Уфа)', 'emoji': '✈️', 'icao': 'UWUU', 'iata': 'UFA'},
+    'nnovgorod': [
+        # Заменяет Уфу (по просьбе пользователя - Уфа полностью убрана из бота,
+        # Нижний Новгород занял её место со 100% той же структурой).
+        {'name': 'GOJ (Нижний Новгород)', 'emoji': '✈️', 'icao': 'UWGG', 'iata': 'GOJ'},
     ],
     'krasnodar': [
         # Вновь открыт с 11.09.2025 (был закрыт с 2022) - в отличие от RND,
@@ -210,45 +264,35 @@ FALLBACK_ARRIVALS_SVO = [
     {'time': '23:30', 'origin': 'Минск', 'airline': 'Аэрофлот', 'flight': '1850', 'passengers': 195},
 ]
 
-FALLBACK_DEPARTURES_SVO = [
-    {'time': '00:45', 'dest': 'Ташкент', 'airline': 'Uzbekistan', 'flight': '602', 'passengers': 185},
-    {'time': '01:30', 'dest': 'Баку', 'airline': 'AZAL', 'flight': '4110', 'passengers': 200},
-    {'time': '02:15', 'dest': 'Тбилиси', 'airline': 'Georgian', 'flight': '501', 'passengers': 175},
-    {'time': '03:45', 'dest': 'Ереван', 'airline': 'Armavia', 'flight': '301', 'passengers': 160},
-    {'time': '04:30', 'dest': 'Алма-Ата', 'airline': 'Air Astana', 'flight': '301', 'passengers': 210},
-    {'time': '06:15', 'dest': 'Санкт-Петербург', 'airline': 'Россия', 'flight': '6230', 'passengers': 185},
-    {'time': '06:50', 'dest': 'Казань', 'airline': 'Победа', 'flight': '6730', 'passengers': 200},
-    {'time': '07:20', 'dest': 'Екатеринбург', 'airline': 'Аэрофлот', 'flight': '1450', 'passengers': 210},
-    {'time': '07:55', 'dest': 'Новосибирск', 'airline': 'S7', 'flight': '4160', 'passengers': 220},
-    {'time': '10:00', 'dest': 'Стамбул', 'airline': 'Turkish', 'flight': '1515', 'passengers': 225},
-    {'time': '10:45', 'dest': 'Берлин', 'airline': 'Lufthansa', 'flight': '790', 'passengers': 215},
-    {'time': '11:15', 'dest': 'Дубай', 'airline': 'Emirates', 'flight': '510', 'passengers': 240},
-    {'time': '11:50', 'dest': 'Париж', 'airline': 'Air France', 'flight': '1610', 'passengers': 230},
-    {'time': '12:20', 'dest': 'Лондон', 'airline': 'British Airways', 'flight': '2510', 'passengers': 235},
-    {'time': '12:55', 'dest': 'Милан', 'airline': 'Alitalia', 'flight': '1410', 'passengers': 220},
-    {'time': '13:30', 'dest': 'Рим', 'airline': 'Alitalia', 'flight': '1412', 'passengers': 215},
-    {'time': '14:00', 'dest': 'Вена', 'airline': 'Austrian', 'flight': '612', 'passengers': 205},
-    {'time': '14:45', 'dest': 'Прага', 'airline': 'Czech Airlines', 'flight': '1312', 'passengers': 200},
-    {'time': '15:15', 'dest': 'Амстердам', 'airline': 'KLM', 'flight': '812', 'passengers': 235},
-    {'time': '15:50', 'dest': 'Женева', 'airline': 'SWISS', 'flight': '512', 'passengers': 220},
-    {'time': '16:20', 'dest': 'Цюрих', 'airline': 'SWISS', 'flight': '514', 'passengers': 215},
-    {'time': '17:00', 'dest': 'Мюнхен', 'airline': 'Lufthansa', 'flight': '791', 'passengers': 210},
-    {'time': '18:00', 'dest': 'Копенгаген', 'airline': 'SAS', 'flight': '1412', 'passengers': 215},
-    {'time': '18:45', 'dest': 'Хельсинки', 'airline': 'Finnair', 'flight': '812', 'passengers': 205},
-    {'time': '19:15', 'dest': 'Осло', 'airline': 'SAS', 'flight': '1413', 'passengers': 210},
-    {'time': '19:50', 'dest': 'Стокгольм', 'airline': 'SAS', 'flight': '1414', 'passengers': 220},
-    {'time': '20:20', 'dest': 'Бельфаст', 'airline': 'British Airways', 'flight': '2515', 'passengers': 210},
-    {'time': '20:55', 'dest': 'Эдинбург', 'airline': 'British Airways', 'flight': '2516', 'passengers': 205},
-    {'time': '22:00', 'dest': 'Дублин', 'airline': 'Aer Lingus', 'flight': '503', 'passengers': 200},
-    {'time': '22:45', 'dest': 'Мадрид', 'airline': 'Iberia', 'flight': '1135', 'passengers': 210},
-    {'time': '23:30', 'dest': 'Барселона', 'airline': 'Iberia', 'flight': '1137', 'passengers': 215},
-]
+# FALLBACK_DEPARTURES_SVO убран вместе с самой функцией вылетов (см. ниже -
+# теперь собираем и показываем только прилёты, для экономии квоты Yandex Rasp).
 
 DB_FILE = 'taxi_queue.db'
 # Если водитель встал в очередь и не появлялся дольше этого времени - считаем,
 # что он уже уехал (забрал пассажира) или просто забыл нажать "Покинуть
 # очередь", и убираем его из очереди автоматически.
 QUEUE_ENTRY_TTL_MINUTES = 120
+
+# "Отдать заказ" - водитель транслирует другим водителям СВОЕГО ГОРОДА заказ,
+# который сам не может/не хочет выполнить (по просьбе пользователя). Только
+# Такси и Ultima - у формы заказа есть "класс автомобиля"/"кол-во пассажиров",
+# это про пассажирские поездки, Курьеру/Грузовому такси не подходит (решение
+# пользователя). Рассылка идёт ТЕМ ЖЕ водителям, что видят саму кнопку - тот
+# же город, та же пара категорий - через user_state, как и остальные пуши в
+# боте (см. push_airport_status_change). Первый принявший и отправитель видят
+# контакт друг друга (решение пользователя) и дальше связываются напрямую в
+# Telegram - бот в самой сделке не участвует, только сводит.
+SHARED_ORDER_CATEGORIES = {'taxi', 'ultima'}
+SHARED_ORDER_EXPIRY_HOURS = 1  # предложение считается неактуальным через час (решение пользователя)
+
+# Человекочитаемые названия городов (ключ city - тот же, что в city_map ниже
+# и в AIRPORTS_INFO) - нужны для текста рассылки заказов и подтверждений.
+CITY_DISPLAY_NAMES = {
+    'moscow': 'Москва', 'spb': 'Санкт-Петербург', 'novosibirsk': 'Новосибирск',
+    'ekb': 'Екатеринбург', 'kazan': 'Казань', 'chelyabinsk': 'Челябинск',
+    'omsk': 'Омск', 'samara': 'Самара', 'rostov': 'Ростов-на-Дону',
+    'nnovgorod': 'Нижний Новгород', 'krasnodar': 'Краснодар', 'sochi': 'Сочи',
+}
 
 # user_state раньше жил только в памяти процесса - при каждом рестарте/редеплое
 # (то есть при каждом git push) состояние ВСЕХ водителей обнулялось, и им
@@ -423,6 +467,61 @@ def load_events_data():
         logger.error(f"❌ Ошибка чтения events_data.json: {e}")
         return None
 
+_trains_data_cache = None
+_trains_data_mtime = None
+
+def load_trains_data():
+    """Загружает trains_data.json (поезда дальнего следования по вокзалам из
+    STATION_CITY - Москва, СПб, Краснодар, Сочи/Адлер, Нижний Новгород,
+    Казань, только прибытия - см. fetch_trains_data.py)."""
+    global _trains_data_cache, _trains_data_mtime
+    try:
+        mtime = os.path.getmtime(TRAINS_DATA_FILE)
+        if _trains_data_cache is not None and mtime == _trains_data_mtime:
+            return _trains_data_cache
+        with open(TRAINS_DATA_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        _trains_data_cache = data
+        _trains_data_mtime = mtime
+        return data
+    except FileNotFoundError:
+        return None
+    except Exception as e:
+        logger.error(f"❌ Ошибка чтения trains_data.json: {e}")
+        return None
+
+# По просьбе пользователя: и Такси, и Ultima теперь видят ВСЕ прибывающие
+# поезда дальнего следования (пригородные электрички не собираются вообще -
+# см. fetch_trains_data.py, transport_types=train). Раньше Ultima видела
+# только Сапсаны - теперь вместо фильтрации по категории Ultima просто
+# ПОДСВЕЧИВАЕТСЯ акцент на Сапсанах и фирменных/премиальных поездах (см.
+# is_sapsan/is_firmenny в fetch_trains_data.py и сортировку/пометки в
+# show_train_station_arrivals ниже), а не скрывает остальные поезда.
+def get_trains_for_station(station_code, category):
+    data = load_trains_data()
+    if not data:
+        return None, None
+    station = data.get('stations', {}).get(station_code)
+    if not station:
+        return None, None
+    return station['name'], station.get('arrivals', [])
+
+def compute_current_train_hour_load(station_code, category, hour_offset=0):
+    """Загрузка вокзала на ЗАДАННЫЙ час (по умолчанию текущий, МСК) - по той же
+    логике, что compute_current_hour_load для аэропортов: сумма оценки
+    пассажиров прибывающих в этот час поездов / STATION_CAPACITY * 100.
+    Пассажиры считаются по СЕРЕДИНЕ диапазона оценки (passengers_min/max),
+    как единственно разумный способ свести диапазон к одному числу."""
+    _, arrivals = get_trains_for_station(station_code, category)
+    arrivals = arrivals or []
+    now = datetime.now(ZoneInfo('Europe/Moscow'))
+    target_hour = (now.hour + hour_offset) % 24
+    trains_in_hour = [t for t in arrivals if int(t['time'].split(':')[0]) == target_hour]
+    total_passengers = sum((t['passengers_min'] + t['passengers_max']) / 2 for t in trains_in_hour)
+    capacity = STATION_CAPACITY.get(station_code, 1000)
+    load = (total_passengers / capacity) * 100 if total_passengers > 0 else 0
+    return load, trains_in_hour, target_hour
+
 # Такси эконом/комфорт видит ВСЕ мероприятия города без разбора категорий.
 # Ultima видит только "значимые" - те, где цена входа от ULTIMA_MIN_PRICE
 # рублей (события без указанной цены и бесплатные для Ultima не подходят -
@@ -592,16 +691,18 @@ def escape_md(text):
         text = text.replace(ch, '\\' + ch)
     return text
 
-def get_airport_flights(airport_icao, flight_type='departures'):
-    """Получить рейсы аэропорта из реальных данных (flights_data.json).
-    Если файла нет - для SVO отдаём запасной хардкод, для остальных пусто."""
+def get_airport_flights(airport_icao):
+    """Получить ПРИЛЁТЫ аэропорта из реальных данных (flights_data.json).
+    Вылеты больше не собираются и не показываются (см. fetch_yandex_data.py -
+    убраны ради экономии дневной квоты Yandex Rasp API). Если файла нет - для
+    SVO отдаём запасной хардкод, для остальных пусто."""
     try:
         now = datetime.now()
         flights = []
         data = load_flights_data()
 
         if data and airport_icao in data.get('airports', {}):
-            raw_flights = data['airports'][airport_icao].get(flight_type, [])
+            raw_flights = data['airports'][airport_icao].get('arrivals', [])
             for flight_data in raw_flights:
                 time_parts = flight_data['time'].split(':')
                 hour, minute = int(time_parts[0]), int(time_parts[1])
@@ -629,20 +730,19 @@ def get_airport_flights(airport_icao, flight_type='departures'):
                     'passengers_business': business_pax,
                     'domestic': domestic,
                 })
-            logger.info(f"✅ Загружено {len(flights)} реальных рейсов {airport_icao} ({flight_type})")
+            logger.info(f"✅ Загружено {len(flights)} реальных прилётов {airport_icao}")
             return flights
 
         # Запасной вариант - только для SVO, пока нет свежего flights_data.json
         if airport_icao == 'UUWW':
-            data_source = FALLBACK_ARRIVALS_SVO if flight_type == 'arrivals' else FALLBACK_DEPARTURES_SVO
-            for flight_data in data_source:
+            for flight_data in FALLBACK_ARRIVALS_SVO:
                 time_parts = flight_data['time'].split(':')
                 hour, minute = int(time_parts[0]), int(time_parts[1])
                 flight_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
                 total_pax = flight_data['passengers']
                 economy_pax = round(total_pax * ECONOMY_SHARE)
                 business_pax = total_pax - economy_pax
-                destination = flight_data.get('dest') or flight_data.get('origin')
+                destination = flight_data.get('origin')
                 flights.append({
                     'time': flight_data['time'],
                     'callsign': f"{flight_data['airline']}{flight_data['flight']}",
@@ -674,19 +774,19 @@ def get_load_recommendation(load_percent):
     elif load_percent <= 100: return '✅ ЕХАТЬ'
     else: return '🚨 СРОЧНО'
 
-# Среднее время до вылета, за которое пассажир заказывает такси из города в
-# аэропорт (внутренние рейсы ~2ч до вылета, международные обычно больше, но
-# берём усреднённо). Используется только для вкладки "Вылеты" - в отличие от
-# прилётов, где пассажир уже в аэропорту и водителю нужно ехать туда, при
-# вылете пассажир ещё в городе, и заказ появляется заранее, а не в момент
-# вылета - логика "ехать в аэропорт/в очередь" тут не подходит вообще.
-DEPARTURE_LEAD_TIME_HOURS = 2
+# Для вокзалов - ПО ПРОСЬБЕ ПОЛЬЗОВАТЕЛЯ упрощённая БИНАРНАЯ индикация вместо
+# 4-уровневой шкалы аэропортов выше (get_load_emoji/get_load_recommendation):
+# всего 2 состояния, без отдельной кнопки - просто символ+короткая подпись в
+# тексте прогноза. До 50% включительно - не ехать, выше 50% - ехать.
+def get_train_load_symbol(load_percent):
+    return '🟢' if load_percent > 50 else '🔴'
 
-def get_departure_recommendation(demand_percent):
-    if demand_percent <= 50: return '😴 Заказов мало'
-    elif demand_percent <= 70: return '📱 Будь на связи в городе'
-    elif demand_percent <= 100: return '🏙️ Активно бери заказы в аэропорт'
-    else: return '🔥 Пиковый спрос на заказы'
+def get_train_load_label(load_percent):
+    return 'ЕХАТЬ' if load_percent > 50 else 'НЕ ЕХАТЬ'
+
+# DEPARTURE_LEAD_TIME_HOURS и get_departure_recommendation() убраны вместе с
+# вылетами (см. get_airport_flights) - вылеты больше не собираются и не
+# показываются, ради экономии дневной квоты Yandex Rasp API.
 
 def get_db_connection():
     """Единая точка подключения к SQLite. При росте числа водителей (сотни
@@ -739,6 +839,26 @@ def init_db():
             PRIMARY KEY (icao, relevant_class, target_date, target_hour)
         )
     ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS shared_orders (
+            order_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            sender_id INTEGER NOT NULL,
+            sender_contact TEXT NOT NULL,
+            city TEXT NOT NULL,
+            category TEXT NOT NULL,
+            pickup TEXT NOT NULL,
+            dropoff TEXT NOT NULL,
+            price TEXT NOT NULL,
+            car_class TEXT NOT NULL,
+            passengers TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'open',
+            accepted_by INTEGER,
+            accepted_by_contact TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            accepted_at DATETIME
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_shared_orders_status ON shared_orders (status, created_at)')
     conn.commit()
     conn.close()
 
@@ -767,6 +887,79 @@ def load_all_airport_statuses():
     rows = cursor.fetchall()
     conn.close()
     return {icao: status for icao, status in rows}
+
+def format_user_contact(user):
+    """Контакт для связи между водителями - ник через @ (как просил
+    пользователь). У части аккаунтов Telegram ник не задан вообще -
+    запасной вариант: имя + числовой ID (по нему тоже можно найти человека
+    через пересылку сообщения, хоть и не так напрямую, как по нику)."""
+    if user.username:
+        return f"@{user.username}"
+    name = escape_md(user.full_name or 'без имени')
+    return f"{name} (ник не задан, ID: {user.id})"
+
+def create_shared_order(sender_id, sender_contact, city, category, pickup, dropoff, price, car_class, passengers):
+    init_db()
+    conn = get_db_connection()
+    cursor = conn.execute(
+        'INSERT INTO shared_orders (sender_id, sender_contact, city, category, pickup, dropoff, price, car_class, passengers) '
+        'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        (sender_id, sender_contact, city, category, pickup, dropoff, price, car_class, passengers)
+    )
+    order_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return order_id
+
+_SHARED_ORDER_FIELDS = ['order_id', 'sender_id', 'sender_contact', 'city', 'category', 'pickup', 'dropoff',
+                         'price', 'car_class', 'passengers', 'status', 'accepted_by', 'accepted_by_contact',
+                         'created_at', 'accepted_at']
+
+def get_shared_order(order_id):
+    init_db()
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(f'SELECT {", ".join(_SHARED_ORDER_FIELDS)} FROM shared_orders WHERE order_id = ?', (order_id,))
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        return None
+    return dict(zip(_SHARED_ORDER_FIELDS, row))
+
+def is_shared_order_expired(order):
+    """SHARED_ORDER_EXPIRY_HOURS (решение пользователя - 1 час) с момента
+    создания. created_at хранится в UTC (SQLite CURRENT_TIMESTAMP), поэтому
+    сравниваем с datetime.now(UTC), а не с местным временем сервера."""
+    try:
+        created = datetime.strptime(order['created_at'], '%Y-%m-%d %H:%M:%S').replace(tzinfo=ZoneInfo('UTC'))
+    except Exception:
+        return False  # не смогли распарсить - не считаем протухшим, чтобы не терять заказ на пустом месте
+    return datetime.now(ZoneInfo('UTC')) - created > timedelta(hours=SHARED_ORDER_EXPIRY_HOURS)
+
+def try_accept_shared_order(order_id, accepted_by, accepted_by_contact):
+    """Атомарно "забирает" заказ - условие status='open' прямо в WHERE
+    гарантирует, что при одновременном нажатии "Принять" двумя водителями
+    выиграет только тот, чей UPDATE применится первым (SQLite сериализует
+    запись на уровне файла БД) - остальные получат rowcount=0 и поймут, что
+    опоздали, без отдельных блокировок в коде бота."""
+    init_db()
+    conn = get_db_connection()
+    cursor = conn.execute(
+        "UPDATE shared_orders SET status='accepted', accepted_by=?, accepted_by_contact=?, accepted_at=? "
+        "WHERE order_id=? AND status='open'",
+        (accepted_by, accepted_by_contact, datetime.now(ZoneInfo('UTC')).strftime('%Y-%m-%d %H:%M:%S'), order_id)
+    )
+    conn.commit()
+    won = cursor.rowcount == 1
+    conn.close()
+    return won
+
+def expire_shared_order(order_id):
+    init_db()
+    conn = get_db_connection()
+    conn.execute("UPDATE shared_orders SET status='expired' WHERE order_id=? AND status='open'", (order_id,))
+    conn.commit()
+    conn.close()
 
 def was_high_demand_alert_sent(icao, relevant_class, target_date, target_hour):
     """Проверяет, уже отправляли ли пуш про повышенный спрос именно для этого
@@ -885,7 +1078,7 @@ def city_keyboard():
         [KeyboardButton(text="🌲 Новосибирск"), KeyboardButton(text="🏔️ Екатеринбург")],
         [KeyboardButton(text="🎓 Казань"), KeyboardButton(text="❄️ Челябинск")],
         [KeyboardButton(text="🌾 Омск"), KeyboardButton(text="🏭 Самара")],
-        [KeyboardButton(text="🌊 Ростов"), KeyboardButton(text="⛰️ Уфа")],
+        [KeyboardButton(text="🌊 Ростов"), KeyboardButton(text="🏰 Нижний Новгород")],
         [KeyboardButton(text="🌴 Краснодар"), KeyboardButton(text="🏖️ Сочи")]
     ])
 
@@ -905,17 +1098,23 @@ CATEGORIES_WITHOUT_AIRPORTS = {'courier', 'cargo'}
 # со ссылкой, открывающая чат с этим ботом напрямую.
 FUEL_BOT_URL = "https://t.me/gde_benzin_rubot"
 
-def services_keyboard(category=None):
+def services_keyboard(category=None, city=None):
     # Итоговый набор кнопок меню услуг (по заданному порядку). "Заказы
     # города" (было "Повышенный спрос") - пока заглушка без своей логики,
     # ждёт переработки под общегородской спрос (сейчас спрос по часам
     # смотрится внутри "Аэропорты"). "Дорожные события" тоже пока без
     # обработчика - как было. "🎭 События города" (афиша KudaGo) - только
     # у Такси/Ultima, курьеру и грузовому такси не актуальна (см.
-    # CATEGORIES_WITHOUT_EVENTS).
+    # CATEGORIES_WITHOUT_EVENTS). "🚆 Вокзалы" - только в городах из
+    # TRAIN_CITIES (см. STATION_CITY), той же категории, что и аэропорты.
+    # "🔄 Отдать заказ" - только Такси/Ultima (см. SHARED_ORDER_CATEGORIES).
     buttons = [[KeyboardButton(text="Заказы города")]]
+    if category in SHARED_ORDER_CATEGORIES:
+        buttons.append([KeyboardButton(text="🔄 Отдать заказ")])
     if category not in CATEGORIES_WITHOUT_AIRPORTS:
         buttons.append([KeyboardButton(text="Аэропорты")])
+    if city in TRAIN_CITIES and category not in CATEGORIES_WITHOUT_AIRPORTS:
+        buttons.append([KeyboardButton(text="🚆 Вокзалы")])
     buttons.append([KeyboardButton(text="⛽ Где бензин")])
     if category not in CATEGORIES_WITHOUT_EVENTS:
         buttons.append([KeyboardButton(text="🎭 События города")])
@@ -949,13 +1148,279 @@ async def go_back(message: types.Message):
         user_state.pop(user_id, None)
         await message.answer("Выбери город 👇", reply_markup=city_keyboard())
 
-@router.message(lambda message: any(city in message.text for city in ["Москва", "СПб", "Новосибирск", "Екатеринбург", "Казань", "Челябинск", "Омск", "Самара", "Ростов", "Уфа", "Краснодар", "Сочи"]))
+# ==================== "ОТДАТЬ ЗАКАЗ" (водитель -> водителям своего города) ====================
+# Пошаговый сбор заказа через user_state[user_id]['order_draft'] = {'step':
+# ..., 'data': {...}} - в боте нет отдельной FSM-библиотеки, весь остальной
+# код тоже держит "текущий шаг" прямо в user_state, здесь та же схема.
+# Шаги: pickup -> dropoff -> price -> car_class -> passengers -> confirm
+# (на confirm ждём нажатия инлайн-кнопок, а не текста).
+
+def shared_order_cancel_keyboard():
+    return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[[KeyboardButton(text="❌ Отмена")]])
+
+def shared_order_car_class_keyboard(category):
+    tariffs = CATEGORIES.get(category, {}).get('tariffs', [])
+    buttons = [[KeyboardButton(text=t)] for t in tariffs]
+    buttons.append([KeyboardButton(text="❌ Отмена")])
+    return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=buttons)
+
+def shared_order_passengers_keyboard():
+    buttons = [
+        [KeyboardButton(text="1"), KeyboardButton(text="2"), KeyboardButton(text="3")],
+        [KeyboardButton(text="4"), KeyboardButton(text="5"), KeyboardButton(text="6")],
+        [KeyboardButton(text="❌ Отмена")],
+    ]
+    return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=buttons)
+
+SHARED_ORDER_STEP_PROMPTS = {
+    'pickup': "📍 Введи адрес *подачи* (точка А):",
+    'dropoff': "🏁 Введи адрес *прибытия* (точка Б):",
+    'price': "💰 Введи стоимость поездки в рублях (только число):",
+}
+
+async def show_shared_order_confirmation(message, data, category, city):
+    city_name = CITY_DISPLAY_NAMES.get(city, city)
+    text = (
+        "*Проверь заказ перед отправкой:*\n\n"
+        f"📍 Подача: {escape_md(data['pickup'])}\n"
+        f"🏁 Прибытие: {escape_md(data['dropoff'])}\n"
+        f"💰 Стоимость: {data['price']} ₽\n"
+        f"🚘 Класс: {data['car_class']}\n"
+        f"👥 Пассажиров: {data['passengers']}\n\n"
+        f"_Разошлём водителям Такси/Ultima города {city_name}. Предложение будет "
+        f"действовать {SHARED_ORDER_EXPIRY_HOURS} час, пока кто-то не примет._"
+    )
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📤 Отправить заказ", callback_data="order_confirm_send")],
+        [InlineKeyboardButton(text="❌ Отменить", callback_data="order_confirm_cancel")]
+    ])
+    await message.answer(text, reply_markup=keyboard, parse_mode='Markdown')
+
+@router.message(lambda message: message.text == "🔄 Отдать заказ")
+async def start_shared_order(message: types.Message):
+    user_id = message.from_user.id
+    state = user_state.get(user_id)
+    if not state or 'category' not in state:
+        await message.answer("Сначала выбери город и категорию!")
+        return
+    if state.get('category') not in SHARED_ORDER_CATEGORIES:
+        await message.answer(
+            "Отдавать заказы могут только категории Такси и Ultima.",
+            reply_markup=services_keyboard(state.get('category'), state.get('city')),
+        )
+        return
+    state['order_draft'] = {'step': 'pickup', 'data': {}}
+    await message.answer(SHARED_ORDER_STEP_PROMPTS['pickup'], reply_markup=shared_order_cancel_keyboard(), parse_mode='Markdown')
+
+@router.message(lambda message: user_state.get(message.from_user.id, {}).get('order_draft') is not None)
+async def shared_order_flow(message: types.Message):
+    """Ловит ЛЮБОЙ текст, пока у пользователя активен черновик заказа - должен
+    стоять РАНЬШЕ остальных текстовых хендлеров (город/категория и т.п.),
+    иначе, например, адрес "Москва, ул. Ленина 1" перехватит select_city."""
+    user_id = message.from_user.id
+    state = user_state[user_id]
+    draft = state['order_draft']
+    text = (message.text or '').strip()
+    category = state.get('category')
+    city = state.get('city')
+
+    if text == "❌ Отмена":
+        state.pop('order_draft', None)
+        await message.answer("Черновик заказа отменён.", reply_markup=services_keyboard(category, city))
+        return
+
+    step = draft['step']
+
+    if step == 'pickup':
+        if not text:
+            await message.answer("Адрес не может быть пустым, попробуй ещё раз:")
+            return
+        draft['data']['pickup'] = text
+        draft['step'] = 'dropoff'
+        state['order_draft'] = draft
+        await message.answer(SHARED_ORDER_STEP_PROMPTS['dropoff'], reply_markup=shared_order_cancel_keyboard(), parse_mode='Markdown')
+        return
+
+    if step == 'dropoff':
+        if not text:
+            await message.answer("Адрес не может быть пустым, попробуй ещё раз:")
+            return
+        draft['data']['dropoff'] = text
+        draft['step'] = 'price'
+        state['order_draft'] = draft
+        await message.answer(SHARED_ORDER_STEP_PROMPTS['price'], reply_markup=shared_order_cancel_keyboard(), parse_mode='Markdown')
+        return
+
+    if step == 'price':
+        price_digits = re.sub(r'[^\d]', '', text)
+        if not price_digits:
+            await message.answer("Не понял сумму - введи просто число, например 1500:")
+            return
+        draft['data']['price'] = price_digits
+        draft['step'] = 'car_class'
+        state['order_draft'] = draft
+        await message.answer("🚘 Выбери класс автомобиля 👇", reply_markup=shared_order_car_class_keyboard(category))
+        return
+
+    if step == 'car_class':
+        tariffs = CATEGORIES.get(category, {}).get('tariffs', [])
+        if text not in tariffs:
+            await message.answer("Выбери класс кнопкой на клавиатуре 👇", reply_markup=shared_order_car_class_keyboard(category))
+            return
+        draft['data']['car_class'] = text
+        draft['step'] = 'passengers'
+        state['order_draft'] = draft
+        await message.answer("👥 Сколько пассажиров?", reply_markup=shared_order_passengers_keyboard())
+        return
+
+    if step == 'passengers':
+        digits = re.sub(r'[^\d]', '', text)
+        if not digits or int(digits) <= 0:
+            await message.answer("Введи число пассажиров (например 2) или выбери кнопкой 👇", reply_markup=shared_order_passengers_keyboard())
+            return
+        draft['data']['passengers'] = digits
+        draft['step'] = 'confirm'
+        state['order_draft'] = draft
+        await show_shared_order_confirmation(message, draft['data'], category, city)
+        return
+
+    # step == 'confirm' - здесь ждём нажатия инлайн-кнопок на сообщении выше,
+    # а не текста; "❌ Отмена" обработана в самом начале функции.
+    await message.answer("Нажми «📤 Отправить заказ» или «❌ Отменить» на сообщении выше 👆")
+
+async def broadcast_shared_order(order_id, data, city, category, sender_id):
+    """Рассылает объявление о заказе ТЕМ ЖЕ водителям, что видят саму кнопку
+    "Отдать заказ" - тот же город, категории из SHARED_ORDER_CATEGORIES, кроме
+    самого отправителя. Как и push_airport_status_change - берём СРЕЗ
+    user_state (рассылка не мгновенная, список не должен "плыть" по ходу)."""
+    if not bot:
+        return 0
+    recipients = [
+        uid for uid, s in list(user_state.items())
+        if isinstance(s, dict) and uid != sender_id and s.get('city') == city and s.get('category') in SHARED_ORDER_CATEGORIES
+    ]
+    if not recipients:
+        return 0
+
+    text = (
+        f"🔄 *Заказ от другого водителя* (#{order_id})\n\n"
+        f"📍 Подача: {escape_md(data['pickup'])}\n"
+        f"🏁 Прибытие: {escape_md(data['dropoff'])}\n"
+        f"💰 Стоимость: {data['price']} ₽\n"
+        f"🚘 Класс: {data['car_class']}\n"
+        f"👥 Пассажиров: {data['passengers']}\n\n"
+        f"_Предложение действует {SHARED_ORDER_EXPIRY_HOURS} час. Кто первый примет - получит контакт отправителя._"
+    )
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Принять заказ", callback_data=f"order_accept_{order_id}")],
+        [InlineKeyboardButton(text="❌ Отказаться", callback_data=f"order_decline_{order_id}")]
+    ])
+    sent = 0
+    for uid in recipients:
+        try:
+            await bot.send_message(uid, text, reply_markup=keyboard, parse_mode='Markdown')
+            sent += 1
+        except Exception as e:
+            logger.warning(f"⚠️ Не удалось отправить заказ #{order_id} водителю {uid}: {e}")
+        await asyncio.sleep(0.05)  # Telegram допускает ~30 сообщений/сек в разные чаты - берём с запасом
+    logger.info(f"🔄 Заказ #{order_id} разослан {sent}/{len(recipients)} водителям города {city}")
+    return sent
+
+@router.callback_query(lambda c: c.data == "order_confirm_cancel")
+async def cancel_shared_order_draft(callback_query: types.CallbackQuery):
+    user_id = callback_query.from_user.id
+    state = user_state.get(user_id, {})
+    state.pop('order_draft', None)
+    await callback_query.message.edit_text("Черновик заказа отменён.")
+    await callback_query.answer()
+    await callback_query.message.answer("Выбери действие 👇", reply_markup=services_keyboard(state.get('category'), state.get('city')))
+
+@router.callback_query(lambda c: c.data == "order_confirm_send")
+async def confirm_send_shared_order(callback_query: types.CallbackQuery):
+    user_id = callback_query.from_user.id
+    state = user_state.get(user_id)
+    if not state or state.get('order_draft', {}).get('step') != 'confirm':
+        await callback_query.answer("Черновик не найден - начни заново", show_alert=True)
+        return
+    data = state['order_draft']['data']
+    category = state.get('category')
+    city = state.get('city')
+    city_name = CITY_DISPLAY_NAMES.get(city, city)
+
+    sender_contact = format_user_contact(callback_query.from_user)
+    order_id = create_shared_order(user_id, sender_contact, city, category, data['pickup'], data['dropoff'], data['price'], data['car_class'], data['passengers'])
+    state.pop('order_draft', None)
+
+    await callback_query.message.edit_text(f"⏳ Отправляю заказ #{order_id} водителям города {city_name}...")
+    await callback_query.answer()
+
+    sent = await broadcast_shared_order(order_id, data, city, category, user_id)
+    if sent > 0:
+        await callback_query.message.edit_text(f"✅ Заказ #{order_id} отправлен {sent} водителям города {city_name}. Ждём отклика - предложение действует {SHARED_ORDER_EXPIRY_HOURS} час.")
+    else:
+        await callback_query.message.edit_text(
+            f"✅ Заказ #{order_id} создан, но сейчас в городе {city_name} нет других известных водителей Такси/Ultima. "
+            f"Как только кто-то из них напишет боту, увидит твой заказ, пока он не истёк."
+        )
+    await callback_query.message.answer("Выбери действие 👇", reply_markup=services_keyboard(category, city))
+
+@router.callback_query(lambda c: c.data.startswith('order_accept_'))
+async def accept_shared_order(callback_query: types.CallbackQuery):
+    order_id = int(callback_query.data[len('order_accept_'):])
+    order = get_shared_order(order_id)
+    if not order:
+        await callback_query.answer("Заказ не найден", show_alert=True)
+        return
+    if order['status'] != 'open' or is_shared_order_expired(order):
+        if order['status'] == 'open':
+            expire_shared_order(order_id)
+        await callback_query.message.edit_text("😔 Этот заказ уже занят другим водителем или срок предложения истёк.")
+        await callback_query.answer("Заказ уже недоступен", show_alert=True)
+        return
+
+    accepted_by_contact = format_user_contact(callback_query.from_user)
+    won = try_accept_shared_order(order_id, callback_query.from_user.id, accepted_by_contact)
+    if not won:
+        # Кто-то другой принял на долю секунды раньше - атомарный UPDATE (см.
+        # try_accept_shared_order) сам разрулил гонку, здесь просто сообщаем.
+        await callback_query.message.edit_text("😔 Этот заказ уже занят другим водителем - вы опоздали буквально на секунды.")
+        await callback_query.answer("Заказ уже занят", show_alert=True)
+        return
+
+    text = (
+        f"✅ *Вы приняли заказ #{order_id}*\n\n"
+        f"📍 Подача: {escape_md(order['pickup'])}\n"
+        f"🏁 Прибытие: {escape_md(order['dropoff'])}\n"
+        f"💰 Стоимость: {order['price']} ₽\n"
+        f"🚘 Класс: {order['car_class']}\n"
+        f"👥 Пассажиров: {order['passengers']}\n\n"
+        f"📞 Свяжитесь с отправителем: {order['sender_contact']}"
+    )
+    await callback_query.message.edit_text(text, parse_mode='Markdown')
+    await callback_query.answer("Заказ принят!")
+
+    if bot:
+        try:
+            await bot.send_message(
+                order['sender_id'],
+                f"🎉 *Ваш заказ #{order_id} принят!*\n\n📞 Свяжитесь с водителем: {accepted_by_contact}",
+                parse_mode='Markdown'
+            )
+        except Exception as e:
+            logger.warning(f"⚠️ Не удалось уведомить отправителя {order['sender_id']} о принятии заказа #{order_id}: {e}")
+
+@router.callback_query(lambda c: c.data.startswith('order_decline_'))
+async def decline_shared_order(callback_query: types.CallbackQuery):
+    await callback_query.message.edit_text("Вы отказались от этого заказа.")
+    await callback_query.answer()
+
+@router.message(lambda message: any(city in message.text for city in ["Москва", "СПб", "Новосибирск", "Екатеринбург", "Казань", "Челябинск", "Омск", "Самара", "Ростов", "Нижний Новгород", "Краснодар", "Сочи"]))
 async def select_city(message: types.Message):
     city_map = {
         "🏛️ Москва": "moscow", "🕯️ СПб": "spb", "🌲 Новосибирск": "novosibirsk",
         "🏔️ Екатеринбург": "ekb", "🎓 Казань": "kazan", "❄️ Челябинск": "chelyabinsk",
         "🌾 Омск": "omsk", "🏭 Самара": "samara", "🌊 Ростов": "rostov",
-        "⛰️ Уфа": "ufa", "🌴 Краснодар": "krasnodar", "🏖️ Сочи": "sochi"
+        "🏰 Нижний Новгород": "nnovgorod", "🌴 Краснодар": "krasnodar", "🏖️ Сочи": "sochi"
     }
     user_state[message.from_user.id] = {'city': city_map.get(message.text, "moscow")}
     text = f"Вы выбрали {message.text}\n\nВыбери категорию 👇"
@@ -976,7 +1441,7 @@ async def select_category(message: types.Message):
             selected_category = cat_key
             break
     text = "Выбери услугу 👇"
-    await message.answer(text, reply_markup=services_keyboard(selected_category))
+    await message.answer(text, reply_markup=services_keyboard(selected_category, user_state[user_id].get('city')))
 
 @router.message(lambda message: message.text == "⛽ Где бензин")
 async def show_fuel_bot(message: types.Message):
@@ -1016,7 +1481,7 @@ async def show_city_events(message: types.Message):
             "(KudaGo) покрывает только Москву, СПб, Екатеринбург и Казань. "
             "Будем искать источник и для остальных городов."
         )
-        await message.answer(text, reply_markup=services_keyboard(category), parse_mode='Markdown')
+        await message.answer(text, reply_markup=services_keyboard(category, city), parse_mode='Markdown')
         return
 
     if not events:
@@ -1025,7 +1490,7 @@ async def show_city_events(message: types.Message):
             "На ближайшее время подходящих событий не нашлось. Загляни позже - "
             "афиша обновляется каждые несколько часов."
         )
-        await message.answer(text, reply_markup=services_keyboard(category), parse_mode='Markdown')
+        await message.answer(text, reply_markup=services_keyboard(category, city), parse_mode='Markdown')
         return
 
     class_label = CATEGORIES.get(category, {}).get('name', '')
@@ -1035,7 +1500,7 @@ async def show_city_events(message: types.Message):
     # не нужно). Каждое событие - ОТДЕЛЬНЫМ сообщением со СВОЕЙ инлайн-кнопкой
     # "Поехали", чтобы кнопка однозначно вела именно к этому месту, а не к
     # первому/последнему в общем списке.
-    await message.answer(header, reply_markup=services_keyboard(category), parse_mode='Markdown')
+    await message.answer(header, reply_markup=services_keyboard(category, city), parse_mode='Markdown')
     for event in events:
         text, keyboard = build_event_message(event, city)
         await message.answer(text, reply_markup=keyboard, parse_mode='Markdown', disable_web_page_preview=True)
@@ -1047,18 +1512,136 @@ async def show_airport_menu(message: types.Message):
         await message.answer("Сначала выбери город!")
         return
     if user_state[user_id].get('category') in CATEGORIES_WITHOUT_AIRPORTS:
-        await message.answer("Для этой категории аэропорты недоступны.", reply_markup=services_keyboard(user_state[user_id].get('category')))
+        await message.answer("Для этой категории аэропорты недоступны.", reply_markup=services_keyboard(user_state[user_id].get('category'), user_state[user_id].get('city')))
         return
     text = "Выбери действие 👇"
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📥 Прилеты", callback_data="airport_arrivals")],
-        [InlineKeyboardButton(text="📤 Вылеты", callback_data="airport_departures")],
         [InlineKeyboardButton(text="🔄 Доступность", callback_data="airport_availability")],
         [InlineKeyboardButton(text="📋 Очередь", callback_data="airport_queue")]
     ])
     await message.answer(text, reply_markup=keyboard)
 
-@router.callback_query(lambda c: c.data in ["airport_arrivals", "airport_departures"])
+def build_train_stations_keyboard(category, city):
+    """Список вокзалов ДАННОГО ГОРОДА (фильтр по STATION_CITY) - у каждого
+    символ+% загрузки текущего часа (бинарная индикация вокзалов - см.
+    get_train_load_symbol, отличается от 4-уровневой шкалы аэропортов)."""
+    data = load_trains_data()
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[])
+    if not data or not data.get('stations'):
+        return keyboard, False
+    city_stations = {code: st for code, st in data['stations'].items() if STATION_CITY.get(code) == city}
+    if not city_stations:
+        return keyboard, False
+    for code, station in city_stations.items():
+        load, trains_in_hour, _ = compute_current_train_hour_load(code, category)
+        symbol = get_train_load_symbol(load)
+        button_text = f"🚆 {station['name']} {symbol} {load:.0f}%"
+        keyboard.inline_keyboard.append([InlineKeyboardButton(text=button_text, callback_data=f"train_station_{code}")])
+    return keyboard, True
+
+@router.message(lambda message: message.text == "🚆 Вокзалы")
+async def show_train_stations_menu(message: types.Message):
+    """Список вокзалов ВЫБРАННОГО ГОРОДА (см. STATION_CITY и
+    fetch_trains_data.py). Кнопка и так видна только в городах из TRAIN_CITIES
+    (см. services_keyboard), но проверяем город и здесь на случай, если
+    пользователь сменил город, не обновив клавиатуру."""
+    user_id = message.from_user.id
+    if user_id not in user_state or 'city' not in user_state[user_id]:
+        await message.answer("Сначала выбери город!")
+        return
+    category = user_state[user_id].get('category')
+    city = user_state[user_id]['city']
+    if city not in TRAIN_CITIES:
+        await message.answer(
+            "🚆 Вокзалы пока недоступны в этом городе.",
+            reply_markup=services_keyboard(category, city),
+        )
+        return
+    keyboard, has_data = build_train_stations_keyboard(category, city)
+    if not has_data:
+        await message.answer(
+            "🚆 Данные по вокзалам ещё не загружены - обновляются раз в 12 часов, загляни чуть позже.",
+            reply_markup=services_keyboard(category, city),
+        )
+        return
+    await message.answer("Выбери вокзал 👇", reply_markup=keyboard)
+
+@router.callback_query(lambda c: c.data.startswith('train_station_'))
+async def show_train_station_arrivals(callback_query: types.CallbackQuery):
+    """Прогноз загруженности вокзала - 8 часов вперёд, у каждого часа
+    символ+%/бинарная рекомендация (см. get_train_load_symbol - у вокзалов, в
+    отличие от аэропортов, только 2 состояния "ехать"/"не ехать"), а внутри
+    часа - сами поезда (время, откуда, статус, оценка пассажиров). И Такси, и
+    Ultima видят ОДИНАКОВЫЙ список - ВСЕ поезда дальнего следования, кроме
+    пригородных электричек (их вообще не собираем - см. fetch_trains_data.py).
+    Разница только в подаче: у Ultima Сапсаны и фирменные/премиальные поезда
+    идут ПЕРВЫМИ в списке часа (акцент на премиальном сегменте), у Такси
+    порядок - просто по времени. Только прибытия - вылеты не собираются."""
+    code = callback_query.data[len('train_station_'):]
+    user_id = callback_query.from_user.id
+    category = user_state.get(user_id, {}).get('category', 'taxi')
+
+    station_name, arrivals = get_trains_for_station(code, category)
+    if station_name is None:
+        await callback_query.answer("Данные пока недоступны", show_alert=True)
+        return
+
+    now = datetime.now(ZoneInfo('Europe/Moscow'))
+    class_label = 'акцент на Сапсан/фирменные' if category == 'ultima' else 'все поезда'
+    capacity = STATION_CAPACITY.get(code, 1000)
+    msg = await callback_query.message.edit_text(f"⏳ Загружаю прогноз по вокзалу {station_name}...")
+
+    text = f"*🚆 {station_name} - прогноз загруженности* ({class_label})\n"
+    text += f"_Обновлено: {now.strftime('%H:%M:%S')} (МСК)_\n"
+    text += f"_Ориентировочная пропускная способность: ~{capacity} пас/час (оценка)_\n\n"
+
+    any_trains = False
+    for hour_offset in range(8):
+        load, trains_in_hour, target_hour = compute_current_train_hour_load(code, category, hour_offset)
+        hour_time = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=hour_offset)
+        hour_display = hour_time.strftime('%H:00')
+        symbol = get_train_load_symbol(load)
+        label = get_train_load_label(load)
+        text += f"{symbol} *{hour_display}* | Загрузка: *{load:.0f}%* - *{label}*\n"
+        if trains_in_hour:
+            any_trains = True
+            if category == 'ultima':
+                # Сапсан/фирменные - первыми в списке (акцент для Ultima)
+                trains_in_hour = sorted(trains_in_hour, key=lambda t: (not t.get('is_sapsan'), not t.get('is_firmenny'), t['time']))
+            for t in trains_in_hour:
+                if t.get('is_sapsan'):
+                    status = "🚄 Сапсан"
+                elif t.get('is_firmenny'):
+                    status = "⭐ Фирменный"
+                else:
+                    status = "🚆 обычный"
+                text += f"   • {t['time']} из {t['point']} (№{t['number']}) - {status}, ~{t['passengers_min']}-{t['passengers_max']} пас. _(оценка)_\n"
+        else:
+            text += "   Прибытий не ожидается\n"
+        text += "\n"
+
+    if not any_trains:
+        text += "_На ближайшие 8 часов прибытий не найдено._\n"
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="train_stations_back")]])
+    await msg.edit_text(text, reply_markup=keyboard, parse_mode='Markdown')
+    await callback_query.answer()
+
+@router.callback_query(lambda c: c.data == "train_stations_back")
+async def train_stations_back(callback_query: types.CallbackQuery):
+    user_id = callback_query.from_user.id
+    category = user_state.get(user_id, {}).get('category', 'taxi')
+    city = user_state.get(user_id, {}).get('city')
+    keyboard, has_data = build_train_stations_keyboard(category, city)
+    if not has_data:
+        await callback_query.message.edit_text("🚆 Данные по вокзалам сейчас недоступны.")
+        await callback_query.answer()
+        return
+    await callback_query.message.edit_text("Выбери вокзал 👇", reply_markup=keyboard)
+    await callback_query.answer()
+
+@router.callback_query(lambda c: c.data == "airport_arrivals")
 async def show_airport_info(callback_query: types.CallbackQuery):
     user_id = callback_query.from_user.id
     if user_id not in user_state:
@@ -1069,21 +1652,19 @@ async def show_airport_info(callback_query: types.CallbackQuery):
     if not airports:
         await callback_query.answer("Не найдены", show_alert=True)
         return
-    flight_type = 'arrivals' if callback_query.data == 'airport_arrivals' else 'departures'
-    flight_label = '📥 Прилеты' if flight_type == 'arrivals' else '📤 Вылеты'
     category = user_state.get(user_id, {}).get('category', 'taxi')
     relevant_class = CATEGORY_TO_CLASS.get(category, 'total')
-    msg = await callback_query.message.edit_text(f"⏳ Загружаю {flight_label.lower()}...")
+    msg = await callback_query.message.edit_text("⏳ Загружаю прилеты...")
     keyboard = InlineKeyboardMarkup(inline_keyboard=[])
     for i, airport in enumerate(airports):
         if airport.get('closed'):
             button_text = f"{airport['emoji']} {airport['name']} 🔴 ЗАКРЫТ"
         else:
-            current_load, _, _ = compute_current_hour_load(airport['icao'], flight_type, relevant_class)
+            current_load, _, _ = compute_current_hour_load(airport['icao'], relevant_class)
             emoji = get_load_emoji(current_load)
             button_text = f"{airport['emoji']} {airport['name']} {emoji} {current_load:.0f}%"
-        keyboard.inline_keyboard.append([InlineKeyboardButton(text=button_text, callback_data=f"airport_details_{city}_{i}_{flight_type}")])
-    await msg.edit_text(f"✅ Аэропорты ({flight_label.lower()}):", reply_markup=keyboard)
+        keyboard.inline_keyboard.append([InlineKeyboardButton(text=button_text, callback_data=f"airport_details_{city}_{i}")])
+    await msg.edit_text("✅ Аэропорты (прилеты):", reply_markup=keyboard)
     await callback_query.answer()
 
 @router.callback_query(lambda c: c.data.startswith('airport_details_'))
@@ -1091,7 +1672,6 @@ async def show_airport_details(callback_query: types.CallbackQuery):
     data_parts = callback_query.data.split('_')
     city = data_parts[2]
     airport_idx = int(data_parts[3])
-    flight_type = data_parts[4]
     airport = AIRPORTS_INFO[city][airport_idx]
 
     if airport.get('closed'):
@@ -1112,28 +1692,18 @@ async def show_airport_details(callback_query: types.CallbackQuery):
     category = user_state.get(user_id, {}).get('category', 'taxi')
     relevant_class = CATEGORY_TO_CLASS.get(category, 'total')
 
-    is_departure = flight_type == 'departures'
     msg = await callback_query.message.edit_text(f"⏳ Загружаю расписание {airport['name']}...")
-    flights = get_airport_flights(airport['icao'], flight_type)
-    flight_label = '📥 Прилеты' if flight_type == 'arrivals' else '📤 Вылеты'
+    flights = get_airport_flights(airport['icao'])
     class_label = {'economy': 'Эконом-класс', 'business': 'Бизнес-класс', 'total': 'Все классы'}[relevant_class]
     now = get_airport_now(airport['icao'])  # местное время АЭРОПОРТА, не сервера
-    text = f"*{airport['emoji']} {airport['name']} - {flight_label}*\n"
+    text = f"*{airport['emoji']} {airport['name']} - 📥 Прилеты*\n"
     text += f"_Обновлено: {now.strftime('%H:%M:%S')} (местное время аэропорта)_\n"
     text += f"_Пропускная способность: {capacity} пас/час (эконом {economy_capacity:.0f} / бизнес {business_capacity:.0f})_\n"
     text += f"_Рекомендации рассчитаны для: {class_label}_\n"
-    if is_departure:
-        text += f"_Заказы считаются за ~{DEPARTURE_LEAD_TIME_HOURS}ч до вылета - именно тогда пассажир вызывает такси из города_\n\n"
-        text += "*🏙️ ПРОГНОЗ СПРОСА НА ЗАКАЗЫ ПО ГОРОДУ (текущее время +8 часов):*\n\n"
-    else:
-        text += "\n*📊 ПРОГНОЗ ЗАГРУЖЕННОСТИ АЭРОПОРТА (текущее время +8 часов):*\n\n"
+    text += "\n*📊 ПРОГНОЗ ЗАГРУЖЕННОСТИ АЭРОПОРТА (текущее время +8 часов):*\n\n"
     current_hour = now.hour
     for hour_offset in range(8):
-        # Для вылетов "час на табло" - это час, КОГДА ВОДИТЕЛЮ ИСКАТЬ ЗАКАЗ В ГОРОДЕ,
-        # а сами рейсы, которые порождают этот спрос, вылетают позже, на DEPARTURE_LEAD_TIME_HOURS.
-        # Для прилётов - как раньше, час фактического прилёта = час, когда ехать в аэропорт.
         order_hour_of_day = (current_hour + hour_offset) % 24
-        relevant_flight_hour = (order_hour_of_day + DEPARTURE_LEAD_TIME_HOURS) % 24 if is_departure else order_hour_of_day
 
         hour_time = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=hour_offset)
         hour_str = hour_time.strftime('%H:00')
@@ -1145,7 +1715,7 @@ async def show_airport_details(callback_query: types.CallbackQuery):
         international_in_hour = 0
         for flight in flights:
             flight_time = datetime.fromtimestamp(flight.get('firstSeen', 0))
-            if flight_time.hour == relevant_flight_hour:
+            if flight_time.hour == order_hour_of_day:
                 flights_in_hour += 1
                 economy_in_hour += flight.get('passengers_economy', 0)
                 business_in_hour += flight.get('passengers_business', 0)
@@ -1159,38 +1729,22 @@ async def show_airport_details(callback_query: types.CallbackQuery):
         relevant_cap = {'economy': economy_capacity, 'business': business_capacity, 'total': capacity}[relevant_class]
         load = (relevant_pax / relevant_cap) * 100 if relevant_pax > 0 else 0
         emoji = get_load_emoji(load)
+        action = get_load_recommendation(load)
+        text += f"{emoji} *{hour_display}* | Нагрузка ({class_label.lower()}): *{load:.0f}%*\n"
+        text += f"   Рекомендация: *{action}*\n"
+        text += f"   🛬 Рейсов: {flights_in_hour} (🇷🇺 внутр. {domestic_in_hour} / 🌍 межд. {international_in_hour})  |  ✈️ Пассажиры: {total_in_hour} (эконом {economy_in_hour} / бизнес {business_in_hour})\n\n"
 
-        if is_departure:
-            action = get_departure_recommendation(load)
-            flight_hour_str = f"{relevant_flight_hour:02d}:00"
-            text += f"{emoji} *{hour_display}* | Спрос на заказы ({class_label.lower()}): *{load:.0f}%*\n"
-            text += f"   Рекомендация: *{action}*\n"
-            text += f"   🛫 Вылетов в ~{flight_hour_str}: {flights_in_hour} (🇷🇺 внутр. {domestic_in_hour} / 🌍 межд. {international_in_hour})  |  ✈️ Пассажиров с заказом: {total_in_hour} (эконом {economy_in_hour} / бизнес {business_in_hour})\n\n"
-        else:
-            action = get_load_recommendation(load)
-            text += f"{emoji} *{hour_display}* | Нагрузка ({class_label.lower()}): *{load:.0f}%*\n"
-            text += f"   Рекомендация: *{action}*\n"
-            text += f"   🛬 Рейсов: {flights_in_hour} (🇷🇺 внутр. {domestic_in_hour} / 🌍 межд. {international_in_hour})  |  ✈️ Пассажиры: {total_in_hour} (эконом {economy_in_hour} / бизнес {business_in_hour})\n\n"
-
-    if is_departure:
-        text += "_🔴0-50% заказов мало | 🟡51-70% будь на связи | 🟢71-100% активно бери заказы | 🟣>100% пиковый спрос_"
-    else:
-        text += "_🔴0-50% НЕ ЕХАТЬ | 🟡51-70% ОЧЕРЕДЬ | 🟢71-100% ЕХАТЬ | 🟣>100% СРОЧНО_"
+    text += "_🔴0-50% НЕ ЕХАТЬ | 🟡51-70% ОЧЕРЕДЬ | 🟢71-100% ЕХАТЬ | 🟣>100% СРОЧНО_"
     await msg.edit_text(text, parse_mode='Markdown')
     await callback_query.answer()
 
-def compute_current_hour_load(airport_icao, flight_type, relevant_class, hour_offset=0):
-    """Загрузка на ТЕКУЩИЙ час для ОДНОГО направления (только прилёты или только
-    вылеты) - используется в списке аэропортов (show_airport_info). Для вылетов
-    берётся час +DEPARTURE_LEAD_TIME_HOURS: спрос на заказы в городе сейчас
-    соответствует рейсам, которые улетят примерно через 2 часа, а не рейсам,
-    улетающим прямо в этот час (пассажир уже давно уехал бы в аэропорт).
-    hour_offset сдвигает "текущий" час вперёд - используется для заблаговременных
-    пуш-уведомлений о повышенном спросе (см. high_demand_alert_checker)."""
+def compute_current_hour_load(airport_icao, relevant_class, hour_offset=0):
+    """Загрузка на ТЕКУЩИЙ час по ПРИЛЁТАМ - используется в списке аэропортов
+    (show_airport_info) и в пуше о повышенном спросе (high_demand_alert_checker).
+    hour_offset сдвигает "текущий" час вперёд - для заблаговременных пушей."""
     now = get_airport_now(airport_icao)
-    current_hour = (now.hour + hour_offset) % 24
-    target_hour = (current_hour + DEPARTURE_LEAD_TIME_HOURS) % 24 if flight_type == 'departures' else current_hour
-    flights = get_airport_flights(airport_icao, flight_type)
+    target_hour = (now.hour + hour_offset) % 24
+    flights = get_airport_flights(airport_icao)
     capacity = AIRPORT_CAPACITY.get(airport_icao, 1000)
     relevant_cap = {'economy': capacity * ECONOMY_SHARE, 'business': capacity * BUSINESS_SHARE, 'total': capacity}[relevant_class]
     key = {'economy': 'passengers_economy', 'business': 'passengers_business', 'total': 'passengers'}[relevant_class]
@@ -1201,34 +1755,29 @@ def compute_current_hour_load(airport_icao, flight_type, relevant_class, hour_of
 
 def compute_current_availability(airport_icao, relevant_class):
     """Загруженность аэропорта ПРЯМО СЕЙЧАС для конкретного класса (эконом/бизнес/все):
-    прилёты в текущий час (эти пассажиры выходят из терминала прямо сейчас) +
-    вылеты через DEPARTURE_LEAD_TIME_HOURS (эти пассажиры заказывают такси в городе
-    прямо сейчас). Сравнивается с ЧАСОВОЙ пропускной способностью - раньше тут по
-    ошибке складывались пассажиры ВСЕХ рейсов за весь день, что давало 1000-2000%+."""
+    только прилёты в текущий час (эти пассажиры выходят из терминала прямо сейчас) -
+    вылеты больше не собираются (убраны ради экономии квоты, см. get_airport_flights).
+    Сравнивается с ЧАСОВОЙ пропускной способностью - раньше тут по ошибке складывались
+    пассажиры ВСЕХ рейсов за весь день, что давало 1000-2000%+."""
     now = get_airport_now(airport_icao)
     current_hour = now.hour
-    arrivals = get_airport_flights(airport_icao, 'arrivals')
-    departures = get_airport_flights(airport_icao, 'departures')
+    arrivals = get_airport_flights(airport_icao)
     capacity = AIRPORT_CAPACITY.get(airport_icao, 1000)
     relevant_cap = {'economy': capacity * ECONOMY_SHARE, 'business': capacity * BUSINESS_SHARE, 'total': capacity}[relevant_class]
     key = {'economy': 'passengers_economy', 'business': 'passengers_business', 'total': 'passengers'}[relevant_class]
 
-    departure_order_hour = (current_hour + DEPARTURE_LEAD_TIME_HOURS) % 24
     arrivals_now = [f for f in arrivals if datetime.fromtimestamp(f.get('firstSeen', 0)).hour == current_hour]
-    departures_soon = [f for f in departures if datetime.fromtimestamp(f.get('firstSeen', 0)).hour == departure_order_hour]
 
-    total_passengers = sum(f.get(key, 0) for f in arrivals_now) + sum(f.get(key, 0) for f in departures_soon)
+    total_passengers = sum(f.get(key, 0) for f in arrivals_now)
     load = (total_passengers / relevant_cap) * 100 if total_passengers > 0 else 0
     return {
         'load': load,
         'capacity': capacity,
         'relevant_cap': relevant_cap,
         'arrivals_now': arrivals_now,
-        'departures_soon': departures_soon,
         'total_passengers': total_passengers,
         'now': now,
         'current_hour': current_hour,
-        'departure_order_hour': departure_order_hour,
     }
 
 @router.callback_query(lambda c: c.data == "airport_availability")
@@ -1274,7 +1823,7 @@ async def show_airport_availability(callback_query: types.CallbackQuery):
 @router.callback_query(lambda c: c.data.startswith('availability_details_'))
 async def show_availability_details(callback_query: types.CallbackQuery):
     """Подробная доступность ОДНОГО выбранного аэропорта: загрузка сейчас,
-    прилёты/вылеты текущего часа и все уведомления Росавиации за 12ч."""
+    прилёты текущего часа и все уведомления Росавиации за 12ч."""
     data_parts = callback_query.data.split('_')
     city = data_parts[2]
     airport_idx = int(data_parts[3])
@@ -1324,8 +1873,7 @@ async def show_availability_details(callback_query: types.CallbackQuery):
         text += "\n"
         text += f"{load_emoji} *{status}*\n"
         text += f"📊 Загруженность сейчас: *{load:.0f}%* (от {info['relevant_cap']:.0f} пас/час)\n\n"
-        text += f"🛬 Прилетает в {info['current_hour']:02d}:00-{(info['current_hour']+1)%24:02d}:00: {len(info['arrivals_now'])} рейсов\n"
-        text += f"🛫 Вылетает в {info['departure_order_hour']:02d}:00-{(info['departure_order_hour']+1)%24:02d}:00 (заказы в городе сейчас): {len(info['departures_soon'])} рейсов\n\n"
+        text += f"🛬 Прилетает в {info['current_hour']:02d}:00-{(info['current_hour']+1)%24:02d}:00: {len(info['arrivals_now'])} рейсов\n\n"
 
         notices = get_notices_for_airport(airport['icao'])
         if notices:
@@ -1569,10 +2117,11 @@ async def airports_data_updater():
 
 
 async def trains_data_updater():
-    """Фоновая задача для trains_data.json (Казанский/Ленинградский, включая
-    Сапсан). Независимый от аэропортов график - раз в
-    TRAINS_UPDATE_INTERVAL_HOURS часов, круглосуточно, без привязки к
-    дню/ночи. Запускается сразу при старте бота."""
+    """Фоновая задача для trains_data.json (7 вокзалов по 6 городам, включая
+    Сапсан - см. STATION_CITY и fetch_trains_data.py). Независимый от
+    аэропортов график - раз в TRAINS_UPDATE_INTERVAL_HOURS часов,
+    круглосуточно, без привязки к дню/ночи. Запускается сразу при старте
+    бота."""
     while True:
         try:
             logger.info("🔄 Обновляю trains_data.json (Казанский/Ленинградский) из Yandex Rasp API...")
@@ -1732,7 +2281,7 @@ async def check_high_demand_alerts():
             continue
         for relevant_class in ('economy', 'business'):
             try:
-                load, _, target_hour = compute_current_hour_load(icao, 'arrivals', relevant_class, hour_offset=HIGH_DEMAND_LEAD_HOURS)
+                load, _, target_hour = compute_current_hour_load(icao, relevant_class, hour_offset=HIGH_DEMAND_LEAD_HOURS)
             except Exception as e:
                 logger.error(f"❌ Не удалось посчитать прогноз спроса {icao}/{relevant_class}: {e}")
                 continue
