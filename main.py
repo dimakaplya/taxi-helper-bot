@@ -189,88 +189,16 @@ AIRPORT_TIMETABLE_URLS = {
     'UUWL': 'https://www.vnukovo.ru',      # Внуково
 }
 
-
-
-
-
-        now = datetime.utcnow()
-        begin = int(now.timestamp())
-        end = int((now + timedelta(hours=6)).timestamp())
-
-        logger.info(f"📡 Запрос вылетов {airport_icao} из OpenSky API")
-
-        headers = {
-            'Authorization': f'Bearer {access_token}',
-            'User-Agent': 'TaxiHelperBot/1.0'
-        }
-
-        response = requests.get(
-            f'{OPENSKY_API}/flights/departure',
-            params={'airport': airport_icao, 'begin': begin, 'end': end},
-            headers=headers,
-            timeout=15
-        )
-
-        if response.status_code == 200:
-            data = response.json()[:10]
-            logger.info(f"✅ Получены вылеты {airport_icao}: {len(data)} рейсов")
-            return data
-        elif response.status_code == 401:
-            logger.warning(f"⚠️ OpenSky: 401 Unauthorized - очищаем token кеш")
-            opensky_token_cache['access_token'] = None
-            return []
-        else:
-            logger.warning(f"⚠️ OpenSky API вернул код {response.status_code}")
-    except Exception as e:
-        logger.error(f"❌ Ошибка при получении вылетов {airport_icao}: {e}")
-
-    return []
-
-
-
-        now = datetime.utcnow()
-        begin = int((now - timedelta(hours=1)).timestamp())
-        end = int((now + timedelta(hours=5)).timestamp())
-
-        logger.info(f"📡 Запрос прилетов {airport_icao} из OpenSky API")
-
-        headers = {
-            'Authorization': f'Bearer {access_token}',
-            'User-Agent': 'TaxiHelperBot/1.0'
-        }
-
-        response = requests.get(
-            f'{OPENSKY_API}/flights/arrival',
-            params={'airport': airport_icao, 'begin': begin, 'end': end},
-            headers=headers,
-            timeout=15
-        )
-
-        if response.status_code == 200:
-            data = response.json()[:10]
-            logger.info(f"✅ Получены прилеты {airport_icao}: {len(data)} рейсов")
-            return data
-        elif response.status_code == 401:
-            logger.warning(f"⚠️ OpenSky: 401 Unauthorized - очищаем token кеш")
-            opensky_token_cache['access_token'] = None
-            return []
-        else:
-            logger.warning(f"⚠️ OpenSky API вернул код {response.status_code}")
-    except Exception as e:
-        logger.error(f"❌ Ошибка при получении прилетов {airport_icao}: {e}")
-
-    return []
-
 def get_departures(airport_icao):
     """Получить вылеты из аэропорта табло"""
     try:
         logger.info(f"📡 Загружаю вылеты {airport_icao}...")
-        
+
         import random
         flights = []
         airlines = ['Аэрофлот', 'S7', 'Победа', 'Россия', 'Ямал']
         dests = ['Санкт-Петербург', 'Казань', 'Екатеринбург', 'Новосибирск', 'Сочи', 'Анталья', 'Стамбул', 'Дубай']
-        
+
         # Генерируем данные из табло
         now = datetime.now()
         for i in range(8):
@@ -281,7 +209,7 @@ def get_departures(airport_icao):
                 'firstSeen': int(flight_time.timestamp()),
                 'status': random.choice(['На борту', 'Регистрация', 'Вылет'])
             })
-        
+
         logger.info(f"✅ Получены вылеты {airport_icao}: {len(flights)} рейсов")
         return flights
     except Exception as e:
@@ -292,12 +220,12 @@ def get_arrivals(airport_icao):
     """Получить прилеты в аэропорт табло"""
     try:
         logger.info(f"📡 Загружаю прилеты {airport_icao}...")
-        
+
         import random
         flights = []
         airlines = ['Аэрофлот', 'S7', 'Победа', 'Россия', 'Ямал']
         origins = ['Санкт-Петербург', 'Казань', 'Екатеринбург', 'Новосибирск', 'Сочи', 'Анталья', 'Стамбул', 'Дубай']
-        
+
         # Генерируем данные из табло
         now = datetime.now()
         for i in range(8):
@@ -308,7 +236,7 @@ def get_arrivals(airport_icao):
                 'lastSeen': int(flight_time.timestamp()),
                 'status': random.choice(['Совершил посадку', 'Выдача багажа', 'Таможня'])
             })
-        
+
         logger.info(f"✅ Получены прилеты {airport_icao}: {len(flights)} рейсов")
         return flights
     except Exception as e:
@@ -474,40 +402,33 @@ async def show_airport_details(callback_query: types.CallbackQuery):
 
     airport = AIRPORTS_INFO[city][airport_idx]
 
-    text = f"⏳ Загружаю расписание {airport['name']}...
-
-"
+    text = f"⏳ Загружаю расписание {airport['name']}...\n"
     msg = await callback_query.message.edit_text(text)
 
     departures = get_departures(airport['icao'])
 
-    text = f"*{airport['emoji']} {airport['name']}*
-"
-    text += f"_Обновлено: {datetime.now().strftime('%H:%M:%S')}_
-"
-    text += "
-*📊 ПРОГНОЗ ЗАГРУЖЕННОСТИ (8 часов):*
-
-"
+    text = f"*{airport['emoji']} {airport['name']}*\n"
+    text += f"_Обновлено: {datetime.now().strftime('%H:%M:%S')}_\n"
+    text += "\n*📊 ПРОГНОЗ ЗАГРУЖЕННОСТИ (8 часов):*\n\n"
 
     now = datetime.now()
-    
-    # Проходим по каждому часу (6 часов)
+
+    # Проходим по каждому часу (8 часов)
     for hour in range(8):
         hour_time = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=hour)
         hour_str = hour_time.strftime('%H:00')
-        
+
         # Считаем рейсы в этот час
         flights_in_hour = 0
         for flight in departures:
             flight_time = datetime.fromtimestamp(flight.get('firstSeen', 0))
             if flight_time.hour == hour_time.hour:
                 flights_in_hour += 1
-        
+
         # Калькулируем загруженность (случайно для примера)
         import random
         load = random.randint(50, 250)
-        
+
         # Определяем цвет и рекомендацию
         if load <= 75:
             emoji = '🔴'
@@ -524,21 +445,17 @@ async def show_airport_details(callback_query: types.CallbackQuery):
         else:
             emoji = '🟣'
             action = '✅ ЕХАТЬ'
-        
+
         # Разбор пассажиров (85% емкости)
         total_capacity = 100
         econom = int(total_capacity * 0.85 * (load / 200))
         business = int(total_capacity * 0.15 * (load / 200))
-        
-        text += f"{emoji} *{hour_str}* | Нагрузка: *{load}%*
-"
-        text += f"   Рекомендация: *{action}*
-"
-        text += f"   🛬 Рейсов: {flights_in_hour}  |  ✈️ Пассажиры: Эконом {econom}, Бизнес {business}
-"
-        text += "
-"
-    
+
+        text += f"{emoji} *{hour_str}* | Нагрузка: *{load}%*\n"
+        text += f"   Рекомендация: *{action}*\n"
+        text += f"   🛬 Рейсов: {flights_in_hour}  |  ✈️ Пассажиры: Эконом {econom}, Бизнес {business}\n"
+        text += "\n"
+
     text += "_Легенда: 🔴≤75% 🟠75-100% 🟡100-125% 🟢125-200% 🟣≥200%_"
 
     await msg.edit_text(text, parse_mode='Markdown')
