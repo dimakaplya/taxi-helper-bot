@@ -3,6 +3,7 @@ import logging
 import asyncio
 import sqlite3
 import json
+import re
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from aiogram import Bot, Dispatcher, Router, types
@@ -387,15 +388,30 @@ def load_events_data():
         logger.error(f"❌ Ошибка чтения events_data.json: {e}")
         return None
 
-# Какие категории KudaGo показываем какому классу такси. Ultima - "значимые"
-# события (концерты, спектакли), эконом/комфорт - более массовые (выставки,
-# фестивали). Курьер/Грузовое такси эту кнопку вообще не видят (см.
-# CATEGORIES_WITHOUT_EVENTS ниже) - события не про их профиль работы.
-CATEGORY_TO_EVENT_CATEGORIES = {
-    'taxi': ['exhibition', 'festival'],
-    'ultima': ['concert', 'theater'],
-}
+# Такси эконом/комфорт видит ВСЕ мероприятия города без разбора категорий.
+# Ultima видит только "значимые" - те, где цена входа от ULTIMA_MIN_PRICE
+# рублей (события без указанной цены и бесплатные для Ultima не подходят -
+# нельзя подтвердить, что они проходят порог). Курьер/Грузовое такси эту
+# кнопку вообще не видят (см. CATEGORIES_WITHOUT_EVENTS ниже).
+ULTIMA_MIN_PRICE = 3000
 CATEGORIES_WITHOUT_EVENTS = {'courier', 'cargo'}
+
+def parse_min_price(event):
+    """Минимальная цена мероприятия в рублях. KudaGo отдаёт price
+    неструктурированным текстом ("от 1000 до 3000 рублей", "500 руб", "от 350
+    рублей, есть льготы", "" - если не указана) - берём ПЕРВОЕ число в строке
+    (это и есть "от", то есть минимальный входной порог). None - если цену
+    вообще не удалось распознать (нельзя проверить порог ULTIMA_MIN_PRICE).
+    Бесплатное мероприятие - явно 0, а не None."""
+    if event.get('is_free'):
+        return 0
+    match = re.search(r'\d[\d\s]*', event.get('price') or '')
+    if not match:
+        return None
+    try:
+        return int(match.group(0).replace(' ', ''))
+    except ValueError:
+        return None
 
 def get_events_for_user(city, category, limit=5):
     """Ближайшие события города под класс водителя. Возвращает (events, city_supported) -
@@ -407,13 +423,11 @@ def get_events_for_user(city, category, limit=5):
     if not data:
         return [], True
     city_events = data.get('cities', {}).get(city, [])
-    wanted_categories = set(CATEGORY_TO_EVENT_CATEGORIES.get(category, []))
     now_ts = datetime.now(ZoneInfo('UTC')).timestamp()
-    filtered = [
-        e for e in city_events
-        if e.get('start', 0) >= now_ts and wanted_categories & set(e.get('categories', []))
-    ]
-    return filtered[:limit], True
+    upcoming = [e for e in city_events if e.get('start', 0) >= now_ts]
+    if category == 'ultima':
+        upcoming = [e for e in upcoming if (parse_min_price(e) or 0) >= ULTIMA_MIN_PRICE]
+    return upcoming[:limit], True
 
 # Часовой пояс городов, покрытых KudaGo (используется только для афиши - не
 # путать с AIRPORT_TIMEZONE, который привязан к конкретным аэропортам).
@@ -440,6 +454,35 @@ def format_event_datetime(event, city):
         return f"{start_dt.strftime('%d.%m, %H:%M')}–{end_dt.strftime('%H:%M')}"
     return f"{start_dt.strftime('%d.%m %H:%M')} – {end_dt.strftime('%d.%m %H:%M')}"
 
+# Оценка числа посетителей мероприятия - KudaGo НЕ отдаёт вместимость
+# площадки или число участников вообще (проверено по полной схеме
+# события/места - такого поля там нет в принципе, "participants" в API это
+# актёры/режиссёр, а не аудитория). Поэтому это ГРУБАЯ прикидка по ключевым
+# словам в названии площадки и по категории события, а не реальные данные -
+# в сообщении всегда явно помечена как "оценка", чтобы не выдавать за факт.
+VENUE_SIZE_KEYWORDS = [
+    (3000, 15000, ['стадион', 'арена', 'дворец спорта', 'экспоцентр', 'манеж', 'ледовый']),
+    (800, 3000, ['дворец культуры', ' дк ', 'концертный зал', 'кремль', 'олимпийский', 'крокус']),
+    (100, 400, ['клуб', 'бар', 'лофт', 'гастро', 'кафе']),
+]
+
+def estimate_attendance(event):
+    """Возвращает (мин, макс) грубой оценки числа посетителей."""
+    place = f" {(event.get('place_title') or '').lower()} "
+    for lo, hi, keywords in VENUE_SIZE_KEYWORDS:
+        if any(k in place for k in keywords):
+            return lo, hi
+    categories = set(event.get('categories', []))
+    if 'festival' in categories:
+        return 500, 3000
+    if 'theater' in categories:
+        return 200, 700
+    if 'concert' in categories:
+        return 150, 600
+    if 'exhibition' in categories:
+        return 50, 300
+    return 100, 400
+
 def build_event_message(event, city):
     """Текст + инлайн-кнопки для ОДНОГО события. "🚗 Поехали" ведёт маршрутом
     в Яндекс.Карты (если у KudaGo есть координаты места) - специально ссылка
@@ -450,10 +493,13 @@ def build_event_message(event, city):
     Навигатора, если оно установлено и ассоциировано с доменом, и в браузере
     в любом случае, если нет. "🔗 Подробнее" - страница события на KudaGo."""
     date_str = format_event_datetime(event, city)
-    lines = [f"🎫 *{event['title']}*", f"🗓 {date_str}"]
+    lo, hi = estimate_attendance(event)
+    lines = [f"🎫 *{event['title']}*"]
     place_bits = [p for p in (event.get('place_title'), event.get('place_address')) if p]
     if place_bits:
         lines.append("📍 " + " · ".join(place_bits))
+    lines.append(f"👥 ~{lo}–{hi} чел. _(оценка)_")
+    lines.append(f"🗓 {date_str}")
     if event.get('is_free'):
         lines.append("💰 Бесплатно")
     elif event.get('price'):
@@ -914,10 +960,11 @@ async def show_fuel_bot(message: types.Message):
 
 @router.message(lambda message: message.text == "🎭 События города")
 async def show_city_events(message: types.Message):
-    """Афиша (концерты/спектакли для Ultima, выставки/фестивали для
-    эконом/комфорт) - источник KudaGo, см. fetch_events_data.py. Покрывает
-    только 4 из 12 городов бота (Москва/СПб/Екатеринбург/Казань) - для
-    остальных явно говорим "нет данных", а не показываем пустой экран."""
+    """Афиша - источник KudaGo, см. fetch_events_data.py. Такси эконом/комфорт
+    видит ВСЕ мероприятия города, Ultima - только от ULTIMA_MIN_PRICE рублей
+    (см. get_events_for_user/parse_min_price). Покрывает только 4 из 12
+    городов бота (Москва/СПб/Екатеринбург/Казань) - для остальных явно
+    говорим "нет данных", а не показываем пустой экран."""
     user_id = message.from_user.id
     if user_id not in user_state or 'city' not in user_state[user_id]:
         await message.answer("Сначала выбери город!")
