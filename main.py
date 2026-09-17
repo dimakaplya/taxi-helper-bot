@@ -257,12 +257,25 @@ def get_airport_flights(airport_icao, flight_type='departures'):
 
 def get_load_emoji(load_percent):
     """Определить эмодзи нагрузки по процентам"""
-    if load_percent < 70:
+    if load_percent <= 50:
         return '🔴'
+    elif load_percent <= 70:
+        return '🟡'
     elif load_percent <= 100:
         return '🟢'
     else:
         return '🟣'
+
+def get_load_recommendation(load_percent):
+    """Определить рекомендацию по нагрузке"""
+    if load_percent <= 50:
+        return 'НЕ ЕХАТЬ'
+    elif load_percent <= 70:
+        return '📍 ЗАНЯТЬ ОЧЕРЕДЬ'
+    elif load_percent <= 100:
+        return '✅ ЕХАТЬ'
+    else:
+        return '🚨 СРОЧНО В АЭРОПОРТ'
 
 # ==================== БАЗА ДАННЫХ ====================
 
