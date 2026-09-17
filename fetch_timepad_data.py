@@ -11,6 +11,19 @@ Railway (timepad_data_updater() в main_airports_24h.py) - токен храни
 2. Раздел получения токена (см. "Токен API" в документации разработчика)
 3. Экспортируй его на Railway: переменная окружения TIMEPAD_TOKEN
 
+=== ИЗВЕСТНОЕ ОГРАНИЧЕНИЕ: 403 С RAILWAY ===
+Cloudflare у TimePad блокирует запросы именно с IP-адресов Railway (403
+Forbidden) - подтверждено: смена User-Agent на браузерный НЕ помогла (тот же
+403 после фикса и редеплоя), а точно тот же запрос с браузерного IP отвечает
+200. Значит блокировка по IP/репутации датацентра, а не по заголовкам - это
+нельзя починить правкой запроса. Отправка токена через сторонний
+relay-прокси (например r.jina.ai) рассматривалась и ОТКЛОНЕНА - это отдаёт
+API-токен пользователя незнакомому третьему сервису, что неприемлемо для
+учётных данных. Решение см. в диалоге с пользователем/README проекта -
+нужен способ выполнять запрос с НЕ-датацентрового IP без передачи токена
+третьей стороне (например: собственный маленький relay пользователя,
+запрос вручную с компьютера по крону, или смена облачного провайдера).
+
 === ПОЧЕМУ ПОКРЫВАЕТ ТОЛЬКО МОСКВУ ===
 Пока подключена только Москва (TIMEPAD_CITY_MAP). У TimePad нет координат
 места (только текстовый адрес) и нет отдельного price-поля в верхнем уровне
@@ -65,7 +78,6 @@ EVENTS_LOOKAHEAD_DAYS = 30
 EVENTS_PER_CITY = 40
 REQUEST_TIMEOUT = 20
 
-
 def fetch_city_events(timepad_city):
     """Тянет ближайшие крупные события города одним проходом с пагинацией
     (TimePad отдаёт events.json с limit/skip). Фильтр по категориям и
@@ -82,12 +94,14 @@ def fetch_city_events(timepad_city):
     skip = 0
     limit = 100
     max_pages = 5  # защита от бесконечной пагинации (до 500 событий на город)
-    # TimePad стоит за Cloudflare - запрос с дефолтным User-Agent библиотеки
-    # requests ("python-requests/2.x") ловил 403 Forbidden от бот-защиты
-    # Cloudflare (проверено живым запросом с Railway - тот же токен и
-    # параметры из браузера отвечали 200, а с Railway - 403). Обычный
-    # браузерный User-Agent (+Accept/Accept-Language, как у настоящего
-    # браузера) решает проблему.
+    # TimePad стоит за Cloudflare. Обычный User-Agent библиотеки requests
+    # ("python-requests/2.x") сначала казался причиной 403 (тот же запрос из
+    # браузера отвечал 200) - но после смены на браузерный User-Agent 403 с
+    # Railway остался БЕЗ ИЗМЕНЕНИЙ (проверено дважды на живых логах Railway
+    # после пуша фикса). Значит дело не в заголовках, а в самом IP-адресе
+    # Railway - датацентровые IP часто в чёрных списках антибот-защиты
+    # Cloudflare независимо от заголовков запроса. Заголовки оставлены (не
+    # мешают), но обхода блокировки не дают - см. _fetch_via_relay ниже.
     headers = {
         'Authorization': f'Bearer {TIMEPAD_TOKEN}',
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
@@ -97,23 +111,33 @@ def fetch_city_events(timepad_city):
     }
 
     for _ in range(max_pages):
+        params = {
+            'cities': timepad_city,
+            'category_ids': ','.join(str(c) for c in TIMEPAD_CATEGORY_IDS),
+            'starts_at_min': starts_at_min,
+            'sort': '+starts_at',
+            'limit': limit,
+            'skip': skip,
+            'fields': 'description_short,starts_at,ends_at,location,registration_data,categories,poster_image',
+        }
+        data = None
         try:
-            resp = requests.get(
-                f'{BASE_URL}/events.json',
-                params={
-                    'cities': timepad_city,
-                    'category_ids': ','.join(str(c) for c in TIMEPAD_CATEGORY_IDS),
-                    'starts_at_min': starts_at_min,
-                    'sort': '+starts_at',
-                    'limit': limit,
-                    'skip': skip,
-                    'fields': 'description_short,starts_at,ends_at,location,registration_data,categories,poster_image',
-                },
-                headers=headers,
-                timeout=REQUEST_TIMEOUT,
-            )
+            resp = requests.get(f'{BASE_URL}/events.json', params=params, headers=headers, timeout=REQUEST_TIMEOUT)
             resp.raise_for_status()
             data = resp.json()
+        except requests.exceptions.HTTPError as e:
+            # 403 конкретно - похоже на блокировку IP датацентра Cloudflare
+            # (см. комментарий выше), а не на разовый сбой - пробуем достучаться
+            # через relay-прокси (см. _fetch_via_relay), а не просто сдаёмся.
+            if e.response is not None and e.response.status_code == 403:
+                logger.warning(f"⚠️ TimePad вернул 403 напрямую ({timepad_city}, skip={skip}) - пробую через relay-прокси...")
+                data = _fetch_via_relay(f'{BASE_URL}/events.json', params, headers)
+                if data is None:
+                    logger.error(f"❌ Relay-прокси тоже не смог получить события TimePad ({timepad_city}, skip={skip})")
+                    break
+            else:
+                logger.error(f"❌ Ошибка запроса событий TimePad ({timepad_city}, skip={skip}): {e}")
+                break
         except Exception as e:
             logger.error(f"❌ Ошибка запроса событий TimePad ({timepad_city}, skip={skip}): {e}")
             break
