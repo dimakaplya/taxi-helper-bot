@@ -101,7 +101,10 @@ AIRPORTS_INFO = {
         {'name': 'KUF (Курумоч)', 'emoji': '✈️', 'icao': 'UWWW', 'iata': 'KUF'},
     ],
     'rostov': [
-        {'name': 'RND (Ростов-на-Дону)', 'emoji': '✈️', 'icao': 'URRP', 'iata': 'RND'},
+        # ⚠️ Платов закрыт для гражданских полётов - данные по нему не собираем
+        # (fetch_yandex_data.py пропускает его без единого запроса к API,
+        # экономим квоту), бот показывает статичную заглушку "закрыт".
+        {'name': 'RND (Ростов-на-Дону)', 'emoji': '✈️', 'icao': 'URRP', 'iata': 'RND', 'closed': True},
     ],
     'ufa': [
         {'name': 'UFA (Уфа)', 'emoji': '✈️', 'icao': 'UWUU', 'iata': 'UFA'},
@@ -113,6 +116,16 @@ AIRPORTS_INFO = {
         {'name': 'AER (Адлер)', 'emoji': '✈️', 'icao': 'URSS', 'iata': 'AER'},
     ]
 }
+
+# Обратный индекс ICAO -> город/данные аэропорта - нужен для пушей об
+# изменении статуса аэропорта: по коду аэропорта нужно быстро понять, каким
+# водителям (по выбранному городу) это разослать.
+ICAO_TO_CITY = {}
+ICAO_TO_AIRPORT = {}
+for _city_key, _airports_list in AIRPORTS_INFO.items():
+    for _airport in _airports_list:
+        ICAO_TO_CITY[_airport['icao']] = _city_key
+        ICAO_TO_AIRPORT[_airport['icao']] = _airport
 
 CATEGORIES = {
     'taxi': {'name': 'ТАКСИ', 'tariffs': ['Эконом', 'Комфорт', 'Комфорт+', 'Минивэн']},
@@ -194,7 +207,100 @@ DB_FILE = 'taxi_queue.db'
 # что он уже уехал (забрал пассажира) или просто забыл нажать "Покинуть
 # очередь", и убираем его из очереди автоматически.
 QUEUE_ENTRY_TTL_MINUTES = 120
-user_state = {}
+
+# user_state раньше жил только в памяти процесса - при каждом рестарте/редеплое
+# (то есть при каждом git push) состояние ВСЕХ водителей обнулялось, и им
+# приходилось заново жать /start. При росте числа водителей (сотни-тысяча)
+# это уже реальная проблема, а не мелочь. Решение: user_state[user_id] и
+# вложенные в него ключи автоматически сохраняются в SQLite при любом
+# изменении - а при старте бота состояние подгружается обратно. Весь
+# остальной код бота работает с user_state как с обычным dict, ничего в нём
+# менять не пришлось - персистентность спрятана внутри этих двух классов.
+
+class PersistentUserDict(dict):
+    """Состояние ОДНОГО пользователя. Любое изменение ключа (set/del/pop)
+    сразу сохраняет весь словарь целиком в БД."""
+    def __init__(self, user_id, *args, **kwargs):
+        self._user_id = user_id
+        super().__init__(*args, **kwargs)
+
+    def __setitem__(self, key, value):
+        super().__setitem__(key, value)
+        save_user_state(self._user_id, dict(self))
+
+    def __delitem__(self, key):
+        super().__delitem__(key)
+        save_user_state(self._user_id, dict(self))
+
+    def pop(self, key, *default):
+        result = super().pop(key, *default)
+        save_user_state(self._user_id, dict(self))
+        return result
+
+class PersistentUserStateStore(dict):
+    """user_state целиком. user_state[user_id] = {...} оборачивает значение в
+    PersistentUserDict и сохраняет его; user_state.pop(user_id) удаляет
+    запись и из БД тоже."""
+    def __setitem__(self, user_id, value):
+        if not isinstance(value, PersistentUserDict):
+            value = PersistentUserDict(user_id, value)
+        super().__setitem__(user_id, value)
+        save_user_state(user_id, dict(value))
+
+    def pop(self, user_id, *default):
+        result = super().pop(user_id, *default)
+        delete_user_state(user_id)
+        return result
+
+def save_user_state(user_id, state_dict):
+    try:
+        init_db()
+        conn = get_db_connection()
+        conn.execute(
+            'INSERT INTO user_states (user_id, state_json, updated_at) VALUES (?, ?, ?) '
+            'ON CONFLICT(user_id) DO UPDATE SET state_json = excluded.state_json, updated_at = excluded.updated_at',
+            (user_id, json.dumps(state_dict, ensure_ascii=False), datetime.now(ZoneInfo('UTC')).strftime('%Y-%m-%d %H:%M:%S'))
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"❌ Не удалось сохранить состояние пользователя {user_id}: {e}")
+
+def delete_user_state(user_id):
+    try:
+        init_db()
+        conn = get_db_connection()
+        conn.execute('DELETE FROM user_states WHERE user_id = ?', (user_id,))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"❌ Не удалось удалить состояние пользователя {user_id}: {e}")
+
+def load_all_user_states():
+    """Восстанавливает user_state из БД при старте бота - без этого все
+    водители слетали бы на выбор города после каждого редеплоя."""
+    try:
+        init_db()
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT user_id, state_json FROM user_states')
+        rows = cursor.fetchall()
+        conn.close()
+        restored = 0
+        for user_id, state_json in rows:
+            try:
+                data = json.loads(state_json)
+                # dict.__setitem__ напрямую - в обход персистентности, иначе
+                # мы бы тут же переписали в БД то, что только что из неё прочитали
+                dict.__setitem__(user_state, user_id, PersistentUserDict(user_id, data))
+                restored += 1
+            except Exception:
+                continue
+        logger.info(f"✅ Восстановлено состояние {restored} пользователей из БД")
+    except Exception as e:
+        logger.error(f"❌ Не удалось восстановить состояния пользователей: {e}")
+
+user_state = PersistentUserStateStore()
 
 _flights_data_cache = None
 _flights_data_mtime = None
@@ -254,11 +360,19 @@ def get_notices_for_airport(icao):
         return []
     return [n for n in data.get('notices', []) if icao in n.get('airports', [])]
 
+# Аэропорты, закрытые для гражданских полётов постоянно (не зависит от
+# уведомлений Росавиации, которые могут вообще не упоминать их) - Платов
+# (Ростов). Статус для них всегда "закрыт", данные по ним не собираются
+# (см. fetch_yandex_data.py) и не запрашиваются.
+PERMANENTLY_CLOSED_AIRPORTS = {'URRP'}
+
 def get_airport_status(icao):
     """Статус аэропорта по последнему уведомлению Росавиации за 12ч:
     'closed' (ВВЕДЕНЫ ограничения), 'coordinated' (работает по согласованию),
     'open' (СНЯТЫ ограничения), или 'open' по умолчанию, если уведомлений нет
     вообще (не значит 100% гарантию - просто нет свежих данных об ограничениях)."""
+    if icao in PERMANENTLY_CLOSED_AIRPORTS:
+        return 'closed', None
     notices = get_notices_for_airport(icao)
     if not notices:
         return 'open', None
@@ -307,15 +421,23 @@ def get_airport_flights(airport_icao, flight_type='departures'):
                 # если их нет в файле (старые данные) - считаем на лету по стандартной разбивке
                 economy_pax = flight_data.get('passengers_economy', round(total_pax * ECONOMY_SHARE))
                 business_pax = flight_data.get('passengers_business', total_pax - economy_pax)
+                # 'domestic' есть в свежих данных (посчитан в fetch_yandex_data.py);
+                # если его нет (старый flights_data.json, ещё без этого поля) -
+                # считаем на лету тем же классификатором, чтобы не хранить два разных.
+                destination = flight_data.get('point', '')
+                domestic = flight_data.get('domestic')
+                if domestic is None:
+                    domestic = fetch_yandex_data.is_domestic_flight(destination)
                 flights.append({
                     'time': flight_data['time'],
                     'callsign': f"{flight_data['airline']} {flight_data['flight']}",
-                    'destination': flight_data.get('point', ''),
+                    'destination': destination,
                     'aircraft': flight_data.get('aircraft', ''),
                     'firstSeen': int(flight_time.timestamp()),
                     'passengers': total_pax,
                     'passengers_economy': economy_pax,
                     'passengers_business': business_pax,
+                    'domestic': domestic,
                 })
             logger.info(f"✅ Загружено {len(flights)} реальных рейсов {airport_icao} ({flight_type})")
             return flights
@@ -330,15 +452,17 @@ def get_airport_flights(airport_icao, flight_type='departures'):
                 total_pax = flight_data['passengers']
                 economy_pax = round(total_pax * ECONOMY_SHARE)
                 business_pax = total_pax - economy_pax
+                destination = flight_data.get('dest') or flight_data.get('origin')
                 flights.append({
                     'time': flight_data['time'],
                     'callsign': f"{flight_data['airline']}{flight_data['flight']}",
-                    'destination': flight_data.get('dest') or flight_data.get('origin'),
+                    'destination': destination,
                     'aircraft': '',
                     'firstSeen': int(flight_time.timestamp()),
                     'passengers': total_pax,
                     'passengers_economy': economy_pax,
                     'passengers_business': business_pax,
+                    'domestic': fetch_yandex_data.is_domestic_flight(destination),
                 })
             logger.info(f"⚠️ Использую запасные данные SVO ({len(flights)} рейсов)")
             return flights
@@ -374,8 +498,20 @@ def get_departure_recommendation(demand_percent):
     elif demand_percent <= 100: return '🏙️ Активно бери заказы в аэропорт'
     else: return '🔥 Пиковый спрос на заказы'
 
+def get_db_connection():
+    """Единая точка подключения к SQLite. При росте числа водителей (сотни
+    одновременных отметок в час пик) SQLite по умолчанию сериализует запись -
+    один писатель блокирует остальных и можно словить "database is locked".
+    WAL-режим позволяет читать во время записи и сильно снижает конфликты,
+    а busy_timeout заставляет соединение подождать и повторить попытку вместо
+    того чтобы сразу падать с ошибкой."""
+    conn = sqlite3.connect(DB_FILE, timeout=10)
+    conn.execute('PRAGMA journal_mode=WAL')
+    conn.execute('PRAGMA busy_timeout=10000')
+    return conn
+
 def init_db():
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS queue (
@@ -388,8 +524,99 @@ def init_db():
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_queue_lookup ON queue (city, airport, tariff, timestamp)')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS user_states (
+            user_id INTEGER PRIMARY KEY,
+            state_json TEXT,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS airport_statuses (
+            icao TEXT PRIMARY KEY,
+            status TEXT,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS high_demand_alerts_sent (
+            icao TEXT,
+            relevant_class TEXT,
+            target_date TEXT,
+            target_hour INTEGER,
+            sent_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (icao, relevant_class, target_date, target_hour)
+        )
+    ''')
     conn.commit()
     conn.close()
+
+def save_airport_status(icao, status):
+    try:
+        init_db()
+        conn = get_db_connection()
+        conn.execute(
+            'INSERT INTO airport_statuses (icao, status, updated_at) VALUES (?, ?, ?) '
+            'ON CONFLICT(icao) DO UPDATE SET status = excluded.status, updated_at = excluded.updated_at',
+            (icao, status, datetime.now(ZoneInfo('UTC')).strftime('%Y-%m-%d %H:%M:%S'))
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"❌ Не удалось сохранить статус аэропорта {icao}: {e}")
+
+def load_all_airport_statuses():
+    """Последний известный статус каждого аэропорта (из прошлого прогона) -
+    хранится в БД, а не в памяти, чтобы рестарт/редеплой бота не считался
+    "изменением статуса" и не рассылал ложные пуши всем водителям."""
+    init_db()
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT icao, status FROM airport_statuses')
+    rows = cursor.fetchall()
+    conn.close()
+    return {icao: status for icao, status in rows}
+
+def was_high_demand_alert_sent(icao, relevant_class, target_date, target_hour):
+    """Проверяет, уже отправляли ли пуш про повышенный спрос именно для этого
+    конкретного часового слота (аэропорт+класс+дата+час). Фоновая задача
+    проверяет прогноз каждые 15 минут, а окно "через 2 часа" остаётся тем же
+    целый час - без этой проверки водитель получил бы 3-4 одинаковых пуша
+    подряд про один и тот же будущий час."""
+    init_db()
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        'SELECT 1 FROM high_demand_alerts_sent WHERE icao=? AND relevant_class=? AND target_date=? AND target_hour=?',
+        (icao, relevant_class, target_date, target_hour)
+    )
+    row = cursor.fetchone()
+    conn.close()
+    return row is not None
+
+def mark_high_demand_alert_sent(icao, relevant_class, target_date, target_hour):
+    init_db()
+    conn = get_db_connection()
+    conn.execute(
+        'INSERT OR IGNORE INTO high_demand_alerts_sent (icao, relevant_class, target_date, target_hour, sent_at) VALUES (?, ?, ?, ?, ?)',
+        (icao, relevant_class, target_date, target_hour, datetime.now(ZoneInfo('UTC')).strftime('%Y-%m-%d %H:%M:%S'))
+    )
+    conn.commit()
+    conn.close()
+
+def cleanup_old_high_demand_alerts():
+    """Чистим отметки об отправленных пушах старше 2 дней, чтобы таблица не
+    росла бесконечно - для дедупликации важны только сегодняшние/вчерашние."""
+    try:
+        init_db()
+        conn = get_db_connection()
+        cutoff = (datetime.now(ZoneInfo('UTC')) - timedelta(days=2)).strftime('%Y-%m-%d')
+        conn.execute('DELETE FROM high_demand_alerts_sent WHERE target_date < ?', (cutoff,))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"❌ Не удалось почистить high_demand_alerts_sent: {e}")
 
 # Водители сами отмечают, сколько машин видят в очереди на аэропорту - выбором
 # диапазона, а не точного числа (точно посчитать чужие машины в моменте
@@ -400,12 +627,19 @@ def queue_range_label(idx):
     lo, hi = QUEUE_RANGES[idx]
     return f"{lo}-{hi}"
 
-def queue_range_midpoint(range_str):
+def format_airport_local_time(utc_timestamp_str, airport_icao):
+    """Время отметки в БД хранится как datetime.now() сервера (Railway работает
+    в UTC), поэтому для показа пользователю его нужно перевести в местное
+    время КОНКРЕТНОГО аэропорта - иначе увидим UTC вместо реального часа, тот
+    же баг, что уже правили с расписанием рейсов."""
     try:
-        lo, hi = range_str.split('-')
-        return (int(lo) + int(hi)) / 2
+        naive = datetime.strptime(utc_timestamp_str, '%Y-%m-%d %H:%M:%S')
+        aware_utc = naive.replace(tzinfo=ZoneInfo('UTC'))
+        tz_name = AIRPORT_TIMEZONE.get(airport_icao, 'Europe/Moscow')
+        local = aware_utc.astimezone(ZoneInfo(tz_name))
+        return local.strftime('%H:%M')
     except Exception:
-        return None
+        return utc_timestamp_str
 
 def queue_submit_report(user_id, city, airport_icao, category, range_str):
     """Сохраняет отметку водителя о длине очереди. Это не "встать в очередь" -
@@ -413,42 +647,31 @@ def queue_submit_report(user_id, city, airport_icao, category, range_str):
     отметки не удаляются при новой - копится история, из которой потом берём
     последние отметки для оценки."""
     init_db()
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute(
         'INSERT INTO queue (user_id, city, airport, tariff, position_range, timestamp) VALUES (?, ?, ?, ?, ?, ?)',
-        (user_id, city, airport_icao, category, range_str, datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+        (user_id, city, airport_icao, category, range_str, datetime.now(ZoneInfo('UTC')).strftime('%Y-%m-%d %H:%M:%S'))
     )
     conn.commit()
     conn.close()
 
-def queue_recent_reports(city, airport_icao, category, limit=2):
-    """Последние отметки водителей за QUEUE_ENTRY_TTL_MINUTES (свежие отчёты -
-    старые уже не отражают реальную ситуацию). Возвращает список (range_str, timestamp),
-    самые свежие первыми."""
+def queue_latest_report(city, airport_icao, category):
+    """Последняя свежая отметка водителя (за QUEUE_ENTRY_TTL_MINUTES) - без
+    усреднения, просто тот диапазон, который отметил последний водитель.
+    Возвращает (range_str, timestamp) или (None, None), если свежих отметок нет."""
     init_db()
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db_connection()
     cursor = conn.cursor()
-    cutoff = (datetime.now() - timedelta(minutes=QUEUE_ENTRY_TTL_MINUTES)).strftime('%Y-%m-%d %H:%M:%S')
+    cutoff = (datetime.now(ZoneInfo('UTC')) - timedelta(minutes=QUEUE_ENTRY_TTL_MINUTES)).strftime('%Y-%m-%d %H:%M:%S')
     cursor.execute(
         'SELECT position_range, timestamp FROM queue WHERE city = ? AND airport = ? AND tariff = ? AND timestamp >= ? '
-        'ORDER BY timestamp DESC LIMIT ?',
-        (city, airport_icao, category, cutoff, limit)
+        'ORDER BY timestamp DESC LIMIT 1',
+        (city, airport_icao, category, cutoff)
     )
-    rows = cursor.fetchall()
+    row = cursor.fetchone()
     conn.close()
-    return rows
-
-def queue_estimate(city, airport_icao, category):
-    """Оценка текущей очереди - среднее по двум последним свежим отметкам
-    водителей. Возвращает (оценка_int_или_None, список_отметок)."""
-    reports = queue_recent_reports(city, airport_icao, category, limit=2)
-    midpoints = [queue_range_midpoint(r) for r, _ in reports]
-    midpoints = [m for m in midpoints if m is not None]
-    if not midpoints:
-        return None, reports
-    estimate = round(sum(midpoints) / len(midpoints))
-    return estimate, reports
+    return row if row else (None, None)
 
 bot = None
 dp = Dispatcher()
@@ -481,14 +704,26 @@ def category_keyboard():
     keyboard_buttons.append([KeyboardButton(text="← Назад")])
     return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=keyboard_buttons)
 
-def services_keyboard():
-    return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[
-        [KeyboardButton(text="Куда поехать")],
-        [KeyboardButton(text="Аэропорты")],
-        [KeyboardButton(text="Повышенный спрос")],
-        [KeyboardButton(text="Дорожные события")],
-        [KeyboardButton(text="← Назад")]
-    ])
+# Курьеру и Грузовому такси аэропорты не нужны (это не про перевозку
+# пассажиров с рейсов) - кнопка "Аэропорты" им не показывается вообще.
+CATEGORIES_WITHOUT_AIRPORTS = {'courier', 'cargo'}
+
+# Внешний бот "Где бензин" (@gde_benzin_rubot) - народная карта наличия
+# топлива на АЗС по России. Это ОТДЕЛЬНЫЙ бот, а не канал - в отличие от
+# @favt_info у него нет публичной веб-версии переписки, поэтому его данные
+# нельзя "стянуть" скрапингом как уведомления Росавиации. Интеграция - кнопка
+# со ссылкой, открывающая чат с этим ботом напрямую.
+FUEL_BOT_URL = "https://t.me/gde_benzin_rubot"
+
+def services_keyboard(category=None):
+    buttons = [[KeyboardButton(text="Куда поехать")]]
+    if category not in CATEGORIES_WITHOUT_AIRPORTS:
+        buttons.append([KeyboardButton(text="Аэропорты")])
+    buttons.append([KeyboardButton(text="Повышенный спрос")])
+    buttons.append([KeyboardButton(text="Дорожные события")])
+    buttons.append([KeyboardButton(text="⛽ Где бензин")])
+    buttons.append([KeyboardButton(text="← Назад")])
+    return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=buttons)
 
 @router.message(Command("start"))
 async def start(message: types.Message):
@@ -536,18 +771,38 @@ async def select_category(message: types.Message):
         return
     # Сортируем по длине названия по убыванию - иначе "ТАКСИ" (подстрока
     # "ТАКСИ ULTIMA") матчится раньше и категория Ultima никогда не выбирается
+    selected_category = None
     for cat_key, cat_data in sorted(CATEGORIES.items(), key=lambda kv: -len(kv[1]['name'])):
         if cat_data['name'] in message.text:
             user_state[user_id]['category'] = cat_key
+            selected_category = cat_key
             break
     text = "Выбери услугу 👇"
-    await message.answer(text, reply_markup=services_keyboard())
+    await message.answer(text, reply_markup=services_keyboard(selected_category))
+
+@router.message(lambda message: message.text == "⛽ Где бензин")
+async def show_fuel_bot(message: types.Message):
+    """Ссылка на отдельного стороннего бота @gde_benzin_rubot (народная карта
+    наличия топлива на АЗС по России) - не встроенные в Taxi Helper данные,
+    а прямой переход в его собственный чат."""
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⛽ Открыть «Где бензин»", url=FUEL_BOT_URL)]
+    ])
+    text = (
+        "⛽ *Где бензин*\n\n"
+        "Народная карта наличия топлива на АЗС по России - отдельный бот. "
+        "Нажми кнопку ниже, чтобы открыть его."
+    )
+    await message.answer(text, reply_markup=keyboard, parse_mode='Markdown')
 
 @router.message(lambda message: message.text == "Аэропорты")
 async def show_airport_menu(message: types.Message):
     user_id = message.from_user.id
     if user_id not in user_state:
         await message.answer("Сначала выбери город!")
+        return
+    if user_state[user_id].get('category') in CATEGORIES_WITHOUT_AIRPORTS:
+        await message.answer("Для этой категории аэропорты недоступны.", reply_markup=services_keyboard(user_state[user_id].get('category')))
         return
     text = "Выбери действие 👇"
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -576,9 +831,12 @@ async def show_airport_info(callback_query: types.CallbackQuery):
     msg = await callback_query.message.edit_text(f"⏳ Загружаю {flight_label.lower()}...")
     keyboard = InlineKeyboardMarkup(inline_keyboard=[])
     for i, airport in enumerate(airports):
-        current_load, _, _ = compute_current_hour_load(airport['icao'], flight_type, relevant_class)
-        emoji = get_load_emoji(current_load)
-        button_text = f"{airport['emoji']} {airport['name']} {emoji} {current_load:.0f}%"
+        if airport.get('closed'):
+            button_text = f"{airport['emoji']} {airport['name']} 🔴 ЗАКРЫТ"
+        else:
+            current_load, _, _ = compute_current_hour_load(airport['icao'], flight_type, relevant_class)
+            emoji = get_load_emoji(current_load)
+            button_text = f"{airport['emoji']} {airport['name']} {emoji} {current_load:.0f}%"
         keyboard.inline_keyboard.append([InlineKeyboardButton(text=button_text, callback_data=f"airport_details_{city}_{i}_{flight_type}")])
     await msg.edit_text(f"✅ Аэропорты ({flight_label.lower()}):", reply_markup=keyboard)
     await callback_query.answer()
@@ -590,6 +848,17 @@ async def show_airport_details(callback_query: types.CallbackQuery):
     airport_idx = int(data_parts[3])
     flight_type = data_parts[4]
     airport = AIRPORTS_INFO[city][airport_idx]
+
+    if airport.get('closed'):
+        text = (
+            f"*{airport['emoji']} {airport['name']}*\n\n"
+            f"🔴 *АЭРОПОРТ ЗАКРЫТ*\n\n"
+            f"Гражданские полёты не выполняются. Расписание не собирается и не показывается."
+        )
+        await callback_query.message.edit_text(text, parse_mode='Markdown')
+        await callback_query.answer()
+        return
+
     capacity = AIRPORT_CAPACITY.get(airport['icao'], 1000)
     economy_capacity = capacity * ECONOMY_SHARE
     business_capacity = capacity * BUSINESS_SHARE
@@ -627,12 +896,18 @@ async def show_airport_details(callback_query: types.CallbackQuery):
         flights_in_hour = 0
         economy_in_hour = 0
         business_in_hour = 0
+        domestic_in_hour = 0
+        international_in_hour = 0
         for flight in flights:
             flight_time = datetime.fromtimestamp(flight.get('firstSeen', 0))
             if flight_time.hour == relevant_flight_hour:
                 flights_in_hour += 1
                 economy_in_hour += flight.get('passengers_economy', 0)
                 business_in_hour += flight.get('passengers_business', 0)
+                if flight.get('domestic', True):
+                    domestic_in_hour += 1
+                else:
+                    international_in_hour += 1
         total_in_hour = economy_in_hour + business_in_hour
 
         relevant_pax = {'economy': economy_in_hour, 'business': business_in_hour, 'total': total_in_hour}[relevant_class]
@@ -645,12 +920,12 @@ async def show_airport_details(callback_query: types.CallbackQuery):
             flight_hour_str = f"{relevant_flight_hour:02d}:00"
             text += f"{emoji} *{hour_display}* | Спрос на заказы ({class_label.lower()}): *{load:.0f}%*\n"
             text += f"   Рекомендация: *{action}*\n"
-            text += f"   🛫 Вылетов в ~{flight_hour_str}: {flights_in_hour}  |  ✈️ Пассажиров с заказом: {total_in_hour} (эконом {economy_in_hour} / бизнес {business_in_hour})\n\n"
+            text += f"   🛫 Вылетов в ~{flight_hour_str}: {flights_in_hour} (🇷🇺 внутр. {domestic_in_hour} / 🌍 межд. {international_in_hour})  |  ✈️ Пассажиров с заказом: {total_in_hour} (эконом {economy_in_hour} / бизнес {business_in_hour})\n\n"
         else:
             action = get_load_recommendation(load)
             text += f"{emoji} *{hour_display}* | Нагрузка ({class_label.lower()}): *{load:.0f}%*\n"
             text += f"   Рекомендация: *{action}*\n"
-            text += f"   🛬 Рейсов: {flights_in_hour}  |  ✈️ Пассажиры: {total_in_hour} (эконом {economy_in_hour} / бизнес {business_in_hour})\n\n"
+            text += f"   🛬 Рейсов: {flights_in_hour} (🇷🇺 внутр. {domestic_in_hour} / 🌍 межд. {international_in_hour})  |  ✈️ Пассажиры: {total_in_hour} (эконом {economy_in_hour} / бизнес {business_in_hour})\n\n"
 
     if is_departure:
         text += "_🔴0-50% заказов мало | 🟡51-70% будь на связи | 🟢71-100% активно бери заказы | 🟣>100% пиковый спрос_"
@@ -659,14 +934,16 @@ async def show_airport_details(callback_query: types.CallbackQuery):
     await msg.edit_text(text, parse_mode='Markdown')
     await callback_query.answer()
 
-def compute_current_hour_load(airport_icao, flight_type, relevant_class):
+def compute_current_hour_load(airport_icao, flight_type, relevant_class, hour_offset=0):
     """Загрузка на ТЕКУЩИЙ час для ОДНОГО направления (только прилёты или только
     вылеты) - используется в списке аэропортов (show_airport_info). Для вылетов
     берётся час +DEPARTURE_LEAD_TIME_HOURS: спрос на заказы в городе сейчас
     соответствует рейсам, которые улетят примерно через 2 часа, а не рейсам,
-    улетающим прямо в этот час (пассажир уже давно уехал бы в аэропорт)."""
+    улетающим прямо в этот час (пассажир уже давно уехал бы в аэропорт).
+    hour_offset сдвигает "текущий" час вперёд - используется для заблаговременных
+    пуш-уведомлений о повышенном спросе (см. high_demand_alert_checker)."""
     now = get_airport_now(airport_icao)
-    current_hour = now.hour
+    current_hour = (now.hour + hour_offset) % 24
     target_hour = (current_hour + DEPARTURE_LEAD_TIME_HOURS) % 24 if flight_type == 'departures' else current_hour
     flights = get_airport_flights(airport_icao, flight_type)
     capacity = AIRPORT_CAPACITY.get(airport_icao, 1000)
@@ -729,12 +1006,15 @@ async def show_airport_availability(callback_query: types.CallbackQuery):
     try:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[])
         for i, airport in enumerate(airports):
-            info = compute_current_availability(airport['icao'], relevant_class)
-            emoji = get_load_emoji(info['load'])
-            airport_status, _ = get_airport_status(airport['icao'])
-            status_icon, _ = AIRPORT_STATUS_DISPLAY[airport_status]
-            # Если аэропорт закрыт/по согласованию - это важнее, чем % загрузки, ставим первым
-            button_text = f"{status_icon} {airport['emoji']} {airport['name']} {emoji} {info['load']:.0f}%"
+            if airport.get('closed'):
+                button_text = f"🔴 {airport['emoji']} {airport['name']} ЗАКРЫТ"
+            else:
+                info = compute_current_availability(airport['icao'], relevant_class)
+                emoji = get_load_emoji(info['load'])
+                airport_status, _ = get_airport_status(airport['icao'])
+                status_icon, _ = AIRPORT_STATUS_DISPLAY[airport_status]
+                # Если аэропорт закрыт/по согласованию - это важнее, чем % загрузки, ставим первым
+                button_text = f"{status_icon} {airport['emoji']} {airport['name']} {emoji} {info['load']:.0f}%"
             keyboard.inline_keyboard.append([InlineKeyboardButton(text=button_text, callback_data=f"availability_details_{city}_{i}")])
         await msg.edit_text("🔄 *Доступность аэропортов*\nВыбери аэропорт для подробностей 👇", reply_markup=keyboard, parse_mode='Markdown')
     except Exception as e:
@@ -754,6 +1034,16 @@ async def show_availability_details(callback_query: types.CallbackQuery):
     city = data_parts[2]
     airport_idx = int(data_parts[3])
     airport = AIRPORTS_INFO[city][airport_idx]
+
+    if airport.get('closed'):
+        text = (
+            f"*{airport['emoji']} {airport['name']} - Доступность*\n\n"
+            f"🔴 *АЭРОПОРТ ЗАКРЫТ*\n\n"
+            f"Гражданские полёты не выполняются. Данные не собираются."
+        )
+        await callback_query.message.edit_text(text, parse_mode='Markdown')
+        await callback_query.answer()
+        return
 
     user_id = callback_query.from_user.id
     category = user_state.get(user_id, {}).get('category', 'taxi')
@@ -823,10 +1113,32 @@ async def show_availability_details(callback_query: types.CallbackQuery):
 
     await callback_query.answer()
 
+def queue_class_key(user_id):
+    """Ключ для группировки очереди в БД: категория + конкретный тариф
+    (если он выбран), например "taxi:Комфорт+" или "ultima:Business". Так
+    очередь у Эконома и у Минивэна на одном и том же аэропорту не смешивается."""
+    state = user_state.get(user_id, {})
+    category = state.get('category', '')
+    tariff = state.get('queue_tariff')
+    return f"{category}:{tariff}" if tariff else category
+
+def queue_class_display(user_id):
+    state = user_state.get(user_id, {})
+    category = state.get('category', '')
+    tariff = state.get('queue_tariff')
+    cat_name = CATEGORIES.get(category, {}).get('name', category)
+    return f"{cat_name} ({tariff})" if tariff else cat_name
+
+async def show_queue_airport_picker(message, user_id):
+    city = user_state[user_id]['city']
+    airports = AIRPORTS_INFO.get(city, [])
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"{airport['emoji']} {airport['name']}", callback_data=f"queue_airport_{city}_{i}")] for i, airport in enumerate(airports)])
+    await message.edit_text("Выбери аэропорт 👇", reply_markup=keyboard)
+
 @router.callback_query(lambda c: c.data == "airport_queue")
 async def show_queue_menu(callback_query: types.CallbackQuery):
     user_id = callback_query.from_user.id
-    if user_id not in user_state:
+    if user_id not in user_state or 'category' not in user_state[user_id]:
         await callback_query.answer("Ошибка!", show_alert=True)
         return
     city = user_state[user_id]['city']
@@ -834,8 +1146,36 @@ async def show_queue_menu(callback_query: types.CallbackQuery):
     if not airports:
         await callback_query.answer("Не найдены", show_alert=True)
         return
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"{airport['emoji']} {airport['name']}", callback_data=f"queue_airport_{city}_{i}")] for i, airport in enumerate(airports)])
-    await callback_query.message.edit_text("Выбери аэропорт 👇", reply_markup=keyboard)
+
+    category = user_state[user_id]['category']
+    tariffs = CATEGORIES.get(category, {}).get('tariffs', [])
+    if tariffs:
+        # Сначала спрашиваем конкретный класс - у ТАКСИ и ТАКСИ ULTIMA свои
+        # варианты (эконом/комфорт/... у такси, business/premier/... у ultima),
+        # поэтому кнопки берутся из тарифов уже выбранной категории.
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=t, callback_data=f"queue_tariff_{i}")] for i, t in enumerate(tariffs)
+        ])
+        await callback_query.message.edit_text("Выбери класс 👇", reply_markup=keyboard)
+    else:
+        user_state[user_id]['queue_tariff'] = None
+        await show_queue_airport_picker(callback_query.message, user_id)
+    await callback_query.answer()
+
+@router.callback_query(lambda c: c.data.startswith('queue_tariff_'))
+async def select_queue_tariff(callback_query: types.CallbackQuery):
+    user_id = callback_query.from_user.id
+    if user_id not in user_state or 'category' not in user_state[user_id]:
+        await callback_query.answer("Начни заново с /start", show_alert=True)
+        return
+    category = user_state[user_id]['category']
+    tariffs = CATEGORIES.get(category, {}).get('tariffs', [])
+    idx = int(callback_query.data.split('_')[-1])
+    if idx < 0 or idx >= len(tariffs):
+        await callback_query.answer("Ошибка!", show_alert=True)
+        return
+    user_state[user_id]['queue_tariff'] = tariffs[idx]
+    await show_queue_airport_picker(callback_query.message, user_id)
     await callback_query.answer()
 
 @router.callback_query(lambda c: c.data.startswith('queue_airport_'))
@@ -850,7 +1190,8 @@ async def show_queue_options(callback_query: types.CallbackQuery):
         [InlineKeyboardButton(text="📋 Текущая очередь", callback_data=f"view_queue_{city}_{airport_idx}")],
         [InlineKeyboardButton(text="🚗 Занять очередь", callback_data=f"join_queue_{city}_{airport_idx}")]
     ])
-    await callback_query.message.edit_text(f"*{airport['emoji']} {airport['name']}*", reply_markup=keyboard, parse_mode='Markdown')
+    text = f"*{airport['emoji']} {airport['name']}*\nКласс: {queue_class_display(user_id)}"
+    await callback_query.message.edit_text(text, reply_markup=keyboard, parse_mode='Markdown')
     await callback_query.answer()
 
 @router.callback_query(lambda c: c.data.startswith('join_queue_'))
@@ -878,7 +1219,7 @@ async def show_range_picker(callback_query: types.CallbackQuery):
         buttons.append(row)
     buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="airport_queue")])
 
-    text = f"*{airport['emoji']} {airport['name']}*\n\nСколько машин сейчас в очереди? Выбери диапазон 👇"
+    text = f"*{airport['emoji']} {airport['name']}*\nКласс: {queue_class_display(user_id)}\n\nСколько машин сейчас в очереди? Выбери диапазон 👇"
     await callback_query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode='Markdown')
     await callback_query.answer()
 
@@ -892,19 +1233,16 @@ async def submit_range(callback_query: types.CallbackQuery):
     airport_idx = int(airport_idx_str)
     range_idx = int(range_idx_str)
     airport = AIRPORTS_INFO[city][airport_idx]
-    category = user_state[user_id]['category']
     range_str = queue_range_label(range_idx)
 
-    queue_submit_report(user_id, city, airport['icao'], category, range_str)
-    estimate, reports = queue_estimate(city, airport['icao'], category)
+    queue_submit_report(user_id, city, airport['icao'], queue_class_key(user_id), range_str)
+    local_time = get_airport_now(airport['icao']).strftime('%H:%M')
 
     text = (
-        f"✅ Спасибо! Отметка *{range_str}* сохранена\n\n"
+        f"✅ Спасибо! Отметка *{range_str}* сохранена в *{local_time}*\n\n"
         f"{airport['emoji']} {airport['name']}\n"
-        f"Категория: {CATEGORIES.get(category, {}).get('name', category)}\n\n"
+        f"Класс: {queue_class_display(user_id)}"
     )
-    if estimate is not None:
-        text += f"📊 Текущая оценка очереди: *~{estimate}* (среднее по последним {len(reports)} отметкам)"
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🚗 Отметить ещё раз", callback_data=f"join_queue_{city}_{airport_idx}")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="airport_queue")]
@@ -921,18 +1259,17 @@ async def view_queue(callback_query: types.CallbackQuery):
     _, _, city, airport_idx_str = callback_query.data.split('_')
     airport_idx = int(airport_idx_str)
     airport = AIRPORTS_INFO[city][airport_idx]
-    category = user_state[user_id]['category']
 
-    estimate, reports = queue_estimate(city, airport['icao'], category)
+    range_str, ts = queue_latest_report(city, airport['icao'], queue_class_key(user_id))
 
     text = (
         f"📋 *Очередь*\n\n"
         f"{airport['emoji']} {airport['name']}\n"
-        f"Категория: {CATEGORIES.get(category, {}).get('name', category)}\n\n"
+        f"Класс: {queue_class_display(user_id)}\n\n"
     )
-    if estimate is not None:
-        text += f"🚗 Оценка очереди: *~{estimate}* машин\n"
-        text += f"_По последним {len(reports)} отметкам водителей: {', '.join(r for r, _ in reports)}_"
+    if range_str is not None:
+        local_time = format_airport_local_time(ts, airport['icao'])
+        text += f"🚗 В очереди: *{range_str}* машин\n_Последняя отметка: {local_time} (местное время аэропорта)_"
     else:
         text += f"Пока нет свежих отметок от водителей за последние {QUEUE_ENTRY_TTL_MINUTES // 60}ч.\nОтметь сам, сколько видишь машин 👇"
 
@@ -962,16 +1299,191 @@ async def flights_data_updater():
             logger.error(f"❌ Ошибка фонового обновления flights_data.json: {e}")
         await asyncio.sleep(FLIGHTS_UPDATE_INTERVAL_HOURS * 3600)
 
+def format_queue_breakdown(city, icao, category):
+    """Блок с текущей очередью ДЛЯ КОНКРЕТНОЙ категории водителя - только его
+    собственные тарифы: Такси видит Эконом/Комфорт/Комфорт+/Минивэн, Ultima -
+    свои Business/Premier/Elite/Cruise. Категории без тарифов (Курьер/Грузовое
+    такси) сюда вообще не попадают - у них нет доступа к аэропортам."""
+    tariffs = CATEGORIES.get(category, {}).get('tariffs', [])
+    if not tariffs:
+        return ''
+    lines = [f"\n\n📋 *Очередь ({CATEGORIES[category]['name']}):*"]
+    for tariff in tariffs:
+        range_str, ts = queue_latest_report(city, icao, f"{category}:{tariff}")
+        if range_str:
+            local_time = format_airport_local_time(ts, icao)
+            lines.append(f"   • {tariff}: *{range_str}* машин _(отметка {local_time})_")
+        else:
+            lines.append(f"   • {tariff}: нет свежих отметок")
+    return '\n'.join(lines)
+
+async def push_airport_status_change(icao, airport, old_status, new_status, notice):
+    """Рассылает пуш всем водителям, у кого выбран город этого аэропорта, о
+    смене статуса (например ОТКРЫТ -> ЗАКРЫТ). Бот может писать первым только
+    тем, кто хотя бы раз ему написал - это все, кто есть в user_state. Курьер
+    и Грузовое такси этот пуш не получают - у них нет доступа к аэропортам
+    вообще. Каждому водителю ДОБАВЛЯЕТСЯ персональный блок очереди - только по
+    тарифам его собственной категории (Такси не видит очередь Ultima и наоборот)."""
+    city = ICAO_TO_CITY.get(icao)
+    if not city or not bot:
+        return
+    status_icon, status_text = AIRPORT_STATUS_DISPLAY[new_status]
+    base_text = f"{status_icon} *{airport['emoji']} {airport['name']}*\n\nСтатус изменился: *{status_text}*"
+    if notice and notice.get('text'):
+        snippet = notice['text']
+        if len(snippet) > 300:
+            snippet = snippet[:300] + '…'
+        base_text += f"\n\n_По данным Росавиации:_\n{escape_md(snippet)}"
+
+    # Копия списка - рассылка идёт не одну секунду, а user_state тем временем
+    # может меняться (кто-то жмёт кнопки), нельзя итерировать "живой" словарь
+    recipients = [
+        (uid, state) for uid, state in list(user_state.items())
+        if isinstance(state, dict) and state.get('city') == city and state.get('category') not in CATEGORIES_WITHOUT_AIRPORTS
+    ]
+    if not recipients:
+        logger.info(f"📢 Статус {icao} изменился ({old_status} -> {new_status}), но в городе {city} сейчас нет известных водителей с доступом к аэропортам")
+        return
+
+    logger.info(f"📢 Статус {icao} изменился ({old_status} -> {new_status}) - рассылаю {len(recipients)} водителям города {city}")
+    sent, failed = 0, 0
+    for user_id, state in recipients:
+        category = state.get('category')
+        text = base_text + format_queue_breakdown(city, icao, category)
+        text += "\n\n_Подробности во вкладке «Доступность»._"
+        try:
+            await bot.send_message(user_id, text, parse_mode='Markdown')
+            sent += 1
+        except Exception as e:
+            failed += 1
+            logger.warning(f"⚠️ Не удалось отправить пуш пользователю {user_id}: {e}")
+        # Telegram допускает ~30 сообщений/сек в разные чаты - берём с запасом
+        await asyncio.sleep(0.05)
+    logger.info(f"📢 Пуш по {icao} разослан: {sent} успешно, {failed} ошибок")
+
+async def notify_airport_status_changes():
+    """Сравнивает текущий статус каждого аэропорта (по свежим уведомлениям
+    Росавиации) с последним сохранённым в БД. Пушит только РЕАЛЬНОЕ изменение,
+    а не каждый прогон - и не пушит вообще на первом прогоне после деплоя
+    (когда сохранённого статуса ещё нет), иначе все водители получили бы пуш
+    просто от того что бот только что узнал текущий статус."""
+    previous = load_all_airport_statuses()
+    for icao, airport in ICAO_TO_AIRPORT.items():
+        if icao in PERMANENTLY_CLOSED_AIRPORTS:
+            continue  # статус константа, реальных "изменений" тут не бывает
+        try:
+            new_status, notice = get_airport_status(icao)
+        except Exception as e:
+            logger.error(f"❌ Не удалось получить статус {icao}: {e}")
+            continue
+
+        old_status = previous.get(icao)
+        if old_status != new_status:
+            save_airport_status(icao, new_status)
+            if old_status is not None:
+                await push_airport_status_change(icao, airport, old_status, new_status, notice)
+
+HIGH_DEMAND_LEAD_HOURS = 2
+HIGH_DEMAND_THRESHOLD = 100
+HIGH_DEMAND_CHECK_INTERVAL_MINUTES = 15
+# Обратное к CATEGORY_TO_CLASS, но только категории с доступом к аэропортам -
+# Курьер/Грузовое такси используют relevant_class='total' и в этот пуш не попадают.
+RELEVANT_CLASS_TO_CATEGORY = {'economy': 'taxi', 'business': 'ultima'}
+
+async def push_high_demand_alert(icao, airport, relevant_class, target_hour, target_date, load):
+    """Рассылает заблаговременный пуш о повышенном спросе: прогноз загрузки
+    прилётов через HIGH_DEMAND_LEAD_HOURS часа даёт фиолетовый уровень (>100%,
+    "СРОЧНО"). Получают только водители категории, которой соответствует
+    relevant_class (эконом -> Такси, бизнес -> Ultima) - как и в пуше о смене
+    статуса, каждому добавляется персональный блок текущей очереди по его
+    собственным тарифам."""
+    city = ICAO_TO_CITY.get(icao)
+    category = RELEVANT_CLASS_TO_CATEGORY.get(relevant_class)
+    if not city or not bot or not category:
+        return
+    class_name = CATEGORIES[category]['name']
+    base_text = (
+        f"🟣 *{airport['emoji']} {airport['name']}*\n\n"
+        f"Через {HIGH_DEMAND_LEAD_HOURS} часа (~{target_hour:02d}:00) ожидается "
+        f"*повышенный спрос* на прилёты ({class_name}) - прогноз загрузки выше 100%."
+    )
+
+    # Копия списка - рассылка идёт не одну секунду, а user_state тем временем
+    # может меняться (кто-то жмёт кнопки), нельзя итерировать "живой" словарь
+    recipients = [
+        (uid, state) for uid, state in list(user_state.items())
+        if isinstance(state, dict) and state.get('city') == city and state.get('category') == category
+    ]
+    if not recipients:
+        logger.info(f"📢 Прогноз повышенного спроса {icao} ({relevant_class}, {target_hour:02d}:00), но в городе {city} нет известных водителей категории {category}")
+        return
+
+    logger.info(f"📢 Прогноз повышенного спроса {icao} ({relevant_class}, {target_hour:02d}:00, загрузка {load:.0f}%) - рассылаю {len(recipients)} водителям категории {category}")
+    sent, failed = 0, 0
+    for user_id, state in recipients:
+        driver_category = state.get('category')
+        text = base_text + format_queue_breakdown(city, icao, driver_category)
+        text += "\n\n_Подробности во вкладке «Доступность»._"
+        try:
+            await bot.send_message(user_id, text, parse_mode='Markdown')
+            sent += 1
+        except Exception as e:
+            failed += 1
+            logger.warning(f"⚠️ Не удалось отправить пуш о спросе пользователю {user_id}: {e}")
+        # Telegram допускает ~30 сообщений/сек в разные чаты - берём с запасом
+        await asyncio.sleep(0.05)
+    logger.info(f"📢 Пуш о спросе по {icao} разослан: {sent} успешно, {failed} ошибок")
+
+async def check_high_demand_alerts():
+    """Проверяет прогноз загрузки прилётов через HIGH_DEMAND_LEAD_HOURS часа для
+    каждого (аэропорт, релевантный класс). При прогнозе >100% (фиолетовый
+    уровень) шлёт заблаговременный пуш - но не чаще одного раза на конкретный
+    (аэропорт, класс, дата, час) слот: фоновая проверка идёт каждые
+    HIGH_DEMAND_CHECK_INTERVAL_MINUTES минут, а окно "через 2 часа" весь этот
+    час указывает на один и тот же будущий час, так что без дедупликации
+    водитель получил бы несколько одинаковых пушей подряд."""
+    cleanup_old_high_demand_alerts()
+    for icao, airport in ICAO_TO_AIRPORT.items():
+        if icao in PERMANENTLY_CLOSED_AIRPORTS or airport.get('closed'):
+            continue
+        for relevant_class in ('economy', 'business'):
+            try:
+                load, _, target_hour = compute_current_hour_load(icao, 'arrivals', relevant_class, hour_offset=HIGH_DEMAND_LEAD_HOURS)
+            except Exception as e:
+                logger.error(f"❌ Не удалось посчитать прогноз спроса {icao}/{relevant_class}: {e}")
+                continue
+            if load <= HIGH_DEMAND_THRESHOLD:
+                continue
+            target_date = (get_airport_now(icao) + timedelta(hours=HIGH_DEMAND_LEAD_HOURS)).strftime('%Y-%m-%d')
+            if was_high_demand_alert_sent(icao, relevant_class, target_date, target_hour):
+                continue
+            await push_high_demand_alert(icao, airport, relevant_class, target_hour, target_date, load)
+            mark_high_demand_alert_sent(icao, relevant_class, target_date, target_hour)
+
+async def high_demand_alert_checker():
+    """Фоновая задача: раз в HIGH_DEMAND_CHECK_INTERVAL_MINUTES минут проверяет
+    прогноз спроса на прилёты и заранее (за HIGH_DEMAND_LEAD_HOURS часа) шлёт
+    пуш водителям, если ожидается фиолетовый уровень (>100%)."""
+    while True:
+        try:
+            await check_high_demand_alerts()
+        except Exception as e:
+            logger.error(f"❌ Ошибка фоновой проверки повышенного спроса: {e}")
+        await asyncio.sleep(HIGH_DEMAND_CHECK_INTERVAL_MINUTES * 60)
+
 async def favt_notices_updater():
     """Фоновая задача: раз в FAVT_UPDATE_INTERVAL_MINUTES минут читает публичную
     веб-версию канала @favt_info (Росавиация) и обновляет favt_notices.json.
     Это не API с лимитом запросов - просто HTML-страница, поэтому можно обновлять
-    часто. Уведомления об ограничениях в аэропортах критичны по времени."""
+    часто. Уведомления об ограничениях в аэропортах критичны по времени. После
+    каждого обновления проверяет, не изменился ли статус какого-то аэропорта, и
+    при реальном изменении рассылает пуш водителям соответствующего города."""
     while True:
         try:
             logger.info("🔄 Обновляю favt_notices.json из канала Росавиации...")
             await asyncio.to_thread(fetch_favt_notices.main)
             logger.info("✅ favt_notices.json обновлён")
+            await notify_airport_status_changes()
         except Exception as e:
             logger.error(f"❌ Ошибка фонового обновления favt_notices.json: {e}")
         await asyncio.sleep(FAVT_UPDATE_INTERVAL_MINUTES * 60)
@@ -980,12 +1492,14 @@ async def main():
     global bot
     if not await initialize_bot():
         return
+    load_all_user_states()
     dp.include_router(router)
     if os.getenv('YANDEX_RASP_API_KEY'):
         asyncio.create_task(flights_data_updater())
     else:
         logger.warning("⚠️ YANDEX_RASP_API_KEY не задан в переменных окружения Railway - flights_data.json не будет обновляться автоматически")
     asyncio.create_task(favt_notices_updater())
+    asyncio.create_task(high_demand_alert_checker())
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
