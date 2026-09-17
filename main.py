@@ -88,6 +88,11 @@ FLIGHTS_DAY_INTERVAL_HOURS = 2  # днём - каждые 2 часа (06,08,...,
 # запросов по 7 вокзалам всё ещё небольшой - не жалко гонять и ночью).
 TRAINS_UPDATE_INTERVAL_HOURS = 12  # 2 запуска/сутки
 
+# Прогноз загруженности вокзала показывает на TRAIN_FORECAST_HOURS часов
+# вперёд (было 8, увеличено по просьбе пользователя). У аэропортов свой,
+# отдельный 8-часовой прогноз (см. show_airport_details) - не путать.
+TRAIN_FORECAST_HOURS = 12
+
 # Расчёт по квоте (500 запросов/сутки на ключ, общий для fetch_yandex_data.py
 # и fetch_trains_data.py - см. их докстринги; доступ к общему счётчику
 # сериализован через _yandex_api_lock ниже, чтобы независимые графики не
@@ -1568,10 +1573,13 @@ async def show_train_stations_menu(message: types.Message):
 
 @router.callback_query(lambda c: c.data.startswith('train_station_'))
 async def show_train_station_arrivals(callback_query: types.CallbackQuery):
-    """Прогноз загруженности вокзала - 8 часов вперёд, у каждого часа
+    """Прогноз загруженности вокзала - TRAIN_FORECAST_HOURS часов вперёд
+    (12 - увеличено по просьбе пользователя, было 8), у каждого часа
     символ+%/бинарная рекомендация (см. get_train_load_symbol - у вокзалов, в
     отличие от аэропортов, только 2 состояния "ехать"/"не ехать"), а внутри
-    часа - сами поезда (время, откуда, статус, оценка пассажиров). И Такси, и
+    часа - сами поезда (время, откуда, статус - без числа пассажиров в
+    отображении, убрано по просьбе пользователя, хотя сама оценка всё ещё
+    считается под капотом для расчёта Загрузки). И Такси, и
     Ultima видят ОДИНАКОВЫЙ список - ВСЕ поезда дальнего следования, кроме
     пригородных электричек (их вообще не собираем - см. fetch_trains_data.py).
     Разница только в подаче: у Ultima Сапсаны и фирменные/премиальные поезда
@@ -1596,7 +1604,7 @@ async def show_train_station_arrivals(callback_query: types.CallbackQuery):
     text += f"_Ориентировочная пропускная способность: ~{capacity} пас/час (оценка)_\n\n"
 
     any_trains = False
-    for hour_offset in range(8):
+    for hour_offset in range(TRAIN_FORECAST_HOURS):
         load, trains_in_hour, target_hour = compute_current_train_hour_load(code, category, hour_offset)
         hour_time = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=hour_offset)
         hour_display = hour_time.strftime('%H:00')
@@ -1615,13 +1623,16 @@ async def show_train_station_arrivals(callback_query: types.CallbackQuery):
                     status = "⭐ Фирменный"
                 else:
                     status = "🚆 обычный"
-                text += f"   • {t['time']} из {t['point']} (№{t['number']}) - {status}, ~{t['passengers_min']}-{t['passengers_max']} пас. _(оценка)_\n"
+                # Количество пассажиров убрано из отображения по просьбе
+                # пользователя - сама оценка передаётся под капотом всё равно
+                # используется для расчёта Загрузки/символа выше.
+                text += f"   • {t['time']} из {t['point']} (№{t['number']}) - {status}\n"
         else:
             text += "   Прибытий не ожидается\n"
         text += "\n"
 
     if not any_trains:
-        text += "_На ближайшие 8 часов прибытий не найдено._\n"
+        text += f"_На ближайшие {TRAIN_FORECAST_HOURS} часов прибытий не найдено._\n"
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="train_stations_back")]])
     await msg.edit_text(text, reply_markup=keyboard, parse_mode='Markdown')
