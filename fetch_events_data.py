@@ -95,15 +95,25 @@ def fetch_city_events(kudago_slug):
     # заново парсить массив дат при каждом нажатии кнопки.
     normalized = []
     for ev in raw_events:
-        upcoming = [d['start'] for d in ev.get('dates', []) if d.get('start') and now <= d['start'] <= until]
+        # Берём ОДИН И ТОТ ЖЕ occurrence целиком (start+end вместе), а не start
+        # и end по отдельности - иначе для события с несколькими показами можно
+        # случайно взять start одного показа и end другого.
+        upcoming = [d for d in ev.get('dates', []) if d.get('start') and now <= d['start'] <= until]
         if not upcoming:
             continue
+        nearest = min(upcoming, key=lambda d: d['start'])
         place = ev.get('place') or {}
+        coords = place.get('coords') or {}
         normalized.append({
             'title': (ev.get('title') or '').strip().capitalize(),
-            'start': min(upcoming),
+            'start': nearest['start'],
+            # end иногда совпадает со start (KudaGo не всегда знает длительность) -
+            # это нормально, бот на своей стороне решает, показывать ли диапазон.
+            'end': nearest.get('end') or nearest['start'],
             'place_title': place.get('title', ''),
             'place_address': place.get('address', ''),
+            'place_lat': coords.get('lat'),
+            'place_lon': coords.get('lon'),
             'price': ev.get('price') or '',
             'is_free': bool(ev.get('is_free')),
             'categories': ev.get('categories', []),

@@ -415,24 +415,6 @@ def get_events_for_user(city, category, limit=5):
     ]
     return filtered[:limit], True
 
-def format_event_line(event, city):
-    """Одна строка события: дата/время в часовом поясе города (см.
-    EVENT_CITY_TIMEZONE - отдельная таблица от AIRPORT_TIMEZONE, та привязана
-    к конкретным аэропортам, а не к городам), название, место, цена."""
-    tz = ZoneInfo(EVENT_CITY_TIMEZONE.get(city, 'Europe/Moscow'))
-    dt_local = datetime.fromtimestamp(event['start'], tz)
-    date_str = dt_local.strftime('%d.%m %H:%M')
-    line = f"🎫 *{event['title']}*\n   🗓 {date_str}"
-    if event.get('place_title'):
-        line += f" · 📍 {event['place_title']}"
-    if event.get('is_free'):
-        line += "\n   💰 Бесплатно"
-    elif event.get('price'):
-        line += f"\n   💰 {event['price']}"
-    if event.get('url'):
-        line += f"\n   [Подробнее]({event['url']})"
-    return line
-
 # Часовой пояс городов, покрытых KudaGo (используется только для афиши - не
 # путать с AIRPORT_TIMEZONE, который привязан к конкретным аэропортам).
 EVENT_CITY_TIMEZONE = {
@@ -441,6 +423,51 @@ EVENT_CITY_TIMEZONE = {
     'ekb': 'Asia/Yekaterinburg',
     'kazan': 'Europe/Moscow',
 }
+
+def format_event_datetime(event, city):
+    """Диапазон начала-конца мероприятия в часовом поясе города - водителю
+    важно понимать не только когда началось, но и когда примерно закончится
+    (именно момент разъезда даёт всплеск спроса у площадки). KudaGo не всегда
+    знает точную длительность - тогда end==start, и показываем только начало,
+    без диапазона."""
+    tz = ZoneInfo(EVENT_CITY_TIMEZONE.get(city, 'Europe/Moscow'))
+    start_dt = datetime.fromtimestamp(event['start'], tz)
+    end_ts = event.get('end') or event['start']
+    if end_ts <= event['start']:
+        return start_dt.strftime('%d.%m, %H:%M')
+    end_dt = datetime.fromtimestamp(end_ts, tz)
+    if start_dt.date() == end_dt.date():
+        return f"{start_dt.strftime('%d.%m, %H:%M')}–{end_dt.strftime('%H:%M')}"
+    return f"{start_dt.strftime('%d.%m %H:%M')} – {end_dt.strftime('%d.%m %H:%M')}"
+
+def build_event_message(event, city):
+    """Текст + инлайн-кнопки для ОДНОГО события. "🚗 Поехали" ведёт маршрутом
+    в Яндекс.Карты (если у KudaGo есть координаты места) - специально ссылка
+    https://yandex.ru/maps/?rtext=..., а НЕ схема yandexnavi://build_route_on_map:
+    у yandexnavi:// нет веб-фолбэка вообще (если у водителя не установлен
+    именно Яндекс.Навигатор - кнопка молча ничего не сделает), а обычная
+    https-ссылка на Яндекс.Карты открывается всегда - в приложении Карт/
+    Навигатора, если оно установлено и ассоциировано с доменом, и в браузере
+    в любом случае, если нет. "🔗 Подробнее" - страница события на KudaGo."""
+    date_str = format_event_datetime(event, city)
+    lines = [f"🎫 *{event['title']}*", f"🗓 {date_str}"]
+    place_bits = [p for p in (event.get('place_title'), event.get('place_address')) if p]
+    if place_bits:
+        lines.append("📍 " + " · ".join(place_bits))
+    if event.get('is_free'):
+        lines.append("💰 Бесплатно")
+    elif event.get('price'):
+        lines.append(f"💰 {event['price']}")
+    text = '\n'.join(lines)
+
+    buttons = []
+    lat, lon = event.get('place_lat'), event.get('place_lon')
+    if lat and lon:
+        buttons.append(InlineKeyboardButton(text="🚗 Поехали", url=f"https://yandex.ru/maps/?rtext=~{lat},{lon}&rtt=auto"))
+    if event.get('url'):
+        buttons.append(InlineKeyboardButton(text="🔗 Подробнее", url=event['url']))
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[buttons]) if buttons else None
+    return text, keyboard
 
 # Аэропорты, закрытые для гражданских полётов постоянно (не зависит от
 # уведомлений Росавиации, которые могут вообще не упоминать их) - Платов
@@ -920,10 +947,16 @@ async def show_city_events(message: types.Message):
         return
 
     class_label = CATEGORIES.get(category, {}).get('name', '')
-    lines = [f"🎭 *События города* ({class_label.title() if class_label else 'все'})\n"]
-    lines.extend(format_event_line(e, city) for e in events)
-    text = '\n\n'.join(lines)
-    await message.answer(text, reply_markup=services_keyboard(category), parse_mode='Markdown', disable_web_page_preview=True)
+    header = f"🎭 *События города* ({class_label.title() if class_label else 'все'})"
+    # Заголовок - обычным сообщением с прикреплённой нижней клавиатурой услуг
+    # (она остаётся видна и дальше, повторно прикреплять на каждое сообщение
+    # не нужно). Каждое событие - ОТДЕЛЬНЫМ сообщением со СВОЕЙ инлайн-кнопкой
+    # "Поехали", чтобы кнопка однозначно вела именно к этому месту, а не к
+    # первому/последнему в общем списке.
+    await message.answer(header, reply_markup=services_keyboard(category), parse_mode='Markdown')
+    for event in events:
+        text, keyboard = build_event_message(event, city)
+        await message.answer(text, reply_markup=keyboard, parse_mode='Markdown', disable_web_page_preview=True)
 
 @router.message(lambda message: message.text == "Аэропорты")
 async def show_airport_menu(message: types.Message):
