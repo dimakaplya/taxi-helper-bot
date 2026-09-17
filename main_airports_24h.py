@@ -12,17 +12,50 @@ from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMar
 import os
 
 import fetch_yandex_data  # логика похода в Yandex Rasp API, запускается фоново прямо на Railway
+import fetch_trains_data  # поезда дальнего следования (Казанский, Ленинградский) - тот же ключ и квота
 import fetch_favt_notices  # логика сбора уведомлений Росавиации (@favt_info), тоже фоново
 import fetch_events_data  # афиша города (KudaGo) для кнопки "🎭 События города", тоже фоново
 
 BOT_TOKEN = os.getenv('TELEGRAM_TOKEN', '8968196261:AAGjxaTy_evirnWDAO124vmkbbDFy03kekY')
 
 # Файл с реальными данными. Раньше генерировался локальным скриптом на Маке,
-# теперь фоновая задача внутри самого бота (см. flights_data_updater ниже)
-# обновляет его прямо на Railway каждые FLIGHTS_UPDATE_INTERVAL_HOURS часов.
-FLIGHTS_DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'flights_data.json')
+# теперь фоновые задачи внутри самого бота (см. airports_data_updater и
+# trains_data_updater ниже) обновляют его прямо на Railway - по отдельным,
+# независимым друг от друга графикам (аэропорты и поезда).
+# DATA_DIR - тот же путь, что и в fetch_yandex_data.py (если задан volume на
+# Railway, оба файла - flights_data.json и api_usage_log.json - должны лежать
+# в одном месте, иначе бот и фетчер будут работать с разными копиями).
+DATA_DIR = os.getenv('DATA_DIR') or os.path.dirname(os.path.abspath(__file__))
+FLIGHTS_DATA_FILE = os.path.join(DATA_DIR, 'flights_data.json')
 FLIGHTS_DATA_MAX_AGE_HOURS = 26  # если данные старше - считаем их устаревшими
-FLIGHTS_UPDATE_INTERVAL_HOURS = 2  # см. расчёт квоты 500 запросов/сутки в fetch_yandex_data.py
+
+# Аэропорты: ночью (00:00-06:00 МСК) рейсов мало - вообще НЕ обновляем в этом
+# окне (0 запусков), а не просто реже, как было раньше. Днём (06:00-24:00) -
+# каждые FLIGHTS_DAY_INTERVAL_HOURS часов.
+FLIGHTS_NIGHT_START_HOUR = 0
+FLIGHTS_NIGHT_END_HOUR = 6  # [0, 6) - ночь (обновлений нет), [6, 24) - день
+FLIGHTS_DAY_INTERVAL_HOURS = 2  # днём - каждые 2 часа (06,08,...,22 = 9 запусков/сутки)
+
+# Поезда (Казанский/Ленинградский): отдельный, не завязанный на день/ночь
+# график - раз в TRAINS_UPDATE_INTERVAL_HOURS часов, круглосуточно (Сапсаны и
+# дальние поезда ходят и вечером/рано утром, а объём запросов по 2 вокзалам
+# небольшой - не жалко гонять и ночью).
+TRAINS_UPDATE_INTERVAL_HOURS = 12  # 2 запуска/сутки
+
+# Расчёт по квоте (500 запросов/сутки на ключ, общий для fetch_yandex_data.py
+# и fetch_trains_data.py - см. их докстринги; доступ к общему счётчику
+# сериализован через _yandex_api_lock ниже, чтобы независимые графики не
+# читали устаревший остаток друг у друга одновременно):
+# Аэропорты: 9 дневных запусков x ~45 (13 активных x 2 направления +
+# пагинация для крупных, худший случай) = 405.
+# Поезда: 2 запуска x ~8 (2 вокзала x 2 направления, пагинация маловероятна,
+# но берём с запасом) = 16.
+# Итого худший случай: 405+16=421 из 500 (порог безопасности - 450) - запас
+# ~29 запросов. Немного, но это именно ХУДШИЙ случай (по факту обычно сильно
+# меньше, см. докстринг fetch_yandex_data.py: "~28-45" - это верхняя граница,
+# а не типичный расход), а DAILY_SAFETY_LIMIT в обоих скриптах в любом случае
+# не даст ключ заблокировать - просто пропустит лишний запуск ближе к концу
+# суток, если расход неожиданно окажется выше обычного.
 
 # Уведомления Росавиации об ограничениях в аэропортах (@favt_info) - публичная
 # веб-страница, лимита запросов нет, поэтому обновляем чаще, чем расписание рейсов.
@@ -117,6 +150,8 @@ AIRPORTS_INFO = {
         {'name': 'UFA (Уфа)', 'emoji': '✈️', 'icao': 'UWUU', 'iata': 'UFA'},
     ],
     'krasnodar': [
+        # Вновь открыт с 11.09.2025 (был закрыт с 2022) - в отличие от RND,
+        # данные собираем как обычно.
         {'name': 'KRR (Краснодар)', 'emoji': '✈️', 'icao': 'URKK', 'iata': 'KRR'},
     ],
     'sochi': [
@@ -1492,22 +1527,61 @@ async def view_queue(callback_query: types.CallbackQuery):
     await callback_query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode='Markdown')
     await callback_query.answer()
 
-async def flights_data_updater():
-    """Фоновая задача: раз в FLIGHTS_UPDATE_INTERVAL_HOURS часов дёргает Yandex Rasp API
-    и перезаписывает flights_data.json прямо на Railway. Запускается сразу при старте
-    бота (не ждёт первого интервала), чтобы данные были свежими с первого деплоя.
-    fetch_yandex_data.main() - синхронная (requests), поэтому уносим её в отдельный
-    поток через asyncio.to_thread, чтобы не блокировать обработку сообщений бота.
-    Сам fetch_yandex_data.py следит за дневной квотой (500 запросов) и просто
-    пропустит запуск, если лимит почти исчерпан - падать бот не будет."""
+# Сериализует доступ к общему счётчику квоты (api_usage_log.json, один ключ
+# на аэропорты и поезда) между двумя НЕЗАВИСИМЫМИ фоновыми циклами ниже. Без
+# этого, если графики случайно совпадут по времени, оба могут одновременно
+# прочитать один и тот же "остаток на сегодня" и вместе превысить квоту -
+# именно так уже один раз заблокировали ключ.
+_yandex_api_lock = asyncio.Lock()
+
+
+def seconds_until_hour(target_hour, tz='Europe/Moscow'):
+    """Сколько секунд осталось до ближайшего наступления target_hour:00 по
+    заданной таймзоне (сегодня, если ещё не наступил, иначе завтра)."""
+    now = datetime.now(ZoneInfo(tz))
+    target = now.replace(hour=target_hour, minute=0, second=0, microsecond=0)
+    if target <= now:
+        target += timedelta(days=1)
+    return (target - now).total_seconds()
+
+
+async def airports_data_updater():
+    """Фоновая задача для flights_data.json. С 00:00 до 06:00 по Москве
+    (FLIGHTS_NIGHT_START_HOUR-FLIGHTS_NIGHT_END_HOUR) обновлений НЕТ ВООБЩЕ -
+    рейсов ночью мало, ждём до 06:00. С 06:00 до 24:00 - каждые
+    FLIGHTS_DAY_INTERVAL_HOURS часов. Запускается сразу при старте бота (если
+    он поднялся не ночью), чтобы данные были свежими с первого деплоя."""
     while True:
+        hour = datetime.now(ZoneInfo('Europe/Moscow')).hour
+        if FLIGHTS_NIGHT_START_HOUR <= hour < FLIGHTS_NIGHT_END_HOUR:
+            wait_s = seconds_until_hour(FLIGHTS_NIGHT_END_HOUR)
+            logger.info(f"🌙 Ночь (00:00-06:00 МСК) - аэропорты не обновляем, жду до 06:00 ({wait_s/3600:.1f}ч)")
+            await asyncio.sleep(wait_s)
+            continue
         try:
             logger.info("🔄 Обновляю flights_data.json из Yandex Rasp API...")
-            await asyncio.to_thread(fetch_yandex_data.main)
+            async with _yandex_api_lock:
+                await asyncio.to_thread(fetch_yandex_data.main)
             logger.info("✅ flights_data.json обновлён")
         except Exception as e:
             logger.error(f"❌ Ошибка фонового обновления flights_data.json: {e}")
-        await asyncio.sleep(FLIGHTS_UPDATE_INTERVAL_HOURS * 3600)
+        await asyncio.sleep(FLIGHTS_DAY_INTERVAL_HOURS * 3600)
+
+
+async def trains_data_updater():
+    """Фоновая задача для trains_data.json (Казанский/Ленинградский, включая
+    Сапсан). Независимый от аэропортов график - раз в
+    TRAINS_UPDATE_INTERVAL_HOURS часов, круглосуточно, без привязки к
+    дню/ночи. Запускается сразу при старте бота."""
+    while True:
+        try:
+            logger.info("🔄 Обновляю trains_data.json (Казанский/Ленинградский) из Yandex Rasp API...")
+            async with _yandex_api_lock:
+                await asyncio.to_thread(fetch_trains_data.main)
+            logger.info("✅ trains_data.json обновлён")
+        except Exception as e:
+            logger.error(f"❌ Ошибка фонового обновления trains_data.json: {e}")
+        await asyncio.sleep(TRAINS_UPDATE_INTERVAL_HOURS * 3600)
 
 def format_queue_breakdown(city, icao, category):
     """Блок с текущей очередью ДЛЯ КОНКРЕТНОЙ категории водителя - только его
@@ -1719,9 +1793,10 @@ async def main():
     load_all_user_states()
     dp.include_router(router)
     if os.getenv('YANDEX_RASP_API_KEY'):
-        asyncio.create_task(flights_data_updater())
+        asyncio.create_task(airports_data_updater())
+        asyncio.create_task(trains_data_updater())
     else:
-        logger.warning("⚠️ YANDEX_RASP_API_KEY не задан в переменных окружения Railway - flights_data.json не будет обновляться автоматически")
+        logger.warning("⚠️ YANDEX_RASP_API_KEY не задан в переменных окружения Railway - flights_data.json и trains_data.json не будут обновляться автоматически")
     asyncio.create_task(favt_notices_updater())
     asyncio.create_task(high_demand_alert_checker())
     asyncio.create_task(events_data_updater())

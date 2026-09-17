@@ -52,8 +52,19 @@ logger = logging.getLogger(__name__)
 
 API_KEY = os.getenv('YANDEX_RASP_API_KEY', 'ВСТАВЬ_СВОЙ_КЛЮЧ_СЮДА')
 BASE_URL = 'https://api.rasp.yandex.net/v3.0'
-OUTPUT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'flights_data.json')
-USAGE_LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'api_usage_log.json')
+
+# ⚠️ На Railway диск эфемерный: при каждом редеплое контейнер стартует с чистой
+# файловой системой, и api_usage_log.json (счётчик запросов за сегодня) обнуляется -
+# именно поэтому дневная квота ключа у Яндекса всё равно превышается, хотя
+# DAILY_SAFETY_LIMIT ниже вроде бы должен это предотвращать (см. flights_data_updater()
+# в main_airports_24h.py - она дёргает main() сразу при каждом старте бота). Если в
+# Railway подключить постоянный volume (Settings -> Volumes, mount path напр. /data) и
+# задать переменную окружения DATA_DIR=/data - счётчик и flights_data.json переживут
+# редеплои, и защита от блокировки ключа реально заработает. Без volume - переменную
+# просто не задавай, всё останется как раньше (файлы рядом со скриптом).
+DATA_DIR = os.getenv('DATA_DIR') or os.path.dirname(os.path.abspath(__file__))
+OUTPUT_FILE = os.path.join(DATA_DIR, 'flights_data.json')
+USAGE_LOG_FILE = os.path.join(DATA_DIR, 'api_usage_log.json')
 
 # Дневной лимит ключа Yandex Rasp API. Если сегодня уже потрачено
 # DAILY_SAFETY_LIMIT запросов - скрипт откажется запускаться, чтобы не
@@ -84,7 +95,7 @@ def get_today_usage(log):
 
 # 14 аэропортов бота: IATA/ICAO коды + yandex_code станции (найден вручную
 # сопоставлением по названию через stations_list, см. примечание выше).
-# yandex_code = None -> аэропорт не найден / закрыт (например КРР закрыт с 2022).
+# yandex_code = None -> аэропорт не найден / закрыт.
 AIRPORTS = [
     {'iata': 'SVO', 'icao': 'UUWW', 'name': 'Шереметьево',       'yandex_code': 's9600213'},
     {'iata': 'DME', 'icao': 'UUDD', 'name': 'Домодедово',        'yandex_code': 's9600216'},
@@ -98,7 +109,7 @@ AIRPORTS = [
     {'iata': 'KUF', 'icao': 'UWWW', 'name': 'Курумоч',           'yandex_code': 's9600380'},
     {'iata': 'RND', 'icao': 'URRP', 'name': 'Платов (Ростов)',   'yandex_code': 's9866615', 'closed': True},  # ⚠️ закрыт для гражданских полётов - данные не собираем, экономим квоту
     {'iata': 'UFA', 'icao': 'UWUU', 'name': 'Уфа',               'yandex_code': 's9600393'},
-    {'iata': 'KRR', 'icao': 'URKK', 'name': 'Пашковский (Краснодар)', 'yandex_code': 's9623123'},  # ⚠️ закрыт с 2022, вероятно 0 рейсов
+    {'iata': 'KRR', 'icao': 'URKK', 'name': 'Пашковский (Краснодар)', 'yandex_code': 's9623123'},  # вновь открыт с 11.09.2025 (был закрыт с 2022) - запросы к API не пропускаем
     {'iata': 'AER', 'icao': 'URSS', 'name': 'Сочи',              'yandex_code': 's9623547'},
 ]
 
