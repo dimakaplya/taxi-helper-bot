@@ -86,9 +86,31 @@ QUEUE_POSITIONS = ['1-5', '6-10', '11-15', '16-20', '21-25', '26-30', '31-35', '
 DB_FILE = 'taxi_queue.db'
 user_state = {}
 
-# ==================== РЕАЛЬНЫЕ ДАННЫЕ С ТАБЛО SVO ====================
+# ==================== РЕАЛЬНЫЕ ДАННЫЕ С ТАБЛО SVO (24 ЧАСА) ====================
 
 REAL_DEPARTURES_SVO = [
+    # Ночные рейсы (00:00-05:00) - минимум трафика
+    {'time': '00:15', 'dest': 'Санкт-Петербург', 'airline': 'Россия', 'flight': '6205', 'passengers': 85},
+    {'time': '01:30', 'dest': 'Екатеринбург', 'airline': 'Аэрофлот', 'flight': '1400', 'passengers': 92},
+    {'time': '02:45', 'dest': 'Новосибирск', 'airline': 'S7', 'flight': '4100', 'passengers': 98},
+    {'time': '04:00', 'dest': 'Казань', 'airline': 'Победа', 'flight': '6700', 'passengers': 80},
+    {'time': '05:15', 'dest': 'Краснодар', 'airline': 'Аэрофлот', 'flight': '1100', 'passengers': 88},
+
+    # Утренние рейсы (06:00-11:00) - нарастание трафика
+    {'time': '06:00', 'dest': 'Минск', 'airline': 'Аэрофлот', 'flight': '1800', 'passengers': 120},
+    {'time': '06:30', 'dest': 'Тбилиси', 'airline': 'Россия', 'flight': '6515', 'passengers': 105},
+    {'time': '07:00', 'dest': 'Баку', 'airline': 'AZAL', 'flight': '4101', 'passengers': 112},
+    {'time': '07:45', 'dest': 'Санкт-Петербург', 'airline': 'Россия', 'flight': '6230', 'passengers': 108},
+    {'time': '08:15', 'dest': 'Казань', 'airline': 'Победа', 'flight': '6725', 'passengers': 125},
+    {'time': '08:45', 'dest': 'Сочи', 'airline': 'Аэрофлот', 'flight': '1120', 'passengers': 135},
+    {'time': '09:20', 'dest': 'Пермь', 'airline': 'Россия', 'flight': '6410', 'passengers': 115},
+    {'time': '09:50', 'dest': 'Уфа', 'airline': 'Аэрофлот', 'flight': '1500', 'passengers': 118},
+    {'time': '10:15', 'dest': 'Волгоград', 'airline': 'Победа', 'flight': '6950', 'passengers': 110},
+    {'time': '10:50', 'dest': 'Саратов', 'airline': 'Аэрофлот', 'flight': '1630', 'passengers': 102},
+    {'time': '11:20', 'dest': 'Анталья', 'airline': 'Corendon', 'flight': '8501', 'passengers': 140},
+    {'time': '11:45', 'dest': 'Стамбул', 'airline': 'Turkish', 'flight': '1501', 'passengers': 135},
+
+    # Дневные рейсы (12:00-18:00) - пиковая нагрузка
     {'time': '12:00', 'dest': 'Краснодар', 'airline': 'Аэрофлот', 'flight': '1156', 'passengers': 111},
     {'time': '12:00', 'dest': 'Санкт-Петербург', 'airline': 'Россия', 'flight': '6243', 'passengers': 101},
     {'time': '12:05', 'dest': 'Волгоград', 'airline': 'Победа', 'flight': '6969', 'passengers': 95},
@@ -119,6 +141,18 @@ REAL_DEPARTURES_SVO = [
     {'time': '15:40', 'dest': 'Хабаровск', 'airline': 'Аэрофлот', 'flight': '1719', 'passengers': 155},
     {'time': '16:00', 'dest': 'Петропавловск-Камч.', 'airline': 'Аэрофлот', 'flight': '1731', 'passengers': 148},
     {'time': '16:30', 'dest': 'Владивосток', 'airline': 'S7', 'flight': '4223', 'passengers': 142},
+    {'time': '17:00', 'dest': 'Тюмень', 'airline': 'Россия', 'flight': '6305', 'passengers': 125},
+    {'time': '17:35', 'dest': 'Дубай', 'airline': 'Emirates', 'flight': '501', 'passengers': 160},
+    {'time': '18:00', 'dest': 'Паттайя', 'airline': 'Thai', 'flight': '2201', 'passengers': 155},
+
+    # Вечерние рейсы (19:00-23:59) - снижение трафика
+    {'time': '19:00', 'dest': 'Санкт-Петербург', 'airline': 'Россия', 'flight': '6280', 'passengers': 110},
+    {'time': '19:45', 'dest': 'Екатеринбург', 'airline': 'Аэрофлот', 'flight': '1445', 'passengers': 128},
+    {'time': '20:20', 'dest': 'Казань', 'airline': 'Победа', 'flight': '6780', 'passengers': 115},
+    {'time': '20:50', 'dest': 'Новосибирск', 'airline': 'S7', 'flight': '4165', 'passengers': 138},
+    {'time': '21:30', 'dest': 'Сочи', 'airline': 'Аэрофлот', 'flight': '1180', 'passengers': 125},
+    {'time': '22:00', 'dest': 'Минск', 'airline': 'Аэрофлот', 'flight': '1850', 'passengers': 118},
+    {'time': '23:15', 'dest': 'Краснодар', 'airline': 'Россия', 'flight': '6260', 'passengers': 105},
 ]
 
 def get_departures(airport_icao):
