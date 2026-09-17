@@ -716,14 +716,17 @@ CATEGORIES_WITHOUT_AIRPORTS = {'courier', 'cargo'}
 FUEL_BOT_URL = "https://t.me/gde_benzin_rubot"
 
 def services_keyboard(category=None):
-    # "Аэропорты" и "Где бензин" - навигационный блок сверху (куда сейчас
-    # ехать/что с топливом), "Повышенный спрос" и "Дорожные события" - блок
-    # прогнозов/уведомлений снизу.
-    buttons = []
+    # Итоговый набор кнопок меню услуг (по заданному порядку). "Заказы
+    # города" (было "Повышенный спрос") и "🎭 События города" - пока
+    # заглушки без своей логики: первая ждёт переработки под общегородской
+    # спрос (сейчас спрос по часам смотрится внутри "Аэропорты"), вторая -
+    # будущую интеграцию афиши (см. отдельное обсуждение источников данных).
+    # "Дорожные события" тоже пока без обработчика - как было.
+    buttons = [[KeyboardButton(text="Заказы города")]]
     if category not in CATEGORIES_WITHOUT_AIRPORTS:
         buttons.append([KeyboardButton(text="Аэропорты")])
     buttons.append([KeyboardButton(text="⛽ Где бензин")])
-    buttons.append([KeyboardButton(text="Повышенный спрос")])
+    buttons.append([KeyboardButton(text="🎭 События города")])
     buttons.append([KeyboardButton(text="Дорожные события")])
     buttons.append([KeyboardButton(text="← Назад")])
     return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=buttons)
