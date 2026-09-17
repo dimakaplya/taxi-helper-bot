@@ -226,6 +226,16 @@ def get_notices_for_airport(icao):
         return []
     return [n for n in data.get('notices', []) if icao in n.get('airports', [])]
 
+def escape_md(text):
+    """Экранирует спецсимволы legacy Markdown (parse_mode='Markdown'), чтобы
+    непредсказуемый внешний текст (уведомления Росавиации и т.п.) не ломал
+    разметку сообщения - иначе Telegram отклоняет весь месседж целиком."""
+    if not text:
+        return text
+    for ch in ('_', '*', '`', '['):
+        text = text.replace(ch, '\\' + ch)
+    return text
+
 def get_airport_flights(airport_icao, flight_type='departures'):
     """Получить рейсы аэропорта из реальных данных (flights_data.json).
     Если файла нет - для SVO отдаём запасной хардкод, для остальных пусто."""
@@ -561,49 +571,68 @@ async def show_airport_availability(callback_query: types.CallbackQuery):
     relevant_class = CATEGORY_TO_CLASS.get(category, 'total')
     class_label = {'economy': 'эконом', 'business': 'бизнес', 'total': 'все классы'}[relevant_class]
     msg = await callback_query.message.edit_text("⏳ Загружаю доступность...")
-    text = f"*🔄 Доступность Аэропортов*\n_Обновлено: {datetime.now().strftime('%H:%M:%S')} | Класс: {class_label}_\n\n"
-    for airport in airports:
-        arrivals = get_airport_flights(airport['icao'], 'arrivals')
-        departures = get_airport_flights(airport['icao'], 'departures')
-        capacity = AIRPORT_CAPACITY.get(airport['icao'], 1000)
-        relevant_cap = {'economy': capacity * ECONOMY_SHARE, 'business': capacity * BUSINESS_SHARE, 'total': capacity}[relevant_class]
-        key = {'economy': 'passengers_economy', 'business': 'passengers_business', 'total': 'passengers'}[relevant_class]
-        total_passengers = sum(f.get(key, 0) for f in arrivals + departures)
-        current_load = (total_passengers / relevant_cap) * 100 if total_passengers > 0 else 0
-        if current_load < 50:
-            status = "✅ Свободен"
-            load_emoji = "🟢"
-        elif current_load < 70:
-            status = "⚠️ Средняя нагрузка"
-            load_emoji = "🟡"
-        elif current_load < 100:
-            status = "🟠 Высокая нагрузка"
-            load_emoji = "🟠"
-        else:
-            status = "🔴 Перегруженный"
-            load_emoji = "🔴"
-        text += f"{airport['emoji']} *{airport['name']}*\n"
-        text += f"  {load_emoji} {status}\n"
-        text += f"  📊 Загруженность: {current_load:.0f}%\n"
-        text += f"  ✈️ Рейсов: {len(arrivals + departures)}\n"
 
-        notices = get_notices_for_airport(airport['icao'])
-        if notices:
-            latest = notices[0]
-            notice_time = datetime.fromisoformat(latest['time']).astimezone().strftime('%H:%M')
-            restricted = 'ВВЕДЕНЫ' in latest['text'].upper() and 'СНЯТ' not in latest['text'].upper()
-            notice_emoji = '🚫' if restricted else 'ℹ️'
-            text += f"  {notice_emoji} *Росавиация ({notice_time}):* {latest['text'][:150]}\n"
-            if len(notices) > 1:
-                text += f"  _(+{len(notices) - 1} за последние 12ч)_\n"
-        text += "\n"
+    try:
+        text = f"*🔄 Доступность Аэропортов*\n_Обновлено: {datetime.now().strftime('%H:%M:%S')} | Класс: {class_label}_\n\n"
+        for airport in airports:
+            arrivals = get_airport_flights(airport['icao'], 'arrivals')
+            departures = get_airport_flights(airport['icao'], 'departures')
+            capacity = AIRPORT_CAPACITY.get(airport['icao'], 1000)
+            relevant_cap = {'economy': capacity * ECONOMY_SHARE, 'business': capacity * BUSINESS_SHARE, 'total': capacity}[relevant_class]
+            key = {'economy': 'passengers_economy', 'business': 'passengers_business', 'total': 'passengers'}[relevant_class]
+            total_passengers = sum(f.get(key, 0) for f in arrivals + departures)
+            current_load = (total_passengers / relevant_cap) * 100 if total_passengers > 0 else 0
+            if current_load < 50:
+                status = "✅ Свободен"
+                load_emoji = "🟢"
+            elif current_load < 70:
+                status = "⚠️ Средняя нагрузка"
+                load_emoji = "🟡"
+            elif current_load < 100:
+                status = "🟠 Высокая нагрузка"
+                load_emoji = "🟠"
+            else:
+                status = "🔴 Перегруженный"
+                load_emoji = "🔴"
+            text += f"{airport['emoji']} *{airport['name']}*\n"
+            text += f"  {load_emoji} {status}\n"
+            text += f"  📊 Загруженность: {current_load:.0f}%\n"
+            text += f"  ✈️ Рейсов: {len(arrivals + departures)}\n"
 
-    all_notices = (load_favt_notices() or {}).get('notices', [])
-    other_notices = [n for n in all_notices if not any(a['icao'] in n.get('airports', []) for a in airports)]
-    if other_notices:
-        text += f"_ℹ️ Ещё {len(other_notices)} уведомлений Росавиации за 12ч по другим городам (см. канал @favt_info)_\n"
+            notices = get_notices_for_airport(airport['icao'])
+            if notices:
+                latest = notices[0]
+                try:
+                    notice_time = datetime.fromisoformat(latest['time']).astimezone().strftime('%H:%M')
+                except Exception:
+                    notice_time = '??:??'
+                restricted = 'ВВЕДЕНЫ' in latest['text'].upper() and 'СНЯТ' not in latest['text'].upper()
+                notice_emoji = '🚫' if restricted else 'ℹ️'
+                safe_notice_text = escape_md(latest['text'][:150])
+                text += f"  {notice_emoji} *Росавиация ({notice_time}):* {safe_notice_text}\n"
+                if len(notices) > 1:
+                    text += f"  _(+{len(notices) - 1} за последние 12ч)_\n"
+            text += "\n"
 
-    await msg.edit_text(text, parse_mode='Markdown')
+        all_notices = (load_favt_notices() or {}).get('notices', [])
+        other_notices = [n for n in all_notices if not any(a['icao'] in n.get('airports', []) for a in airports)]
+        if other_notices:
+            text += f"_ℹ️ Ещё {len(other_notices)} уведомлений Росавиации за 12ч по другим городам (см. канал @favt_info)_\n"
+
+        try:
+            await msg.edit_text(text, parse_mode='Markdown')
+        except Exception as e:
+            logger.error(f"❌ Не удалось отправить доступность с Markdown-разметкой: {e}")
+            # Фолбэк без разметки - чтобы юзер хоть что-то увидел, а не вечную "Загружаю..."
+            plain_text = text.replace('*', '').replace('_', '')
+            await msg.edit_text(plain_text)
+    except Exception as e:
+        logger.error(f"❌ Непредвиденная ошибка в show_airport_availability: {e}")
+        try:
+            await msg.edit_text("⚠️ Не удалось загрузить доступность аэропортов. Попробуй ещё раз через минуту.")
+        except Exception:
+            pass
+
     await callback_query.answer()
 
 @router.callback_query(lambda c: c.data == "airport_queue")
