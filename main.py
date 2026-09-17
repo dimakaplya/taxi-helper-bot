@@ -391,61 +391,64 @@ def init_db():
     conn.commit()
     conn.close()
 
-def cleanup_stale_queue(conn):
-    """Удаляет из очереди записи старше QUEUE_ENTRY_TTL_MINUTES - реальная
-    физическая очередь на аэропорту не может "висеть" сутками, а водитель
-    мог просто забыть нажать "Покинуть очередь" после того как уехал."""
-    cursor = conn.cursor()
-    cutoff = (datetime.now() - timedelta(minutes=QUEUE_ENTRY_TTL_MINUTES)).strftime('%Y-%m-%d %H:%M:%S')
-    cursor.execute('DELETE FROM queue WHERE timestamp < ?', (cutoff,))
-    conn.commit()
+# Водители сами отмечают, сколько машин видят в очереди на аэропорту - выбором
+# диапазона, а не точного числа (точно посчитать чужие машины в моменте
+# нереально). Диапазоны по 5: 1-5, 6-10, ... 96-100.
+QUEUE_RANGES = [(i, i + 4) for i in range(1, 101, 5)]
 
-def queue_join(user_id, username, city, airport_icao, category):
-    """Ставит водителя в очередь. Один водитель может стоять только в одной
-    очереди одновременно - если он уже где-то стоял, старая запись удаляется."""
+def queue_range_label(idx):
+    lo, hi = QUEUE_RANGES[idx]
+    return f"{lo}-{hi}"
+
+def queue_range_midpoint(range_str):
+    try:
+        lo, hi = range_str.split('-')
+        return (int(lo) + int(hi)) / 2
+    except Exception:
+        return None
+
+def queue_submit_report(user_id, city, airport_icao, category, range_str):
+    """Сохраняет отметку водителя о длине очереди. Это не "встать в очередь" -
+    просто разовый отчёт "я сейчас вижу вот столько машин", поэтому старые
+    отметки не удаляются при новой - копится история, из которой потом берём
+    последние отметки для оценки."""
     init_db()
     conn = sqlite3.connect(DB_FILE)
-    cleanup_stale_queue(conn)
     cursor = conn.cursor()
-    cursor.execute('DELETE FROM queue WHERE user_id = ?', (user_id,))
     cursor.execute(
         'INSERT INTO queue (user_id, city, airport, tariff, position_range, timestamp) VALUES (?, ?, ?, ?, ?, ?)',
-        (user_id, city, airport_icao, category, username or '', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+        (user_id, city, airport_icao, category, range_str, datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
     )
     conn.commit()
     conn.close()
 
-def queue_leave(user_id):
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute('DELETE FROM queue WHERE user_id = ?', (user_id,))
-    conn.commit()
-    conn.close()
-
-def queue_list(city, airport_icao, category):
-    """Список user_id в очереди для (город, аэропорт, категория водителя),
-    отсортированный по времени входа - кто встал раньше, тот ближе к началу.
-    Категории разделены, потому что у Такси и Ultima на аэропортах обычно
-    разные зоны ожидания и разный спрос."""
+def queue_recent_reports(city, airport_icao, category, limit=2):
+    """Последние отметки водителей за QUEUE_ENTRY_TTL_MINUTES (свежие отчёты -
+    старые уже не отражают реальную ситуацию). Возвращает список (range_str, timestamp),
+    самые свежие первыми."""
     init_db()
     conn = sqlite3.connect(DB_FILE)
-    cleanup_stale_queue(conn)
     cursor = conn.cursor()
+    cutoff = (datetime.now() - timedelta(minutes=QUEUE_ENTRY_TTL_MINUTES)).strftime('%Y-%m-%d %H:%M:%S')
     cursor.execute(
-        'SELECT user_id, timestamp FROM queue WHERE city = ? AND airport = ? AND tariff = ? ORDER BY timestamp ASC',
-        (city, airport_icao, category)
+        'SELECT position_range, timestamp FROM queue WHERE city = ? AND airport = ? AND tariff = ? AND timestamp >= ? '
+        'ORDER BY timestamp DESC LIMIT ?',
+        (city, airport_icao, category, cutoff, limit)
     )
     rows = cursor.fetchall()
     conn.close()
     return rows
 
-def queue_position(user_id, city, airport_icao, category):
-    """Возвращает (позиция_водителя_или_None, всего_в_очереди)."""
-    rows = queue_list(city, airport_icao, category)
-    for i, (uid, _) in enumerate(rows):
-        if uid == user_id:
-            return i + 1, len(rows)
-    return None, len(rows)
+def queue_estimate(city, airport_icao, category):
+    """Оценка текущей очереди - среднее по двум последним свежим отметкам
+    водителей. Возвращает (оценка_int_или_None, список_отметок)."""
+    reports = queue_recent_reports(city, airport_icao, category, limit=2)
+    midpoints = [queue_range_midpoint(r) for r, _ in reports]
+    midpoints = [m for m in midpoints if m is not None]
+    if not midpoints:
+        return None, reports
+    estimate = round(sum(midpoints) / len(midpoints))
+    return estimate, reports
 
 bot = None
 dp = Dispatcher()
@@ -851,7 +854,11 @@ async def show_queue_options(callback_query: types.CallbackQuery):
     await callback_query.answer()
 
 @router.callback_query(lambda c: c.data.startswith('join_queue_'))
-async def join_queue(callback_query: types.CallbackQuery):
+async def show_range_picker(callback_query: types.CallbackQuery):
+    """Кнопка "Занять очередь" на самом деле не ставит водителя в реальную
+    очередь, а открывает выбор диапазона - сколько машин водитель сейчас видит
+    в очереди на аэропорту (1-5, 6-10, ... 96-100). Точное число никто не
+    посчитает на глаз, а диапазон - реально."""
     user_id = callback_query.from_user.id
     if user_id not in user_state or 'category' not in user_state[user_id]:
         await callback_query.answer("Начни заново с /start", show_alert=True)
@@ -859,25 +866,51 @@ async def join_queue(callback_query: types.CallbackQuery):
     _, _, city, airport_idx_str = callback_query.data.split('_')
     airport_idx = int(airport_idx_str)
     airport = AIRPORTS_INFO[city][airport_idx]
-    category = user_state[user_id]['category']
-    username = callback_query.from_user.username or callback_query.from_user.full_name
 
-    queue_join(user_id, username, city, airport['icao'], category)
-    position, total = queue_position(user_id, city, airport['icao'], category)
+    buttons = []
+    row = []
+    for i in range(len(QUEUE_RANGES)):
+        row.append(InlineKeyboardButton(text=queue_range_label(i), callback_data=f"qsub_{city}_{airport_idx}_{i}"))
+        if len(row) == 4:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="airport_queue")])
+
+    text = f"*{airport['emoji']} {airport['name']}*\n\nСколько машин сейчас в очереди? Выбери диапазон 👇"
+    await callback_query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode='Markdown')
+    await callback_query.answer()
+
+@router.callback_query(lambda c: c.data.startswith('qsub_'))
+async def submit_range(callback_query: types.CallbackQuery):
+    user_id = callback_query.from_user.id
+    if user_id not in user_state or 'category' not in user_state[user_id]:
+        await callback_query.answer("Начни заново с /start", show_alert=True)
+        return
+    _, city, airport_idx_str, range_idx_str = callback_query.data.split('_')
+    airport_idx = int(airport_idx_str)
+    range_idx = int(range_idx_str)
+    airport = AIRPORTS_INFO[city][airport_idx]
+    category = user_state[user_id]['category']
+    range_str = queue_range_label(range_idx)
+
+    queue_submit_report(user_id, city, airport['icao'], category, range_str)
+    estimate, reports = queue_estimate(city, airport['icao'], category)
 
     text = (
-        f"✅ *Ты в очереди*\n\n"
+        f"✅ Спасибо! Отметка *{range_str}* сохранена\n\n"
         f"{airport['emoji']} {airport['name']}\n"
         f"Категория: {CATEGORIES.get(category, {}).get('name', category)}\n\n"
-        f"📍 Твоя позиция: *{position}* из *{total}*"
     )
+    if estimate is not None:
+        text += f"📊 Текущая оценка очереди: *~{estimate}* (среднее по последним {len(reports)} отметкам)"
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔄 Обновить позицию", callback_data=f"view_queue_{city}_{airport_idx}")],
-        [InlineKeyboardButton(text="🚪 Покинуть очередь", callback_data=f"leave_queue_{city}_{airport_idx}")],
+        [InlineKeyboardButton(text="🚗 Отметить ещё раз", callback_data=f"join_queue_{city}_{airport_idx}")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="airport_queue")]
     ])
     await callback_query.message.edit_text(text, reply_markup=keyboard, parse_mode='Markdown')
-    await callback_query.answer("Ты встал в очередь!")
+    await callback_query.answer("Отметка сохранена")
 
 @router.callback_query(lambda c: c.data.startswith('view_queue_'))
 async def view_queue(callback_query: types.CallbackQuery):
@@ -890,41 +923,27 @@ async def view_queue(callback_query: types.CallbackQuery):
     airport = AIRPORTS_INFO[city][airport_idx]
     category = user_state[user_id]['category']
 
-    position, total = queue_position(user_id, city, airport['icao'], category)
+    estimate, reports = queue_estimate(city, airport['icao'], category)
 
     text = (
         f"📋 *Очередь*\n\n"
         f"{airport['emoji']} {airport['name']}\n"
         f"Категория: {CATEGORIES.get(category, {}).get('name', category)}\n\n"
-        f"🚗 Машин в очереди: *{total}*\n"
     )
-    text += f"📍 Твоя позиция: *{position}*" if position else "Ты пока не в очереди."
-
-    buttons = []
-    if position:
-        buttons.append([InlineKeyboardButton(text="🔄 Обновить", callback_data=f"view_queue_{city}_{airport_idx}")])
-        buttons.append([InlineKeyboardButton(text="🚪 Покинуть очередь", callback_data=f"leave_queue_{city}_{airport_idx}")])
+    if estimate is not None:
+        text += f"🚗 Оценка очереди: *~{estimate}* машин\n"
+        text += f"_По последним {len(reports)} отметкам водителей: {', '.join(r for r, _ in reports)}_"
     else:
-        buttons.append([InlineKeyboardButton(text="🚗 Встать в очередь", callback_data=f"join_queue_{city}_{airport_idx}")])
-    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="airport_queue")])
+        text += f"Пока нет свежих отметок от водителей за последние {QUEUE_ENTRY_TTL_MINUTES // 60}ч.\nОтметь сам, сколько видишь машин 👇"
+
+    buttons = [
+        [InlineKeyboardButton(text="🚗 Отметить очередь", callback_data=f"join_queue_{city}_{airport_idx}")],
+        [InlineKeyboardButton(text="🔄 Обновить", callback_data=f"view_queue_{city}_{airport_idx}")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="airport_queue")]
+    ]
 
     await callback_query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode='Markdown')
     await callback_query.answer()
-
-@router.callback_query(lambda c: c.data.startswith('leave_queue_'))
-async def leave_queue(callback_query: types.CallbackQuery):
-    user_id = callback_query.from_user.id
-    queue_leave(user_id)
-    _, _, city, airport_idx_str = callback_query.data.split('_')
-    airport_idx = int(airport_idx_str)
-    airport = AIRPORTS_INFO[city][airport_idx]
-    text = f"🚪 Ты вышел из очереди\n\n{airport['emoji']} {airport['name']}"
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🚗 Встать снова", callback_data=f"join_queue_{city}_{airport_idx}")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="airport_queue")]
-    ])
-    await callback_query.message.edit_text(text, reply_markup=keyboard)
-    await callback_query.answer("Вышел из очереди")
 
 async def flights_data_updater():
     """Фоновая задача: раз в FLIGHTS_UPDATE_INTERVAL_HOURS часов дёргает Yandex Rasp API
