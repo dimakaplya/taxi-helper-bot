@@ -298,6 +298,20 @@ def get_load_recommendation(load_percent):
     elif load_percent <= 100: return '✅ ЕХАТЬ'
     else: return '🚨 СРОЧНО'
 
+# Среднее время до вылета, за которое пассажир заказывает такси из города в
+# аэропорт (внутренние рейсы ~2ч до вылета, международные обычно больше, но
+# берём усреднённо). Используется только для вкладки "Вылеты" - в отличие от
+# прилётов, где пассажир уже в аэропорту и водителю нужно ехать туда, при
+# вылете пассажир ещё в городе, и заказ появляется заранее, а не в момент
+# вылета - логика "ехать в аэропорт/в очередь" тут не подходит вообще.
+DEPARTURE_LEAD_TIME_HOURS = 2
+
+def get_departure_recommendation(demand_percent):
+    if demand_percent <= 50: return '😴 Заказов мало'
+    elif demand_percent <= 70: return '📱 Будь на связи в городе'
+    elif demand_percent <= 100: return '🏙️ Активно бери заказы в аэропорт'
+    else: return '🔥 Пиковый спрос на заказы'
+
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
@@ -471,6 +485,7 @@ async def show_airport_details(callback_query: types.CallbackQuery):
     category = user_state.get(user_id, {}).get('category', 'taxi')
     relevant_class = CATEGORY_TO_CLASS.get(category, 'total')
 
+    is_departure = flight_type == 'departures'
     msg = await callback_query.message.edit_text(f"⏳ Загружаю расписание {airport['name']}...")
     flights = get_airport_flights(airport['icao'], flight_type)
     flight_label = '📥 Прилеты' if flight_type == 'arrivals' else '📤 Вылеты'
@@ -478,21 +493,30 @@ async def show_airport_details(callback_query: types.CallbackQuery):
     text = f"*{airport['emoji']} {airport['name']} - {flight_label}*\n"
     text += f"_Обновлено: {datetime.now().strftime('%H:%M:%S')}_\n"
     text += f"_Пропускная способность: {capacity} пас/час (эконом {economy_capacity:.0f} / бизнес {business_capacity:.0f})_\n"
-    text += f"_Рекомендации рассчитаны для: {class_label}_\n\n"
-    text += "*📊 ПРОГНОЗ ЗАГРУЖЕННОСТИ (текущее время +8 часов):*\n\n"
+    text += f"_Рекомендации рассчитаны для: {class_label}_\n"
+    if is_departure:
+        text += f"_Заказы считаются за ~{DEPARTURE_LEAD_TIME_HOURS}ч до вылета - именно тогда пассажир вызывает такси из города_\n\n"
+        text += "*🏙️ ПРОГНОЗ СПРОСА НА ЗАКАЗЫ ПО ГОРОДУ (текущее время +8 часов):*\n\n"
+    else:
+        text += "\n*📊 ПРОГНОЗ ЗАГРУЖЕННОСТИ АЭРОПОРТА (текущее время +8 часов):*\n\n"
     now = datetime.now()
     current_hour = now.hour
     for hour_offset in range(8):
-        hour_of_day = (current_hour + hour_offset) % 24
+        # Для вылетов "час на табло" - это час, КОГДА ВОДИТЕЛЮ ИСКАТЬ ЗАКАЗ В ГОРОДЕ,
+        # а сами рейсы, которые порождают этот спрос, вылетают позже, на DEPARTURE_LEAD_TIME_HOURS.
+        # Для прилётов - как раньше, час фактического прилёта = час, когда ехать в аэропорт.
+        order_hour_of_day = (current_hour + hour_offset) % 24
+        relevant_flight_hour = (order_hour_of_day + DEPARTURE_LEAD_TIME_HOURS) % 24 if is_departure else order_hour_of_day
+
         hour_time = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=hour_offset)
         hour_str = hour_time.strftime('%H:00')
-        hour_display = f"{hour_str} (+1д)" if hour_of_day < current_hour else hour_str
+        hour_display = f"{hour_str} (+1д)" if order_hour_of_day < current_hour else hour_str
         flights_in_hour = 0
         economy_in_hour = 0
         business_in_hour = 0
         for flight in flights:
             flight_time = datetime.fromtimestamp(flight.get('firstSeen', 0))
-            if flight_time.hour == hour_of_day:
+            if flight_time.hour == relevant_flight_hour:
                 flights_in_hour += 1
                 economy_in_hour += flight.get('passengers_economy', 0)
                 business_in_hour += flight.get('passengers_business', 0)
@@ -502,11 +526,23 @@ async def show_airport_details(callback_query: types.CallbackQuery):
         relevant_cap = {'economy': economy_capacity, 'business': business_capacity, 'total': capacity}[relevant_class]
         load = (relevant_pax / relevant_cap) * 100 if relevant_pax > 0 else 0
         emoji = get_load_emoji(load)
-        action = get_load_recommendation(load)
-        text += f"{emoji} *{hour_display}* | Нагрузка ({class_label.lower()}): *{load:.0f}%*\n"
-        text += f"   Рекомендация: *{action}*\n"
-        text += f"   🛬 Рейсов: {flights_in_hour}  |  ✈️ Пассажиры: {total_in_hour} (эконом {economy_in_hour} / бизнес {business_in_hour})\n\n"
-    text += "_🔴0-50% НЕ ЕХАТЬ | 🟡51-70% ОЧЕРЕДЬ | 🟢71-100% ЕХАТЬ | 🟣>100% СРОЧНО_"
+
+        if is_departure:
+            action = get_departure_recommendation(load)
+            flight_hour_str = f"{relevant_flight_hour:02d}:00"
+            text += f"{emoji} *{hour_display}* | Спрос на заказы ({class_label.lower()}): *{load:.0f}%*\n"
+            text += f"   Рекомендация: *{action}*\n"
+            text += f"   🛫 Вылетов в ~{flight_hour_str}: {flights_in_hour}  |  ✈️ Пассажиров с заказом: {total_in_hour} (эконом {economy_in_hour} / бизнес {business_in_hour})\n\n"
+        else:
+            action = get_load_recommendation(load)
+            text += f"{emoji} *{hour_display}* | Нагрузка ({class_label.lower()}): *{load:.0f}%*\n"
+            text += f"   Рекомендация: *{action}*\n"
+            text += f"   🛬 Рейсов: {flights_in_hour}  |  ✈️ Пассажиры: {total_in_hour} (эконом {economy_in_hour} / бизнес {business_in_hour})\n\n"
+
+    if is_departure:
+        text += "_🔴0-50% заказов мало | 🟡51-70% будь на связи | 🟢71-100% активно бери заказы | 🟣>100% пиковый спрос_"
+    else:
+        text += "_🔴0-50% НЕ ЕХАТЬ | 🟡51-70% ОЧЕРЕДЬ | 🟢71-100% ЕХАТЬ | 🟣>100% СРОЧНО_"
     await msg.edit_text(text, parse_mode='Markdown')
     await callback_query.answer()
 
