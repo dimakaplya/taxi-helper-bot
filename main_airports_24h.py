@@ -14,7 +14,7 @@ import os
 import fetch_yandex_data  # логика похода в Yandex Rasp API, запускается фоново прямо на Railway
 import fetch_trains_data  # поезда дальнего следования (Казанский, Ленинградский) - тот же ключ и квота
 import fetch_favt_notices  # логика сбора уведомлений Росавиации (@favt_info), тоже фоново
-import fetch_events_data  # афиша города (KudaGo) для кнопки "🎭 События города", тоже фоново
+import fetch_timepad_data  # афиша города (TimePad) для кнопки "🎭 События города", тоже фоново
 
 BOT_TOKEN = os.getenv('TELEGRAM_TOKEN', '8968196261:AAGjxaTy_evirnWDAO124vmkbbDFy03kekY')
 
@@ -117,10 +117,11 @@ TRAIN_FORECAST_PERIOD_MINUTES = 30
 FAVT_NOTICES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'favt_notices.json')
 FAVT_UPDATE_INTERVAL_MINUTES = 15
 
-# Афиша города (KudaGo) - события меняются медленно (не по минутам, как
-# рейсы/статусы), поэтому обновляем редко и не тратим лишние запросы.
-EVENTS_DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'events_data.json')
-EVENTS_UPDATE_INTERVAL_HOURS = 3
+# Афиша города (TimePad, см. fetch_timepad_data.py) - события меняются
+# медленно (не по минутам, как рейсы/статусы), поэтому обновляем редко и не
+# тратим лишние запросы. Пока покрывает только Москву.
+TIMEPAD_DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'timepad_data.json')
+TIMEPAD_UPDATE_INTERVAL_HOURS = 3
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -455,25 +456,25 @@ def get_notices_for_airport(icao):
         return []
     return [n for n in data.get('notices', []) if icao in n.get('airports', [])]
 
-_events_data_cache = None
-_events_data_mtime = None
+_timepad_data_cache = None
+_timepad_data_mtime = None
 
-def load_events_data():
-    """Загружает events_data.json (афиша KudaGo, см. fetch_events_data.py)."""
-    global _events_data_cache, _events_data_mtime
+def load_timepad_data():
+    """Загружает timepad_data.json (афиша города, см. fetch_timepad_data.py)."""
+    global _timepad_data_cache, _timepad_data_mtime
     try:
-        mtime = os.path.getmtime(EVENTS_DATA_FILE)
-        if _events_data_cache is not None and mtime == _events_data_mtime:
-            return _events_data_cache
-        with open(EVENTS_DATA_FILE, 'r', encoding='utf-8') as f:
+        mtime = os.path.getmtime(TIMEPAD_DATA_FILE)
+        if _timepad_data_cache is not None and mtime == _timepad_data_mtime:
+            return _timepad_data_cache
+        with open(TIMEPAD_DATA_FILE, 'r', encoding='utf-8') as f:
             data = json.load(f)
-        _events_data_cache = data
-        _events_data_mtime = mtime
+        _timepad_data_cache = data
+        _timepad_data_mtime = mtime
         return data
     except FileNotFoundError:
         return None
     except Exception as e:
-        logger.error(f"❌ Ошибка чтения events_data.json: {e}")
+        logger.error(f"❌ Ошибка чтения timepad_data.json: {e}")
         return None
 
 _trains_data_cache = None
@@ -558,53 +559,36 @@ def compute_current_train_period_load(station_code, category, period_offset=0):
     load = (total_passengers / period_capacity) * 100 if total_passengers > 0 else 0
     return load, trains_in_period, period_start_minutes
 
-# Такси эконом/комфорт видит ВСЕ мероприятия города без разбора категорий.
-# Ultima видит только "значимые" - те, где цена входа от ULTIMA_MIN_PRICE
-# рублей (события без указанной цены и бесплатные для Ultima не подходят -
-# нельзя подтвердить, что они проходят порог). Курьер/Грузовое такси эту
+# Такси эконом/комфорт и Ultima видят одну и ту же афишу TimePad без разбора
+# по классу - событие уже прошло фильтр по масштабу (tickets_total>=200) на
+# этапе сбора данных, см. fetch_timepad_data.py. Курьер/Грузовое такси эту
 # кнопку вообще не видят (см. CATEGORIES_WITHOUT_EVENTS ниже).
-ULTIMA_MIN_PRICE = 3000
 CATEGORIES_WITHOUT_EVENTS = {'courier', 'cargo'}
 
-def parse_min_price(event):
-    """Минимальная цена мероприятия в рублях. KudaGo отдаёт price
-    неструктурированным текстом ("от 1000 до 3000 рублей", "500 руб", "от 350
-    рублей, есть льготы", "" - если не указана) - берём ПЕРВОЕ число в строке
-    (это и есть "от", то есть минимальный входной порог). None - если цену
-    вообще не удалось распознать (нельзя проверить порог ULTIMA_MIN_PRICE).
-    Бесплатное мероприятие - явно 0, а не None."""
-    if event.get('is_free'):
-        return 0
-    match = re.search(r'\d[\d\s]*', event.get('price') or '')
-    if not match:
-        return None
-    try:
-        return int(match.group(0).replace(' ', ''))
-    except ValueError:
-        return None
-
-def get_events_for_user(city, category, limit=5):
-    """Ближайшие события города под класс водителя. Возвращает (events, city_supported) -
-    city_supported=False значит KudaGo вообще не покрывает этот город (нужно
-    отдельное сообщение "нет данных", а не пустой список - это разные вещи)."""
-    if city not in fetch_events_data.KUDAGO_CITY_MAP:
+def get_events_for_user(city, category, limit=10):
+    """Ближайшие события города под класс водителя. Источник - ТОЛЬКО TimePad
+    (см. fetch_timepad_data.py) - KudaGo убран по просьбе пользователя (кнопка
+    "Поехали" по координатам открывала именно приложение Яндекс.Навигатор
+    вместо карт/браузера на части телефонов, и события были не нужны).
+    Возвращает (events, city_supported) - city_supported=False значит
+    TimePad вообще не покрывает этот город (нужно отдельное сообщение "нет
+    данных", а не пустой список - это разные вещи)."""
+    if city not in fetch_timepad_data.TIMEPAD_CITY_MAP:
         return [], False
-    data = load_events_data()
-    if not data:
-        return [], True
-    city_events = data.get('cities', {}).get(city, [])
+
     now_ts = datetime.now(ZoneInfo('UTC')).timestamp()
+    data = load_timepad_data()
+    city_events = (data or {}).get('cities', {}).get(city, [])
+    # fetch_timepad_data.py уже отфильтровал по категориям и
+    # tickets_total>=200 на стороне сбора данных - здесь только актуальность
+    # по времени (адрес и масштаб уже гарантированы).
     upcoming = [e for e in city_events if e.get('start', 0) >= now_ts]
-    # Показываем только события с указанным адресом площадки - водителю без
-    # адреса ехать некуда, а "🚗 Поехали" всё равно требует координат
-    # (place_lat/place_lon), которые у KudaGo почти всегда идут вместе с адресом.
-    upcoming = [e for e in upcoming if e.get('place_address')]
-    if category == 'ultima':
-        upcoming = [e for e in upcoming if (parse_min_price(e) or 0) >= ULTIMA_MIN_PRICE]
+    upcoming.sort(key=lambda e: e['start'])
     return upcoming[:limit], True
 
-# Часовой пояс городов, покрытых KudaGo (используется только для афиши - не
-# путать с AIRPORT_TIMEZONE, который привязан к конкретным аэропортам).
+# Часовой пояс городов афиши (используется только для событий - не путать с
+# AIRPORT_TIMEZONE, который привязан к конкретным аэропортам). Пока только
+# Москва (TimePad), остальные оставлены на будущее расширение покрытия.
 EVENT_CITY_TIMEZONE = {
     'moscow': 'Europe/Moscow',
     'spb': 'Europe/Moscow',
@@ -615,9 +599,9 @@ EVENT_CITY_TIMEZONE = {
 def format_event_datetime(event, city):
     """Диапазон начала-конца мероприятия в часовом поясе города - водителю
     важно понимать не только когда началось, но и когда примерно закончится
-    (именно момент разъезда даёт всплеск спроса у площадки). KudaGo не всегда
-    знает точную длительность - тогда end==start, и показываем только начало,
-    без диапазона."""
+    (именно момент разъезда даёт всплеск спроса у площадки). Если TimePad не
+    знает точную длительность - end==start, и показываем только начало, без
+    диапазона."""
     tz = ZoneInfo(EVENT_CITY_TIMEZONE.get(city, 'Europe/Moscow'))
     start_dt = datetime.fromtimestamp(event['start'], tz)
     end_ts = event.get('end') or event['start']
@@ -628,60 +612,41 @@ def format_event_datetime(event, city):
         return f"{start_dt.strftime('%d.%m, %H:%M')}–{end_dt.strftime('%H:%M')}"
     return f"{start_dt.strftime('%d.%m %H:%M')} – {end_dt.strftime('%d.%m %H:%M')}"
 
-# Оценка числа посетителей мероприятия - KudaGo НЕ отдаёт вместимость
-# площадки или число участников вообще (проверено по полной схеме
-# события/места - такого поля там нет в принципе, "participants" в API это
-# актёры/режиссёр, а не аудитория). Поэтому это ГРУБАЯ прикидка по ключевым
-# словам в названии площадки и по категории события, а не реальные данные -
-# в сообщении всегда явно помечена как "оценка", чтобы не выдавать за факт.
-VENUE_SIZE_KEYWORDS = [
-    (3000, 15000, ['стадион', 'арена', 'дворец спорта', 'экспоцентр', 'манеж', 'ледовый']),
-    (800, 3000, ['дворец культуры', ' дк ', 'концертный зал', 'кремль', 'олимпийский', 'крокус']),
-    (100, 400, ['клуб', 'бар', 'лофт', 'гастро', 'кафе']),
-]
-
 def estimate_attendance(event):
-    """Возвращает (мин, макс) грубой оценки числа посетителей."""
-    place = f" {(event.get('place_title') or '').lower()} "
-    for lo, hi, keywords in VENUE_SIZE_KEYWORDS:
-        if any(k in place for k in keywords):
-            return lo, hi
-    categories = set(event.get('categories', []))
-    if 'festival' in categories:
-        return 500, 3000
-    if 'theater' in categories:
-        return 200, 700
-    if 'concert' in categories:
-        return 150, 600
-    if 'exhibition' in categories:
-        return 50, 300
-    return 100, 400
+    """Возвращает (мин, макс) числа посетителей. TimePad-события всегда
+    несут РЕАЛЬНОЕ число билетов (tickets_total) - оно уже прошло порог
+    TIMEPAD_MIN_TICKETS на этапе сбора данных (см. fetch_timepad_data.py),
+    так что отдельная догадка по ключевым словам в названии площадки не
+    нужна. Диапазон 0.7x-1.0x от tickets_total проще подать водителю, чем
+    точную цифру, и не выглядит как гарантия явки именно этого числа людей."""
+    tickets_total = event.get('tickets_total') or 0
+    return int(tickets_total * 0.7), int(tickets_total)
 
 def build_event_message(event, city):
-    """Текст + инлайн-кнопки для ОДНОГО события. "🚗 Поехали" ведёт маршрутом
-    в Яндекс.Карты (если у KudaGo есть координаты места) - специально ссылка
-    https://yandex.ru/maps/?rtext=..., а НЕ схема yandexnavi://build_route_on_map:
-    у yandexnavi:// нет веб-фолбэка вообще (если у водителя не установлен
-    именно Яндекс.Навигатор - кнопка молча ничего не сделает), а обычная
-    https-ссылка на Яндекс.Карты открывается всегда - в приложении Карт/
-    Навигатора, если оно установлено и ассоциировано с доменом, и в браузере
-    в любом случае, если нет. "🔗 Подробнее" - страница события на KudaGo."""
+    """Текст + инлайн-кнопки для ОДНОГО события TimePad. "🚗 Поехали": у
+    TimePad нет координат площадки вообще (только текстовый адрес) - кнопка
+    ведёт на ссылку-ПОИСК по адресу https://yandex.ru/maps/?text=<адрес>
+    (Яндекс.Карты сами геокодируют текст), а НЕ на схему yandexnavi://
+    build_route_on_map: у неё нет веб-фолбэка вообще (если у водителя не
+    установлен именно Яндекс.Навигатор - кнопка молча ничего не сделает), а
+    обычная https-ссылка на Яндекс.Карты открывается всегда - в приложении
+    Карт/Навигатора, если оно установлено и ассоциировано с доменом, и в
+    браузере в любом случае, если нет. "🔗 Подробнее" - страница события на TimePad."""
     date_str = format_event_datetime(event, city)
     lo, hi = estimate_attendance(event)
     lines = [f"🎫 *{event['title']}*"]
-    place_bits = [p for p in (event.get('place_title'), event.get('place_address')) if p]
-    if place_bits:
-        lines.append("📍 " + " · ".join(place_bits))
-    lines.append(f"👥 ~{lo}–{hi} чел. _(оценка)_")
+    address = event.get('place_address')
+    if address:
+        lines.append(f"📍 {address}")
+    lines.append(f"👥 ~{lo}–{hi} чел.")
     lines.append(f"🗓 {date_str}")
-    # Цену билета не показываем - водителям она не нужна (используется только
-    # внутри parse_min_price для фильтра Ultima, см. get_events_for_user).
+    # Цену билета не показываем - водителям она не нужна.
     text = '\n'.join(lines)
 
     buttons = []
-    lat, lon = event.get('place_lat'), event.get('place_lon')
-    if lat and lon:
-        buttons.append(InlineKeyboardButton(text="🚗 Поехали", url=f"https://yandex.ru/maps/?rtext=~{lat},{lon}&rtt=auto"))
+    if address:
+        from urllib.parse import quote
+        buttons.append(InlineKeyboardButton(text="🚗 Поехали", url=f"https://yandex.ru/maps/?text={quote(address)}"))
     if event.get('url'):
         buttons.append(InlineKeyboardButton(text="🔗 Подробнее", url=event['url']))
     keyboard = InlineKeyboardMarkup(inline_keyboard=[buttons]) if buttons else None
@@ -1140,7 +1105,7 @@ def services_keyboard(category=None, city=None):
     # Итоговый набор кнопок меню услуг (по заданному порядку). "Заказы
     # города" (было "Повышенный спрос") убрана по просьбе пользователя - была
     # заглушкой без своей логики. "Дорожные события" тоже пока без
-    # обработчика - как было. "🎭 События города" (афиша KudaGo) - только
+    # обработчика - как было. "🎭 События города" (афиша TimePad) - только
     # у Такси/Ultima, курьеру и грузовому такси не актуальна (см.
     # CATEGORIES_WITHOUT_EVENTS). "🚆 Вокзалы" - только в городах из
     # TRAIN_CITIES (см. STATION_CITY), той же категории, что и аэропорты.
@@ -1497,11 +1462,12 @@ async def show_fuel_bot(message: types.Message):
 
 @router.message(lambda message: message.text == "🎭 События города")
 async def show_city_events(message: types.Message):
-    """Афиша - источник KudaGo, см. fetch_events_data.py. Такси эконом/комфорт
-    видит ВСЕ мероприятия города, Ultima - только от ULTIMA_MIN_PRICE рублей
-    (см. get_events_for_user/parse_min_price). Покрывает только 4 из 12
-    городов бота (Москва/СПб/Екатеринбург/Казань) - для остальных явно
-    говорим "нет данных", а не показываем пустой экран."""
+    """Афиша - источник ТОЛЬКО TimePad (см. fetch_timepad_data.py; KudaGo
+    убран по просьбе пользователя - кнопка "Поехали" по координатам
+    открывала именно приложение Яндекс.Навигатор вместо карт/браузера,
+    события были не нужны). Показываем топ-10 ближайших крупных событий
+    (см. get_events_for_user, limit=10). Для городов вне покрытия TimePad
+    явно говорим "нет данных", а не показываем пустой экран."""
     user_id = message.from_user.id
     if user_id not in user_state or 'city' not in user_state[user_id]:
         await message.answer("Сначала выбери город!")
@@ -1509,14 +1475,14 @@ async def show_city_events(message: types.Message):
     city = user_state[user_id]['city']
     category = user_state[user_id].get('category', 'taxi')
 
-    events, city_supported = get_events_for_user(city, category, limit=5)
+    events, city_supported = get_events_for_user(city, category, limit=10)
 
     if not city_supported:
         text = (
             "🎭 *События города*\n\n"
             "Для этого города пока нет данных об афише - источник событий "
-            "(KudaGo) покрывает только Москву, СПб, Екатеринбург и Казань. "
-            "Будем искать источник и для остальных городов."
+            "(TimePad) пока покрывает только Москву. Будем искать источник "
+            "и для остальных городов."
         )
         await message.answer(text, reply_markup=services_keyboard(category, city), parse_mode='Markdown')
         return
@@ -1536,11 +1502,14 @@ async def show_city_events(message: types.Message):
     # (она остаётся видна и дальше, повторно прикреплять на каждое сообщение
     # не нужно). Каждое событие - ОТДЕЛЬНЫМ сообщением со СВОЕЙ инлайн-кнопкой
     # "Поехали", чтобы кнопка однозначно вела именно к этому месту, а не к
-    # первому/последнему в общем списке.
+    # первому/последнему в общем списке. Небольшая пауза между отправками -
+    # чтобы Telegram не сворачивал быстро идущие подряд сообщения от одного
+    # бота визуально в одну группу у пользователя.
     await message.answer(header, reply_markup=services_keyboard(category, city), parse_mode='Markdown')
     for event in events:
         text, keyboard = build_event_message(event, city)
         await message.answer(text, reply_markup=keyboard, parse_mode='Markdown', disable_web_page_preview=True)
+        await asyncio.sleep(0.1)
 
 @router.message(lambda message: message.text == "Аэропорты")
 async def show_airport_menu(message: types.Message):
@@ -2371,19 +2340,20 @@ async def favt_notices_updater():
             logger.error(f"❌ Ошибка фонового обновления favt_notices.json: {e}")
         await asyncio.sleep(FAVT_UPDATE_INTERVAL_MINUTES * 60)
 
-async def events_data_updater():
-    """Фоновая задача: раз в EVENTS_UPDATE_INTERVAL_HOURS часов обновляет
-    events_data.json из KudaGo (афиша города). Публичный API без ключа и без
-    строгого лимита запросов, но события не нужно тянуть часто - раз в
-    несколько часов более чем достаточно."""
+async def timepad_data_updater():
+    """Фоновая задача: раз в TIMEPAD_UPDATE_INTERVAL_HOURS часов обновляет
+    timepad_data.json (второй источник афиши, см. fetch_timepad_data.py).
+    Токен читается из переменной окружения TIMEPAD_TOKEN на Railway - если
+    не задан, fetch_timepad_data.py сам логирует предупреждение и отдаёт
+    пустой список городов (не падает)."""
     while True:
         try:
-            logger.info("🔄 Обновляю events_data.json из KudaGo...")
-            await asyncio.to_thread(fetch_events_data.main)
-            logger.info("✅ events_data.json обновлён")
+            logger.info("🔄 Обновляю timepad_data.json из TimePad...")
+            await asyncio.to_thread(fetch_timepad_data.main)
+            logger.info("✅ timepad_data.json обновлён")
         except Exception as e:
-            logger.error(f"❌ Ошибка фонового обновления events_data.json: {e}")
-        await asyncio.sleep(EVENTS_UPDATE_INTERVAL_HOURS * 3600)
+            logger.error(f"❌ Ошибка фонового обновления timepad_data.json: {e}")
+        await asyncio.sleep(TIMEPAD_UPDATE_INTERVAL_HOURS * 3600)
 
 async def main():
     global bot
@@ -2398,7 +2368,7 @@ async def main():
         logger.warning("⚠️ YANDEX_RASP_API_KEY не задан в переменных окружения Railway - flights_data.json и trains_data.json не будут обновляться автоматически")
     asyncio.create_task(favt_notices_updater())
     asyncio.create_task(high_demand_alert_checker())
-    asyncio.create_task(events_data_updater())
+    asyncio.create_task(timepad_data_updater())
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
