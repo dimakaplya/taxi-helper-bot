@@ -556,8 +556,41 @@ async def show_airport_details(callback_query: types.CallbackQuery):
     await msg.edit_text(text, parse_mode='Markdown')
     await callback_query.answer()
 
+def compute_current_availability(airport_icao, relevant_class):
+    """Загруженность аэропорта ПРЯМО СЕЙЧАС для конкретного класса (эконом/бизнес/все):
+    прилёты в текущий час (эти пассажиры выходят из терминала прямо сейчас) +
+    вылеты через DEPARTURE_LEAD_TIME_HOURS (эти пассажиры заказывают такси в городе
+    прямо сейчас). Сравнивается с ЧАСОВОЙ пропускной способностью - раньше тут по
+    ошибке складывались пассажиры ВСЕХ рейсов за весь день, что давало 1000-2000%+."""
+    now = datetime.now()
+    current_hour = now.hour
+    arrivals = get_airport_flights(airport_icao, 'arrivals')
+    departures = get_airport_flights(airport_icao, 'departures')
+    capacity = AIRPORT_CAPACITY.get(airport_icao, 1000)
+    relevant_cap = {'economy': capacity * ECONOMY_SHARE, 'business': capacity * BUSINESS_SHARE, 'total': capacity}[relevant_class]
+    key = {'economy': 'passengers_economy', 'business': 'passengers_business', 'total': 'passengers'}[relevant_class]
+
+    departure_order_hour = (current_hour + DEPARTURE_LEAD_TIME_HOURS) % 24
+    arrivals_now = [f for f in arrivals if datetime.fromtimestamp(f.get('firstSeen', 0)).hour == current_hour]
+    departures_soon = [f for f in departures if datetime.fromtimestamp(f.get('firstSeen', 0)).hour == departure_order_hour]
+
+    total_passengers = sum(f.get(key, 0) for f in arrivals_now) + sum(f.get(key, 0) for f in departures_soon)
+    load = (total_passengers / relevant_cap) * 100 if total_passengers > 0 else 0
+    return {
+        'load': load,
+        'capacity': capacity,
+        'relevant_cap': relevant_cap,
+        'arrivals_now': arrivals_now,
+        'departures_soon': departures_soon,
+        'total_passengers': total_passengers,
+        'current_hour': current_hour,
+        'departure_order_hour': departure_order_hour,
+    }
+
 @router.callback_query(lambda c: c.data == "airport_availability")
 async def show_airport_availability(callback_query: types.CallbackQuery):
+    """Список аэропортов города с быстрым индикатором загрузки - выбери конкретный
+    для подробностей (см. show_availability_details)."""
     user_id = callback_query.from_user.id
     if user_id not in user_state:
         await callback_query.answer("Ошибка!", show_alert=True)
@@ -569,67 +602,86 @@ async def show_airport_availability(callback_query: types.CallbackQuery):
         return
     category = user_state.get(user_id, {}).get('category', 'taxi')
     relevant_class = CATEGORY_TO_CLASS.get(category, 'total')
-    class_label = {'economy': 'эконом', 'business': 'бизнес', 'total': 'все классы'}[relevant_class]
     msg = await callback_query.message.edit_text("⏳ Загружаю доступность...")
 
     try:
-        text = f"*🔄 Доступность Аэропортов*\n_Обновлено: {datetime.now().strftime('%H:%M:%S')} | Класс: {class_label}_\n\n"
-        for airport in airports:
-            arrivals = get_airport_flights(airport['icao'], 'arrivals')
-            departures = get_airport_flights(airport['icao'], 'departures')
-            capacity = AIRPORT_CAPACITY.get(airport['icao'], 1000)
-            relevant_cap = {'economy': capacity * ECONOMY_SHARE, 'business': capacity * BUSINESS_SHARE, 'total': capacity}[relevant_class]
-            key = {'economy': 'passengers_economy', 'business': 'passengers_business', 'total': 'passengers'}[relevant_class]
-            total_passengers = sum(f.get(key, 0) for f in arrivals + departures)
-            current_load = (total_passengers / relevant_cap) * 100 if total_passengers > 0 else 0
-            if current_load < 50:
-                status = "✅ Свободен"
-                load_emoji = "🟢"
-            elif current_load < 70:
-                status = "⚠️ Средняя нагрузка"
-                load_emoji = "🟡"
-            elif current_load < 100:
-                status = "🟠 Высокая нагрузка"
-                load_emoji = "🟠"
-            else:
-                status = "🔴 Перегруженный"
-                load_emoji = "🔴"
-            text += f"{airport['emoji']} *{airport['name']}*\n"
-            text += f"  {load_emoji} {status}\n"
-            text += f"  📊 Загруженность: {current_load:.0f}%\n"
-            text += f"  ✈️ Рейсов: {len(arrivals + departures)}\n"
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[])
+        for i, airport in enumerate(airports):
+            info = compute_current_availability(airport['icao'], relevant_class)
+            emoji = get_load_emoji(info['load'])
+            button_text = f"{airport['emoji']} {airport['name']} {emoji} {info['load']:.0f}%"
+            keyboard.inline_keyboard.append([InlineKeyboardButton(text=button_text, callback_data=f"availability_details_{city}_{i}")])
+        await msg.edit_text("🔄 *Доступность аэропортов*\nВыбери аэропорт для подробностей 👇", reply_markup=keyboard, parse_mode='Markdown')
+    except Exception as e:
+        logger.error(f"❌ Ошибка в show_airport_availability: {e}")
+        try:
+            await msg.edit_text("⚠️ Не удалось загрузить доступность аэропортов. Попробуй ещё раз через минуту.")
+        except Exception:
+            pass
 
-            notices = get_notices_for_airport(airport['icao'])
-            if notices:
-                latest = notices[0]
+    await callback_query.answer()
+
+@router.callback_query(lambda c: c.data.startswith('availability_details_'))
+async def show_availability_details(callback_query: types.CallbackQuery):
+    """Подробная доступность ОДНОГО выбранного аэропорта: загрузка сейчас,
+    прилёты/вылеты текущего часа и все уведомления Росавиации за 12ч."""
+    data_parts = callback_query.data.split('_')
+    city = data_parts[2]
+    airport_idx = int(data_parts[3])
+    airport = AIRPORTS_INFO[city][airport_idx]
+
+    user_id = callback_query.from_user.id
+    category = user_state.get(user_id, {}).get('category', 'taxi')
+    relevant_class = CATEGORY_TO_CLASS.get(category, 'total')
+    class_label = {'economy': 'Эконом-класс', 'business': 'Бизнес-класс', 'total': 'Все классы'}[relevant_class]
+
+    msg = await callback_query.message.edit_text(f"⏳ Загружаю {airport['name']}...")
+
+    try:
+        info = compute_current_availability(airport['icao'], relevant_class)
+        load = info['load']
+        if load < 50:
+            status, load_emoji = "✅ Свободен", "🟢"
+        elif load < 70:
+            status, load_emoji = "⚠️ Средняя нагрузка", "🟡"
+        elif load < 100:
+            status, load_emoji = "🟠 Высокая нагрузка", "🟠"
+        else:
+            status, load_emoji = "🔴 Перегруженный", "🔴"
+
+        text = f"*{airport['emoji']} {airport['name']} - Доступность*\n"
+        text += f"_Обновлено: {datetime.now().strftime('%H:%M:%S')} | Класс: {class_label}_\n\n"
+        text += f"{load_emoji} *{status}*\n"
+        text += f"📊 Загруженность сейчас: *{load:.0f}%* (от {info['relevant_cap']:.0f} пас/час)\n\n"
+        text += f"🛬 Прилетает в {info['current_hour']:02d}:00-{(info['current_hour']+1)%24:02d}:00: {len(info['arrivals_now'])} рейсов\n"
+        text += f"🛫 Вылетает в {info['departure_order_hour']:02d}:00-{(info['departure_order_hour']+1)%24:02d}:00 (заказы в городе сейчас): {len(info['departures_soon'])} рейсов\n\n"
+
+        notices = get_notices_for_airport(airport['icao'])
+        if notices:
+            text += "*📢 Уведомления Росавиации (последние 12ч):*\n"
+            for n in notices[:5]:
                 try:
-                    notice_time = datetime.fromisoformat(latest['time']).astimezone().strftime('%H:%M')
+                    ntime = datetime.fromisoformat(n['time']).astimezone().strftime('%H:%M')
                 except Exception:
-                    notice_time = '??:??'
-                restricted = 'ВВЕДЕНЫ' in latest['text'].upper() and 'СНЯТ' not in latest['text'].upper()
+                    ntime = '??:??'
+                restricted = 'ВВЕДЕНЫ' in n['text'].upper() and 'СНЯТ' not in n['text'].upper()
                 notice_emoji = '🚫' if restricted else 'ℹ️'
-                safe_notice_text = escape_md(latest['text'][:150])
-                text += f"  {notice_emoji} *Росавиация ({notice_time}):* {safe_notice_text}\n"
-                if len(notices) > 1:
-                    text += f"  _(+{len(notices) - 1} за последние 12ч)_\n"
-            text += "\n"
-
-        all_notices = (load_favt_notices() or {}).get('notices', [])
-        other_notices = [n for n in all_notices if not any(a['icao'] in n.get('airports', []) for a in airports)]
-        if other_notices:
-            text += f"_ℹ️ Ещё {len(other_notices)} уведомлений Росавиации за 12ч по другим городам (см. канал @favt_info)_\n"
+                text += f"{notice_emoji} *{ntime}:* {escape_md(n['text'][:200])}\n\n"
+            if len(notices) > 5:
+                text += f"_(+{len(notices) - 5} ещё за 12ч)_\n"
+        else:
+            text += "_Уведомлений Росавиации по этому аэропорту за последние 12ч нет_\n"
 
         try:
             await msg.edit_text(text, parse_mode='Markdown')
         except Exception as e:
             logger.error(f"❌ Не удалось отправить доступность с Markdown-разметкой: {e}")
-            # Фолбэк без разметки - чтобы юзер хоть что-то увидел, а не вечную "Загружаю..."
             plain_text = text.replace('*', '').replace('_', '')
             await msg.edit_text(plain_text)
     except Exception as e:
-        logger.error(f"❌ Непредвиденная ошибка в show_airport_availability: {e}")
+        logger.error(f"❌ Непредвиденная ошибка в show_availability_details: {e}")
         try:
-            await msg.edit_text("⚠️ Не удалось загрузить доступность аэропортов. Попробуй ещё раз через минуту.")
+            await msg.edit_text("⚠️ Не удалось загрузить доступность. Попробуй ещё раз через минуту.")
         except Exception:
             pass
 
