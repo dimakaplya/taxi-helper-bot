@@ -331,11 +331,8 @@ async def initialize_bot():
         logger.error(f"❌ Ошибка: {e}")
         return False
 
-@router.message(Command("start"))
-async def start(message: types.Message):
-    init_db()
-    text = "🚕 *Taxi Helper*\n\nВыбери город 👇"
-    keyboard = ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[
+def city_keyboard():
+    return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[
         [KeyboardButton(text="🏛️ Москва"), KeyboardButton(text="🕯️ СПб")],
         [KeyboardButton(text="🌲 Новосибирск"), KeyboardButton(text="🏔️ Екатеринбург")],
         [KeyboardButton(text="🎓 Казань"), KeyboardButton(text="❄️ Челябинск")],
@@ -343,7 +340,46 @@ async def start(message: types.Message):
         [KeyboardButton(text="🌊 Ростов"), KeyboardButton(text="⛰️ Уфа")],
         [KeyboardButton(text="🌴 Краснодар"), KeyboardButton(text="🏖️ Сочи")]
     ])
-    await message.answer(text, reply_markup=keyboard, parse_mode='Markdown')
+
+def category_keyboard():
+    keyboard_buttons = [[KeyboardButton(text=f"{cat_data['name']}")] for cat_data in CATEGORIES.values()]
+    keyboard_buttons.append([KeyboardButton(text="← Назад")])
+    return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=keyboard_buttons)
+
+def services_keyboard():
+    return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[
+        [KeyboardButton(text="Куда поехать")],
+        [KeyboardButton(text="Аэропорты")],
+        [KeyboardButton(text="Повышенный спрос")],
+        [KeyboardButton(text="Дорожные события")],
+        [KeyboardButton(text="← Назад")]
+    ])
+
+@router.message(Command("start"))
+async def start(message: types.Message):
+    init_db()
+    user_state.pop(message.from_user.id, None)
+    text = "🚕 *Taxi Helper*\n\nВыбери город 👇"
+    await message.answer(text, reply_markup=city_keyboard(), parse_mode='Markdown')
+
+@router.message(lambda message: message.text == "← Назад")
+async def go_back(message: types.Message):
+    user_id = message.from_user.id
+    state = user_state.get(user_id)
+
+    if not state or 'city' not in state:
+        # Некуда возвращаться дальше - показываем выбор города
+        await message.answer("Выбери город 👇", reply_markup=city_keyboard())
+        return
+
+    if 'category' in state:
+        # Были на экране услуг -> возвращаемся к выбору категории (город остаётся)
+        state.pop('category', None)
+        await message.answer("Выбери категорию 👇", reply_markup=category_keyboard())
+    else:
+        # Были на экране категорий -> возвращаемся к выбору города
+        user_state.pop(user_id, None)
+        await message.answer("Выбери город 👇", reply_markup=city_keyboard())
 
 @router.message(lambda message: any(city in message.text for city in ["Москва", "СПб", "Новосибирск", "Екатеринбург", "Казань", "Челябинск", "Омск", "Самара", "Ростов", "Уфа", "Краснодар", "Сочи"]))
 async def select_city(message: types.Message):
@@ -355,9 +391,7 @@ async def select_city(message: types.Message):
     }
     user_state[message.from_user.id] = {'city': city_map.get(message.text, "moscow")}
     text = f"Вы выбрали {message.text}\n\nВыбери категорию 👇"
-    keyboard_buttons = [[KeyboardButton(text=f"{cat_data['name']}")] for cat_data in CATEGORIES.values()]
-    keyboard_buttons.append([KeyboardButton(text="← Назад")])
-    await message.answer(text, reply_markup=ReplyKeyboardMarkup(resize_keyboard=True, keyboard=keyboard_buttons))
+    await message.answer(text, reply_markup=category_keyboard())
 
 @router.message(lambda message: any(cat_data['name'] in message.text for cat_data in CATEGORIES.values()))
 async def select_category(message: types.Message):
@@ -372,14 +406,7 @@ async def select_category(message: types.Message):
             user_state[user_id]['category'] = cat_key
             break
     text = "Выбери услугу 👇"
-    keyboard = ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[
-        [KeyboardButton(text="Куда поехать")],
-        [KeyboardButton(text="Аэропорты")],
-        [KeyboardButton(text="Повышенный спрос")],
-        [KeyboardButton(text="Дорожные события")],
-        [KeyboardButton(text="← Назад")]
-    ])
-    await message.answer(text, reply_markup=keyboard)
+    await message.answer(text, reply_markup=services_keyboard())
 
 @router.message(lambda message: message.text == "Аэропорты")
 async def show_airport_menu(message: types.Message):
