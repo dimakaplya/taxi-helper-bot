@@ -1231,12 +1231,32 @@ NEARBY_BUTTON_TO_KIND = {
 }
 
 NEARBY_SERVICES = {
-    'toilets': {'file': 'toilets_data.json', 'label': 'Туалеты', 'emoji': '🚻', 'noun': 'туалетов'},
-    'parking': {'file': 'parking_data.json', 'label': 'Бесплатные парковки', 'emoji': '🅿️', 'noun': 'парковок'},
-    'tires': {'file': 'tires_data.json', 'label': 'Шиномонтажи', 'emoji': '🔧', 'noun': 'шиномонтажей'},
-    'car_wash': {'file': 'car_wash_data.json', 'label': 'Автомойки', 'emoji': '🚿', 'noun': 'моек'},
+    # 'noun' - винительный падеж мн. числа для фразы "найти ближайшие ___"
+    # (show_nearby_prompt) - для этих слов совпадает с именительным (label).
+    'toilets': {'file': 'toilets_data.json', 'label': 'Туалеты', 'emoji': '🚻', 'noun': 'туалеты'},
+    'parking': {'file': 'parking_data.json', 'label': 'Бесплатные парковки', 'emoji': '🅿️', 'noun': 'бесплатные парковки'},
+    'tires': {'file': 'tires_data.json', 'label': 'Шиномонтажи', 'emoji': '🔧', 'noun': 'шиномонтажи'},
+    'car_wash': {'file': 'car_wash_data.json', 'label': 'Автомойки', 'emoji': '🚿', 'noun': 'автомойки'},
 }
-NEARBY_RESULTS_COUNT = 10
+NEARBY_RESULTS_COUNT = 5
+
+# Только для kind='toilets': точки бывают не только явными туалетами
+# (amenity=toilets), но и местами, где туалет почти наверняка есть, хотя явно
+# не помечен в OSM - заправки/кафе/рестораны (по просьбе пользователя, см.
+# fetch_toilets_data.py). ТЦ (mall) в список намеренно НЕ входит - убрано по
+# прямой просьбе пользователя (туалет в ТЦ часто не быстро найти/дойти).
+# Подписываем явным словом "ТУАЛЕТ" + категория заведения, чтобы сразу было
+# видно, что это место, где искать туалет (а не просто список заведений) -
+# по просьбе пользователя, пример: "ТУАЛЕТ Ресторан Брудер". Для явного
+# amenity=toilets отдельная категория не нужна - там просто "ТУАЛЕТ".
+# Старые данные (собранные до этого расширения) поля 'kind' не имеют -
+# render_nearby_results ниже просто не покажет префикс, это нормально.
+NEARBY_POINT_KIND_LABELS = {
+    'toilet': 'ТУАЛЕТ',
+    'fuel': 'ТУАЛЕТ АЗС',
+    'cafe': 'ТУАЛЕТ Кафе',
+    'restaurant': 'ТУАЛЕТ Ресторан',
+}
 
 _nearby_cache = {}
 _nearby_mtime = {}
@@ -1292,11 +1312,18 @@ def nearest_nearby_points(kind, city, lat, lon, count=NEARBY_RESULTS_COUNT):
     return scored[:count]
 
 def yandex_navi_url(lat, lon):
-    """Deep link кнопки "Поехали" - открывает построение маршрута до точки
-    прямо в приложении Яндекс Навигатор (если оно установлено; если нет -
-    Telegram просто не сможет открыть ссылку, доп. веб-фолбэк не делаем, т.к.
-    пользователь просил именно Навигатор)."""
-    return f"yandexnavi://build_route_on_map?lat_to={lat}&lon_to={lon}"
+    """Ссылка кнопки "Поехали" - маршрут до точки в Яндекс Навигаторе/Картах.
+    ВАЖНО: раньше тут была кастомная схема "yandexnavi://build_route_on_map?..."
+    - Telegram Bot API отклоняет такие ссылки в инлайн-кнопках как невалидные
+    (BUTTON_URL_INVALID), из-за чего сообщение целиком не отправлялось (весь
+    список ближайших точек пропадал - баг, найденный пользователем живьём:
+    первое сообщение "Готово" доходило, второе с кнопками - нет). Универсальная
+    ссылка yandex.ru/maps с rtext/rtt - обычный https:// URL (Telegram его
+    принимает), на телефоне с установленным Яндекс Навигатором/Картами
+    открывается сразу в приложении (Yandex зарегистрировал universal links на
+    этот домен), иначе - в браузере как веб-версия Яндекс Карт с готовым
+    маршрутом."""
+    return f"https://yandex.ru/maps/?rtext=~{lat},{lon}&rtt=auto"
 
 def nearby_location_keyboard():
     return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[
@@ -1316,10 +1343,21 @@ def render_nearby_results(kind, scored_points):
     lines = [f"{cfg['emoji']} *{cfg['label']} — ближайшие {len(scored_points)}*\n"]
     buttons = []
     for i, (dist_km, point) in enumerate(scored_points, start=1):
-        name = escape_md(point.get('name') or 'Без названия')
+        # У немалой части точек в OSM нет названия - раньше тут стояла
+        # заглушка "Без названия", по просьбе пользователя убрали: если
+        # названия нет, просто не показываем его (не выдумываем и не
+        # подписываем никак), только номер и расстояние. Адрес не собираем и
+        # не показываем вообще - в исходных данных (OSM) его тоже нет.
+        name = point.get('name')
+        title = f"*{escape_md(name)}* — " if name else ""
+        # Категория точки (только для "Туалеты" - см. NEARBY_POINT_KIND_LABELS):
+        # ТЦ/АЗС/кафе/ресторан показываем значком ПЕРЕД названием, чтобы было
+        # видно, что это не гарантированный туалет, а место, где он вероятно есть.
+        kind_label = NEARBY_POINT_KIND_LABELS.get(point.get('kind'))
+        prefix = f"{kind_label} " if kind_label else ""
         hours = point.get('hours')
         hours_line = f"   🕐 {escape_md(hours)}" if hours else "   🕐 часы работы не указаны"
-        lines.append(f"{i}. *{name}* — {format_nearby_distance(dist_km)}\n{hours_line}")
+        lines.append(f"{i}. {prefix}{title}{format_nearby_distance(dist_km)}\n{hours_line}")
         buttons.append([InlineKeyboardButton(
             text=f"{i}. 🚕 Поехали",
             url=yandex_navi_url(point['lat'], point['lon']),
@@ -1773,7 +1811,19 @@ async def handle_nearby_location(message: types.Message):
 
     text, keyboard = render_nearby_results(kind, scored)
     await message.answer("Готово 👇", reply_markup=courier_module_keyboard())
-    await message.answer(text, reply_markup=keyboard, parse_mode='Markdown')
+    try:
+        await message.answer(text, reply_markup=keyboard, parse_mode='Markdown')
+    except Exception as e:
+        # Уже был реальный случай: невалидная ссылка в кнопке "Поехали"
+        # (кастомная схема yandexnavi://) роняла именно ЭТО сообщение молча -
+        # первое ("Готово") доходило, а сам список точек пропадал без всякой
+        # ошибки в чате. Больше так не должно случиться ни по какой причине -
+        # если что-то всё же сломается, водитель хотя бы получит понятный
+        # текст вместо тишины, а в логах будет видно, что упало и почему.
+        logger.error(f"❌ Не удалось отправить список точек «{kind}» пользователю {user_id}: {e}")
+        await message.answer(
+            f"{cfg['emoji']} Не получилось показать список - попробуй ещё раз через минуту.",
+        )
 
 @router.message(lambda message: user_state.get(message.from_user.id, {}).get('courier_finance_draft') is not None)
 async def courier_finance_flow(message: types.Message):
