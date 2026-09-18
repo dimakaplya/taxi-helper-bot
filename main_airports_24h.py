@@ -1114,9 +1114,13 @@ def services_keyboard(category=None, city=None):
     # CATEGORIES_WITHOUT_EVENTS). "🚆 Вокзалы" - только в городах из
     # TRAIN_CITIES (см. STATION_CITY), той же категории, что и аэропорты.
     # "🔄 Отдать заказ" - только Такси/Ultima (см. SHARED_ORDER_CATEGORIES).
+    # "🚚 Курьеру" - отдельный модуль (см. COURIER_MODULE_CATEGORIES) для
+    # курьеров/доставки: финансовый калькулятор + заглушки под карту точек.
     buttons = []
     if category in SHARED_ORDER_CATEGORIES:
         buttons.append([KeyboardButton(text="🔄 Отдать заказ")])
+    if category in COURIER_MODULE_CATEGORIES:
+        buttons.append([KeyboardButton(text="🚚 Курьеру")])
     if category not in CATEGORIES_WITHOUT_AIRPORTS:
         buttons.append([KeyboardButton(text="Аэропорты")])
     if city in TRAIN_CITIES and category not in CATEGORIES_WITHOUT_AIRPORTS:
@@ -1127,6 +1131,66 @@ def services_keyboard(category=None, city=None):
     buttons.append([KeyboardButton(text="Дорожные события")])
     buttons.append([KeyboardButton(text="← Назад")])
     return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=buttons)
+
+# ==================== МОДУЛЬ "КУРЬЕРУ" (доставка) ====================
+# Отдельный раздел под курьеров/доставку (Яндекс.Еда, Купер, СДЭК,
+# WB/Ozon-логистика) - пришёл как отдельный прототип (courier-bot-package),
+# встраивается сюда тем же паттерном, что и остальной бот: JSON/state,
+# никакой БД (в отличие от исходной спеки прототипа, где предполагался
+# Postgres+PostGIS - на этом этапе не нужен, все "точечные" разделы ниже
+# пока заглушки). Рабочий сейчас - только 💰 Финансы (см. COURIER_FINANCE_*
+# ниже). Остальные 4 пункта меню - "в разработке" (текст как в самом
+# прототипе, экран data-view="soon").
+COURIER_MODULE_CATEGORIES = {'courier'}
+
+COURIER_STUB_SECTIONS = {
+    "📈 Спрос сейчас",
+    "🚻 Туалеты рядом",
+    "🅿️ Парковка / остановка",
+    "🛠 ТО транспорта",
+}
+
+def courier_module_keyboard():
+    buttons = [
+        [KeyboardButton(text="💰 Финансы")],
+        [KeyboardButton(text="📈 Спрос сейчас")],
+        [KeyboardButton(text="🚻 Туалеты рядом")],
+        [KeyboardButton(text="🅿️ Парковка / остановка")],
+        [KeyboardButton(text="🛠 ТО транспорта")],
+        [KeyboardButton(text="← Назад")],
+    ]
+    return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=buttons)
+
+def courier_finance_cancel_keyboard():
+    return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[[KeyboardButton(text="❌ Отмена")]])
+
+# Резерв на износ/ремонт - фиксированный % от валового дохода (см. README
+# прототипа: "доход минус топливо минус резерв на износ"). Пользователь явно
+# попросил 10% - в отличие от топлива это не физическая величина, а
+# отложенная "подушка" на будущий ремонт/амортизацию, поэтому считается от
+# дохода, а не от километража.
+COURIER_WEAR_RESERVE_RATE = 0.10
+
+COURIER_FINANCE_STEP_PROMPTS = {
+    'income': "💰 Валовый доход за смену, ₽ (только число):",
+    'km': "🚗 Километраж за день, км:",
+    'consumption': "⛽ Расход топлива на 100 км (л или кВтч - как в профиле):",
+    'fuel_price': "💵 Стоимость топлива за литр/кВтч, ₽:",
+    'expenses': "📦 Доп. расходы за смену, ₽ (шины, штрафы и т.п. - если нет, пришли 0):",
+    'hours': "🕐 Сколько часов длилась смена (можно дробно, например 5.5):",
+}
+
+def parse_decimal(text):
+    """Число с точкой или запятой из свободного текста пользователя -
+    Telegram-клавиатуры на телефоне часто подставляют запятую вместо точки."""
+    cleaned = (text or '').strip().replace(',', '.')
+    match = re.search(r'-?\d+(\.\d+)?', cleaned)
+    if not match:
+        return None
+    try:
+        return float(match.group())
+    except ValueError:
+        return None
 
 @router.message(Command("start"))
 async def start(message: types.Message):
@@ -1143,6 +1207,11 @@ async def go_back(message: types.Message):
     if not state or 'city' not in state:
         # Некуда возвращаться дальше - показываем выбор города
         await message.answer("Выбери город 👇", reply_markup=city_keyboard())
+        return
+
+    if state.pop('in_courier_module', None):
+        # Были в подменю "🚚 Курьеру" -> возвращаемся на экран услуг (категория и город остаются)
+        await message.answer("Выбери услугу 👇", reply_markup=services_keyboard(state.get('category'), state.get('city')))
         return
 
     if 'category' in state:
@@ -1419,6 +1488,154 @@ async def accept_shared_order(callback_query: types.CallbackQuery):
 async def decline_shared_order(callback_query: types.CallbackQuery):
     await callback_query.message.edit_text("Вы отказались от этого заказа.")
     await callback_query.answer()
+
+# ==================== МОДУЛЬ "КУРЬЕРУ" - хендлеры ====================
+
+@router.message(lambda message: message.text == "🚚 Курьеру")
+async def open_courier_module(message: types.Message):
+    user_id = message.from_user.id
+    state = user_state.get(user_id)
+    if not state or 'category' not in state:
+        await message.answer("Сначала выбери город и категорию!")
+        return
+    if state.get('category') not in COURIER_MODULE_CATEGORIES:
+        await message.answer(
+            "Этот раздел доступен только категории «Курьер».",
+            reply_markup=services_keyboard(state.get('category'), state.get('city')),
+        )
+        return
+    state['in_courier_module'] = True
+    await message.answer("🚚 *Курьеру*\n\nВыбери раздел 👇", reply_markup=courier_module_keyboard(), parse_mode='Markdown')
+
+@router.message(lambda message: message.text == "💰 Финансы" and user_state.get(message.from_user.id, {}).get('in_courier_module'))
+async def start_courier_finance(message: types.Message):
+    user_id = message.from_user.id
+    state = user_state[user_id]
+    state['courier_finance_draft'] = {'step': 'income', 'data': {}}
+    await message.answer(COURIER_FINANCE_STEP_PROMPTS['income'], reply_markup=courier_finance_cancel_keyboard())
+
+@router.message(lambda message: message.text in COURIER_STUB_SECTIONS and user_state.get(message.from_user.id, {}).get('in_courier_module'))
+async def courier_stub_section(message: types.Message):
+    # Спрос/туалеты/парковка/ТО - пока без реальных точек (нужна карта +
+    # источники данных, см. README прототипа), тот же текст, что в самом
+    # HTML-прототипе на экране-заглушке (data-view="soon").
+    await message.answer("Этот раздел в разработке 🚧 — скоро будет", reply_markup=courier_module_keyboard())
+
+@router.message(lambda message: user_state.get(message.from_user.id, {}).get('courier_finance_draft') is not None)
+async def courier_finance_flow(message: types.Message):
+    """Пошаговый сбор данных для финансового калькулятора - та же схема, что
+    у shared_order_flow (черновик в state, один вопрос за раз). Должен стоять
+    РАНЬШЕ общих текстовых хендлеров по той же причине (см. shared_order_flow)."""
+    user_id = message.from_user.id
+    state = user_state[user_id]
+    draft = state['courier_finance_draft']
+    text = (message.text or '').strip()
+
+    if text == "❌ Отмена":
+        state.pop('courier_finance_draft', None)
+        await message.answer("Расчёт отменён.", reply_markup=courier_module_keyboard())
+        return
+
+    step = draft['step']
+
+    if step == 'income':
+        value = parse_decimal(text)
+        if value is None or value < 0:
+            await message.answer("Не понял сумму - введи просто число, например 2340:")
+            return
+        draft['data']['income'] = value
+        draft['step'] = 'km'
+        state['courier_finance_draft'] = draft
+        await message.answer(COURIER_FINANCE_STEP_PROMPTS['km'], reply_markup=courier_finance_cancel_keyboard())
+        return
+
+    if step == 'km':
+        value = parse_decimal(text)
+        if value is None or value < 0:
+            await message.answer("Не понял километраж - введи число, например 87:")
+            return
+        draft['data']['km'] = value
+        draft['step'] = 'consumption'
+        state['courier_finance_draft'] = draft
+        await message.answer(COURIER_FINANCE_STEP_PROMPTS['consumption'], reply_markup=courier_finance_cancel_keyboard())
+        return
+
+    if step == 'consumption':
+        value = parse_decimal(text)
+        if value is None or value < 0:
+            await message.answer("Не понял расход - введи число, например 6.2:")
+            return
+        draft['data']['consumption'] = value
+        draft['step'] = 'fuel_price'
+        state['courier_finance_draft'] = draft
+        await message.answer(COURIER_FINANCE_STEP_PROMPTS['fuel_price'], reply_markup=courier_finance_cancel_keyboard())
+        return
+
+    if step == 'fuel_price':
+        value = parse_decimal(text)
+        if value is None or value < 0:
+            await message.answer("Не понял цену топлива - введи число, например 61.5:")
+            return
+        draft['data']['fuel_price'] = value
+        draft['step'] = 'expenses'
+        state['courier_finance_draft'] = draft
+        await message.answer(COURIER_FINANCE_STEP_PROMPTS['expenses'], reply_markup=courier_finance_cancel_keyboard())
+        return
+
+    if step == 'expenses':
+        value = parse_decimal(text)
+        if value is None or value < 0:
+            await message.answer("Не понял сумму - введи число (или 0, если доп. расходов не было):")
+            return
+        draft['data']['expenses'] = value
+        draft['step'] = 'hours'
+        state['courier_finance_draft'] = draft
+        await message.answer(COURIER_FINANCE_STEP_PROMPTS['hours'], reply_markup=courier_finance_cancel_keyboard())
+        return
+
+    if step == 'hours':
+        value = parse_decimal(text)
+        if value is None or value <= 0:
+            await message.answer("Не понял часы - введи число больше нуля, например 5.5:")
+            return
+        draft['data']['hours'] = value
+        state.pop('courier_finance_draft', None)
+        await send_courier_finance_result(message, draft['data'])
+        return
+
+async def send_courier_finance_result(message: types.Message, data):
+    """Считает и показывает итог смены - формула и порядок строк повторяют
+    карточку "📊 СМЕНА - ИТОГ" из прототипа (income - топливо - резерв на
+    износ - доп.расходы = чистыми; отдельной строкой ₽/час)."""
+    income = data['income']
+    km = data['km']
+    consumption = data['consumption']
+    fuel_price = data['fuel_price']
+    expenses = data['expenses']
+    hours = data['hours']
+
+    fuel_cost = (km / 100) * consumption * fuel_price
+    wear_reserve = income * COURIER_WEAR_RESERVE_RATE
+    net_profit = income - fuel_cost - wear_reserve - expenses
+    per_hour = net_profit / hours
+
+    def fmt(n):
+        return f"{n:,.0f}".replace(',', ' ')
+
+    lines = [
+        "📊 *СМЕНА — ИТОГ*",
+        "",
+        f"Валовый доход: {fmt(income)} ₽",
+        f"⛽ Топливо ({fmt(km)} км × {consumption:g} на 100): −{fmt(fuel_cost)} ₽",
+        f"🔧 Резерв на износ/ремонт (10%): −{fmt(wear_reserve)} ₽",
+    ]
+    if expenses > 0:
+        lines.append(f"📦 Доп. расходы: −{fmt(expenses)} ₽")
+    lines.append("")
+    lines.append(f"✅ *Чистыми за смену: {fmt(net_profit)} ₽*")
+    lines.append(f"за {hours:g} ч ≈ {fmt(per_hour)} ₽/ч")
+
+    await message.answer('\n'.join(lines), reply_markup=courier_module_keyboard(), parse_mode='Markdown')
 
 @router.message(lambda message: any(city in message.text for city in ["Москва", "СПб", "Новосибирск", "Екатеринбург", "Казань", "Челябинск", "Омск", "Самара", "Ростов", "Нижний Новгород", "Краснодар", "Сочи"]))
 async def select_city(message: types.Message):
