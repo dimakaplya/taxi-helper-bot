@@ -9,9 +9,11 @@ fetch_yandex_data.py и fetch_timepad_data.py) - НЕ фоновой задач�
 ⚠️ ВАЖНО - egress: см. подробное объяснение в fetch_parking_data.py (тот же
 хост overpass-api.de, та же блокировка и то же решение - fetch из браузера).
 
-Тег shop=alcohol. Фильтр "бесплатно"/"круглосуточно" не применяется - это
-обычные алкомаркеты, бот просто показывает ближайший с часами работы (если
-есть в OSM).
+Тег shop=alcohol. По прямой просьбе пользователя показываем ТОЛЬКО
+круглосуточные алкомаркеты (та же эвристика is_24h, что и в
+fetch_grocery24_data.py - см. подробное объяснение там). Точка без тега
+opening_hours или с обычным режимом работы в раздел не попадает - лучше не
+показать точку, чем отправить водителя к закрытому магазину.
 
 Точки дедуплицированы по сетке ~120м.
 """
@@ -55,6 +57,21 @@ CITY_BBOX = {
 GRID_STEP = 0.0015  # ~120 м на широте Москвы
 
 
+def is_24h(hours):
+    """См. docstring модуля и fetch_grocery24_data.py - эвристика "точно
+    круглосуточно" по тегу opening_hours. Возвращает False для пустого/
+    отсутствующего тега."""
+    if not hours:
+        return False
+    h = hours.strip()
+    if h == '24/7':
+        return True
+    h_lower = h.lower()
+    if '00:00-24:00' in h and 'off' not in h_lower and 'closed' not in h_lower:
+        return True
+    return False
+
+
 def fetch_city_alcohol(bbox):
     south, west, north, east = bbox
     query = f'''[out:json][timeout:90];
@@ -68,8 +85,13 @@ out center tags;'''
     data = resp.json()
 
     raw_points = []
+    skipped_not_24h = 0
     for el in data.get('elements', []):
         tags = el.get('tags') or {}
+        hours = tags.get('opening_hours')
+        if not is_24h(hours):
+            skipped_not_24h += 1
+            continue
         if el.get('type') == 'node':
             lat, lon = el.get('lat'), el.get('lon')
         else:
@@ -77,7 +99,9 @@ out center tags;'''
             lat, lon = center.get('lat'), center.get('lon')
         if lat is None or lon is None:
             continue
-        raw_points.append((round(lat, 6), round(lon, 6), tags.get('name'), tags.get('opening_hours')))
+        raw_points.append((round(lat, 6), round(lon, 6), tags.get('name'), hours))
+
+    logger.info(f"   (отфильтровано {skipped_not_24h} НЕ круглосуточных из {len(data.get('elements', []))} алкомаркетов)")
 
     cells = {}
     for lat, lon, name, hours in raw_points:
@@ -95,11 +119,11 @@ def main():
         'cities': {},
     }
     for bot_city, bbox in CITY_BBOX.items():
-        logger.info(f"🔄 Тяну алкомаркеты для {bot_city}...")
+        logger.info(f"🔄 Тяну круглосуточные алкомаркеты для {bot_city}...")
         try:
             points = fetch_city_alcohol(bbox)
             result['cities'][bot_city] = points
-            logger.info(f"✅ {bot_city}: {len(points)} алкомаркетов (после дедупа)")
+            logger.info(f"✅ {bot_city}: {len(points)} круглосуточных алкомаркетов (после дедупа)")
         except Exception as e:
             logger.error(f"❌ Не удалось получить алкомаркеты для {bot_city}: {e}")
             result['cities'][bot_city] = []

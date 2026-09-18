@@ -9,10 +9,15 @@ fetch_yandex_data.py и fetch_timepad_data.py) - НЕ фоновой задач�
 ⚠️ ВАЖНО - egress: см. подробное объяснение в fetch_parking_data.py (тот же
 хост overpass-api.de, та же блокировка и то же решение - fetch из браузера).
 
-Тег amenity=charging_station. Сохраняем дополнительно socket-теги (тип
-разъёма) в поле 'sockets' - если они есть в OSM, но бот пока их не
-показывает отдельно (только название/часы/дистанция, как у остальных
-разделов) - задел на будущее, не обязательный для отображения.
+Тег amenity=charging_station. По прямой просьбе пользователя сразу собираем
+характеристики разъёмов (не только название/часы/дистанцию, как у
+остальных разделов) - см. extract_specs() ниже: тип разъёма (Type 2, CCS,
+CHAdeMO и т.п.) + количество + мощность (если есть тег socket:<тип>:output).
+Результат кладём в поле 'specs' одной строкой вида "Type 2 ×2 (22 kW) ·
+CHAdeMO ×1 (50 kW)" - бот показывает её прямо в списке (см.
+render_nearby_results/NEARBY_POINT_KIND_LABELS в main.py). Если в OSM тегов
+socket:* вообще нет - specs будет None, бот просто не покажет эту строку
+(так же, как сейчас с отсутствующими часами работы).
 
 Точки дедуплицированы по сетке ~120м.
 """
@@ -55,6 +60,55 @@ CITY_BBOX = {
 
 GRID_STEP = 0.0015  # ~120 м на широте Москвы
 
+# OSM-ключ типа разъёма (socket:<KEY>) -> человекочитаемое название.
+# Список - стандартные значения из OSM wiki (Key:socket) для зарядных
+# станций в России/Европе.
+SOCKET_LABELS = {
+    'type2': 'Type 2',
+    'type2_combo': 'CCS (Type 2 Combo)',
+    'type2_cable': 'Type 2 (с кабелем)',
+    'chademo': 'CHAdeMO',
+    'type1': 'Type 1',
+    'type1_combo': 'CCS (Type 1 Combo)',
+    'type1_cable': 'Type 1 (с кабелем)',
+    'tesla_standard': 'Tesla',
+    'tesla_supercharger': 'Tesla Supercharger',
+    'tesla_destination': 'Tesla Destination',
+    'schuko': 'Schuko (бытовая розетка)',
+    'industrial': 'Промышленный разъём',
+    'caravan': 'Caravan',
+}
+
+
+def extract_specs(tags):
+    """Собирает строку вида "Type 2 ×2 (22 kW) · CHAdeMO ×1 (50 kW)" из
+    тегов socket:<тип>[=количество] и socket:<тип>:output=<мощность> (см.
+    docstring модуля). Возвращает None, если ни одного распознанного
+    socket:* тега нет - это нормально, часть точек в OSM отмечена только
+    как charging_station без деталей."""
+    parts = []
+    for key in sorted(tags.keys()):
+        if not key.startswith('socket:'):
+            continue
+        rest = key[len('socket:'):]
+        if ':' in rest:
+            continue  # это socket:<тип>:output/:voltage/:current - обработаем отдельно ниже
+        label = SOCKET_LABELS.get(rest)
+        if not label:
+            continue
+        value = (tags.get(key) or '').strip()
+        count = value if value.isdigit() and value != '0' else None
+        output = tags.get(f'socket:{rest}:output')
+        piece = label
+        if count and count != '1':
+            piece += f" ×{count}"
+        if output:
+            piece += f" ({output})"
+        parts.append(piece)
+    if not parts:
+        return None
+    return ' · '.join(parts)
+
 
 def fetch_city_ev_charging(bbox):
     south, west, north, east = bbox
@@ -78,16 +132,16 @@ out center tags;'''
             lat, lon = center.get('lat'), center.get('lon')
         if lat is None or lon is None:
             continue
-        raw_points.append((round(lat, 6), round(lon, 6), tags.get('name'), tags.get('opening_hours')))
+        raw_points.append((round(lat, 6), round(lon, 6), tags.get('name'), tags.get('opening_hours'), extract_specs(tags)))
 
     cells = {}
-    for lat, lon, name, hours in raw_points:
+    for lat, lon, name, hours, specs in raw_points:
         key = (round(lat / GRID_STEP), round(lon / GRID_STEP))
         existing = cells.get(key)
         if not existing or (not existing[2] and name):
-            cells[key] = (lat, lon, name, hours)
+            cells[key] = (lat, lon, name, hours, specs)
 
-    return [{'lat': lat, 'lon': lon, 'name': name, 'hours': hours} for lat, lon, name, hours in cells.values()]
+    return [{'lat': lat, 'lon': lon, 'name': name, 'hours': hours, 'specs': specs} for lat, lon, name, hours, specs in cells.values()]
 
 
 def main():

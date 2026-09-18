@@ -1217,8 +1217,8 @@ def courier_module_keyboard():
         [KeyboardButton(text="🅿️ Парковка / остановка")],
         [KeyboardButton(text="🔧 Шиномонтаж")],
         [KeyboardButton(text="🚿 Мойки")],
-        [KeyboardButton(text="🍷 Алкомаркеты")],
-        [KeyboardButton(text="🛒 Продукты 24ч")],
+        [KeyboardButton(text="🍷 Алкомаркеты 24ч")],
+        [KeyboardButton(text="🛒 Магазины 24ч")],
         [KeyboardButton(text="🔌 Электрозарядки")],
         [KeyboardButton(text="🛠 ТО транспорта")],
         [KeyboardButton(text="← Назад"), KeyboardButton(text="🏙 Выбор города")],
@@ -1231,8 +1231,8 @@ NEARBY_BUTTON_TO_KIND = {
     "🅿️ Парковка / остановка": 'parking',
     "🔧 Шиномонтаж": 'tires',
     "🚿 Мойки": 'car_wash',
-    "🍷 Алкомаркеты": 'alcohol',
-    "🛒 Продукты 24ч": 'grocery24',
+    "🍷 Алкомаркеты 24ч": 'alcohol',
+    "🛒 Магазины 24ч": 'grocery24',
     "🔌 Электрозарядки": 'ev_charging',
 }
 
@@ -1243,8 +1243,11 @@ NEARBY_SERVICES = {
     'parking': {'file': 'parking_data.json', 'label': 'Бесплатные парковки', 'emoji': '🅿️', 'noun': 'бесплатные парковки'},
     'tires': {'file': 'tires_data.json', 'label': 'Шиномонтажи', 'emoji': '🔧', 'noun': 'шиномонтажи'},
     'car_wash': {'file': 'car_wash_data.json', 'label': 'Автомойки', 'emoji': '🚿', 'noun': 'автомойки'},
-    'alcohol': {'file': 'alcohol_data.json', 'label': 'Алкомаркеты', 'emoji': '🍷', 'noun': 'алкомаркеты'},
-    'grocery24': {'file': 'grocery24_data.json', 'label': 'Продукты 24 часа', 'emoji': '🛒', 'noun': 'круглосуточные продуктовые'},
+    # Алкомаркеты и магазины - по прямой просьбе пользователя показываем ТОЛЬКО
+    # круглосуточные (фильтрация уже на этапе сбора, см. is_24h в
+    # fetch_alcohol_data.py/fetch_grocery24_data.py) - label честно об этом говорит.
+    'alcohol': {'file': 'alcohol_data.json', 'label': 'Алкомаркеты 24 часа', 'emoji': '🍷', 'noun': 'круглосуточные алкомаркеты'},
+    'grocery24': {'file': 'grocery24_data.json', 'label': 'Магазины 24 часа', 'emoji': '🛒', 'noun': 'круглосуточные магазины'},
     'ev_charging': {'file': 'ev_charging_data.json', 'label': 'Электрозарядки', 'emoji': '🔌', 'noun': 'электрозарядки'},
 }
 NEARBY_RESULTS_COUNT = 5
@@ -1366,7 +1369,14 @@ def render_nearby_results(kind, scored_points):
         prefix = f"{kind_label} " if kind_label else ""
         hours = point.get('hours')
         hours_line = f"   🕐 {escape_md(hours)}" if hours else "   🕐 часы работы не указаны"
-        lines.append(f"{i}. {prefix}{title}{format_nearby_distance(dist_km)}\n{hours_line}")
+        # Только для kind='ev_charging' (см. extract_specs в
+        # fetch_ev_charging_data.py) - тип/количество/мощность разъёмов, по
+        # прямой просьбе пользователя показываем сразу в списке, а не только
+        # по клику. Если specs нет (не было socket:* тегов в OSM) - строку не
+        # показываем вообще, как и с часами работы.
+        specs = point.get('specs')
+        specs_line = f"\n   🔌 {escape_md(specs)}" if specs else ""
+        lines.append(f"{i}. {prefix}{title}{format_nearby_distance(dist_km)}\n{hours_line}{specs_line}")
         buttons.append([InlineKeyboardButton(
             text=f"{i}. 🚕 Поехали",
             url=yandex_navi_url(point['lat'], point['lon']),
