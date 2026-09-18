@@ -1125,7 +1125,7 @@ def services_keyboard(category=None, city=None):
     if category in COURIER_MODULE_CATEGORIES:
         buttons.append([KeyboardButton(text="🧰 Инструменты водителя")])
     if category not in CATEGORIES_WITHOUT_AIRPORTS:
-        buttons.append([KeyboardButton(text="Аэропорты")])
+        buttons.append([KeyboardButton(text="✈️ Аэропорты")])
     if city in TRAIN_CITIES and category not in CATEGORIES_WITHOUT_AIRPORTS:
         buttons.append([KeyboardButton(text="🚆 Вокзалы")])
     buttons.append([KeyboardButton(text="⛽ Где бензин")])
@@ -1688,6 +1688,18 @@ async def show_fuel_bot(message: types.Message):
     )
     await message.answer(text, reply_markup=keyboard, parse_mode='Markdown')
 
+@router.message(lambda message: message.text == "Дорожные события")
+async def show_road_events_stub(message: types.Message):
+    """Заглушка - кнопка в меню есть, но своих данных о перекрытиях/авариях
+    у бота пока нет (см. комментарий у services_keyboard). Раньше нажатие
+    просто не давало никакого ответа - это оно и было той самой "пустотой"."""
+    state = user_state.get(message.from_user.id, {})
+    await message.answer(
+        "🚧 *Дорожные события*\n\nЭтот раздел в разработке - скоро здесь появятся перекрытия, аварии и другие дорожные события.",
+        reply_markup=services_keyboard(state.get('category'), state.get('city')),
+        parse_mode='Markdown',
+    )
+
 @router.message(lambda message: message.text == "🎭 События города")
 async def show_city_events(message: types.Message):
     """Афиша - источник ТОЛЬКО TimePad (см. fetch_timepad_data.py; KudaGo
@@ -1739,7 +1751,7 @@ async def show_city_events(message: types.Message):
         await message.answer(text, reply_markup=keyboard, parse_mode='Markdown', disable_web_page_preview=True)
         await asyncio.sleep(0.1)
 
-@router.message(lambda message: message.text == "Аэропорты")
+@router.message(lambda message: message.text == "✈️ Аэропорты")
 async def show_airport_menu(message: types.Message):
     user_id = message.from_user.id
     if user_id not in user_state:
