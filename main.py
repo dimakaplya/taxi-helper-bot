@@ -14,7 +14,10 @@ import os
 import fetch_yandex_data  # логика похода в Yandex Rasp API, запускается фоново прямо на Railway
 import fetch_trains_data  # поезда дальнего следования (Казанский, Ленинградский) - тот же ключ и квота
 import fetch_favt_notices  # логика сбора уведомлений Росавиации (@favt_info), тоже фоново
-import fetch_timepad_data  # афиша города (TimePad) для кнопки "🎭 События города", тоже фоново
+import fetch_timepad_data  # афиша города (TimePad) для кнопки "🎭 События города" - используется
+                            # только для TIMEPAD_CITY_MAP; timepad_data.json обновляется ЛОКАЛЬНО
+                            # (см. fetch_timepad_data.py), Railway не может дотянуться до TimePad
+                            # (Cloudflare блокирует датацентровые IP, см. комментарий в самом файле)
 
 BOT_TOKEN = os.getenv('TELEGRAM_TOKEN', '8968196261:AAGjxaTy_evirnWDAO124vmkbbDFy03kekY')
 
@@ -118,10 +121,11 @@ FAVT_NOTICES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fa
 FAVT_UPDATE_INTERVAL_MINUTES = 15
 
 # Афиша города (TimePad, см. fetch_timepad_data.py) - события меняются
-# медленно (не по минутам, как рейсы/статусы), поэтому обновляем редко и не
-# тратим лишние запросы. Пока покрывает только Москву.
+# медленно (не по минутам, как рейсы/статусы). Обновляется ЛОКАЛЬНО (см.
+# fetch_timepad_data.py - Railway не может дотянуться до TimePad, Cloudflare
+# блокирует датацентровые IP), файл коммитится/пушится вручную. Пока
+# покрывает только Москву.
 TIMEPAD_DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'timepad_data.json')
-TIMEPAD_UPDATE_INTERVAL_HOURS = 3
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -2340,21 +2344,6 @@ async def favt_notices_updater():
             logger.error(f"❌ Ошибка фонового обновления favt_notices.json: {e}")
         await asyncio.sleep(FAVT_UPDATE_INTERVAL_MINUTES * 60)
 
-async def timepad_data_updater():
-    """Фоновая задача: раз в TIMEPAD_UPDATE_INTERVAL_HOURS часов обновляет
-    timepad_data.json (второй источник афиши, см. fetch_timepad_data.py).
-    Токен читается из переменной окружения TIMEPAD_TOKEN на Railway - если
-    не задан, fetch_timepad_data.py сам логирует предупреждение и отдаёт
-    пустой список городов (не падает)."""
-    while True:
-        try:
-            logger.info("🔄 Обновляю timepad_data.json из TimePad...")
-            await asyncio.to_thread(fetch_timepad_data.main)
-            logger.info("✅ timepad_data.json обновлён")
-        except Exception as e:
-            logger.error(f"❌ Ошибка фонового обновления timepad_data.json: {e}")
-        await asyncio.sleep(TIMEPAD_UPDATE_INTERVAL_HOURS * 3600)
-
 async def main():
     global bot
     if not await initialize_bot():
@@ -2368,7 +2357,6 @@ async def main():
         logger.warning("⚠️ YANDEX_RASP_API_KEY не задан в переменных окружения Railway - flights_data.json и trains_data.json не будут обновляться автоматически")
     asyncio.create_task(favt_notices_updater())
     asyncio.create_task(high_demand_alert_checker())
-    asyncio.create_task(timepad_data_updater())
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
