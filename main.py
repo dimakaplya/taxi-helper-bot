@@ -14,6 +14,7 @@ import os
 import fetch_yandex_data  # логика похода в Yandex Rasp API, запускается фоново прямо на Railway
 import fetch_trains_data  # поезда дальнего следования (Казанский, Ленинградский) - тот же ключ и квота
 import fetch_favt_notices  # логика сбора уведомлений Росавиации (@favt_info), тоже фоново
+import fetch_road_events   # ДТП по городам (@dtp777, @dtp_spb78) - тем же способом, фоново
 import fetch_timepad_data  # афиша города (TimePad) для кнопки "🎭 События города" - используется
                             # только для TIMEPAD_CITY_MAP; timepad_data.json обновляется ЛОКАЛЬНО
                             # (см. fetch_timepad_data.py), Railway не может дотянуться до TimePad
@@ -119,6 +120,13 @@ TRAIN_FORECAST_PERIOD_MINUTES = 30
 # веб-страница, лимита запросов нет, поэтому обновляем чаще, чем расписание рейсов.
 FAVT_NOTICES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'favt_notices.json')
 FAVT_UPDATE_INTERVAL_MINUTES = 15
+
+# Дорожные события (ДТП) по городам - те же публичные веб-версии Telegram-
+# каналов (@dtp777 Москва, @dtp_spb78 СПб), тот же способ сбора, что и у
+# @favt_info выше (см. fetch_road_events.py). Часто не блокируется/не
+# требует ключа, поэтому обновляем каждые 10 минут.
+ROAD_EVENTS_DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'road_events_data.json')
+ROAD_EVENTS_UPDATE_INTERVAL_MINUTES = 10
 
 # Афиша города (TimePad, см. fetch_timepad_data.py) - события меняются
 # медленно (не по минутам, как рейсы/статусы). Обновляется ЛОКАЛЬНО (см.
@@ -459,6 +467,36 @@ def get_notices_for_airport(icao):
     if not data:
         return []
     return [n for n in data.get('notices', []) if icao in n.get('airports', [])]
+
+_road_events_cache = None
+_road_events_mtime = None
+
+def load_road_events():
+    """Загружает road_events_data.json (сообщения о ДТП из @dtp777/@dtp_spb78,
+    см. fetch_road_events.py)."""
+    global _road_events_cache, _road_events_mtime
+    try:
+        mtime = os.path.getmtime(ROAD_EVENTS_DATA_FILE)
+        if _road_events_cache is not None and mtime == _road_events_mtime:
+            return _road_events_cache
+        with open(ROAD_EVENTS_DATA_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        _road_events_cache = data
+        _road_events_mtime = mtime
+        return data
+    except FileNotFoundError:
+        return None
+    except Exception as e:
+        logger.error(f"❌ Ошибка чтения road_events_data.json: {e}")
+        return None
+
+def get_road_events_for_city(city):
+    """Последние сообщения о ДТП для города бота ('moscow'/'spb') - пусто,
+    если для города канал не настроен или файл ещё не собран."""
+    data = load_road_events()
+    if not data:
+        return []
+    return data.get('cities', {}).get(city, [])
 
 _timepad_data_cache = None
 _timepad_data_mtime = None
@@ -1725,36 +1763,75 @@ async def show_fuel_bot(message: types.Message):
     )
     await message.answer(text, reply_markup=keyboard, parse_mode='Markdown')
 
-ROAD_EVENTS_CHANNELS = {
+ROAD_EVENTS_CHANNEL_LINKS = {
     'moscow': ('https://t.me/dtp777', 'Москва'),
     'spb': ('https://t.me/dtp_spb78', 'Санкт-Петербург'),
 }
+ROAD_EVENTS_SHOW_COUNT = 5  # сколько последних сообщений пересылать в чат за раз
+
+def format_road_event_time(iso_time, city):
+    """Время сообщения в часовом поясе города (те же EVENT_CITY_TIMEZONE, что
+    и у афиши города), в формате ЧЧ:ММ."""
+    try:
+        dt = datetime.fromisoformat(iso_time)
+        tz_name = EVENT_CITY_TIMEZONE.get(city)
+        if tz_name:
+            dt = dt.astimezone(ZoneInfo(tz_name))
+        return dt.strftime('%H:%M')
+    except Exception:
+        return ''
 
 @router.message(lambda message: message.text == "Дорожные события")
 async def show_road_events(message: types.Message):
-    """ДТП и дорожные происшествия по городам - вместо собственной ленты
-    в боте просто отдаём кнопку-ссылку на публичный Telegram-канал с живыми
-    сводками ДТП для этого города (Москва -> @dtp777, СПб -> @dtp_spb78).
-    Для городов без канала в ROAD_EVENTS_CHANNELS остаётся текст-заглушка."""
+    """ДТП и дорожные происшествия по городам - пересылаем сами тексты
+    последних сообщений из публичных Telegram-каналов (Москва -> @dtp777,
+    СПб -> @dtp_spb78), а не просто даём ссылку на канал. Источник данных -
+    road_events_data.json, который в фоне обновляет road_events_updater()
+    (см. fetch_road_events.py - парсинг публичной веб-версии канала, тот же
+    способ, что уже используется для уведомлений Росавиации @favt_info).
+    Для городов без канала - текст-заглушка."""
     state = user_state.get(message.from_user.id, {})
     city = state.get('city')
-    channel = ROAD_EVENTS_CHANNELS.get(city)
-    if channel:
-        url, city_name = channel
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🚨 Открыть канал ДТП", url=url)]
-        ])
-        await message.answer(
-            f"🚧 *Дорожные события — {city_name}*\n\nАктуальные ДТП и происшествия — в Telegram-канале 👇",
-            reply_markup=keyboard,
-            parse_mode='Markdown',
-        )
-    else:
+    channel = ROAD_EVENTS_CHANNEL_LINKS.get(city)
+
+    if not channel:
         await message.answer(
             "🚧 *Дорожные события*\n\nДля этого города канал с ДТП пока не подключен.",
             reply_markup=services_keyboard(state.get('category'), city),
             parse_mode='Markdown',
         )
+        return
+
+    url, city_name = channel
+    events = get_road_events_for_city(city)
+    channel_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🚨 Открыть канал целиком", url=url)]
+    ])
+
+    if not events:
+        await message.answer(
+            f"🚧 *Дорожные события — {city_name}*\n\n"
+            "Свежих сообщений за последние часы нет, либо данные ещё не собраны. "
+            "Загляни в канал напрямую 👇",
+            reply_markup=channel_keyboard,
+            parse_mode='Markdown',
+        )
+        return
+
+    lines = [f"🚧 *Дорожные события — {city_name}*\n"]
+    for event in events[:ROAD_EVENTS_SHOW_COUNT]:
+        time_str = format_road_event_time(event.get('time', ''), city)
+        text = escape_md(event.get('text', '').strip())
+        prefix = f"🕐 {time_str}\n" if time_str else ""
+        lines.append(f"{prefix}{text}")
+    message_text = '\n\n'.join(lines)
+
+    # Telegram режет сообщение на 4096 символах - при большом количестве
+    # длинных постов подряд подрезаем, чтобы не словить ошибку отправки.
+    if len(message_text) > 4000:
+        message_text = message_text[:4000] + "…"
+
+    await message.answer(message_text, reply_markup=channel_keyboard, parse_mode='Markdown')
 
 @router.message(lambda message: message.text == "🎭 События города")
 async def show_city_events(message: types.Message):
@@ -2636,6 +2713,20 @@ async def favt_notices_updater():
             logger.error(f"❌ Ошибка фонового обновления favt_notices.json: {e}")
         await asyncio.sleep(FAVT_UPDATE_INTERVAL_MINUTES * 60)
 
+async def road_events_updater():
+    """Фоновая задача: раз в ROAD_EVENTS_UPDATE_INTERVAL_MINUTES минут читает
+    публичные веб-версии каналов @dtp777 (Москва) и @dtp_spb78 (СПб) и
+    обновляет road_events_data.json (см. fetch_road_events.py - тот же
+    способ сбора, что и у favt_notices_updater выше)."""
+    while True:
+        try:
+            logger.info("🔄 Обновляю road_events_data.json (ДТП по городам)...")
+            await asyncio.to_thread(fetch_road_events.main)
+            logger.info("✅ road_events_data.json обновлён")
+        except Exception as e:
+            logger.error(f"❌ Ошибка фонового обновления road_events_data.json: {e}")
+        await asyncio.sleep(ROAD_EVENTS_UPDATE_INTERVAL_MINUTES * 60)
+
 async def main():
     global bot
     if not await initialize_bot():
@@ -2648,6 +2739,7 @@ async def main():
     else:
         logger.warning("⚠️ YANDEX_RASP_API_KEY не задан в переменных окружения Railway - flights_data.json и trains_data.json не будут обновляться автоматически")
     asyncio.create_task(favt_notices_updater())
+    asyncio.create_task(road_events_updater())
     asyncio.create_task(high_demand_alert_checker())
     await dp.start_polling(bot)
 
