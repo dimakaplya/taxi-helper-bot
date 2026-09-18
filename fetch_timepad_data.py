@@ -98,6 +98,22 @@ def fetch_city_events(timepad_city):
     if not TIMEPAD_TOKEN:
         logger.warning("⚠️ TIMEPAD_TOKEN не задан - пропускаю TimePad")
         return []
+    try:
+        TIMEPAD_TOKEN.encode('latin-1')
+    except UnicodeEncodeError:
+        # HTTP-заголовки должны быть latin-1/ASCII - если в скопированном
+        # токене затесался "умный" символ (например кавычка “ ” вместо
+        # обычной " при копировании из Заметок/мессенджера), requests падает
+        # с невнятным 'latin-1' codec can't encode... Ловим это здесь и
+        # говорим человеческим языком, что не так, вместо крипто-трейсбека.
+        logger.error(
+            "❌ TIMEPAD_TOKEN содержит символы, которые нельзя отправить в HTTP-заголовке "
+            "(не ASCII) - похоже, при копировании токена попал лишний символ, например "
+            "\"умная\" кавычка из Заметок/мессенджера. Скопируй токен ещё раз, лучше из "
+            "адресной строки браузера или простого текстового редактора, и проверь, что "
+            "export TIMEPAD_TOKEN=\"...\" использует ОБЫЧНЫЕ прямые кавычки."
+        )
+        return []
 
     now_dt = datetime.now(timezone.utc)
     starts_at_min = now_dt.strftime('%Y-%m-%dT%H:%M:%S')
