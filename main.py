@@ -1725,17 +1725,36 @@ async def show_fuel_bot(message: types.Message):
     )
     await message.answer(text, reply_markup=keyboard, parse_mode='Markdown')
 
+ROAD_EVENTS_CHANNELS = {
+    'moscow': ('https://t.me/dtp777', 'Москва'),
+    'spb': ('https://t.me/dtp_spb78', 'Санкт-Петербург'),
+}
+
 @router.message(lambda message: message.text == "Дорожные события")
-async def show_road_events_stub(message: types.Message):
-    """Заглушка - кнопка в меню есть, но своих данных о перекрытиях/авариях
-    у бота пока нет (см. комментарий у services_keyboard). Раньше нажатие
-    просто не давало никакого ответа - это оно и было той самой "пустотой"."""
+async def show_road_events(message: types.Message):
+    """ДТП и дорожные происшествия по городам - вместо собственной ленты
+    в боте просто отдаём кнопку-ссылку на публичный Telegram-канал с живыми
+    сводками ДТП для этого города (Москва -> @dtp777, СПб -> @dtp_spb78).
+    Для городов без канала в ROAD_EVENTS_CHANNELS остаётся текст-заглушка."""
     state = user_state.get(message.from_user.id, {})
-    await message.answer(
-        "🚧 *Дорожные события*\n\nЭтот раздел в разработке - скоро здесь появятся перекрытия, аварии и другие дорожные события.",
-        reply_markup=services_keyboard(state.get('category'), state.get('city')),
-        parse_mode='Markdown',
-    )
+    city = state.get('city')
+    channel = ROAD_EVENTS_CHANNELS.get(city)
+    if channel:
+        url, city_name = channel
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🚨 Открыть канал ДТП", url=url)]
+        ])
+        await message.answer(
+            f"🚧 *Дорожные события — {city_name}*\n\nАктуальные ДТП и происшествия — в Telegram-канале 👇",
+            reply_markup=keyboard,
+            parse_mode='Markdown',
+        )
+    else:
+        await message.answer(
+            "🚧 *Дорожные события*\n\nДля этого города канал с ДТП пока не подключен.",
+            reply_markup=services_keyboard(state.get('category'), city),
+            parse_mode='Markdown',
+        )
 
 @router.message(lambda message: message.text == "🎭 События города")
 async def show_city_events(message: types.Message):
