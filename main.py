@@ -866,6 +866,14 @@ def init_db():
         )
     ''')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_shared_orders_status ON shared_orders (status, created_at)')
+    # Миграция: номер телефона клиента добавлен позже, чем сама таблица -
+    # CREATE TABLE IF NOT EXISTS не трогает уже существующую (на Railway)
+    # таблицу, колонку нужно добавлять отдельно. SQLite не умеет "ADD COLUMN
+    # IF NOT EXISTS", поэтому сначала проверяем через PRAGMA.
+    cursor.execute('PRAGMA table_info(shared_orders)')
+    existing_columns = {row[1] for row in cursor.fetchall()}
+    if 'client_phone' not in existing_columns:
+        cursor.execute('ALTER TABLE shared_orders ADD COLUMN client_phone TEXT')
     conn.commit()
     conn.close()
 
@@ -905,13 +913,13 @@ def format_user_contact(user):
     name = escape_md(user.full_name or 'без имени')
     return f"{name} (ник не задан, ID: {user.id})"
 
-def create_shared_order(sender_id, sender_contact, city, category, pickup, dropoff, price, car_class, passengers):
+def create_shared_order(sender_id, sender_contact, city, category, pickup, dropoff, price, car_class, passengers, client_phone=None):
     init_db()
     conn = get_db_connection()
     cursor = conn.execute(
-        'INSERT INTO shared_orders (sender_id, sender_contact, city, category, pickup, dropoff, price, car_class, passengers) '
-        'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-        (sender_id, sender_contact, city, category, pickup, dropoff, price, car_class, passengers)
+        'INSERT INTO shared_orders (sender_id, sender_contact, city, category, pickup, dropoff, price, car_class, passengers, client_phone) '
+        'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        (sender_id, sender_contact, city, category, pickup, dropoff, price, car_class, passengers, client_phone)
     )
     order_id = cursor.lastrowid
     conn.commit()
@@ -920,7 +928,7 @@ def create_shared_order(sender_id, sender_contact, city, category, pickup, dropo
 
 _SHARED_ORDER_FIELDS = ['order_id', 'sender_id', 'sender_contact', 'city', 'category', 'pickup', 'dropoff',
                          'price', 'car_class', 'passengers', 'status', 'accepted_by', 'accepted_by_contact',
-                         'created_at', 'accepted_at']
+                         'created_at', 'accepted_at', 'client_phone']
 
 def get_shared_order(order_id):
     init_db()
@@ -1091,7 +1099,7 @@ def city_keyboard():
 
 def category_keyboard():
     keyboard_buttons = [[KeyboardButton(text=f"{cat_data['name']}")] for cat_data in CATEGORIES.values()]
-    keyboard_buttons.append([KeyboardButton(text="← Назад")])
+    keyboard_buttons.append([KeyboardButton(text="← Назад"), KeyboardButton(text="🏠 Старт")])
     return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=keyboard_buttons)
 
 # Курьеру и Грузовому такси аэропорты не нужны (это не про перевозку
@@ -1132,7 +1140,7 @@ def services_keyboard(category=None, city=None):
     if category not in CATEGORIES_WITHOUT_EVENTS:
         buttons.append([KeyboardButton(text="🎭 События города")])
     buttons.append([KeyboardButton(text="Дорожные события")])
-    buttons.append([KeyboardButton(text="← Назад")])
+    buttons.append([KeyboardButton(text="← Назад"), KeyboardButton(text="🏠 Старт")])
     return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=buttons)
 
 # ==================== МОДУЛЬ "ИНСТРУМЕНТЫ ВОДИТЕЛЯ" (бывш. "Курьеру") ====================
@@ -1162,7 +1170,7 @@ def courier_module_keyboard():
         [KeyboardButton(text="🚻 Туалеты рядом")],
         [KeyboardButton(text="🅿️ Парковка / остановка")],
         [KeyboardButton(text="🛠 ТО транспорта")],
-        [KeyboardButton(text="← Назад")],
+        [KeyboardButton(text="← Назад"), KeyboardButton(text="🏠 Старт")],
     ]
     return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=buttons)
 
@@ -1197,12 +1205,25 @@ def parse_decimal(text):
     except ValueError:
         return None
 
-@router.message(Command("start"))
-async def start(message: types.Message):
+async def send_start_screen(message: types.Message):
+    """Общий код /start и кнопки "🏠 Старт" - сбрасывает весь user_state
+    (включая любой незавершённый черновик заказа/расчёта) и возвращает на
+    экран выбора города. Кнопка добавлена, чтобы не заставлять пользователя
+    искать команду /start в интерфейсе Telegram - она есть на всех
+    клавиатурах ниже корневого экрана (см. category_keyboard,
+    services_keyboard, courier_module_keyboard)."""
     init_db()
     user_state.pop(message.from_user.id, None)
     text = "🚕 *Taxi Helper*\n\nВыбери город 👇"
     await message.answer(text, reply_markup=city_keyboard(), parse_mode='Markdown')
+
+@router.message(Command("start"))
+async def start(message: types.Message):
+    await send_start_screen(message)
+
+@router.message(lambda message: message.text == "🏠 Старт")
+async def start_button(message: types.Message):
+    await send_start_screen(message)
 
 @router.message(lambda message: message.text == "← Назад")
 async def go_back(message: types.Message):
@@ -1256,6 +1277,7 @@ SHARED_ORDER_STEP_PROMPTS = {
     'pickup': "📍 Введи адрес *подачи* (точка А):",
     'dropoff': "🏁 Введи адрес *прибытия* (точка Б):",
     'price': "💰 Введи стоимость поездки в рублях (только число):",
+    'client_phone': "📱 Введи номер телефона клиента (его передадим водителю, который примет заказ). Если номера нет - пришли *-*:",
 }
 
 async def show_shared_order_confirmation(message, data, category, city):
@@ -1266,7 +1288,8 @@ async def show_shared_order_confirmation(message, data, category, city):
         f"🏁 Прибытие: {escape_md(data['dropoff'])}\n"
         f"💰 Стоимость: {data['price']} ₽\n"
         f"🚘 Класс: {data['car_class']}\n"
-        f"👥 Пассажиров: {data['passengers']}\n\n"
+        f"👥 Пассажиров: {data['passengers']}\n"
+        f"📱 Телефон клиента: {escape_md(data['client_phone']) if data.get('client_phone') else 'не указан'}\n\n"
         f"_Разошлём водителям Такси/Ultima города {city_name}. Предложение будет "
         f"действовать {SHARED_ORDER_EXPIRY_HOURS} час, пока кто-то не примет._"
     )
@@ -1359,6 +1382,16 @@ async def shared_order_flow(message: types.Message):
             await message.answer("Введи число пассажиров (например 2) или выбери кнопкой 👇", reply_markup=shared_order_passengers_keyboard())
             return
         draft['data']['passengers'] = digits
+        draft['step'] = 'client_phone'
+        state['order_draft'] = draft
+        await message.answer(SHARED_ORDER_STEP_PROMPTS['client_phone'], reply_markup=shared_order_cancel_keyboard(), parse_mode='Markdown')
+        return
+
+    if step == 'client_phone':
+        if not text:
+            await message.answer("Пришли номер телефона клиента или *-*, если его нет:", parse_mode='Markdown')
+            return
+        draft['data']['client_phone'] = None if text == '-' else text
         draft['step'] = 'confirm'
         state['order_draft'] = draft
         await show_shared_order_confirmation(message, draft['data'], category, city)
@@ -1428,7 +1461,7 @@ async def confirm_send_shared_order(callback_query: types.CallbackQuery):
     city_name = CITY_DISPLAY_NAMES.get(city, city)
 
     sender_contact = format_user_contact(callback_query.from_user)
-    order_id = create_shared_order(user_id, sender_contact, city, category, data['pickup'], data['dropoff'], data['price'], data['car_class'], data['passengers'])
+    order_id = create_shared_order(user_id, sender_contact, city, category, data['pickup'], data['dropoff'], data['price'], data['car_class'], data['passengers'], data.get('client_phone'))
     state.pop('order_draft', None)
 
     await callback_query.message.edit_text(f"⏳ Отправляю заказ #{order_id} водителям города {city_name}...")
@@ -1473,9 +1506,13 @@ async def accept_shared_order(callback_query: types.CallbackQuery):
         f"🏁 Прибытие: {escape_md(order['dropoff'])}\n"
         f"💰 Стоимость: {order['price']} ₽\n"
         f"🚘 Класс: {order['car_class']}\n"
-        f"👥 Пассажиров: {order['passengers']}\n\n"
-        f"📞 Свяжитесь с отправителем: {order['sender_contact']}"
+        f"👥 Пассажиров: {order['passengers']}\n"
     )
+    if order.get('client_phone'):
+        # Телефон клиента - не в общей рассылке (см. broadcast_shared_order),
+        # виден только тому, кто реально принял заказ.
+        text += f"📱 Телефон клиента: {escape_md(order['client_phone'])}\n"
+    text += f"\n📞 Свяжитесь с отправителем: {order['sender_contact']}"
     await callback_query.message.edit_text(text, parse_mode='Markdown')
     await callback_query.answer("Заказ принят!")
 
