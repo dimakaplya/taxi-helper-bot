@@ -1099,7 +1099,7 @@ def city_keyboard():
 
 def category_keyboard():
     keyboard_buttons = [[KeyboardButton(text=f"{cat_data['name']}")] for cat_data in CATEGORIES.values()]
-    keyboard_buttons.append([KeyboardButton(text="← Назад"), KeyboardButton(text="🏠 Старт")])
+    keyboard_buttons.append([KeyboardButton(text="← Назад"), KeyboardButton(text="🏙 Выбор города")])
     return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=keyboard_buttons)
 
 # Курьеру и Грузовому такси аэропорты не нужны (это не про перевозку
@@ -1140,7 +1140,7 @@ def services_keyboard(category=None, city=None):
     if category not in CATEGORIES_WITHOUT_EVENTS:
         buttons.append([KeyboardButton(text="🎭 События города")])
     buttons.append([KeyboardButton(text="Дорожные события")])
-    buttons.append([KeyboardButton(text="← Назад"), KeyboardButton(text="🏠 Старт")])
+    buttons.append([KeyboardButton(text="← Назад"), KeyboardButton(text="🏙 Выбор города")])
     return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=buttons)
 
 # ==================== МОДУЛЬ "ИНСТРУМЕНТЫ ВОДИТЕЛЯ" (бывш. "Курьеру") ====================
@@ -1170,7 +1170,7 @@ def courier_module_keyboard():
         [KeyboardButton(text="🚻 Туалеты рядом")],
         [KeyboardButton(text="🅿️ Парковка / остановка")],
         [KeyboardButton(text="🛠 ТО транспорта")],
-        [KeyboardButton(text="← Назад"), KeyboardButton(text="🏠 Старт")],
+        [KeyboardButton(text="← Назад"), KeyboardButton(text="🏙 Выбор города")],
     ]
     return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=buttons)
 
@@ -1206,7 +1206,7 @@ def parse_decimal(text):
         return None
 
 async def send_start_screen(message: types.Message):
-    """Общий код /start и кнопки "🏠 Старт" - сбрасывает весь user_state
+    """Общий код /start и кнопки "🏙 Выбор города" - сбрасывает весь user_state
     (включая любой незавершённый черновик заказа/расчёта) и возвращает на
     экран выбора города. Кнопка добавлена, чтобы не заставлять пользователя
     искать команду /start в интерфейсе Telegram - она есть на всех
@@ -1221,7 +1221,7 @@ async def send_start_screen(message: types.Message):
 async def start(message: types.Message):
     await send_start_screen(message)
 
-@router.message(lambda message: message.text == "🏠 Старт")
+@router.message(lambda message: message.text == "🏙 Выбор города")
 async def start_button(message: types.Message):
     await send_start_screen(message)
 
