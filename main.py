@@ -1114,13 +1114,16 @@ def services_keyboard(category=None, city=None):
     # CATEGORIES_WITHOUT_EVENTS). "🚆 Вокзалы" - только в городах из
     # TRAIN_CITIES (см. STATION_CITY), той же категории, что и аэропорты.
     # "🔄 Отдать заказ" - только Такси/Ultima (см. SHARED_ORDER_CATEGORIES).
-    # "🚚 Курьеру" - отдельный модуль (см. COURIER_MODULE_CATEGORIES) для
-    # курьеров/доставки: финансовый калькулятор + заглушки под карту точек.
+    # "🧰 Инструменты водителя" - отдельный модуль (см.
+    # COURIER_MODULE_CATEGORIES) с финансовым калькулятором смены +
+    # заглушки под карту точек; изначально делался под курьеров, но по
+    # просьбе пользователя открыт всем категориям (калькулятор дохода/км/
+    # топлива/часов одинаково полезен и такси, и грузовому такси).
     buttons = []
     if category in SHARED_ORDER_CATEGORIES:
         buttons.append([KeyboardButton(text="🔄 Отдать заказ")])
     if category in COURIER_MODULE_CATEGORIES:
-        buttons.append([KeyboardButton(text="🚚 Курьеру")])
+        buttons.append([KeyboardButton(text="🧰 Инструменты водителя")])
     if category not in CATEGORIES_WITHOUT_AIRPORTS:
         buttons.append([KeyboardButton(text="Аэропорты")])
     if city in TRAIN_CITIES and category not in CATEGORIES_WITHOUT_AIRPORTS:
@@ -1132,16 +1135,18 @@ def services_keyboard(category=None, city=None):
     buttons.append([KeyboardButton(text="← Назад")])
     return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=buttons)
 
-# ==================== МОДУЛЬ "КУРЬЕРУ" (доставка) ====================
-# Отдельный раздел под курьеров/доставку (Яндекс.Еда, Купер, СДЭК,
-# WB/Ozon-логистика) - пришёл как отдельный прототип (courier-bot-package),
-# встраивается сюда тем же паттерном, что и остальной бот: JSON/state,
-# никакой БД (в отличие от исходной спеки прототипа, где предполагался
-# Postgres+PostGIS - на этом этапе не нужен, все "точечные" разделы ниже
-# пока заглушки). Рабочий сейчас - только 💰 Финансы (см. COURIER_FINANCE_*
-# ниже). Остальные 4 пункта меню - "в разработке" (текст как в самом
-# прототипе, экран data-view="soon").
-COURIER_MODULE_CATEGORIES = {'courier'}
+# ==================== МОДУЛЬ "ИНСТРУМЕНТЫ ВОДИТЕЛЯ" (бывш. "Курьеру") ====================
+# Изначально прототип (courier-bot-package) делался под курьеров/доставку
+# (Яндекс.Еда, Купер, СДЭК, WB/Ozon-логистика), но пользователь попросил
+# открыть его всем категориям - формулы (доход/км/топливо/часы -> чистая
+# прибыль) одинаково применимы к такси и грузовому такси, специфики именно
+# под курьера в них нет. Встраивается тем же паттерном, что и остальной бот:
+# JSON/state, никакой БД (в отличие от исходной спеки прототипа, где
+# предполагался Postgres+PostGIS - на этом этапе не нужен, все "точечные"
+# разделы ниже пока заглушки). Рабочий сейчас - только 💰 Финансы (см.
+# COURIER_FINANCE_* ниже). Остальные 4 пункта меню - "в разработке" (текст
+# как в самом прототипе, экран data-view="soon").
+COURIER_MODULE_CATEGORIES = set(CATEGORIES.keys())  # все категории
 
 COURIER_STUB_SECTIONS = {
     "📈 Спрос сейчас",
@@ -1210,7 +1215,7 @@ async def go_back(message: types.Message):
         return
 
     if state.pop('in_courier_module', None):
-        # Были в подменю "🚚 Курьеру" -> возвращаемся на экран услуг (категория и город остаются)
+        # Были в подменю "🧰 Инструменты водителя" -> возвращаемся на экран услуг (категория и город остаются)
         await message.answer("Выбери услугу 👇", reply_markup=services_keyboard(state.get('category'), state.get('city')))
         return
 
@@ -1489,9 +1494,9 @@ async def decline_shared_order(callback_query: types.CallbackQuery):
     await callback_query.message.edit_text("Вы отказались от этого заказа.")
     await callback_query.answer()
 
-# ==================== МОДУЛЬ "КУРЬЕРУ" - хендлеры ====================
+# ==================== МОДУЛЬ "ИНСТРУМЕНТЫ ВОДИТЕЛЯ" - хендлеры ====================
 
-@router.message(lambda message: message.text == "🚚 Курьеру")
+@router.message(lambda message: message.text == "🧰 Инструменты водителя")
 async def open_courier_module(message: types.Message):
     user_id = message.from_user.id
     state = user_state.get(user_id)
@@ -1499,13 +1504,15 @@ async def open_courier_module(message: types.Message):
         await message.answer("Сначала выбери город и категорию!")
         return
     if state.get('category') not in COURIER_MODULE_CATEGORIES:
+        # COURIER_MODULE_CATEGORIES сейчас = все категории, но проверку
+        # оставляем на случай, если позже какую-то категорию снова исключат.
         await message.answer(
-            "Этот раздел доступен только категории «Курьер».",
+            "Этот раздел пока недоступен для твоей категории.",
             reply_markup=services_keyboard(state.get('category'), state.get('city')),
         )
         return
     state['in_courier_module'] = True
-    await message.answer("🚚 *Курьеру*\n\nВыбери раздел 👇", reply_markup=courier_module_keyboard(), parse_mode='Markdown')
+    await message.answer("🧰 *Инструменты водителя*\n\nВыбери раздел 👇", reply_markup=courier_module_keyboard(), parse_mode='Markdown')
 
 @router.message(lambda message: message.text == "💰 Финансы" and user_state.get(message.from_user.id, {}).get('in_courier_module'))
 async def start_courier_finance(message: types.Message):
