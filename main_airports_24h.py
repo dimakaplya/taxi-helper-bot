@@ -1157,9 +1157,12 @@ def services_keyboard(category=None, city=None):
     # заглушкой без своей логики. "Дорожные события" тоже пока без
     # обработчика - как было. "🎭 События города" (афиша TimePad) - только
     # у Такси/Ultima, курьеру и грузовому такси не актуальна (см.
-    # CATEGORIES_WITHOUT_EVENTS). "🚆 Вокзалы" - только в городах из
-    # TRAIN_CITIES (см. STATION_CITY), той же категории, что и аэропорты.
-    # "🔄 Отдать заказ" - только Такси/Ultima (см. SHARED_ORDER_CATEGORIES).
+    # CATEGORIES_WITHOUT_EVENTS). "✈️🚆 Транспорт" объединяет аэропорты и
+    # вокзалы в одну кнопку главного меню (короче список) - при нажатии
+    # show_transport_menu показывает инлайн-подменю с двумя вариантами;
+    # "🚆 Вокзалы" внутри него виден, только если город в TRAIN_CITIES (см.
+    # STATION_CITY) - иначе только "✈️ Аэропорты". "🔄 Отдать заказ" - только
+    # Такси/Ultima (см. SHARED_ORDER_CATEGORIES).
     # "🧰 Инструменты водителя" - отдельный модуль (см.
     # COURIER_MODULE_CATEGORIES) с финансовым калькулятором смены +
     # заглушки под карту точек; изначально делался под курьеров, но по
@@ -1171,9 +1174,7 @@ def services_keyboard(category=None, city=None):
     if category in COURIER_MODULE_CATEGORIES:
         buttons.append([KeyboardButton(text="🧰 Инструменты водителя")])
     if category not in CATEGORIES_WITHOUT_AIRPORTS:
-        buttons.append([KeyboardButton(text="✈️ Аэропорты")])
-    if city in TRAIN_CITIES and category not in CATEGORIES_WITHOUT_AIRPORTS:
-        buttons.append([KeyboardButton(text="🚆 Вокзалы")])
+        buttons.append([KeyboardButton(text="✈️🚆 Транспорт")])
     buttons.append([KeyboardButton(text="⛽ Где бензин")])
     if category not in CATEGORIES_WITHOUT_EVENTS:
         buttons.append([KeyboardButton(text="🎭 События города")])
@@ -1907,22 +1908,45 @@ async def show_city_events(message: types.Message):
         await message.answer(text, reply_markup=keyboard, parse_mode='Markdown', disable_web_page_preview=True)
         await asyncio.sleep(0.1)
 
-@router.message(lambda message: message.text == "✈️ Аэропорты")
-async def show_airport_menu(message: types.Message):
+AIRPORT_MENU_KEYBOARD = InlineKeyboardMarkup(inline_keyboard=[
+    [InlineKeyboardButton(text="📥 Прилеты", callback_data="airport_arrivals")],
+    [InlineKeyboardButton(text="🔄 Доступность", callback_data="airport_availability")],
+    [InlineKeyboardButton(text="📋 Очередь", callback_data="airport_queue")]
+])
+
+@router.message(lambda message: message.text == "✈️🚆 Транспорт")
+async def show_transport_menu(message: types.Message):
+    """Объединённая кнопка "✈️🚆 Транспорт" (было 2 отдельные кнопки -
+    "✈️ Аэропорты" и "🚆 Вокзалы" - объединены в одну по просьбе
+    пользователя, чтобы короче было главное меню услуг). При нажатии -
+    инлайн-подменю с этими двумя вариантами; "🚆 Вокзалы" в нём показывается,
+    только если город есть в TRAIN_CITIES (см. STATION_CITY) - иначе только
+    "✈️ Аэропорты", без лишнего пункта "недоступно"."""
     user_id = message.from_user.id
     if user_id not in user_state:
         await message.answer("Сначала выбери город!")
         return
-    if user_state[user_id].get('category') in CATEGORIES_WITHOUT_AIRPORTS:
-        await message.answer("Для этой категории аэропорты недоступны.", reply_markup=services_keyboard(user_state[user_id].get('category'), user_state[user_id].get('city')))
+    category = user_state[user_id].get('category')
+    city = user_state[user_id].get('city')
+    if category in CATEGORIES_WITHOUT_AIRPORTS:
+        await message.answer("Для этой категории транспорт недоступен.", reply_markup=services_keyboard(category, city))
         return
-    text = "Выбери действие 👇"
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📥 Прилеты", callback_data="airport_arrivals")],
-        [InlineKeyboardButton(text="🔄 Доступность", callback_data="airport_availability")],
-        [InlineKeyboardButton(text="📋 Очередь", callback_data="airport_queue")]
-    ])
-    await message.answer(text, reply_markup=keyboard)
+    buttons = [[InlineKeyboardButton(text="✈️ Аэропорты", callback_data="transport_airports")]]
+    if city in TRAIN_CITIES:
+        buttons.append([InlineKeyboardButton(text="🚆 Вокзалы", callback_data="transport_trains")])
+    await message.answer("Выбери 👇", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+
+@router.callback_query(lambda c: c.data == "transport_airports")
+async def show_airport_menu(callback_query: types.CallbackQuery):
+    await callback_query.answer()
+    user_id = callback_query.from_user.id
+    if user_id not in user_state:
+        await callback_query.message.answer("Сначала выбери город!")
+        return
+    if user_state[user_id].get('category') in CATEGORIES_WITHOUT_AIRPORTS:
+        await callback_query.message.answer("Для этой категории аэропорты недоступны.", reply_markup=services_keyboard(user_state[user_id].get('category'), user_state[user_id].get('city')))
+        return
+    await callback_query.message.answer("Выбери действие 👇", reply_markup=AIRPORT_MENU_KEYBOARD)
 
 def build_train_stations_keyboard(category, city):
     """Список вокзалов ДАННОГО ГОРОДА (фильтр по STATION_CITY) - у каждого
@@ -1942,32 +1966,34 @@ def build_train_stations_keyboard(category, city):
         keyboard.inline_keyboard.append([InlineKeyboardButton(text=button_text, callback_data=f"train_station_{code}")])
     return keyboard, True
 
-@router.message(lambda message: message.text == "🚆 Вокзалы")
-async def show_train_stations_menu(message: types.Message):
+@router.callback_query(lambda c: c.data == "transport_trains")
+async def show_train_stations_menu(callback_query: types.CallbackQuery):
     """Список вокзалов ВЫБРАННОГО ГОРОДА (см. STATION_CITY и
-    fetch_trains_data.py). Кнопка и так видна только в городах из TRAIN_CITIES
-    (см. services_keyboard), но проверяем город и здесь на случай, если
-    пользователь сменил город, не обновив клавиатуру."""
-    user_id = message.from_user.id
+    fetch_trains_data.py). Пункт "🚆 Вокзалы" и так показывается в подменю
+    "✈️🚆 Транспорт" только в городах из TRAIN_CITIES (см. show_transport_menu),
+    но проверяем город и здесь на случай, если пользователь сменил город, не
+    обновив клавиатуру."""
+    await callback_query.answer()
+    user_id = callback_query.from_user.id
     if user_id not in user_state or 'city' not in user_state[user_id]:
-        await message.answer("Сначала выбери город!")
+        await callback_query.message.answer("Сначала выбери город!")
         return
     category = user_state[user_id].get('category')
     city = user_state[user_id]['city']
     if city not in TRAIN_CITIES:
-        await message.answer(
+        await callback_query.message.answer(
             "🚆 Вокзалы пока недоступны в этом городе.",
             reply_markup=services_keyboard(category, city),
         )
         return
     keyboard, has_data = build_train_stations_keyboard(category, city)
     if not has_data:
-        await message.answer(
+        await callback_query.message.answer(
             "🚆 Данные по вокзалам ещё не загружены - обновляются раз в 12 часов, загляни чуть позже.",
             reply_markup=services_keyboard(category, city),
         )
         return
-    await message.answer("Выбери вокзал 👇", reply_markup=keyboard)
+    await callback_query.message.answer("Выбери вокзал 👇", reply_markup=keyboard)
 
 @router.callback_query(lambda c: c.data.startswith('train_station_'))
 async def show_train_station_arrivals(callback_query: types.CallbackQuery):
