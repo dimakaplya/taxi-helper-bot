@@ -1177,7 +1177,7 @@ def services_keyboard(category=None, city=None):
     buttons.append([KeyboardButton(text="⛽ Где бензин")])
     if category not in CATEGORIES_WITHOUT_EVENTS:
         buttons.append([KeyboardButton(text="🎭 События города")])
-    buttons.append([KeyboardButton(text="Дорожные события")])
+    buttons.append([KeyboardButton(text="⛔ Дорожные события")])
     buttons.append([KeyboardButton(text="← Назад"), KeyboardButton(text="🏙 Выбор города")])
     return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=buttons)
 
@@ -1768,6 +1768,18 @@ ROAD_EVENTS_CHANNEL_LINKS = {
     'spb': ('https://t.me/dtp_spb78', 'Санкт-Петербург'),
 }
 ROAD_EVENTS_SHOW_COUNT = 5  # сколько последних сообщений пересылать в чат за раз
+ROAD_EVENTS_LOOKBACK_HOURS_LABEL = "6 часов"  # для текста в чате - см. LOOKBACK_HOURS в fetch_road_events.py
+
+_URL_RE = re.compile(r'(?:https?://|(?:www\.)?t\.me/|(?:www\.)?telegram\.me/)\S+', re.IGNORECASE)
+
+def strip_urls_for_display(text):
+    """Доп. страховка перед отправкой в чат: вырезает любую ссылку (в т.ч.
+    голую t.me/... без протокола), которая могла проскочить очистку в
+    fetch_road_events.py - иначе Telegram сам подставляет превью-карточку
+    канала ("Проголосуйте за канал") поверх нашего сообщения."""
+    if not text:
+        return text
+    return re.sub(r'\n{3,}', '\n\n', _URL_RE.sub('', text)).strip()
 
 def format_road_event_time(iso_time, city):
     """Время сообщения в часовом поясе города (те же EVENT_CITY_TIMEZONE, что
@@ -1781,24 +1793,29 @@ def format_road_event_time(iso_time, city):
     except Exception:
         return ''
 
-@router.message(lambda message: message.text == "Дорожные события")
+@router.message(lambda message: message.text == "⛔ Дорожные события")
 async def show_road_events(message: types.Message):
     """ДТП и дорожные происшествия по городам - пересылаем сами тексты
     последних сообщений из публичных Telegram-каналов (Москва -> @dtp777,
     СПб -> @dtp_spb78), а не просто даём ссылку на канал. Источник данных -
     road_events_data.json, который в фоне обновляет road_events_updater()
     (см. fetch_road_events.py - парсинг публичной веб-версии канала, тот же
-    способ, что уже используется для уведомлений Росавиации @favt_info).
-    Для городов без канала - текст-заглушка."""
+    способ, что уже используется для уведомлений Росавиации @favt_info;
+    там же фильтр "только про ДТП/перекрытия/аварии" и окно 6 часов).
+    disable_web_page_preview=True на всех answer() ниже - без этого Telegram
+    иногда сам подтягивал превью-карточку канала ("Проголосуйте за канал")
+    по ссылке, которая могла всплыть в тексте поста. Для городов без канала
+    - текст-заглушка."""
     state = user_state.get(message.from_user.id, {})
     city = state.get('city')
     channel = ROAD_EVENTS_CHANNEL_LINKS.get(city)
 
     if not channel:
         await message.answer(
-            "🚧 *Дорожные события*\n\nДля этого города канал с ДТП пока не подключен.",
+            "⛔ *Дорожные события*\n\nДля этого города канал с ДТП пока не подключен.",
             reply_markup=services_keyboard(state.get('category'), city),
             parse_mode='Markdown',
+            disable_web_page_preview=True,
         )
         return
 
@@ -1810,18 +1827,19 @@ async def show_road_events(message: types.Message):
 
     if not events:
         await message.answer(
-            f"🚧 *Дорожные события — {city_name}*\n\n"
-            "Свежих сообщений за последние часы нет, либо данные ещё не собраны. "
-            "Загляни в канал напрямую 👇",
+            f"⛔ *Дорожные события — {city_name}*\n\n"
+            f"За последние {ROAD_EVENTS_LOOKBACK_HOURS_LABEL} новых ДТП/перекрытий не было, "
+            "либо данные ещё не собраны. Загляни в канал напрямую 👇",
             reply_markup=channel_keyboard,
             parse_mode='Markdown',
+            disable_web_page_preview=True,
         )
         return
 
-    lines = [f"🚧 *Дорожные события — {city_name}*\n"]
+    lines = [f"⛔ *Дорожные события — {city_name}* (за последние {ROAD_EVENTS_LOOKBACK_HOURS_LABEL})\n"]
     for event in events[:ROAD_EVENTS_SHOW_COUNT]:
         time_str = format_road_event_time(event.get('time', ''), city)
-        text = escape_md(event.get('text', '').strip())
+        text = escape_md(strip_urls_for_display(event.get('text', '').strip()))
         prefix = f"🕐 {time_str}\n" if time_str else ""
         lines.append(f"{prefix}{text}")
     message_text = '\n\n'.join(lines)
@@ -1831,7 +1849,12 @@ async def show_road_events(message: types.Message):
     if len(message_text) > 4000:
         message_text = message_text[:4000] + "…"
 
-    await message.answer(message_text, reply_markup=channel_keyboard, parse_mode='Markdown')
+    await message.answer(
+        message_text,
+        reply_markup=channel_keyboard,
+        parse_mode='Markdown',
+        disable_web_page_preview=True,
+    )
 
 @router.message(lambda message: message.text == "🎭 События города")
 async def show_city_events(message: types.Message):
