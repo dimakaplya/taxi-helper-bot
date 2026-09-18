@@ -6,6 +6,7 @@ import json
 import re
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
+from math import radians, sin, cos, asin, sqrt
 from aiogram import Bot, Dispatcher, Router, types
 from aiogram.filters import Command
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
@@ -814,10 +815,12 @@ def get_load_emoji(load_percent):
     else: return '🟣'
 
 def get_load_recommendation(load_percent):
-    if load_percent <= 50: return 'НЕ ЕХАТЬ'
-    elif load_percent <= 70: return '📍 ЗАНЯТЬ ОЧЕРЕДЬ'
-    elif load_percent <= 100: return '✅ ЕХАТЬ'
-    else: return '🚨 СРОЧНО'
+    # Формулировки статусов - по просьбе пользователя (было
+    # "НЕ ЕХАТЬ/ЗАНЯТЬ ОЧЕРЕДЬ/ЕХАТЬ/СРОЧНО"), пороги загрузки не менялись.
+    if load_percent <= 50: return 'Не ехать'
+    elif load_percent <= 70: return 'Уточни очередь'
+    elif load_percent <= 100: return 'Занимай очередь'
+    else: return 'Срочно ехать'
 
 # Для вокзалов - ПО ПРОСЬБЕ ПОЛЬЗОВАТЕЛЯ упрощённая БИНАРНАЯ индикация вместо
 # 4-уровневой шкалы аэропортов выше (get_load_emoji/get_load_recommendation):
@@ -1197,21 +1200,132 @@ COURIER_MODULE_CATEGORIES = set(CATEGORIES.keys())  # все категории
 
 COURIER_STUB_SECTIONS = {
     "📈 Спрос сейчас",
-    "🚻 Туалеты рядом",
-    "🅿️ Парковка / остановка",
     "🛠 ТО транспорта",
 }
 
+# "🚻 Туалеты рядом"/"🅿️ Парковка / остановка" переведены с заглушки на
+# реальные точки (OpenStreetMap) + добавлены "🔧 Шиномонтаж"/"🚿 Мойки" - см.
+# NEARBY_SERVICES/show_nearby_prompt/handle_nearby_location ниже. Кнопка
+# запрашивает геолокацию, показывает ближайшие NEARBY_RESULTS_COUNT точек с
+# расстоянием и часами работы (если есть в OSM) и кнопкой "Поехали" (открывает
+# маршрут в Яндекс Навигаторе) на каждую.
 def courier_module_keyboard():
     buttons = [
         [KeyboardButton(text="💰 Финансы")],
         [KeyboardButton(text="📈 Спрос сейчас")],
         [KeyboardButton(text="🚻 Туалеты рядом")],
         [KeyboardButton(text="🅿️ Парковка / остановка")],
+        [KeyboardButton(text="🔧 Шиномонтаж")],
+        [KeyboardButton(text="🚿 Мойки")],
         [KeyboardButton(text="🛠 ТО транспорта")],
         [KeyboardButton(text="← Назад"), KeyboardButton(text="🏙 Выбор города")],
     ]
     return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=buttons)
+
+# Кнопка (текст меню) -> ключ в NEARBY_SERVICES.
+NEARBY_BUTTON_TO_KIND = {
+    "🚻 Туалеты рядом": 'toilets',
+    "🅿️ Парковка / остановка": 'parking',
+    "🔧 Шиномонтаж": 'tires',
+    "🚿 Мойки": 'car_wash',
+}
+
+NEARBY_SERVICES = {
+    'toilets': {'file': 'toilets_data.json', 'label': 'Туалеты', 'emoji': '🚻', 'noun': 'туалетов'},
+    'parking': {'file': 'parking_data.json', 'label': 'Бесплатные парковки', 'emoji': '🅿️', 'noun': 'парковок'},
+    'tires': {'file': 'tires_data.json', 'label': 'Шиномонтажи', 'emoji': '🔧', 'noun': 'шиномонтажей'},
+    'car_wash': {'file': 'car_wash_data.json', 'label': 'Автомойки', 'emoji': '🚿', 'noun': 'моек'},
+}
+NEARBY_RESULTS_COUNT = 10
+
+_nearby_cache = {}
+_nearby_mtime = {}
+
+def load_nearby_data(kind):
+    """Читает <kind>_data.json (см. fetch_toilets_data.py/fetch_parking_data.py/
+    fetch_tires_data.py/fetch_car_wash_data.py) с тем же кэшем по mtime, что и
+    load_road_events/load_flights_data - файлы обновляются НЕ фоновой задачей
+    бота (Overpass недоступен с Railway/облака), а вручную/по расписанию с
+    компьютера с доступом в обход блокировки (см. docstring фетчеров)."""
+    global _nearby_cache, _nearby_mtime
+    cfg = NEARBY_SERVICES[kind]
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), cfg['file'])
+    try:
+        mtime = os.path.getmtime(path)
+        if _nearby_cache.get(kind) is not None and _nearby_mtime.get(kind) == mtime:
+            return _nearby_cache[kind]
+        with open(path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        _nearby_cache[kind] = data
+        _nearby_mtime[kind] = mtime
+        return data
+    except FileNotFoundError:
+        return None
+    except Exception as e:
+        logger.error(f"❌ Ошибка чтения {cfg['file']}: {e}")
+        return None
+
+def haversine_km(lat1, lon1, lat2, lon2):
+    """Расстояние по прямой между двумя точками (км) - этого достаточно для
+    сортировки "ближайшие N", точный маршрут посчитает уже сам Яндекс
+    Навигатор по кнопке "Поехали"."""
+    r = 6371.0
+    phi1, phi2 = radians(lat1), radians(lat2)
+    dphi = radians(lat2 - lat1)
+    dlambda = radians(lon2 - lon1)
+    a = sin(dphi / 2) ** 2 + cos(phi1) * cos(phi2) * sin(dlambda / 2) ** 2
+    return 2 * r * asin(sqrt(a))
+
+def nearest_nearby_points(kind, city, lat, lon, count=NEARBY_RESULTS_COUNT):
+    """Возвращает (расстояние_км, точка) для ближайших count точек в городе,
+    отсортированные по расстоянию. None - данные вообще не собраны (файла
+    нет/битый), [] - данные есть, но конкретно для этого города пока пусто
+    (сбор пока покрывает не все города - см. docstring фетчеров)."""
+    data = load_nearby_data(kind)
+    if not data:
+        return None
+    points = data.get('cities', {}).get(city, [])
+    if not points:
+        return []
+    scored = [(haversine_km(lat, lon, p['lat'], p['lon']), p) for p in points]
+    scored.sort(key=lambda x: x[0])
+    return scored[:count]
+
+def yandex_navi_url(lat, lon):
+    """Deep link кнопки "Поехали" - открывает построение маршрута до точки
+    прямо в приложении Яндекс Навигатор (если оно установлено; если нет -
+    Telegram просто не сможет открыть ссылку, доп. веб-фолбэк не делаем, т.к.
+    пользователь просил именно Навигатор)."""
+    return f"yandexnavi://build_route_on_map?lat_to={lat}&lon_to={lon}"
+
+def nearby_location_keyboard():
+    return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[
+        [KeyboardButton(text="📍 Отправить геолокацию", request_location=True)],
+        [KeyboardButton(text="❌ Отмена")],
+    ])
+
+def format_nearby_distance(dist_km):
+    return f"{dist_km * 1000:.0f} м" if dist_km < 1 else f"{dist_km:.1f} км"
+
+def render_nearby_results(kind, scored_points):
+    """Текст + инлайн-клавиатура с кнопкой "🚕 Поехали" на каждую из ближайших
+    точек (открывает маршрут в Яндекс Навигаторе - см. yandex_navi_url).
+    Цену НЕ показываем - в OSM её почти никогда нет ни для шиномонтажей, ни
+    для моек (решение пользователя - показывать без неё, а не выдумывать)."""
+    cfg = NEARBY_SERVICES[kind]
+    lines = [f"{cfg['emoji']} *{cfg['label']} — ближайшие {len(scored_points)}*\n"]
+    buttons = []
+    for i, (dist_km, point) in enumerate(scored_points, start=1):
+        name = escape_md(point.get('name') or 'Без названия')
+        hours = point.get('hours')
+        hours_line = f"   🕐 {escape_md(hours)}" if hours else "   🕐 часы работы не указаны"
+        lines.append(f"{i}. *{name}* — {format_nearby_distance(dist_km)}\n{hours_line}")
+        buttons.append([InlineKeyboardButton(
+            text=f"{i}. 🚕 Поехали",
+            url=yandex_navi_url(point['lat'], point['lon']),
+        )])
+    text = '\n\n'.join(lines)
+    return text, InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def courier_finance_cancel_keyboard():
     return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[[KeyboardButton(text="❌ Отмена")]])
@@ -1276,6 +1390,7 @@ async def go_back(message: types.Message):
 
     if state.pop('in_courier_module', None):
         # Были в подменю "🧰 Инструменты водителя" -> возвращаемся на экран услуг (категория и город остаются)
+        state.pop('nearby_pending', None)  # на случай если "Назад" пришёл, пока ждали геолокацию
         await message.answer("Выбери услугу 👇", reply_markup=services_keyboard(state.get('category'), state.get('city')))
         return
 
@@ -1599,10 +1714,66 @@ async def start_courier_finance(message: types.Message):
 
 @router.message(lambda message: message.text in COURIER_STUB_SECTIONS and user_state.get(message.from_user.id, {}).get('in_courier_module'))
 async def courier_stub_section(message: types.Message):
-    # Спрос/туалеты/парковка/ТО - пока без реальных точек (нужна карта +
-    # источники данных, см. README прототипа), тот же текст, что в самом
-    # HTML-прототипе на экране-заглушке (data-view="soon").
+    # Спрос сейчас/ТО - пока без реальных точек (нужна карта + источники
+    # данных, см. README прототипа), тот же текст, что в самом HTML-прототипе
+    # на экране-заглушке (data-view="soon"). Туалеты/парковка/шиномонтаж/мойки
+    # больше НЕ заглушки - см. show_nearby_prompt/handle_nearby_location ниже.
     await message.answer("Этот раздел в разработке 🚧 — скоро будет", reply_markup=courier_module_keyboard())
+
+@router.message(lambda message: message.text in NEARBY_BUTTON_TO_KIND and user_state.get(message.from_user.id, {}).get('in_courier_module'))
+async def show_nearby_prompt(message: types.Message):
+    """Нажатие на "🚻 Туалеты рядом"/"🅿️ Парковка / остановка"/"🔧 Шиномонтаж"/
+    "🚿 Мойки" - запрашивает у водителя геолокацию (кнопка request_location в
+    nearby_location_keyboard). Сама выдача ближайших точек - в
+    handle_nearby_location ниже, после того как Telegram пришлёт location."""
+    user_id = message.from_user.id
+    kind = NEARBY_BUTTON_TO_KIND[message.text]
+    user_state[user_id]['nearby_pending'] = kind
+    cfg = NEARBY_SERVICES[kind]
+    await message.answer(
+        f"{cfg['emoji']} Отправь геолокацию, чтобы найти ближайшие {cfg['noun']} 👇",
+        reply_markup=nearby_location_keyboard(),
+    )
+
+@router.message(lambda message: user_state.get(message.from_user.id, {}).get('nearby_pending') and message.text == "❌ Отмена")
+async def cancel_nearby_prompt(message: types.Message):
+    user_id = message.from_user.id
+    user_state[user_id].pop('nearby_pending', None)
+    await message.answer("Отменено", reply_markup=courier_module_keyboard())
+
+@router.message(lambda message: getattr(message, 'location', None) is not None and user_state.get(message.from_user.id, {}).get('nearby_pending'))
+async def handle_nearby_location(message: types.Message):
+    """Водитель прислал геолокацию (кнопка "📍 Отправить геолокацию") после
+    show_nearby_prompt - считаем ближайшие NEARBY_RESULTS_COUNT точек по
+    прямой (haversine_km) и показываем список с кнопками "Поехали" (маршрут
+    в Яндекс Навигаторе на каждую). Reply-клавиатуру (нижнее меню) и инлайн-
+    кнопки результатов Telegram нельзя отправить одним сообщением - поэтому
+    два отдельных answer(): сначала возвращаем обычное меню инструментов,
+    потом отдельным сообщением - сам список с инлайн-кнопками."""
+    user_id = message.from_user.id
+    state = user_state[user_id]
+    kind = state.pop('nearby_pending')
+    city = state.get('city')
+    cfg = NEARBY_SERVICES[kind]
+    lat, lon = message.location.latitude, message.location.longitude
+
+    scored = nearest_nearby_points(kind, city, lat, lon)
+    if scored is None:
+        await message.answer(
+            f"{cfg['emoji']} Данные по разделу «{cfg['label']}» пока не собраны - скоро добавим.",
+            reply_markup=courier_module_keyboard(),
+        )
+        return
+    if not scored:
+        await message.answer(
+            f"{cfg['emoji']} Для твоего города пока нет собранных точек «{cfg['label']}» - начали со сбора по Москве, остальные города добавим позже.",
+            reply_markup=courier_module_keyboard(),
+        )
+        return
+
+    text, keyboard = render_nearby_results(kind, scored)
+    await message.answer("Готово 👇", reply_markup=courier_module_keyboard())
+    await message.answer(text, reply_markup=keyboard, parse_mode='Markdown')
 
 @router.message(lambda message: user_state.get(message.from_user.id, {}).get('courier_finance_draft') is not None)
 async def courier_finance_flow(message: types.Message):
@@ -1805,8 +1976,10 @@ async def show_road_events(message: types.Message):
     там же фильтр "только про ДТП/перекрытия/аварии" и окно 6 часов).
     disable_web_page_preview=True на всех answer() ниже - без этого Telegram
     иногда сам подтягивал превью-карточку канала ("Проголосуйте за канал")
-    по ссылке, которая могла всплыть в тексте поста. Для городов без канала
-    - текст-заглушка."""
+    по ссылке, которая могла всплыть в тексте поста. Кнопки/ссылки на сам
+    канал нарочно НЕТ нигде в этом хендлере (было раньше - убрано по
+    просьбе пользователя: не подсвечивать переход в канал вообще, только
+    сами новости). Для городов без канала - текст-заглушка."""
     state = user_state.get(message.from_user.id, {})
     city = state.get('city')
     channel = ROAD_EVENTS_CHANNEL_LINKS.get(city)
@@ -1820,18 +1993,14 @@ async def show_road_events(message: types.Message):
         )
         return
 
-    url, city_name = channel
+    _, city_name = channel
     events = get_road_events_for_city(city)
-    channel_keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🚨 Открыть канал целиком", url=url)]
-    ])
 
     if not events:
         await message.answer(
             f"⛔ *Дорожные события — {city_name}*\n\n"
             f"За последние {ROAD_EVENTS_LOOKBACK_HOURS_LABEL} новых ДТП/перекрытий не было, "
-            "либо данные ещё не собраны. Загляни в канал напрямую 👇",
-            reply_markup=channel_keyboard,
+            "либо данные ещё не собраны.",
             parse_mode='Markdown',
             disable_web_page_preview=True,
         )
@@ -1852,7 +2021,6 @@ async def show_road_events(message: types.Message):
 
     await message.answer(
         message_text,
-        reply_markup=channel_keyboard,
         parse_mode='Markdown',
         disable_web_page_preview=True,
     )
@@ -2141,7 +2309,12 @@ async def show_airport_details(callback_query: types.CallbackQuery):
     text += f"_Обновлено: {now.strftime('%H:%M:%S')} (местное время аэропорта)_\n"
     text += f"_Пропускная способность: {capacity} пас/час (эконом {economy_capacity:.0f} / бизнес {business_capacity:.0f})_\n"
     text += f"_Рекомендации рассчитаны для: {class_label}_\n"
-    text += "\n*📊 ПРОГНОЗ ЗАГРУЖЕННОСТИ АЭРОПОРТА (текущее время +8 часов):*\n\n"
+    # Текущая очередь по тарифам (те же крауд-отметки водителей, что и в
+    # разделе "📋 Очередь" - см. format_queue_breakdown) - по просьбе
+    # пользователя показываем прямо в окне "Прилёты", а не только отдельным
+    # пунктом меню.
+    text += format_queue_breakdown(city, airport['icao'], category)
+    text += "\n\n*📊 ПРОГНОЗ ЗАГРУЖЕННОСТИ АЭРОПОРТА (текущее время +8 часов):*\n\n"
     current_hour = now.hour
     for hour_offset in range(8):
         order_hour_of_day = (current_hour + hour_offset) % 24
@@ -2175,7 +2348,7 @@ async def show_airport_details(callback_query: types.CallbackQuery):
         text += f"   Рекомендация: *{action}*\n"
         text += f"   🛬 Рейсов: {flights_in_hour} (🇷🇺 внутр. {domestic_in_hour} / 🌍 межд. {international_in_hour})  |  ✈️ Пассажиры: {total_in_hour} (эконом {economy_in_hour} / бизнес {business_in_hour})\n\n"
 
-    text += "_🔴0-50% НЕ ЕХАТЬ | 🟡51-70% ОЧЕРЕДЬ | 🟢71-100% ЕХАТЬ | 🟣>100% СРОЧНО_"
+    text += "_🔴0-50% Не ехать | 🟡51-70% Уточни очередь | 🟢71-100% Занимай очередь | 🟣>100% Срочно ехать_"
     await msg.edit_text(text, parse_mode='Markdown')
     await callback_query.answer()
 
@@ -2658,16 +2831,22 @@ async def notify_airport_status_changes():
                 await push_airport_status_change(icao, airport, old_status, new_status, notice)
 
 HIGH_DEMAND_LEAD_HOURS = 2
+# По просьбе пользователя пуш шлётся не на разовый скачок >100% в один
+# конкретный час, а только на УСТОЙЧИВУЮ перегрузку - подряд идущие часы с
+# прогнозом выше порога. HIGH_DEMAND_STREAK_HOURS=2 - именно "2 часа подряд".
+HIGH_DEMAND_STREAK_HOURS = 2
 HIGH_DEMAND_THRESHOLD = 100
 HIGH_DEMAND_CHECK_INTERVAL_MINUTES = 15
 # Обратное к CATEGORY_TO_CLASS, но только категории с доступом к аэропортам -
 # Курьер/Грузовое такси используют relevant_class='total' и в этот пуш не попадают.
 RELEVANT_CLASS_TO_CATEGORY = {'economy': 'taxi', 'business': 'ultima'}
 
-async def push_high_demand_alert(icao, airport, relevant_class, target_hour, target_date, load):
+async def push_high_demand_alert(icao, airport, relevant_class, hour_from, hour_to, target_date, loads):
     """Рассылает заблаговременный пуш о повышенном спросе: прогноз загрузки
     прилётов через HIGH_DEMAND_LEAD_HOURS часа даёт фиолетовый уровень (>100%,
-    "СРОЧНО"). Получают только водители категории, которой соответствует
+    "СРОЧНО") НЕ на один час, а на HIGH_DEMAND_STREAK_HOURS часов ПОДРЯД
+    (hour_from..hour_to включительно) - устойчивая перегрузка, а не разовый
+    скачок. Получают только водители категории, которой соответствует
     relevant_class (эконом -> Такси, бизнес -> Ultima) - как и в пуше о смене
     статуса, каждому добавляется персональный блок текущей очереди по его
     собственным тарифам."""
@@ -2676,10 +2855,13 @@ async def push_high_demand_alert(icao, airport, relevant_class, target_hour, tar
     if not city or not bot or not category:
         return
     class_name = CATEGORIES[category]['name']
+    hour_to_end = (hour_to + 1) % 24
+    loads_str = ', '.join(f"{l:.0f}%" for l in loads)
     base_text = (
         f"🟣 *{airport['emoji']} {airport['name']}*\n\n"
-        f"Через {HIGH_DEMAND_LEAD_HOURS} часа (~{target_hour:02d}:00) ожидается "
-        f"*повышенный спрос* на прилёты ({class_name}) - прогноз загрузки выше 100%."
+        f"Через {HIGH_DEMAND_LEAD_HOURS} часа (~{hour_from:02d}:00-{hour_to_end:02d}:00) ожидается "
+        f"*устойчивый повышенный спрос* на прилёты ({class_name}) - "
+        f"{HIGH_DEMAND_STREAK_HOURS} часа подряд прогноз загрузки выше 100% ({loads_str})."
     )
 
     # Копия списка - рассылка идёт не одну секунду, а user_state тем временем
@@ -2689,10 +2871,10 @@ async def push_high_demand_alert(icao, airport, relevant_class, target_hour, tar
         if isinstance(state, dict) and state.get('city') == city and state.get('category') == category
     ]
     if not recipients:
-        logger.info(f"📢 Прогноз повышенного спроса {icao} ({relevant_class}, {target_hour:02d}:00), но в городе {city} нет известных водителей категории {category}")
+        logger.info(f"📢 Прогноз устойчивого спроса {icao} ({relevant_class}, {hour_from:02d}:00-{hour_to_end:02d}:00), но в городе {city} нет известных водителей категории {category}")
         return
 
-    logger.info(f"📢 Прогноз повышенного спроса {icao} ({relevant_class}, {target_hour:02d}:00, загрузка {load:.0f}%) - рассылаю {len(recipients)} водителям категории {category}")
+    logger.info(f"📢 Прогноз устойчивого спроса {icao} ({relevant_class}, {hour_from:02d}:00-{hour_to_end:02d}:00, загрузка {loads_str}) - рассылаю {len(recipients)} водителям категории {category}")
     sent, failed = 0, 0
     for user_id, state in recipients:
         driver_category = state.get('category')
@@ -2709,35 +2891,48 @@ async def push_high_demand_alert(icao, airport, relevant_class, target_hour, tar
     logger.info(f"📢 Пуш о спросе по {icao} разослан: {sent} успешно, {failed} ошибок")
 
 async def check_high_demand_alerts():
-    """Проверяет прогноз загрузки прилётов через HIGH_DEMAND_LEAD_HOURS часа для
-    каждого (аэропорт, релевантный класс). При прогнозе >100% (фиолетовый
-    уровень) шлёт заблаговременный пуш - но не чаще одного раза на конкретный
-    (аэропорт, класс, дата, час) слот: фоновая проверка идёт каждые
-    HIGH_DEMAND_CHECK_INTERVAL_MINUTES минут, а окно "через 2 часа" весь этот
-    час указывает на один и тот же будущий час, так что без дедупликации
-    водитель получил бы несколько одинаковых пушей подряд."""
+    """Проверяет прогноз загрузки прилётов для каждого (аэропорт, релевантный
+    класс) на предмет УСТОЙЧИВОЙ перегрузки - HIGH_DEMAND_STREAK_HOURS часов
+    ПОДРЯД с прогнозом >100% (фиолетовый уровень), а не разовый скачок в
+    один час. Окно начинается через HIGH_DEMAND_LEAD_HOURS часа от текущего
+    момента (т.е. пуш - это предупреждение ЗА HIGH_DEMAND_LEAD_HOURS часа ДО
+    начала этих HIGH_DEMAND_STREAK_HOURS часов перегрузки, по просьбе
+    пользователя). Не чаще одного раза на конкретный (аэропорт, класс, дата,
+    первый час окна) слот: фоновая проверка идёт каждые
+    HIGH_DEMAND_CHECK_INTERVAL_MINUTES минут и без дедупликации водитель
+    получил бы несколько одинаковых пушей подряд про одно и то же окно."""
     cleanup_old_high_demand_alerts()
     for icao, airport in ICAO_TO_AIRPORT.items():
         if icao in PERMANENTLY_CLOSED_AIRPORTS or airport.get('closed'):
             continue
         for relevant_class in ('economy', 'business'):
             try:
-                load, _, target_hour = compute_current_hour_load(icao, relevant_class, hour_offset=HIGH_DEMAND_LEAD_HOURS)
+                # Смотрим HIGH_DEMAND_STREAK_HOURS часов подряд, начиная через
+                # HIGH_DEMAND_LEAD_HOURS часов от сейчас: hour_offset =
+                # LEAD_HOURS, LEAD_HOURS+1, ... LEAD_HOURS+STREAK_HOURS-1.
+                streak = [
+                    compute_current_hour_load(icao, relevant_class, hour_offset=HIGH_DEMAND_LEAD_HOURS + i)
+                    for i in range(HIGH_DEMAND_STREAK_HOURS)
+                ]
             except Exception as e:
                 logger.error(f"❌ Не удалось посчитать прогноз спроса {icao}/{relevant_class}: {e}")
                 continue
-            if load <= HIGH_DEMAND_THRESHOLD:
-                continue
+            loads = [s[0] for s in streak]
+            if any(load <= HIGH_DEMAND_THRESHOLD for load in loads):
+                continue  # хотя бы один час из окна не превышает порог - это не устойчивая перегрузка
+            hour_from = streak[0][2]
+            hour_to = streak[-1][2]
             target_date = (get_airport_now(icao) + timedelta(hours=HIGH_DEMAND_LEAD_HOURS)).strftime('%Y-%m-%d')
-            if was_high_demand_alert_sent(icao, relevant_class, target_date, target_hour):
+            if was_high_demand_alert_sent(icao, relevant_class, target_date, hour_from):
                 continue
-            await push_high_demand_alert(icao, airport, relevant_class, target_hour, target_date, load)
-            mark_high_demand_alert_sent(icao, relevant_class, target_date, target_hour)
+            await push_high_demand_alert(icao, airport, relevant_class, hour_from, hour_to, target_date, loads)
+            mark_high_demand_alert_sent(icao, relevant_class, target_date, hour_from)
 
 async def high_demand_alert_checker():
     """Фоновая задача: раз в HIGH_DEMAND_CHECK_INTERVAL_MINUTES минут проверяет
     прогноз спроса на прилёты и заранее (за HIGH_DEMAND_LEAD_HOURS часа) шлёт
-    пуш водителям, если ожидается фиолетовый уровень (>100%)."""
+    пуш водителям, если ожидается HIGH_DEMAND_STREAK_HOURS часов ПОДРЯД
+    фиолетового уровня (>100%) - устойчивая перегрузка, а не разовый скачок."""
     while True:
         try:
             await check_high_demand_alerts()

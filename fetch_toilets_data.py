@@ -17,6 +17,11 @@ amenity=toilets в OSM почти всегда общедоступные точ
 Точки дедуплицированы по сетке ~120м (точки-амениti в OSM гораздо реже
 дублируются близкими сегментами, чем парковки, но небольшой шаг всё равно
 не помешает при плотной застройке).
+
+Помимо названия сохраняем opening_hours (часы работы) - тег в OSM есть у
+заметной части точек и не требует доп. запросов. Цену/стоимость НЕ собираем -
+пользователь подтвердил, что для туалетов/шиномонтажей/моек в OSM её почти
+никогда нет (некому вносить), показывать в боте будем без неё.
 """
 import os
 import json
@@ -62,16 +67,16 @@ out center tags;'''
             lat, lon = center.get('lat'), center.get('lon')
         if lat is None or lon is None:
             continue
-        raw_points.append((round(lat, 6), round(lon, 6), tags.get('name')))
+        raw_points.append((round(lat, 6), round(lon, 6), tags.get('name'), tags.get('opening_hours')))
 
     cells = {}
-    for lat, lon, name in raw_points:
+    for lat, lon, name, hours in raw_points:
         key = (round(lat / GRID_STEP), round(lon / GRID_STEP))
         existing = cells.get(key)
         if not existing or (not existing[2] and name):
-            cells[key] = (lat, lon, name)
+            cells[key] = (lat, lon, name, hours)
 
-    return [{'lat': lat, 'lon': lon, 'name': name} for lat, lon, name in cells.values()]
+    return [{'lat': lat, 'lon': lon, 'name': name, 'hours': hours} for lat, lon, name, hours in cells.values()]
 
 
 def main():

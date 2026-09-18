@@ -203,6 +203,34 @@ def is_domestic_flight(point_title):
     return city in RUSSIAN_CITIES
 
 
+# Разделители, которыми в thread.title склеены оба конца маршрута
+# ("Абакан — Москва", изредка через обычный дефис). Используется только как
+# ПОСЛЕДНИЙ fallback в extract_point_city ниже, когда в ответе API нет
+# структурированного объекта с городом.
+_THREAD_TITLE_SEPARATORS = (' — ', ' – ', ' — ', '—', '–', ' - ')
+
+
+def extract_point_city(thread_title, event):
+    """Вытаскивает ОДИН город (откуда рейс - для arrival, куда - для
+    departure) из thread.title вида "Абакан — Москва". Раньше в fallback
+    (когда structured-поле с точкой отправления/назначения недоступно, см.
+    parse_flights) передавался ВЕСЬ title целиком - is_domestic_flight
+    сравнивал это как один город и НИКОГДА не находил совпадение в
+    RUSSIAN_CITIES (составная строка "Абакан — Москва" не равна ни "абакан",
+    ни "москва" по отдельности), из-за чего рейсы поголовно помечались
+    международными, даже 100% внутренние по России. Эта функция разбивает
+    title по разделителю и берёт нужный конец маршрута."""
+    if not thread_title:
+        return thread_title
+    for sep in _THREAD_TITLE_SEPARATORS:
+        if sep in thread_title:
+            parts = [p.strip() for p in thread_title.split(sep) if p.strip()]
+            if len(parts) >= 2:
+                return parts[0] if event == 'arrival' else parts[-1]
+            break
+    return thread_title
+
+
 REQUEST_COUNT = 0  # глобальный счётчик реальных запросов к API за этот запуск
 
 
@@ -269,13 +297,20 @@ def parse_flights(schedule_items, event):
         vehicle = thread.get('vehicle', '') or ''
         economy, business, total = estimate_passengers(thread)
 
-        # Направление: для arrival - откуда, для departure - куда
+        # Направление: для arrival - откуда, для departure - куда. У Yandex
+        # Rasp API для эндпоинта расписания станции нет structured-поля
+        # "departure_from"/"destination_to" на самом item (это поля другого
+        # эндпоинта - поиска маршрута) - на практике point почти всегда None,
+        # и мы попадаем в fallback. Раньше fallback брал thread.title ЦЕЛИКОМ
+        # ("Абакан — Москва") - см. extract_point_city выше, почему это
+        # ломало is_domestic_flight. Теперь fallback вытаскивает из title
+        # именно тот город, который нужен (откуда/куда).
         point = item.get('departure_from') if event == 'arrival' else item.get('destination_to')
         point_title = None
         if isinstance(point, dict):
             point_title = point.get('title')
         if not point_title:
-            point_title = title  # fallback на название нитки маршрута
+            point_title = extract_point_city(title, event)
 
         flights.append({
             'time': dt.strftime('%H:%M'),
