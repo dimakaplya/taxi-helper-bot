@@ -104,14 +104,18 @@ STATION_CAPACITY = {
 # окне (0 запусков), а не просто реже, как было раньше. Днём (06:00-24:00) -
 # каждые FLIGHTS_DAY_INTERVAL_HOURS часов.
 FLIGHTS_NIGHT_START_HOUR = 0
-FLIGHTS_NIGHT_END_HOUR = 6  # [0, 6) - ночь (обновлений нет), [6, 24) - день
+FLIGHTS_NIGHT_END_HOUR = 6  # [0, 6) - ночь (реже), [6, 24) - день
 FLIGHTS_DAY_INTERVAL_HOURS = 1  # днём - каждый час (06,07,...,23 = 18 запусков/сутки).
 # ИЗМЕНЕНО 19.09.2026 с 2ч по просьбе пользователя (было 9 запусков/сутки).
-# 13 аэропортов x 18 запусков = 234 запроса/сутки только на рейсы - вдвое
-# больше "всплесков" запросов в день, чем раньше, хоть суммарный дневной
-# объём (234 + 52 у поездов = 286/500, 57%) всё ещё укладывается в
-# DAILY_SAFETY_LIMIT (см. fetch_yandex_data.py, 70% = 350). Стоит помнить
-# при новой блокировке ключа - см. инцидент 19.09.2026.
+FLIGHTS_NIGHT_INTERVAL_HOURS = 2  # ночью (00:00-06:00) - каждые 2ч (00,02,04 = 3 запуска/сутки).
+# ДОБАВЛЕНО 19.09.2026 по просьбе пользователя - раньше ночью обновлений не
+# было ВООБЩЕ (см. историю airports_data_updater), теперь собираем реже, но
+# не пропускаем совсем.
+# Итого аэропорты: 18 (день) + 3 (ночь) = 21 запуск/сутки x 13 аэропортов =
+# 273 запроса/сутки только на рейсы. Вместе с поездами (52/сутки) - 325/500
+# (65%) - ещё в пределах DAILY_SAFETY_LIMIT (см. fetch_yandex_data.py, 70% =
+# 350), но запас уже небольшой. Стоит помнить при новой блокировке ключа -
+# см. инцидент 19.09.2026.
 
 # Поезда (7 вокзалов по 6 городам - см. STATION_CITY): отдельный, не
 # завязанный на день/ночь график - раз в TRAINS_UPDATE_INTERVAL_HOURS часов,
@@ -3884,28 +3888,26 @@ def _data_file_age_minutes(path):
 
 
 async def airports_data_updater():
-    """Фоновая задача для flights_data.json. С 00:00 до 06:00 по Москве
-    (FLIGHTS_NIGHT_START_HOUR-FLIGHTS_NIGHT_END_HOUR) обновлений НЕТ ВООБЩЕ -
-    рейсов ночью мало, ждём до 06:00. С 06:00 до 24:00 - каждые
-    FLIGHTS_DAY_INTERVAL_HOURS часов. Запускается сразу при старте бота (если
-    он поднялся не ночью), чтобы данные были свежими с первого деплоя -
-    НО ТОЛЬКО если данные реально устарели (см. MIN_FRESH_AGE_MINUTES ниже).
+    """Фоновая задача для flights_data.json. Днём (06:00-24:00 МСК) - каждые
+    FLIGHTS_DAY_INTERVAL_HOURS часов, ночью (00:00-06:00,
+    FLIGHTS_NIGHT_START_HOUR-FLIGHTS_NIGHT_END_HOUR) - реже, каждые
+    FLIGHTS_NIGHT_INTERVAL_HOURS часов (рейсов мало, но не ноль - по просьбе
+    пользователя ночью тоже собираем, просто пореже). Запускается сразу при
+    старте бота, чтобы данные были свежими с первого деплоя - НО ТОЛЬКО если
+    данные реально устарели (см. MIN_FRESH_AGE_MINUTES ниже).
 
     ИСПРАВЛЕНО 19.09.2026: раньше запускался БЕЗУСЛОВНО при каждом старте
     бота, даже если данные были только что обновлены - на Railway это
     означало, что каждый редеплой (а их за день бывает несколько подряд при
     активной разработке) добавлял ЕЩЁ ОДИН внеплановый цикл запросов к
-    Yandex Rasp сверх обычного расписания раз в 2 часа. Именно череда
-    редеплоев в течение одного дня внесла свой вклад в блокировку ключа
-    19.09.2026 (см. письмо Яндекса о превышении лимита)."""
+    Yandex Rasp сверх обычного расписания. Именно череда редеплоев в течение
+    одного дня внесла свой вклад в блокировку ключа 19.09.2026 (см. письмо
+    Яндекса о превышении лимита)."""
     MIN_FRESH_AGE_MINUTES = 25  # меньше половины FLIGHTS_DAY_INTERVAL_HOURS (1ч=60мин)
     while True:
         hour = datetime.now(ZoneInfo('Europe/Moscow')).hour
-        if FLIGHTS_NIGHT_START_HOUR <= hour < FLIGHTS_NIGHT_END_HOUR:
-            wait_s = seconds_until_hour(FLIGHTS_NIGHT_END_HOUR)
-            logger.info(f"🌙 Ночь (00:00-06:00 МСК) - аэропорты не обновляем, жду до 06:00 ({wait_s/3600:.1f}ч)")
-            await asyncio.sleep(wait_s)
-            continue
+        is_night = FLIGHTS_NIGHT_START_HOUR <= hour < FLIGHTS_NIGHT_END_HOUR
+        interval_hours = FLIGHTS_NIGHT_INTERVAL_HOURS if is_night else FLIGHTS_DAY_INTERVAL_HOURS
 
         age_min = _data_file_age_minutes(FLIGHTS_DATA_FILE)
         if age_min is not None and age_min < MIN_FRESH_AGE_MINUTES:
@@ -3915,13 +3917,13 @@ async def airports_data_updater():
             )
         else:
             try:
-                logger.info("🔄 Обновляю flights_data.json из Yandex Rasp API...")
+                logger.info(f"🔄 Обновляю flights_data.json из Yandex Rasp API... ({'ночь' if is_night else 'день'})")
                 async with _yandex_api_lock:
                     await asyncio.to_thread(fetch_yandex_data.main)
                 logger.info("✅ flights_data.json обновлён")
             except Exception as e:
                 logger.error(f"❌ Ошибка фонового обновления flights_data.json: {e}")
-        await asyncio.sleep(FLIGHTS_DAY_INTERVAL_HOURS * 3600)
+        await asyncio.sleep(interval_hours * 3600)
 
 
 async def trains_data_updater():
