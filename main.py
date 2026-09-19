@@ -2019,7 +2019,7 @@ def services_keyboard(category=None, city=None):
     # заглушкой без своей логики. "Дорожные события" тоже пока без
     # обработчика - как было. "🎭 События города" (афиша TimePad) - только
     # у Такси/Ultima, курьеру и грузовому такси не актуальна (см.
-    # CATEGORIES_WITHOUT_EVENTS). "✈️🚆 Транспорт" объединяет аэропорты и
+    # CATEGORIES_WITHOUT_EVENTS). "✈️🚆 Авиа/ЖД" объединяет аэропорты и
     # вокзалы в одну кнопку главного меню (короче список) - при нажатии
     # show_transport_menu показывает инлайн-подменю с двумя вариантами;
     # "🚆 Вокзалы" внутри него виден, только если город в TRAIN_CITIES (см.
@@ -2059,8 +2059,7 @@ def services_keyboard(category=None, city=None):
     if category in COURIER_MODULE_CATEGORIES:
         items.append("🧰 Инструменты водителя")
     if category not in CATEGORIES_WITHOUT_AIRPORTS:
-        items.append("✈️🚆 Транспорт")
-    items.append("⛽ Где бензин")
+        items.append("✈️🚆 Авиа/ЖД")
     if category not in CATEGORIES_WITHOUT_EVENTS:
         items.append("🎭 События города")
     items.append("⛔ Дорожные события")
@@ -2113,14 +2112,17 @@ def courier_module_keyboard(category=None):
     старыми вызовами) - по просьбе пользователя кнопка скрыта для
     courier/cargo (см. CATEGORIES_WITHOUT_AIRPORTS): эти категории не
     забирают пассажиров в аэропорту, аэропортовые пуши им не нужны - та же
-    логика, что у "✈️🚆 Транспорт" в services_keyboard."""
+    логика, что у "✈️🚆 Авиа/ЖД" в services_keyboard."""
     buttons = [
         [KeyboardButton(text="💰 Финансы"), KeyboardButton(text="📈 Спрос сейчас")],
         [KeyboardButton(text="📅 Часы пика"), KeyboardButton(text="🚻 Туалеты")],
         [KeyboardButton(text="🅿️ Парковка"), KeyboardButton(text="🔧 Шиномонтаж")],
         [KeyboardButton(text="🚿 Мойки"), KeyboardButton(text="🍷 Алкомаркеты 24ч")],
         [KeyboardButton(text="🛒 Магазины 24ч"), KeyboardButton(text="🔌 Электрозарядки")],
-        [KeyboardButton(text="🛠 ТО транспорта")],
+        # "⛽ Где бензин" перенесена сюда из главного меню (по просьбе
+        # пользователя, 19.09.2026) - раньше была отдельной кнопкой в
+        # services_keyboard.
+        [KeyboardButton(text="🛠 ТО транспорта"), KeyboardButton(text="⛽ Где бензин")],
     ]
     # "💰 КУДА ЕХАТЬ ➡️" отсюда убрана - перенесена в services_keyboard как
     # верхняя строка главного меню (по просьбе пользователя, 19.09.2026).
@@ -2844,7 +2846,7 @@ def score_station_candidate(city, code, station, category):
     аэропортов. По просьбе пользователя (21.09.2026) вокзалы тоже участвуют
     в "Куда ехать", а не только аэропорты. score - тот же % загрузки
     текущего получаса, что показывается на кнопке вокзала в разделе
-    "✈️🚆 Транспорт" - шкалы сопоставимы (обе - % от часовой ёмкости),
+    "✈️🚆 Авиа/ЖД" - шкалы сопоставимы (обе - % от часовой ёмкости),
     прямое сравнение с score аэропорта корректно."""
     load, trains_in_period, _ = compute_current_train_period_load(code, category)
     reasons = []
@@ -3121,6 +3123,8 @@ def format_where_to_go_text(city, category, candidates):
     )
     return '\n'.join(lines)
 
+_where_to_go_in_progress = set()  # user_id-ы, для которых сейчас уже считается сводка
+
 @router.message(lambda message: message.text == "💰 КУДА ЕХАТЬ ➡️")
 async def show_where_to_go(message: types.Message):
     user_id = message.from_user.id
@@ -3136,12 +3140,38 @@ async def show_where_to_go(message: types.Message):
         # откуда-то ещё (например, старая клавиатура в чате).
         await message.answer("Этот раздел пока доступен только для Такси и Ultima.")
         return
-    status_msg = await show_loading_animation(message.answer, "🧭 Считаю варианты")
-    anim_task = asyncio.create_task(animate_loading(status_msg, "🧭 Считаю варианты"))
-    candidates = await compute_where_to_go(city, category)
-    anim_task.cancel()
-    text = format_where_to_go_text(city, category, candidates)
-    await status_msg.edit_text(text, parse_mode='Markdown')
+    # Защита от повторного нажатия, пока предыдущий запрос ещё считается
+    # (баг 19.09.2026: двойной тап запускал два параллельных расчёта -
+    # SingleMessageMiddleware удалял статус-сообщение ПЕРВОГО запроса при
+    # отправке статус-сообщения ВТОРОГО, и последующий status_msg.edit_text
+    # первого запроса падал на уже удалённом сообщении - без try/except это
+    # тихо роняло всю задачу, и "Считаю варианты..." зависало навсегда).
+    if user_id in _where_to_go_in_progress:
+        return
+    _where_to_go_in_progress.add(user_id)
+    try:
+        status_msg = await show_loading_animation(message.answer, "🧭 Считаю варианты")
+        anim_task = asyncio.create_task(animate_loading(status_msg, "🧭 Считаю варианты"))
+        try:
+            candidates = await compute_where_to_go(city, category)
+        except Exception as e:
+            anim_task.cancel()
+            logger.error(f"❌ Ошибка расчёта 'Куда ехать' для {city}/{category}: {e}")
+            try:
+                await status_msg.edit_text("⚠️ Не удалось посчитать варианты. Попробуй ещё раз через минуту.")
+            except Exception:
+                await message.answer("⚠️ Не удалось посчитать варианты. Попробуй ещё раз через минуту.")
+            return
+        anim_task.cancel()
+        text = format_where_to_go_text(city, category, candidates)
+        try:
+            await status_msg.edit_text(text, parse_mode='Markdown')
+        except Exception:
+            # status_msg уже мог быть удалён (см. комментарий выше) -
+            # отправляем результат новым сообщением, чтобы он точно дошёл.
+            await message.answer(text, parse_mode='Markdown')
+    finally:
+        _where_to_go_in_progress.discard(user_id)
 
 @router.message(lambda message: message.text == "⚙️ Настройки")
 async def show_notification_settings(message: types.Message):
@@ -3905,9 +3935,9 @@ AIRPORT_MENU_KEYBOARD = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="📋 Очередь", callback_data="airport_queue")]
 ])
 
-@router.message(lambda message: message.text == "✈️🚆 Транспорт")
+@router.message(lambda message: message.text == "✈️🚆 Авиа/ЖД")
 async def show_transport_menu(message: types.Message):
-    """Объединённая кнопка "✈️🚆 Транспорт" (было 2 отдельные кнопки -
+    """Объединённая кнопка "✈️🚆 Авиа/ЖД" (было 2 отдельные кнопки -
     "✈️ Аэропорты" и "🚆 Вокзалы" - объединены в одну по просьбе
     пользователя, чтобы короче было главное меню услуг). При нажатии -
     инлайн-подменю с этими двумя вариантами; "🚆 Вокзалы" в нём показывается,
@@ -3961,7 +3991,7 @@ def build_train_stations_keyboard(category, city):
 async def show_train_stations_menu(callback_query: types.CallbackQuery):
     """Список вокзалов ВЫБРАННОГО ГОРОДА (см. STATION_CITY и
     fetch_trains_data.py). Пункт "🚆 Вокзалы" и так показывается в подменю
-    "✈️🚆 Транспорт" только в городах из TRAIN_CITIES (см. show_transport_menu),
+    "✈️🚆 Авиа/ЖД" только в городах из TRAIN_CITIES (см. show_transport_menu),
     но проверяем город и здесь на случай, если пользователь сменил город, не
     обновив клавиатуру."""
     await callback_query.answer()
