@@ -1457,6 +1457,11 @@ CATEGORIES_WITHOUT_AIRPORTS = {'courier', 'cargo'}
 # со ссылкой, открывающая чат с этим ботом напрямую.
 FUEL_BOT_URL = "https://t.me/gde_benzin_rubot"
 
+# Ещё одна внешняя ссылка того же типа (кнопка -> открывает чат/страницу
+# стороннего сервиса напрямую, без интеграции с данными бота) - по просьбе
+# пользователя, реферальная ссылка на бота VPN-сервиса.
+VPN_BOT_URL = "https://t.me/Strelka_vpn_bot?start=147611511"
+
 def services_keyboard(category=None, city=None):
     # Итоговый набор кнопок меню услуг (по заданному порядку). "Заказы
     # города" (было "Повышенный спрос") убрана по просьбе пользователя - была
@@ -1480,6 +1485,7 @@ def services_keyboard(category=None, city=None):
     buttons = []
     if category in SHARED_ORDER_CATEGORIES:
         buttons.append([KeyboardButton(text="🔄 Отдать заказ")])
+    buttons.append([KeyboardButton(text="🔓 Бесплатный VPN для Работы")])
     buttons.append([KeyboardButton(text="🌤 Погода")])
     if category in COURIER_MODULE_CATEGORIES:
         buttons.append([KeyboardButton(text="🧰 Инструменты водителя")])
@@ -1519,16 +1525,24 @@ COURIER_STUB_SECTIONS = {
 # Раскладка в 2 колонки (по просьбе пользователя) - тексты кнопок сокращены,
 # где были длинные (см. NEARBY_BUTTON_TO_KIND). "🔔 Уведомления" - отдельная
 # настройка, какие типы автопушей получать (см. блок "НАСТРОЙКИ ПУШЕЙ" ниже).
-def courier_module_keyboard():
+def courier_module_keyboard(category=None):
+    """category=None показывает "📍 Очередь у аэропорта" (совместимость со
+    старыми вызовами) - по просьбе пользователя кнопка скрыта для
+    courier/cargo (см. CATEGORIES_WITHOUT_AIRPORTS): эти категории не
+    забирают пассажиров в аэропорту, аэропортовые пуши им не нужны - та же
+    логика, что у "✈️🚆 Транспорт" в services_keyboard."""
     buttons = [
         [KeyboardButton(text="💰 Финансы"), KeyboardButton(text="📈 Спрос сейчас")],
         [KeyboardButton(text="🚻 Туалеты"), KeyboardButton(text="🅿️ Парковка")],
         [KeyboardButton(text="🔧 Шиномонтаж"), KeyboardButton(text="🚿 Мойки")],
         [KeyboardButton(text="🍷 Алкомаркеты 24ч"), KeyboardButton(text="🛒 Магазины 24ч")],
         [KeyboardButton(text="🔌 Электрозарядки"), KeyboardButton(text="🛠 ТО транспорта")],
-        [KeyboardButton(text="📍 Очередь у аэропорта"), KeyboardButton(text="🔔 Уведомления")],
-        [KeyboardButton(text="← Назад"), KeyboardButton(text="🏙 Выбор города")],
     ]
+    if category not in CATEGORIES_WITHOUT_AIRPORTS:
+        buttons.append([KeyboardButton(text="📍 Очередь у аэропорта"), KeyboardButton(text="🔔 Уведомления")])
+    else:
+        buttons.append([KeyboardButton(text="🔔 Уведомления")])
+    buttons.append([KeyboardButton(text="← Назад"), KeyboardButton(text="🏙 Выбор города")])
     return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=buttons)
 
 def notification_settings_keyboard(state):
@@ -2093,7 +2107,7 @@ async def open_courier_module(message: types.Message):
         )
         return
     state['in_courier_module'] = True
-    await message.answer("🧰 *Инструменты водителя*\n\nВыбери раздел 👇", reply_markup=courier_module_keyboard(), parse_mode='Markdown')
+    await message.answer("🧰 *Инструменты водителя*\n\nВыбери раздел 👇", reply_markup=courier_module_keyboard(state.get('category')), parse_mode='Markdown')
 
 @router.message(lambda message: message.text == "💰 Финансы" and user_state.get(message.from_user.id, {}).get('in_courier_module'))
 async def start_courier_finance(message: types.Message):
@@ -2108,7 +2122,8 @@ async def courier_stub_section(message: types.Message):
     # данных, см. README прототипа), тот же текст, что в самом HTML-прототипе
     # на экране-заглушке (data-view="soon"). Туалеты/парковка/шиномонтаж/мойки
     # больше НЕ заглушки - см. show_nearby_prompt/handle_nearby_location ниже.
-    await message.answer("Этот раздел в разработке 🚧 — скоро будет", reply_markup=courier_module_keyboard())
+    category = user_state.get(message.from_user.id, {}).get('category')
+    await message.answer("Этот раздел в разработке 🚧 — скоро будет", reply_markup=courier_module_keyboard(category))
 
 @router.message(lambda message: message.text == "🔔 Уведомления" and user_state.get(message.from_user.id, {}).get('in_courier_module'))
 async def show_notification_settings(message: types.Message):
@@ -2136,7 +2151,7 @@ async def toggle_notification_setting(callback_query: types.CallbackQuery):
     state['notif_prefs'] = prefs
     await callback_query.message.edit_reply_markup(reply_markup=notification_settings_keyboard(state))
 
-@router.message(lambda message: message.text == "📍 Очередь у аэропорта" and user_state.get(message.from_user.id, {}).get('in_courier_module'))
+@router.message(lambda message: message.text == "📍 Очередь у аэропорта" and user_state.get(message.from_user.id, {}).get('in_courier_module') and user_state.get(message.from_user.id, {}).get('category') not in CATEGORIES_WITHOUT_AIRPORTS)
 async def toggle_airport_queue_tracking(message: types.Message):
     """Кнопка-переключатель (toggle, без отдельного экрана): первое нажатие
     включает отслеживание живой геопозиции и объясняет, как её включить в
@@ -2145,27 +2160,32 @@ async def toggle_airport_queue_tracking(message: types.Message):
     выше - для живой трансляции юзер обязательно жмёт 📎 сам). Повторное
     нажатие выключает и сбрасывает накопленное состояние (см.
     process_airport_queue_ping/check_airport_queue_timers рядом с
-    push_airport_status_change)."""
+    push_airport_status_change). Скрыта для courier/cargo в самой клавиатуре
+    (courier_module_keyboard) - фильтр по CATEGORIES_WITHOUT_AIRPORTS в
+    декораторе тут просто защита на случай, если кнопка всё же придёт
+    текстом (например с уже открытой у пользователя старой клавиатуры)."""
     user_id = message.from_user.id
     state = user_state[user_id]
+    category = state.get('category')
     if state.get('airport_queue_active'):
         state['airport_queue_active'] = False
         state['airport_queue'] = {}
-        await message.answer("⏹ Отслеживание очереди у аэропорта остановлено.", reply_markup=courier_module_keyboard())
+        await message.answer("⏹ Отслеживание очереди у аэропорта остановлено.", reply_markup=courier_module_keyboard(category))
         return
     state['airport_queue_active'] = True
     state['airport_queue'] = {}
     text = (
         "📍 *Очередь у аэропорта*\n\n"
         "Как включить: скрепка 📎 → Геопозиция → *«Транслировать геопозицию»* → "
-        "выбери *«1 час»*, а лучше сразу *«8 часов»* - если выбрать «15 минут», "
-        "трансляция может закончиться раньше, чем придут все уведомления.\n\n"
+        "сразу выбирай *«8 часов»* (если выбрать «15 минут» или «1 час», трансляция "
+        "может закончиться раньше, чем придут все уведомления).\n\n"
         "Дальше всё автоматически: как только окажешься в 3 км от аэропорта - пришлю пуш, "
         "затем на 1.5 км, и потом ещё два - через 30 минут и через 1 час, если всё ещё рядом. "
-        "Помогает не терять счёт времени в очереди на посадку.\n\n"
+        "Помогает не терять счёт времени в очереди на посадку. Когда трансляция закончится - "
+        "напомню включить её заново, если ты всё ещё на линии.\n\n"
         "Чтобы остановить - нажми эту же кнопку ещё раз."
     )
-    await message.answer(text, reply_markup=courier_module_keyboard(), parse_mode='Markdown')
+    await message.answer(text, reply_markup=courier_module_keyboard(category), parse_mode='Markdown')
 
 def airport_queue_bonus_line(user_id, icao):
     """Необязательная строка-бонус в пуше - последняя САМООТЧЁТНАЯ отметка
@@ -2211,6 +2231,28 @@ async def send_airport_queue_push(user_id, icao, kind, dist_km=None):
     except Exception as e:
         logger.warning(f"⚠️ Не удалось отправить пуш об очереди у аэропорта пользователю {user_id}: {e}")
 
+async def send_airport_queue_expired_push(user_id, icao):
+    """Пуш-напоминание на случай, когда трансляция геопозиции, судя по
+    всему, закончилась (см. check_airport_queue_timers) - по просьбе
+    пользователя, чтобы водитель не забывал включить её заново, если он
+    всё ещё работает. icao может быть None (трансляция началась, но юзер
+    ни разу не оказывался рядом ни с одним аэропортом) - тогда просто без
+    упоминания конкретного аэропорта."""
+    if not bot:
+        return
+    airport = ICAO_TO_AIRPORT.get(icao) if icao else None
+    where = f" у {airport['emoji']} {airport['name']}" if airport else ""
+    text = (
+        f"📡 Трансляция геопозиции{where}, похоже, закончилась.\n\n"
+        f"Если ты всё ещё на линии - включи её заново: скрепка 📎 → Геопозиция → "
+        f"«Транслировать геопозицию» → *«8 часов»*, чтобы не пропускать отметки "
+        f"об очереди у аэропорта."
+    )
+    try:
+        await bot.send_message(user_id, text, parse_mode='Markdown')
+    except Exception as e:
+        logger.warning(f"⚠️ Не удалось отправить пуш об окончании трансляции геопозиции пользователю {user_id}: {e}")
+
 async def process_airport_queue_ping(user_id, lat, lon, live_period=None):
     """Обрабатывает один пинг геопозиции (и разовый message.location, и
     последующие edited_message.location трансляции - см. хендлеры ниже) -
@@ -2219,6 +2261,10 @@ async def process_airport_queue_ping(user_id, lat, lon, live_period=None):
     (30 мин/1 час - см. check_airport_queue_timers)."""
     state = user_state.get(user_id)
     if not state or not state.get('airport_queue_active'):
+        return
+    if state.get('category') in CATEGORIES_WITHOUT_AIRPORTS:
+        # Защитный случай - активная трансляция, начатая ДО смены категории
+        # на courier/cargo, не должна продолжать слать аэропортовые пуши.
         return
     icao, dist_km = nearest_airport(lat, lon)
     if icao is None:
@@ -2286,8 +2332,9 @@ async def show_nearby_prompt(message: types.Message):
 @router.message(lambda message: user_state.get(message.from_user.id, {}).get('nearby_pending') and message.text == "❌ Отмена")
 async def cancel_nearby_prompt(message: types.Message):
     user_id = message.from_user.id
+    category = user_state[user_id].get('category')
     user_state[user_id].pop('nearby_pending', None)
-    await message.answer("Отменено", reply_markup=courier_module_keyboard())
+    await message.answer("Отменено", reply_markup=courier_module_keyboard(category))
 
 @router.message(lambda message: getattr(message, 'location', None) is not None and user_state.get(message.from_user.id, {}).get('nearby_pending'))
 async def handle_nearby_location(message: types.Message):
@@ -2309,18 +2356,18 @@ async def handle_nearby_location(message: types.Message):
     if scored is None:
         await message.answer(
             f"{cfg['emoji']} Данные по разделу «{cfg['label']}» пока не собраны - скоро добавим.",
-            reply_markup=courier_module_keyboard(),
+            reply_markup=courier_module_keyboard(state.get('category')),
         )
         return
     if not scored:
         await message.answer(
             f"{cfg['emoji']} Для твоего города пока нет собранных точек «{cfg['label']}» - сбор идёт постепенно по городам, скоро дойдём и до тебя.",
-            reply_markup=courier_module_keyboard(),
+            reply_markup=courier_module_keyboard(state.get('category')),
         )
         return
 
     text, keyboard = render_nearby_results(kind, scored)
-    await message.answer("Готово 👇", reply_markup=courier_module_keyboard())
+    await message.answer("Готово 👇", reply_markup=courier_module_keyboard(state.get('category')))
     try:
         await message.answer(text, reply_markup=keyboard, parse_mode='Markdown')
     except Exception as e:
@@ -2347,7 +2394,7 @@ async def courier_finance_flow(message: types.Message):
 
     if text == "❌ Отмена":
         state.pop('courier_finance_draft', None)
-        await message.answer("Расчёт отменён.", reply_markup=courier_module_keyboard())
+        await message.answer("Расчёт отменён.", reply_markup=courier_module_keyboard(state.get('category')))
         return
 
     step = draft['step']
@@ -2449,7 +2496,8 @@ async def send_courier_finance_result(message: types.Message, data):
     lines.append(f"✅ *Чистыми за смену: {fmt(net_profit)} ₽*")
     lines.append(f"за {hours:g} ч ≈ {fmt(per_hour)} ₽/ч")
 
-    await message.answer('\n'.join(lines), reply_markup=courier_module_keyboard(), parse_mode='Markdown')
+    category = user_state.get(message.from_user.id, {}).get('category')
+    await message.answer('\n'.join(lines), reply_markup=courier_module_keyboard(category), parse_mode='Markdown')
 
 @router.message(lambda message: any(city in message.text for city in ["Москва", "СПб", "Новосибирск", "Екатеринбург", "Казань", "Челябинск", "Омск", "Самара", "Ростов", "Нижний Новгород", "Краснодар", "Сочи"]))
 async def select_city(message: types.Message):
@@ -2512,6 +2560,20 @@ async def show_fuel_bot(message: types.Message):
         "⛽ *Где бензин*\n\n"
         "Народная карта наличия топлива на АЗС по России - отдельный бот. "
         "Нажми кнопку ниже, чтобы открыть его."
+    )
+    await message.answer(text, reply_markup=keyboard, parse_mode='Markdown')
+
+@router.message(lambda message: message.text == "🔓 Бесплатный VPN для Работы")
+async def show_vpn_bot(message: types.Message):
+    """Ссылка на стороннего VPN-бота (реферальная, VPN_BOT_URL) - тот же
+    паттерн, что и show_fuel_bot выше: кнопка просто открывает чужой чат,
+    без какой-либо интеграции с данными самого Taxi Helper."""
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔓 Открыть VPN-бота", url=VPN_BOT_URL)]
+    ])
+    text = (
+        "🔓 *Бесплатный VPN для Работы*\n\n"
+        "Нажми кнопку ниже, чтобы открыть бота и подключить VPN."
     )
     await message.answer(text, reply_markup=keyboard, parse_mode='Markdown')
 
@@ -3655,23 +3717,22 @@ async def check_airport_queue_timers():
     отслеживаниям (user_state[...]['airport_queue_active']) и досылает пуши
     "уже 30 минут/1 час рядом" по прошедшему времени - независимо от того,
     приходят ли новые пинги геопозиции прямо сейчас (см. docstring у
-    AIRPORT_QUEUE_CHECK_INTERVAL_MINUTES). Молча гасит отслеживание, если
-    трансляция геопозиции, судя по всему, уже закончилась (нет новых пингов
-    дольше live_period + AIRPORT_QUEUE_STALE_BUFFER_SECONDS) - иначе водитель,
-    который давно уехал, продолжал бы получать пуши бесконечно."""
+    AIRPORT_QUEUE_CHECK_INTERVAL_MINUTES). Если трансляция геопозиции, судя
+    по всему, уже закончилась (нет новых пингов дольше live_period +
+    AIRPORT_QUEUE_STALE_BUFFER_SECONDS) - гасит отслеживание и присылает
+    напоминание включить трансляцию заново (по просьбе пользователя, чтобы
+    водитель не забывал) вместо того, чтобы молча пушить бесконечно того,
+    кто уже уехал, ИЛИ молча остановиться без единого слова тому, кто
+    забыл, что нужно включить трансляцию заново."""
     now = datetime.now(ZoneInfo('UTC'))
     for user_id, state in list(user_state.items()):
         if not isinstance(state, dict) or not state.get('airport_queue_active'):
             continue
         aq = state.get('airport_queue') or {}
-        icao = aq.get('icao')
-        entered_at_str = aq.get('entered_outer_at')
-        if not icao or not entered_at_str:
-            continue
 
         last_update_str = aq.get('last_update_at')
-        live_period = aq.get('live_period') or 3600
         if last_update_str:
+            live_period = aq.get('live_period') or 3600
             try:
                 last_update = datetime.fromisoformat(last_update_str)
             except ValueError:
@@ -3679,7 +3740,13 @@ async def check_airport_queue_timers():
             if (now - last_update).total_seconds() > live_period + AIRPORT_QUEUE_STALE_BUFFER_SECONDS:
                 state['airport_queue_active'] = False
                 state['airport_queue'] = {}
+                await send_airport_queue_expired_push(user_id, aq.get('icao'))
                 continue
+
+        icao = aq.get('icao')
+        entered_at_str = aq.get('entered_outer_at')
+        if not icao or not entered_at_str:
+            continue
 
         try:
             entered_at = datetime.fromisoformat(entered_at_str)
