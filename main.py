@@ -4,6 +4,7 @@ import asyncio
 import sqlite3
 import json
 import re
+import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from math import radians, sin, cos, asin, sqrt
@@ -3851,12 +3852,30 @@ def seconds_until_hour(target_hour, tz='Europe/Moscow'):
     return (target - now).total_seconds()
 
 
+def _data_file_age_minutes(path):
+    """Возраст файла в минутах по mtime, или None если файла нет/не читается."""
+    try:
+        return (time.time() - os.path.getmtime(path)) / 60
+    except Exception:
+        return None
+
+
 async def airports_data_updater():
     """Фоновая задача для flights_data.json. С 00:00 до 06:00 по Москве
     (FLIGHTS_NIGHT_START_HOUR-FLIGHTS_NIGHT_END_HOUR) обновлений НЕТ ВООБЩЕ -
     рейсов ночью мало, ждём до 06:00. С 06:00 до 24:00 - каждые
     FLIGHTS_DAY_INTERVAL_HOURS часов. Запускается сразу при старте бота (если
-    он поднялся не ночью), чтобы данные были свежими с первого деплоя."""
+    он поднялся не ночью), чтобы данные были свежими с первого деплоя -
+    НО ТОЛЬКО если данные реально устарели (см. MIN_FRESH_AGE_MINUTES ниже).
+
+    ИСПРАВЛЕНО 19.09.2026: раньше запускался БЕЗУСЛОВНО при каждом старте
+    бота, даже если данные были только что обновлены - на Railway это
+    означало, что каждый редеплой (а их за день бывает несколько подряд при
+    активной разработке) добавлял ЕЩЁ ОДИН внеплановый цикл запросов к
+    Yandex Rasp сверх обычного расписания раз в 2 часа. Именно череда
+    редеплоев в течение одного дня внесла свой вклад в блокировку ключа
+    19.09.2026 (см. письмо Яндекса о превышении лимита)."""
+    MIN_FRESH_AGE_MINUTES = 90  # меньше половины FLIGHTS_DAY_INTERVAL_HOURS (2ч=120мин)
     while True:
         hour = datetime.now(ZoneInfo('Europe/Moscow')).hour
         if FLIGHTS_NIGHT_START_HOUR <= hour < FLIGHTS_NIGHT_END_HOUR:
@@ -3864,13 +3883,21 @@ async def airports_data_updater():
             logger.info(f"🌙 Ночь (00:00-06:00 МСК) - аэропорты не обновляем, жду до 06:00 ({wait_s/3600:.1f}ч)")
             await asyncio.sleep(wait_s)
             continue
-        try:
-            logger.info("🔄 Обновляю flights_data.json из Yandex Rasp API...")
-            async with _yandex_api_lock:
-                await asyncio.to_thread(fetch_yandex_data.main)
-            logger.info("✅ flights_data.json обновлён")
-        except Exception as e:
-            logger.error(f"❌ Ошибка фонового обновления flights_data.json: {e}")
+
+        age_min = _data_file_age_minutes(FLIGHTS_DATA_FILE)
+        if age_min is not None and age_min < MIN_FRESH_AGE_MINUTES:
+            logger.info(
+                f"⏭️  flights_data.json свежий ({age_min:.0f}мин < {MIN_FRESH_AGE_MINUTES}мин) - "
+                f"пропускаю внеплановое обновление (вероятно, бот только что перезапустился)"
+            )
+        else:
+            try:
+                logger.info("🔄 Обновляю flights_data.json из Yandex Rasp API...")
+                async with _yandex_api_lock:
+                    await asyncio.to_thread(fetch_yandex_data.main)
+                logger.info("✅ flights_data.json обновлён")
+            except Exception as e:
+                logger.error(f"❌ Ошибка фонового обновления flights_data.json: {e}")
         await asyncio.sleep(FLIGHTS_DAY_INTERVAL_HOURS * 3600)
 
 
@@ -3879,15 +3906,24 @@ async def trains_data_updater():
     Сапсан - см. STATION_CITY и fetch_trains_data.py). Независимый от
     аэропортов график - раз в TRAINS_UPDATE_INTERVAL_HOURS часов,
     круглосуточно, без привязки к дню/ночи. Запускается сразу при старте
-    бота."""
+    бота - НО ТОЛЬКО если данные реально устарели (см. комментарий в
+    airports_data_updater про редеплои 19.09.2026 - та же защита тут)."""
+    MIN_FRESH_AGE_MINUTES = 360  # меньше половины TRAINS_UPDATE_INTERVAL_HOURS (12ч=720мин)
     while True:
-        try:
-            logger.info("🔄 Обновляю trains_data.json (Казанский/Ленинградский) из Yandex Rasp API...")
-            async with _yandex_api_lock:
-                await asyncio.to_thread(fetch_trains_data.main)
-            logger.info("✅ trains_data.json обновлён")
-        except Exception as e:
-            logger.error(f"❌ Ошибка фонового обновления trains_data.json: {e}")
+        age_min = _data_file_age_minutes(TRAINS_DATA_FILE)
+        if age_min is not None and age_min < MIN_FRESH_AGE_MINUTES:
+            logger.info(
+                f"⏭️  trains_data.json свежий ({age_min:.0f}мин < {MIN_FRESH_AGE_MINUTES}мин) - "
+                f"пропускаю внеплановое обновление (вероятно, бот только что перезапустился)"
+            )
+        else:
+            try:
+                logger.info("🔄 Обновляю trains_data.json (Казанский/Ленинградский) из Yandex Rasp API...")
+                async with _yandex_api_lock:
+                    await asyncio.to_thread(fetch_trains_data.main)
+                logger.info("✅ trains_data.json обновлён")
+            except Exception as e:
+                logger.error(f"❌ Ошибка фонового обновления trains_data.json: {e}")
         await asyncio.sleep(TRAINS_UPDATE_INTERVAL_HOURS * 3600)
 
 def format_queue_breakdown(city, icao, category):
