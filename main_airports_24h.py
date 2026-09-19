@@ -842,10 +842,16 @@ def get_upcoming_concert_events_for_category(city, category, limit=10):
     пропускается: без даты нельзя понять, актуально ли оно ещё.
 
     По прямому запросу пользователя (19.09.2026, ответы на AskUserQuestion):
-    1) показываем ТОЛЬКО события на СЕГОДНЯ в местном времени города (не всю
-       афишу на месяцы вперёд) - сравниваем календарную дату start с
-       "сегодня" в часовом поясе города (тот же EVENT_CITY_TIMEZONE, которым
-       размечены сами события в fetch_concert_events.py);
+    1) показываем события на СЕГОДНЯ И ЗАВТРА в местном времени города (не
+       всю афишу на месяцы вперёд) - сравниваем календарную дату start с
+       "сегодня"/"завтра" в часовом поясе города (тот же EVENT_CITY_TIMEZONE,
+       которым размечены сами события в fetch_concert_events.py). Изначально
+       было СТРОГО "только сегодня" (19.09.2026), но выяснилось, что в
+       каналах часто вообще нет ни одного события именно на текущий день
+       (особенно ночью/рано утром, пока новых постов на новый день ещё не
+       было) - афиша получалась почти всегда пустой. Расширено до 2 дней
+       (19.09.2026, повторная жалоба пользователя) - компромисс между "не
+       завалить всей афишей на месяцы" и "не показывать пустой экран";
     2) события БЕЗ явно указанного в посте времени начала
        (start_has_explicit_time=False - у них start это заглушка 20:00 UTC,
        см. parse_event_datetime в fetch_concert_events.py) - НЕ исключаются
@@ -854,13 +860,13 @@ def get_upcoming_concert_events_for_category(city, category, limit=10):
        Pravda / 1300 ₽" без часов - и афиша почти всегда получалась пустой),
        а показываются С ПОМЕТКОЙ "точное время не указано в афише" (см.
        build_concert_event_message) - как было изначально, ещё до этого
-       фильтра. Отбор по дате "сегодня" (пункт 1) для таких событий делаем
-       по заглушке start (20:00 UTC), что для сравнения календарной даты
+       фильтра. Отбор по дате (пункт 1) для таких событий делаем по
+       заглушке start (20:00 UTC), что для сравнения календарной даты
        достаточно точно."""
     posts = get_concert_events_for_city(city)
     tz = ZoneInfo(EVENT_CITY_TIMEZONE.get(city, 'Europe/Moscow'))
     now_local = datetime.now(tz)
-    today_local = now_local.date()
+    allowed_dates = {now_local.date(), (now_local + timedelta(days=1)).date()}
     upcoming = []
     for post in posts:
         if not post.get('start'):
@@ -870,7 +876,7 @@ def get_upcoming_concert_events_for_category(city, category, limit=10):
         except Exception:
             continue
         start_local = start_dt.astimezone(tz)
-        if start_local.date() != today_local:
+        if start_local.date() not in allowed_dates:
             continue
         # Событие без явного времени пропускаем мимо проверки "уже прошло" -
         # заглушка 20:00 UTC не отражает реальное время, отсекать по ней
