@@ -1487,19 +1487,32 @@ def services_keyboard(category=None, city=None):
     # "🌤 Погода" - на верхнем уровне (не внутри "Инструменты водителя") по
     # просьбе пользователя - почасовой прогноз + автопуш за RAIN_LEAD_MINUTES
     # минут до начала осадков (см. блок "ПОГОДА / ОСАДКИ" выше по файлу).
-    buttons = []
+    # Раскладка в 2 колонки (по просьбе пользователя, тот же приём, что и в
+    # courier_module_keyboard) - пункты сначала собираются в плоский список
+    # (с учётом всех условий по категории выше), а потом режутся по 2 в ряд,
+    # так что раскладка остаётся 2-колоночной независимо от того, сколько
+    # именно кнопок видно конкретной категории.
+    # "🔓 Бесплатный VPN TAXI HELPER" - НЕ в общей 2-колоночной сетке ниже, а
+    # отдельной строкой в самом низу (перед "← Назад"/"🏙 Выбор города") - по
+    # просьбе пользователя.
+    items = []
     if category in SHARED_ORDER_CATEGORIES:
-        buttons.append([KeyboardButton(text="🔄 Отдать заказ")])
-    buttons.append([KeyboardButton(text="🔓 Бесплатный VPN для Работы")])
-    buttons.append([KeyboardButton(text="🌤 Погода")])
+        items.append("🔄 Отдать заказ")
+    items.append("🌤 Погода")
     if category in COURIER_MODULE_CATEGORIES:
-        buttons.append([KeyboardButton(text="🧰 Инструменты водителя")])
+        items.append("🧰 Инструменты водителя")
     if category not in CATEGORIES_WITHOUT_AIRPORTS:
-        buttons.append([KeyboardButton(text="✈️🚆 Транспорт")])
-    buttons.append([KeyboardButton(text="⛽ Где бензин")])
+        items.append("✈️🚆 Транспорт")
+    items.append("⛽ Где бензин")
     if category not in CATEGORIES_WITHOUT_EVENTS:
-        buttons.append([KeyboardButton(text="🎭 События города")])
-    buttons.append([KeyboardButton(text="⛔ Дорожные события")])
+        items.append("🎭 События города")
+    items.append("⛔ Дорожные события")
+
+    buttons = [
+        [KeyboardButton(text=t) for t in items[i:i + 2]]
+        for i in range(0, len(items), 2)
+    ]
+    buttons.append([KeyboardButton(text="🔓 Бесплатный VPN TAXI HELPER")])
     buttons.append([KeyboardButton(text="← Назад"), KeyboardButton(text="🏙 Выбор города")])
     return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=buttons)
 
@@ -2613,16 +2626,18 @@ async def show_fuel_bot(message: types.Message):
     )
     await message.answer(text, reply_markup=keyboard, parse_mode='Markdown')
 
-@router.message(lambda message: message.text == "🔓 Бесплатный VPN для Работы")
+@router.message(lambda message: message.text == "🔓 Бесплатный VPN TAXI HELPER")
 async def show_vpn_bot(message: types.Message):
     """Ссылка на стороннего VPN-бота (реферальная, VPN_BOT_URL) - тот же
     паттерн, что и show_fuel_bot выше: кнопка просто открывает чужой чат,
-    без какой-либо интеграции с данными самого Taxi Helper."""
+    без какой-либо интеграции с данными самого Taxi Helper. Название
+    "TAXI HELPER" - по просьбе пользователя должно фигурировать везде, где
+    упоминается эта кнопка (текст кнопки, заголовок сообщения, инлайн-кнопка)."""
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔓 Открыть VPN-бота", url=VPN_BOT_URL)]
+        [InlineKeyboardButton(text="🔓 Открыть VPN TAXI HELPER", url=VPN_BOT_URL)]
     ])
     text = (
-        "🔓 *Бесплатный VPN для Работы*\n\n"
+        "🔓 *Бесплатный VPN TAXI HELPER*\n\n"
         "Нажми кнопку ниже, чтобы открыть бота и подключить VPN."
     )
     await message.answer(text, reply_markup=keyboard, parse_mode='Markdown')
