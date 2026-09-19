@@ -3236,8 +3236,6 @@ async def show_airport_details(callback_query: types.CallbackQuery):
         return
 
     capacity = AIRPORT_CAPACITY.get(airport['icao'], 1000)
-    economy_capacity = capacity * ECONOMY_SHARE
-    business_capacity = capacity * BUSINESS_SHARE
 
     user_id = callback_query.from_user.id
     category = user_state.get(user_id, {}).get('category', 'taxi')
@@ -3245,6 +3243,21 @@ async def show_airport_details(callback_query: types.CallbackQuery):
 
     msg = await callback_query.message.edit_text(f"⏳ Загружаю расписание {airport['name']}...")
     flights = get_airport_flights(airport['icao'])
+    zone_key = airport.get('zone_key')
+    if zone_key:
+        # Карточка конкретной терминальной зоны (сейчас только Шереметьево
+        # B/C и D/E/F) - фильтруем рейсы ТОЛЬКО этой зоны и делим capacity
+        # пропорционально её доле трафика (см. compute_zone_capacity_shares).
+        # ИСПРАВЛЕНО 19.09.2026: раньше эта функция игнорировала zone_key
+        # полностью - заголовочная загрузка/число рейсов считались по ВСЕМ
+        # рейсам аэропорта, даже когда открыта карточка одной конкретной
+        # зоны (см. отчёт пользователя - "SVO Терминал D" показывал те же
+        # цифры, что и весь аэропорт целиком).
+        shares = compute_zone_capacity_shares(airport['icao'])
+        capacity = capacity * shares.get(zone_key, 1.0 / max(len(shares), 1))
+        flights = [f for f in flights if flight_terminal_zone(airport['icao'], f.get('terminal')) == zone_key]
+    economy_capacity = capacity * ECONOMY_SHARE
+    business_capacity = capacity * BUSINESS_SHARE
     class_label = {'economy': 'Эконом-класс', 'business': 'Бизнес-класс', 'total': 'Все классы'}[relevant_class]
     now = get_airport_now(airport['icao'])  # местное время АЭРОПОРТА, не сервера
     text = f"*{airport['emoji']} {airport['name']} - 📥 Прилеты*\n"
@@ -3269,13 +3282,16 @@ async def show_airport_details(callback_query: types.CallbackQuery):
         business_in_hour = 0
         domestic_in_hour = 0
         international_in_hour = 0
-        # Для аэропортов с несколькими терминальными зонами (сейчас только
-        # UUEE/Шереметьево - см. AIRPORT_TERMINAL_ZONES) отдельно считаем
-        # рейсы/пассажиров по зоне (flight_terminal_zone -> zone_key),
-        # по просьбе пользователя разделить прогноз загрузки по терминалам.
-        # У остальных аэропортов zones_in_hour остаётся пустым - ничего не
-        # меняется, дополнительная строка ниже просто не печатается.
-        airport_zones = AIRPORT_TERMINAL_ZONES.get(airport['icao'])
+        # Разбивка "по терминалам" (zones_in_hour) имеет смысл только если
+        # ЭТА карточка ещё не привязана к конкретной зоне (zone_key из
+        # airport - переменная выше, ДО цикла) - у Шереметьево оба пункта
+        # в списке аэропортов (B/C и D/E/F) уже свои конкретные зоны,
+        # flights уже отфильтрован под них, так что показывать ещё и
+        # разбивку "по терминалам" внутри уже-зональной карточки было бы
+        # избыточно (см. фикс 19.09.2026 - раньше карточка "Терминал D"
+        # показывала общие для всего аэропорта цифры, а разбивка по
+        # терминалам внизу - всегда нули, что вместе выглядело нелогично).
+        airport_zones = AIRPORT_TERMINAL_ZONES.get(airport['icao']) if not zone_key else None
         zones_in_hour = {zk: {'flights': 0, 'pax': 0} for zk in airport_zones} if airport_zones else {}
         for flight in flights:
             flight_time = datetime.fromtimestamp(flight.get('firstSeen', 0))
@@ -3288,10 +3304,10 @@ async def show_airport_details(callback_query: types.CallbackQuery):
                 else:
                     international_in_hour += 1
                 if airport_zones:
-                    zone_key = flight_terminal_zone(airport['icao'], flight.get('terminal'))
-                    if zone_key and zone_key in zones_in_hour:
-                        zones_in_hour[zone_key]['flights'] += 1
-                        zones_in_hour[zone_key]['pax'] += flight.get('passengers', 0)
+                    flight_zone_key = flight_terminal_zone(airport['icao'], flight.get('terminal'))
+                    if flight_zone_key and flight_zone_key in zones_in_hour:
+                        zones_in_hour[flight_zone_key]['flights'] += 1
+                        zones_in_hour[flight_zone_key]['pax'] += flight.get('passengers', 0)
         total_in_hour = economy_in_hour + business_in_hour
 
         relevant_pax = {'economy': economy_in_hour, 'business': business_in_hour, 'total': total_in_hour}[relevant_class]
