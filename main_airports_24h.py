@@ -838,11 +838,17 @@ def get_upcoming_concert_events_for_category(city, category, limit=10):
        афишу на месяцы вперёд) - сравниваем календарную дату start с
        "сегодня" в часовом поясе города (тот же EVENT_CITY_TIMEZONE, которым
        размечены сами события в fetch_concert_events.py);
-    2) события без явно указанного в посте времени начала
-       (start_has_explicit_time=False - время у них заглушка 20:00 UTC,
-       см. parse_event_datetime в fetch_concert_events.py) ПОЛНОСТЬЮ
-       исключаются - водителю нельзя показывать выдуманное время, когда
-       забирать/везти пассажира."""
+    2) события БЕЗ явно указанного в посте времени начала
+       (start_has_explicit_time=False - у них start это заглушка 20:00 UTC,
+       см. parse_event_datetime в fetch_concert_events.py) - НЕ исключаются
+       полностью (так было раньше, но выяснилось, что у подавляющего
+       большинства постов канала время вообще не указано - "18 ноября /
+       Pravda / 1300 ₽" без часов - и афиша почти всегда получалась пустой),
+       а показываются С ПОМЕТКОЙ "точное время не указано в афише" (см.
+       build_concert_event_message) - как было изначально, ещё до этого
+       фильтра. Отбор по дате "сегодня" (пункт 1) для таких событий делаем
+       по заглушке start (20:00 UTC), что для сравнения календарной даты
+       достаточно точно."""
     posts = get_concert_events_for_city(city)
     tz = ZoneInfo(EVENT_CITY_TIMEZONE.get(city, 'Europe/Moscow'))
     now_local = datetime.now(tz)
@@ -851,8 +857,6 @@ def get_upcoming_concert_events_for_category(city, category, limit=10):
     for post in posts:
         if not post.get('start'):
             continue
-        if not post.get('start_has_explicit_time'):
-            continue
         try:
             start_dt = datetime.fromisoformat(post['start'])
         except Exception:
@@ -860,7 +864,10 @@ def get_upcoming_concert_events_for_category(city, category, limit=10):
         start_local = start_dt.astimezone(tz)
         if start_local.date() != today_local:
             continue
-        if start_local < now_local:
+        # Событие без явного времени пропускаем мимо проверки "уже прошло" -
+        # заглушка 20:00 UTC не отражает реальное время, отсекать по ней
+        # рискованно (можно скрыть ещё не начавшееся вечернее событие).
+        if post.get('start_has_explicit_time') and start_local < now_local:
             continue
         price_category = post.get('price_category', 'taxi_only')
         if category == 'ultima' and price_category != 'all':
