@@ -559,17 +559,24 @@ def compute_zone_capacity_shares(icao):
     каждую терминальную зону - вычисляется по ФАКТИЧЕСКОМУ распределению
     сегодняшних рейсов между зонами (сколько рейсов сегодня реально прилетает
     в каждую зону), а не по захардкоженной оценке - официальных цифр по
-    пропускной способности именно по терминалам B/C и D/E/F по отдельности
-    нет (есть только по терминалу в целом, а терминалы делят зоны по
-    несколько штук), а прикидывать было бы менее точно, чем считать по
-    реальному расписанию на сегодня. Если у аэропорта нет зон - возвращает {}.
-    Если СЕГОДНЯ ни у одного рейса нет распознанного терминала (например,
-    Yandex Rasp не прислал поле terminal ни разу) - делит капасити поровну
-    между зонами, честный фолбэк при отсутствии данных, а не перекос в
-    одну сторону."""
+    пропускной способности именно по терминалам B/C и D по отдельности нет
+    (есть только по терминалу в целом), а прикидывать было бы менее точно,
+    чем считать по реальному расписанию на сегодня.
+
+    Возвращает (shares_dict, has_data). Если у аэропорта нет зон - ({}, True).
+    Если СЕГОДНЯ ни у одного рейса нет распознанного терминала (Yandex Rasp
+    не прислал поле terminal ни разу, или прислал буквы вне TERMINAL_LETTER_TO_ZONE) -
+    has_data=False, а shares_dict всё равно 50/50 (может использоваться как
+    честный фолбэк, но вызывающий код должен ИНТЕРПРЕТИРОВАТЬ has_data=False
+    как сигнал НЕ фильтровать рейсы по зоне - иначе обе зоны одновременно
+    показали бы "0 рейсов", даже если рейсы реально есть, просто без
+    известного терминала (см. отчёт пользователя 19.09.2026 - B/C и D
+    ОДНОВРЕМЕННО показали 0% на все 8 часов, хотя аэропорт не может быть
+    пуст 8 часов подряд у крупного хаба - оказалось, что terminal не пришёл
+    ни у одного рейса за весь день)."""
     zones = AIRPORT_TERMINAL_ZONES.get(icao)
     if not zones:
-        return {}
+        return {}, True
     counts = {zk: 0 for zk in zones}
     for f in get_airport_flights(icao):
         zk = flight_terminal_zone(icao, f.get('terminal'))
@@ -578,8 +585,8 @@ def compute_zone_capacity_shares(icao):
     total_known = sum(counts.values())
     if total_known == 0:
         share = 1.0 / len(zones)
-        return {zk: share for zk in zones}
-    return {zk: counts[zk] / total_known for zk in zones}
+        return {zk: share for zk in zones}, False
+    return {zk: counts[zk] / total_known for zk in zones}, True
 
 CATEGORIES = {
     'taxi': {'name': '🚕 ТАКСИ', 'tariffs': ['Эконом', 'Комфорт', 'Комфорт+', 'Минивэн']},
@@ -3237,6 +3244,7 @@ async def show_airport_details(callback_query: types.CallbackQuery):
     msg = await callback_query.message.edit_text(f"⏳ Загружаю расписание {airport['name']}...")
     flights = get_airport_flights(airport['icao'])
     zone_key = airport.get('zone_key')
+    zone_data_missing = False
     if zone_key:
         # Карточка конкретной терминальной зоны (сейчас только Шереметьево:
         # B/C и D) - фильтруем рейсы ТОЛЬКО этой зоны и делим capacity
@@ -3246,16 +3254,29 @@ async def show_airport_details(callback_query: types.CallbackQuery):
         # рейсам аэропорта, даже когда открыта карточка одной конкретной
         # зоны (см. отчёт пользователя - "SVO Терминал D" показывал те же
         # цифры, что и весь аэропорт целиком).
-        shares = compute_zone_capacity_shares(airport['icao'])
-        capacity = capacity * shares.get(zone_key, 1.0 / max(len(shares), 1))
-        flights = [f for f in flights if flight_terminal_zone(airport['icao'], f.get('terminal')) == zone_key]
+        # ДОРАБОТАНО тем же вечером: если у Yandex Rasp СЕГОДНЯ вообще нет
+        # поля terminal ни у одного рейса (has_data=False), строгая
+        # фильтрация "рейсов по зоне" даёт ОБЕИМ картам одновременно "0
+        # рейсов", хотя реальные рейсы наверняка есть - просто без
+        # известного терминала. В этом случае НЕ фильтруем и показываем
+        # весь аэропорт с честной пометкой, вместо вводящего в заблуждение
+        # нуля (см. отчёт пользователя - B/C и D ОДНОВРЕМЕННО показали 0%
+        # на все 8 часов подряд).
+        shares, has_zone_data = compute_zone_capacity_shares(airport['icao'])
+        if has_zone_data:
+            capacity = capacity * shares.get(zone_key, 1.0 / max(len(shares), 1))
+            flights = [f for f in flights if flight_terminal_zone(airport['icao'], f.get('terminal')) == zone_key]
+        else:
+            zone_data_missing = True
     economy_capacity = capacity * ECONOMY_SHARE
     business_capacity = capacity * BUSINESS_SHARE
     class_label = {'economy': 'Эконом-класс', 'business': 'Бизнес-класс', 'total': 'Все классы'}[relevant_class]
     now = get_airport_now(airport['icao'])  # местное время АЭРОПОРТА, не сервера
     text = f"*{airport['emoji']} {airport['name']} - 📥 Прилеты*\n"
     text += f"_Обновлено: {now.strftime('%H:%M:%S')} (местное время аэропорта)_\n"
-    text += f"_Пропускная способность: {capacity} пас/час (эконом {economy_capacity:.0f} / бизнес {business_capacity:.0f})_\n"
+    text += f"_Пропускная способность: {capacity:.0f} пас/час (эконом {economy_capacity:.0f} / бизнес {business_capacity:.0f})_\n"
+    if zone_data_missing:
+        text += "_⚠️ Разбивка по терминалам сегодня недоступна (нет данных о терминале в расписании) - показаны цифры по всему аэропорту_\n"
     text += f"_Рекомендации рассчитаны для: {class_label}_\n"
     # Текущая очередь по тарифам (те же крауд-отметки водителей, что и в
     # разделе "📋 Очередь" - см. format_queue_breakdown) - по просьбе
@@ -3342,9 +3363,13 @@ def compute_current_hour_load(airport_icao, relevant_class, hour_offset=0, zone_
     flights = get_airport_flights(airport_icao)
     capacity = AIRPORT_CAPACITY.get(airport_icao, 1000)
     if zone_key:
-        shares = compute_zone_capacity_shares(airport_icao)
-        capacity = capacity * shares.get(zone_key, 1.0 / max(len(shares), 1))
-        flights = [f for f in flights if flight_terminal_zone(airport_icao, f.get('terminal')) == zone_key]
+        shares, has_zone_data = compute_zone_capacity_shares(airport_icao)
+        if has_zone_data:
+            capacity = capacity * shares.get(zone_key, 1.0 / max(len(shares), 1))
+            flights = [f for f in flights if flight_terminal_zone(airport_icao, f.get('terminal')) == zone_key]
+        # иначе (has_zone_data=False - см. compute_zone_capacity_shares) не
+        # фильтруем: у Yandex Rasp сегодня нет поля terminal ни у одного
+        # рейса, строгий фильтр дал бы ложный "0" вместо реальных рейсов.
     relevant_cap = {'economy': capacity * ECONOMY_SHARE, 'business': capacity * BUSINESS_SHARE, 'total': capacity}[relevant_class]
     key = {'economy': 'passengers_economy', 'business': 'passengers_business', 'total': 'passengers'}[relevant_class]
     flights_now = [f for f in flights if datetime.fromtimestamp(f.get('firstSeen', 0)).hour == target_hour]
@@ -3365,9 +3390,11 @@ def compute_current_availability(airport_icao, relevant_class, zone_key=None):
     arrivals = get_airport_flights(airport_icao)
     capacity = AIRPORT_CAPACITY.get(airport_icao, 1000)
     if zone_key:
-        shares = compute_zone_capacity_shares(airport_icao)
-        capacity = capacity * shares.get(zone_key, 1.0 / max(len(shares), 1))
-        arrivals = [f for f in arrivals if flight_terminal_zone(airport_icao, f.get('terminal')) == zone_key]
+        shares, has_zone_data = compute_zone_capacity_shares(airport_icao)
+        if has_zone_data:
+            capacity = capacity * shares.get(zone_key, 1.0 / max(len(shares), 1))
+            arrivals = [f for f in arrivals if flight_terminal_zone(airport_icao, f.get('terminal')) == zone_key]
+        # иначе не фильтруем - см. комментарий в compute_current_hour_load выше.
     relevant_cap = {'economy': capacity * ECONOMY_SHARE, 'business': capacity * BUSINESS_SHARE, 'total': capacity}[relevant_class]
     key = {'economy': 'passengers_economy', 'business': 'passengers_business', 'total': 'passengers'}[relevant_class]
 
