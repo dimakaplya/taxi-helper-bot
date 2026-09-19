@@ -1740,21 +1740,39 @@ router = Router()
 # сообщения. Если удаление не удалось (сообщение уже стёрто пользователем,
 # прошло >48ч и Telegram сам не даёт удалить, и т.п.) - тихо игнорируем,
 # это не должно ломать отправку нового сообщения.
-_last_bot_message_id = {}  # chat_id -> message_id последнего отправленного ботом сообщения
+#
+# ВАЖНО (баг найден 19.09.2026): сообщения с ReplyKeyboardMarkup (нижнее
+# меню кнопок 8/8 и т.п.) НЕ удаляются и НЕ запоминаются как "последнее
+# сообщение на удаление". В Telegram reply-клавиатура привязана к
+# КОНКРЕТНОМУ сообщению чата, а не существует отдельно от него - если
+# удалить то самое сообщение, у пользователя вместе с ним пропадает и
+# нижнее меню, пока не придёт новое сообщение с клавиатурой. Поэтому такие
+# сообщения (и распознавание "что было последним для удаления" тоже) не
+# участвуют в этой логике - они остаются в чате как обычно, стирается
+# только всё остальное (карточки событий, текстовые ответы без меню и т.п).
+_last_bot_message_id = {}  # chat_id -> message_id последнего отправленного ботом сообщения (без reply-клавиатуры)
 
 class SingleMessageMiddleware(BaseRequestMiddleware):
     async def __call__(self, make_request, bot_instance: Bot, method: TelegramMethod[TelegramType]):
         if isinstance(method, SendMessage):
             chat_id = method.chat_id
-            prev_id = _last_bot_message_id.get(chat_id)
-            if prev_id is not None:
-                try:
-                    await bot_instance.delete_message(chat_id=chat_id, message_id=prev_id)
-                except Exception:
-                    pass  # сообщение уже удалено/недоступно для удаления - не критично
+            has_reply_keyboard = isinstance(method.reply_markup, ReplyKeyboardMarkup)
+            if not has_reply_keyboard:
+                prev_id = _last_bot_message_id.get(chat_id)
+                if prev_id is not None:
+                    try:
+                        await bot_instance.delete_message(chat_id=chat_id, message_id=prev_id)
+                    except Exception:
+                        pass  # сообщение уже удалено/недоступно для удаления - не критично
             result = await make_request(bot_instance, method)
             try:
-                _last_bot_message_id[chat_id] = result.message_id
+                if has_reply_keyboard:
+                    # Сообщение с нижним меню не трогаем и не считаем
+                    # "последним на удаление" - следующее удаление не
+                    # должно снести меню.
+                    _last_bot_message_id.pop(chat_id, None)
+                else:
+                    _last_bot_message_id[chat_id] = result.message_id
             except Exception:
                 pass
             return result
