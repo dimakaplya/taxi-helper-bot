@@ -270,7 +270,16 @@ def fetch_channel_messages(channel_username):
     soup = BeautifulSoup(resp.text, 'html.parser')
     messages = soup.select('.tgme_widget_message_wrap')
     cutoff = datetime.now(timezone.utc) - timedelta(hours=LOOKBACK_HOURS)
+    # Диагностика (по просьбе пользователя, 22.09.2026 - "Куда ехать"/"События
+    # города" не показывали афишу концертов, а без видимости в логах Railway
+    # было не понять, ЧТО пошло не так: пустой ответ, изменившаяся вёрстка
+    # страницы или просто дата не распознаётся парсером). Считаем на каждом
+    # шаге фильтрации, сколько сообщений отсеялось и почему.
+    logger.info(f"   {url}: HTML {len(resp.text)} байт, найдено сообщений в разметке: {len(messages)}")
+    if len(messages) == 0:
+        logger.warning(f"   ⚠️ Селектор .tgme_widget_message_wrap не нашёл ни одного сообщения - возможно, изменилась вёрстка t.me/s/ или канал не существует/приватный")
 
+    parsed_dates_count = 0
     posts = []
     for msg in messages:
         time_tag = msg.select_one('.tgme_widget_message_date time')
@@ -303,10 +312,14 @@ def fetch_channel_messages(channel_username):
             'text': text,
             'link': msg_link,
         }
-        post.update(parse_event_fields(text, post['time']))
+        parsed_fields = parse_event_fields(text, post['time'])
+        post.update(parsed_fields)
+        if parsed_fields.get('start'):
+            parsed_dates_count += 1
         posts.append(post)
 
     posts.sort(key=lambda p: p['time'], reverse=True)
+    logger.info(f"   {url}: {len(posts)} постов после фильтра по времени/тексту, из них с распознанной датой: {parsed_dates_count}")
     return posts[:MAX_MESSAGES_PER_CITY]
 
 
