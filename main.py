@@ -828,18 +828,36 @@ def get_upcoming_concert_events_for_category(city, category, limit=10):
     Грузовое такси эту кнопку вообще не видят (см. CATEGORIES_WITHOUT_EVENTS),
     поэтому фильтр здесь рассчитан только на 'taxi'/'ultima'. Событие без
     распознанной даты (start=None - разметка поста не подошла под парсер)
-    пропускается: без даты нельзя понять, актуально ли оно ещё."""
+    пропускается: без даты нельзя понять, актуально ли оно ещё.
+
+    По прямому запросу пользователя (19.09.2026, ответы на AskUserQuestion):
+    1) показываем ТОЛЬКО события на СЕГОДНЯ в местном времени города (не всю
+       афишу на месяцы вперёд) - сравниваем календарную дату start с
+       "сегодня" в часовом поясе города (тот же EVENT_CITY_TIMEZONE, которым
+       размечены сами события в fetch_concert_events.py);
+    2) события без явно указанного в посте времени начала
+       (start_has_explicit_time=False - время у них заглушка 20:00 UTC,
+       см. parse_event_datetime в fetch_concert_events.py) ПОЛНОСТЬЮ
+       исключаются - водителю нельзя показывать выдуманное время, когда
+       забирать/везти пассажира."""
     posts = get_concert_events_for_city(city)
-    now_ts = datetime.now(ZoneInfo('UTC')).timestamp()
+    tz = ZoneInfo(EVENT_CITY_TIMEZONE.get(city, 'Europe/Moscow'))
+    now_local = datetime.now(tz)
+    today_local = now_local.date()
     upcoming = []
     for post in posts:
         if not post.get('start'):
+            continue
+        if not post.get('start_has_explicit_time'):
             continue
         try:
             start_dt = datetime.fromisoformat(post['start'])
         except Exception:
             continue
-        if start_dt.timestamp() < now_ts:
+        start_local = start_dt.astimezone(tz)
+        if start_local.date() != today_local:
+            continue
+        if start_local < now_local:
             continue
         price_category = post.get('price_category', 'taxi_only')
         if category == 'ultima' and price_category != 'all':
