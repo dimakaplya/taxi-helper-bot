@@ -246,6 +246,7 @@ NOTIFICATION_TYPES = {
     'airport_status': {'label': 'Статус аэропорта', 'emoji': '✈️'},
     'high_demand': {'label': 'Повышенный спрос', 'emoji': '📈'},
     'holidays': {'label': 'Праздники', 'emoji': '🎉'},
+    'peak_hours': {'label': 'Часы пика', 'emoji': '📅'},
 }
 
 def notifications_enabled(state, notif_key):
@@ -1208,6 +1209,15 @@ def init_db():
         )
     ''')
     cursor.execute('''
+        CREATE TABLE IF NOT EXISTS peak_hour_alerts_sent (
+            city TEXT,
+            target_date TEXT,
+            target_hour INTEGER,
+            sent_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (city, target_date, target_hour)
+        )
+    ''')
+    cursor.execute('''
         CREATE TABLE IF NOT EXISTS shared_orders (
             order_id INTEGER PRIMARY KEY AUTOINCREMENT,
             sender_id INTEGER NOT NULL,
@@ -1438,6 +1448,43 @@ def cleanup_old_high_demand_alerts():
         conn.close()
     except Exception as e:
         logger.error(f"❌ Не удалось почистить high_demand_alerts_sent: {e}")
+
+def was_peak_hour_alert_sent(city, target_date, target_hour):
+    """Тот же дедуп-паттерн, что was_high_demand_alert_sent, но по (город,
+    дата, час начала пика) - пик один на весь город, не привязан к
+    конкретному аэропорту/классу, поэтому таблица/ключ проще."""
+    init_db()
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        'SELECT 1 FROM peak_hour_alerts_sent WHERE city=? AND target_date=? AND target_hour=?',
+        (city, target_date, target_hour)
+    )
+    row = cursor.fetchone()
+    conn.close()
+    return row is not None
+
+def mark_peak_hour_alert_sent(city, target_date, target_hour):
+    init_db()
+    conn = get_db_connection()
+    conn.execute(
+        'INSERT OR IGNORE INTO peak_hour_alerts_sent (city, target_date, target_hour, sent_at) VALUES (?, ?, ?, ?)',
+        (city, target_date, target_hour, datetime.now(ZoneInfo('UTC')).strftime('%Y-%m-%d %H:%M:%S'))
+    )
+    conn.commit()
+    conn.close()
+
+def cleanup_old_peak_hour_alerts():
+    """Чистим отметки старше 2 дней - тот же принцип, что cleanup_old_high_demand_alerts."""
+    try:
+        init_db()
+        conn = get_db_connection()
+        cutoff = (datetime.now(ZoneInfo('UTC')) - timedelta(days=2)).strftime('%Y-%m-%d')
+        conn.execute('DELETE FROM peak_hour_alerts_sent WHERE target_date < ?', (cutoff,))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"❌ Не удалось почистить peak_hour_alerts_sent: {e}")
 
 # Водители сами отмечают, сколько машин видят в очереди на аэропорту - выбором
 # диапазона, а не точного числа (точно посчитать чужие машины в моменте
@@ -1700,6 +1747,40 @@ def get_current_peak_level(city):
         if start_h <= now.hour < end_h:
             return level
     return 'mid'
+
+PEAK_HOUR_PUSH_LEAD_MINUTES = 30  # за сколько минут до начала уведомляем - см. peak_hour_alert_checker ниже
+
+def find_upcoming_peak_start(city, lead_minutes=PEAK_HOUR_PUSH_LEAD_MINUTES):
+    """Ищет ближайшее НАЧАЛО диапазона уровня 'peak' (час пик, не просто
+    high/mid) в пределах lead_minutes от текущего момента - для пуша "через
+    30 минут начинается час пик". Проверяет только СЕГОДНЯШНИЙ день недели
+    и завтрашний (на случай, если пик начинается сразу после полуночи,
+    например суббота 00:00 - конец пятницы) - lead_minutes всегда меньше
+    часа, этого достаточно, дальше можно не смотреть.
+
+    Возвращает dict {target_date, target_hour, label} или None. target_date/
+    target_hour - для дедупа (see was_peak_hour_alert_sent), должны совпадать
+    с калиндарной датой/часом НАЧАЛА диапазона (а не датой "сейчас")."""
+    now = get_city_now(city)
+    window_end = now + timedelta(minutes=lead_minutes)
+
+    for check_date, weekday in ((now, now.weekday()), (window_end, window_end.weekday())):
+        pattern = WEEKDAY_HOUR_LOAD[weekday]
+        for start_h, end_h, level, label in pattern:
+            if level != 'peak':
+                continue
+            # Момент начала диапазона в системе того же дня, что и check_date -
+            # start_h может быть 0 (полночь) для диапазонов, начинающихся
+            # сразу после смены дня (см. _WEEKDAY_PATTERN_SATURDAY).
+            start_dt = check_date.replace(hour=start_h, minute=0, second=0, microsecond=0)
+            if now < start_dt <= window_end:
+                return {
+                    'target_date': start_dt.strftime('%Y-%m-%d'),
+                    'target_hour': start_h,
+                    'label': label,
+                    'start_dt': start_dt,
+                }
+    return None
 
 def peak_hours_weekday_keyboard(current_weekday):
     """Инлайн-кнопки переключения дня недели - 7 кнопок, текущий день
@@ -4839,6 +4920,76 @@ async def high_demand_alert_checker():
             logger.error(f"❌ Ошибка фоновой проверки повышенного спроса: {e}")
         await asyncio.sleep(HIGH_DEMAND_CHECK_INTERVAL_MINUTES * 60)
 
+# ==================== ПУШ "ЧАСЫ ПИКА" ====================
+# По просьбе пользователя - пуш за PEAK_HOUR_PUSH_LEAD_MINUTES (30) минут ДО
+# начала часа пика (см. WEEKDAY_HOUR_LOAD/find_upcoming_peak_start выше).
+# Проверяем каждые PEAK_HOUR_CHECK_INTERVAL_MINUTES минут - заметно чаще, чем
+# лид в 30 минут, чтобы не пропустить окно между проверками (10 минут - тот
+# же порядок частоты, что и у остальных фоновых проверок бота).
+PEAK_HOUR_CHECK_INTERVAL_MINUTES = 10
+
+async def push_peak_hour_alert(city, target_date, target_hour, label, start_dt):
+    """Рассылает пуш "через 30 минут начинается час пик" водителям такси/
+    Ultima в этом городе (курьеру/грузовому такси не актуально - та же
+    логика, что у "🧭 Куда ехать", см. CATEGORIES_WITHOUT_AIRPORTS)."""
+    if not bot:
+        return
+    city_name = CITY_DISPLAY_NAMES.get(city, city)
+    text = (
+        f"📅 *{city_name}*\n\n"
+        f"Через {PEAK_HOUR_PUSH_LEAD_MINUTES} минут ({start_dt.strftime('%H:%M')}) начинается "
+        f"*{label}* - самое время выехать в оживлённый район или к аэропорту."
+    )
+    recipients = [
+        uid for uid, state in list(user_state.items())
+        if isinstance(state, dict) and state.get('city') == city
+        and state.get('category') not in CATEGORIES_WITHOUT_AIRPORTS
+        and notifications_enabled(state, 'peak_hours')
+    ]
+    if not recipients:
+        logger.info(f"📅 Час пика через {PEAK_HOUR_PUSH_LEAD_MINUTES} мин в городе {city} ({target_date} {target_hour:02d}:00), но нет известных водителей такси/Ultima (либо все отключили эти пуши)")
+        return
+    logger.info(f"📅 Час пика через {PEAK_HOUR_PUSH_LEAD_MINUTES} мин в городе {city} ({target_date} {target_hour:02d}:00) - рассылаю {len(recipients)} водителям")
+    sent, failed = 0, 0
+    for user_id in recipients:
+        try:
+            await bot.send_message(user_id, text, parse_mode='Markdown')
+            sent += 1
+        except Exception as e:
+            failed += 1
+            logger.warning(f"⚠️ Не удалось отправить пуш о часе пика пользователю {user_id}: {e}")
+        await asyncio.sleep(0.05)  # Telegram допускает ~30 сообщений/сек в разные чаты
+    logger.info(f"📅 Пуш о часе пика по городу {city} разослан: {sent} успешно, {failed} ошибок")
+
+async def check_peak_hour_alerts():
+    """Проверяет каждый город бота на предмет "час пик начинается через
+    PEAK_HOUR_PUSH_LEAD_MINUTES минут" - тот же дедуп-паттерн, что и у
+    check_high_demand_alerts (не шлём повторно один и тот же слот)."""
+    cleanup_old_peak_hour_alerts()
+    for city in AIRPORTS_INFO:
+        try:
+            upcoming = find_upcoming_peak_start(city)
+        except Exception as e:
+            logger.error(f"❌ Не удалось проверить час пика для города {city}: {e}")
+            continue
+        if not upcoming:
+            continue
+        if was_peak_hour_alert_sent(city, upcoming['target_date'], upcoming['target_hour']):
+            continue
+        await push_peak_hour_alert(city, upcoming['target_date'], upcoming['target_hour'], upcoming['label'], upcoming['start_dt'])
+        mark_peak_hour_alert_sent(city, upcoming['target_date'], upcoming['target_hour'])
+
+async def peak_hour_alert_checker():
+    """Фоновая задача: раз в PEAK_HOUR_CHECK_INTERVAL_MINUTES минут проверяет
+    приближение часа пика по каждому городу и заранее (за
+    PEAK_HOUR_PUSH_LEAD_MINUTES минут) шлёт пуш водителям такси/Ultima."""
+    while True:
+        try:
+            await check_peak_hour_alerts()
+        except Exception as e:
+            logger.error(f"❌ Ошибка фоновой проверки часов пика: {e}")
+        await asyncio.sleep(PEAK_HOUR_CHECK_INTERVAL_MINUTES * 60)
+
 async def favt_notices_updater():
     """Фоновая задача: раз в FAVT_UPDATE_INTERVAL_MINUTES минут читает публичную
     веб-версию канала @favt_info (Росавиация) и обновляет favt_notices.json.
@@ -4913,6 +5064,7 @@ async def main():
     asyncio.create_task(rain_checker())
     asyncio.create_task(holiday_checker())
     asyncio.create_task(airport_queue_checker())
+    asyncio.create_task(peak_hour_alert_checker())
     # allowed_updates передаём ЯВНО (а не полагаемся на автоматическое
     # dp.resolve_used_update_types()) - похоже, это и была причина, почему
     # пуши "Очередь у аэропорта" не приходили: Telegram Bot API запоминает
