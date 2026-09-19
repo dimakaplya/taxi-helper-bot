@@ -105,7 +105,13 @@ STATION_CAPACITY = {
 # каждые FLIGHTS_DAY_INTERVAL_HOURS часов.
 FLIGHTS_NIGHT_START_HOUR = 0
 FLIGHTS_NIGHT_END_HOUR = 6  # [0, 6) - ночь (обновлений нет), [6, 24) - день
-FLIGHTS_DAY_INTERVAL_HOURS = 2  # днём - каждые 2 часа (06,08,...,22 = 9 запусков/сутки)
+FLIGHTS_DAY_INTERVAL_HOURS = 1  # днём - каждый час (06,07,...,23 = 18 запусков/сутки).
+# ИЗМЕНЕНО 19.09.2026 с 2ч по просьбе пользователя (было 9 запусков/сутки).
+# 13 аэропортов x 18 запусков = 234 запроса/сутки только на рейсы - вдвое
+# больше "всплесков" запросов в день, чем раньше, хоть суммарный дневной
+# объём (234 + 52 у поездов = 286/500, 57%) всё ещё укладывается в
+# DAILY_SAFETY_LIMIT (см. fetch_yandex_data.py, 70% = 350). Стоит помнить
+# при новой блокировке ключа - см. инцидент 19.09.2026.
 
 # Поезда (7 вокзалов по 6 городам - см. STATION_CITY): отдельный, не
 # завязанный на день/ночь график - раз в TRAINS_UPDATE_INTERVAL_HOURS часов,
@@ -3892,7 +3898,7 @@ async def airports_data_updater():
     Yandex Rasp сверх обычного расписания раз в 2 часа. Именно череда
     редеплоев в течение одного дня внесла свой вклад в блокировку ключа
     19.09.2026 (см. письмо Яндекса о превышении лимита)."""
-    MIN_FRESH_AGE_MINUTES = 90  # меньше половины FLIGHTS_DAY_INTERVAL_HOURS (2ч=120мин)
+    MIN_FRESH_AGE_MINUTES = 25  # меньше половины FLIGHTS_DAY_INTERVAL_HOURS (1ч=60мин)
     while True:
         hour = datetime.now(ZoneInfo('Europe/Moscow')).hour
         if FLIGHTS_NIGHT_START_HOUR <= hour < FLIGHTS_NIGHT_END_HOUR:
