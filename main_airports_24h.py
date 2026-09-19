@@ -2832,34 +2832,57 @@ async def compute_where_to_go(city, category):
     candidates.sort(key=lambda c: c['score'], reverse=True)
     return candidates
 
+# Ранговые эмодзи для мест в списке "Остальные варианты" - по просьбе
+# пользователя сделать сводку "красочнее" (21.09.2026): медаль для топ-3,
+# дальше нейтральная точка. WHERE_TO_GO_RANK_EMOJI - медали 2 и 3 места
+# (1 место уже показано отдельным блоком "Сейчас лучше всего" с 🏆).
+WHERE_TO_GO_RANK_EMOJI = ['🥈', '🥉']
+
+def _where_to_go_score_bar(score):
+    """Условная визуальная шкала загрузки под score (0-100%+) - просто
+    заполненность кружками, чисто декоративно (не привязана к 4-уровневой
+    шкале аэропортов, т.к. у "Города" и вокзалов другие единицы/диапазоны).
+    5 сегментов, каждый ~20 очков, максимум забивается на 5-м."""
+    filled = min(5, max(0, round(score / 20)))
+    return '●' * filled + '○' * (5 - filled)
+
 def format_where_to_go_text(city, category, candidates):
     city_name = CITY_DISPLAY_NAMES.get(city, city)
-    lines = [f"🧭 *Куда ехать — {city_name}*\n"]
+    now = get_city_now(city)
+    lines = [
+        f"🧭✨ *КУДА ЕХАТЬ — {city_name.upper()}*",
+        f"_{now.strftime('%H:%M')}, {WEEKDAY_NAMES[now.weekday()]}_",
+        "━━━━━━━━━━━━━━━━━━",
+    ]
 
     open_candidates = [c for c in candidates if not c['closed']]
     if not open_candidates:
-        lines.append("Все аэропорты города сейчас закрыты - ориентируйся на центр города и часы пика (см. «📅 Часы пика»).")
+        lines.append("\n⛔ Все аэропорты города сейчас закрыты - ориентируйся на центр города и часы пика (см. «📅 Часы пика»).")
         return '\n'.join(lines)
 
     best = open_candidates[0]
     reasons_str = ', '.join(best['reasons'])
-    lines.append(f"📍 *Сейчас лучше всего: {best['label']}*")
-    lines.append(f"_{reasons_str}_")
+    lines.append(f"\n🏆 *{best['label']}*")
+    lines.append(f"{_where_to_go_score_bar(best['score'])}  _{reasons_str}_")
     if best.get('advice'):
-        lines.append(f"\n{best['advice'][0].upper()}{best['advice'][1:]}.")
-    lines.append("")
+        lines.append(f"\n💡 {best['advice'][0].upper()}{best['advice'][1:]}.")
 
     if len(open_candidates) > 1:
-        lines.append("Остальные варианты:")
-        for c in open_candidates[1:]:
-            lines.append(f"• {c['label']} — {', '.join(c['reasons'])}")
+        lines.append("\n━━━━━━━━━━━━━━━━━━")
+        lines.append("*Остальные варианты:*\n")
+        for i, c in enumerate(open_candidates[1:]):
+            rank_emoji = WHERE_TO_GO_RANK_EMOJI[i] if i < len(WHERE_TO_GO_RANK_EMOJI) else '▫️'
+            lines.append(f"{rank_emoji} *{c['label']}*")
+            lines.append(f"{_where_to_go_score_bar(c['score'])}  _{', '.join(c['reasons'])}_\n")
 
     closed = [c for c in candidates if c['closed']]
     if closed:
-        lines.append("\n⛔ Закрыто сейчас: " + ', '.join(c['label'] for c in closed))
+        lines.append("━━━━━━━━━━━━━━━━━━")
+        lines.append("⛔ Закрыто сейчас: " + ', '.join(c['label'] for c in closed))
 
+    lines.append("━━━━━━━━━━━━━━━━━━")
     lines.append(
-        "\n_Ориентир на основе прилётов, статуса аэропортов, очереди и часов "
+        "_Ориентир на основе прилётов, статуса аэропортов, очереди и часов "
         "пика - не гарантия заработка, реальный спрос может отличаться._"
     )
     return '\n'.join(lines)
