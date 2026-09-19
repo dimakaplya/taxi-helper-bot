@@ -1874,7 +1874,7 @@ def services_keyboard(category=None, city=None):
     # "🔓 Бесплатный VPN TAXI HELPER" - НЕ в общей 2-колоночной сетке ниже, а
     # отдельной строкой в самом низу (перед "← Назад"/"🏙 Выбор города") - по
     # просьбе пользователя.
-    # "🧭💰 Куда ехать" - самая верхняя строка меню, отдельной строкой (по
+    # "💰 КУДА ЕХАТЬ ➡️" - самая верхняя строка меню, отдельной строкой (по
     # просьбе пользователя) - раньше была внутри "Инструменты водителя",
     # перенесена сюда как самая важная кнопка (решает, куда именно ехать
     # прямо сейчас). Доступна только категориям с аэропортами (см.
@@ -1883,7 +1883,7 @@ def services_keyboard(category=None, city=None):
     # актуальна (см. обсуждение с пользователем 19.09.2026).
     top_row = []
     if category not in CATEGORIES_WITHOUT_AIRPORTS:
-        top_row.append(KeyboardButton(text="🧭💰 Куда ехать"))
+        top_row.append(KeyboardButton(text="💰 КУДА ЕХАТЬ ➡️"))
 
     items = []
     if category in SHARED_ORDER_CATEGORIES:
@@ -1955,7 +1955,7 @@ def courier_module_keyboard(category=None):
         [KeyboardButton(text="🛒 Магазины 24ч"), KeyboardButton(text="🔌 Электрозарядки")],
         [KeyboardButton(text="🛠 ТО транспорта")],
     ]
-    # "🧭💰 Куда ехать" отсюда убрана - перенесена в services_keyboard как
+    # "💰 КУДА ЕХАТЬ ➡️" отсюда убрана - перенесена в services_keyboard как
     # верхняя строка главного меню (по просьбе пользователя, 19.09.2026).
     # "🔔 Уведомления" тоже отсюда убрана - теперь доступна через
     # "⚙️ Настройки" в главном меню (по просьбе пользователя, 19.09.2026).
@@ -2887,7 +2887,7 @@ def format_where_to_go_text(city, category, candidates):
     )
     return '\n'.join(lines)
 
-@router.message(lambda message: message.text == "🧭💰 Куда ехать")
+@router.message(lambda message: message.text == "💰 КУДА ЕХАТЬ ➡️")
 async def show_where_to_go(message: types.Message):
     user_id = message.from_user.id
     state = user_state.get(user_id, {})
