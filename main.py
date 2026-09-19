@@ -16,7 +16,7 @@ import aiohttp  # прямой запрос к Open-Meteo (публичный AP
 import fetch_yandex_data  # логика похода в Yandex Rasp API, запускается фоново прямо на Railway
 import fetch_trains_data  # поезда дальнего следования (Казанский, Ленинградский) - тот же ключ и квота
 import fetch_favt_notices  # логика сбора уведомлений Росавиации (@favt_info), тоже фоново
-import fetch_road_events   # ДТП по городам (@dtp777, @dtp_spb78) - тем же способом, фоново
+import fetch_road_events   # ДТП по городам (Москва: @dtp777+@DtOperativno слиты в одну ленту, СПб: @dtp_spb78) - тем же способом, фоново
 import fetch_timepad_data  # афиша города (TimePad) для кнопки "🎭 События города" - используется
                             # только для TIMEPAD_CITY_MAP; timepad_data.json обновляется ЛОКАЛЬНО
                             # (см. fetch_timepad_data.py), Railway не может дотянуться до TimePad
@@ -2660,8 +2660,9 @@ def format_road_event_time(iso_time, city):
 @router.message(lambda message: message.text == "⛔ Дорожные события")
 async def show_road_events(message: types.Message):
     """ДТП и дорожные происшествия по городам - пересылаем сами тексты
-    последних сообщений из публичных Telegram-каналов (Москва -> @dtp777,
-    СПб -> @dtp_spb78), а не просто даём ссылку на канал. Источник данных -
+    последних сообщений из публичных Telegram-каналов (Москва -> @dtp777 +
+    @DtOperativno слиты в одну ленту, СПб -> @dtp_spb78), а не просто даём
+    ссылку на канал. Источник данных -
     road_events_data.json, который в фоне обновляет road_events_updater()
     (см. fetch_road_events.py - парсинг публичной веб-версии канала, тот же
     способ, что уже используется для уведомлений Росавиации @favt_info;

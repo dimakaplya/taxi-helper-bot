@@ -17,7 +17,9 @@ ROAD_EVENTS_UPDATE_INTERVAL_MINUTES в main.py).
     python3 fetch_road_events.py
 
 Каналы:
-    Москва          - @dtp777      (https://t.me/dtp777)
+    Москва          - @dtp777, @DtOperativno (несколько каналов на город -
+                       см. ROAD_EVENTS_CHANNELS ниже, результаты сливаются
+                       в одну ленту по времени, с дедупом по ссылке/тексту)
     Санкт-Петербург - @dtp_spb78   (https://t.me/dtp_spb78)
 """
 import os
@@ -37,10 +39,14 @@ OUTPUT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'road_eve
 LOOKBACK_HOURS = 6
 MAX_MESSAGES_PER_CITY = 15  # сколько последних сообщений хранить/показывать на город
 
-# Бот-город -> (username канала без @, ссылка для кнопки "Открыть канал")
+# Бот-город -> список username-ов каналов без @ (может быть несколько на
+# город - см. merge_city_messages ниже: результаты всех каналов сливаются в
+# одну ленту по городу, сортируются по времени, дедупятся по ссылке на
+# сообщение (а если ссылки почему-то нет - по паре (время, текст), на случай
+# если один и тот же инцидент запостили в обоих каналах почти одновременно).
 ROAD_EVENTS_CHANNELS = {
-    'moscow': 'dtp777',
-    'spb': 'dtp_spb78',
+    'moscow': ['dtp777', 'DtOperativno'],
+    'spb': ['dtp_spb78'],
 }
 
 # Каналы @dtp777/@dtp_spb78 называются "ДТП И ЧП" - помимо аварий постят и
@@ -188,17 +194,43 @@ def fetch_channel_messages(channel_username):
     return notices[:MAX_MESSAGES_PER_CITY]
 
 
+def merge_city_messages(per_channel_notices):
+    """Сливает списки сообщений от нескольких каналов одного города в одну
+    ленту: сортирует по времени (новые сверху) и дедупит - в первую очередь
+    по прямой ссылке на сообщение (надёжнее всего, у неё разные каналы не
+    могут случайно совпасть), а если ссылки нет - по паре (время, текст),
+    на случай если один и тот же инцидент независимо запостили в двух
+    каналах почти секунда в секунду с одинаковым текстом (маловероятно, но
+    дешёво подстраховаться)."""
+    merged = []
+    for notices in per_channel_notices:
+        merged.extend(notices)
+    merged.sort(key=lambda n: n['time'], reverse=True)
+
+    seen = set()
+    deduped = []
+    for n in merged:
+        key = ('link', n['link']) if n.get('link') else ('text', n['time'], n['text'])
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(n)
+    return deduped[:MAX_MESSAGES_PER_CITY]
+
+
 def main():
     result = {
         'generated_at': datetime.now(timezone.utc).isoformat(),
         'lookback_hours': LOOKBACK_HOURS,
         'cities': {},
     }
-    for bot_city, channel_username in ROAD_EVENTS_CHANNELS.items():
-        logger.info(f"🔄 Обновляю дорожные события для {bot_city} (@{channel_username})...")
-        notices = fetch_channel_messages(channel_username)
+    for bot_city, channel_usernames in ROAD_EVENTS_CHANNELS.items():
+        channels_label = ', '.join(f'@{c}' for c in channel_usernames)
+        logger.info(f"🔄 Обновляю дорожные события для {bot_city} ({channels_label})...")
+        per_channel = [fetch_channel_messages(c) for c in channel_usernames]
+        notices = merge_city_messages(per_channel)
         result['cities'][bot_city] = notices
-        logger.info(f"✅ {bot_city}: {len(notices)} сообщений за последние {LOOKBACK_HOURS}ч")
+        logger.info(f"✅ {bot_city}: {len(notices)} сообщений за последние {LOOKBACK_HOURS}ч (из {len(channel_usernames)} канал(ов))")
 
     with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
