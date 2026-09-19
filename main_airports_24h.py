@@ -2330,9 +2330,21 @@ async def process_airport_queue_ping(user_id, lat, lon, live_period=None):
 
 @router.message(lambda message: getattr(message, 'location', None) is not None and user_state.get(message.from_user.id, {}).get('airport_queue_active'))
 async def handle_airport_queue_location(message: types.Message):
+    """Срабатывает только на ПЕРВЫЙ пинг живой геопозиции (сама отправка -
+    обычное новое сообщение); все следующие обновления той же трансляции
+    приходят как edited_message, см. handle_airport_queue_location_update
+    ниже - отдельный хендлер их не трогает. Поэтому именно тут (а не там)
+    место для разового "геопозиция получена" - по просьбе пользователя,
+    чтобы после отправки геопозиции чат не оставался без клавиатуры меню."""
+    user_id = message.from_user.id
     await process_airport_queue_ping(
-        message.from_user.id, message.location.latitude, message.location.longitude,
+        user_id, message.location.latitude, message.location.longitude,
         live_period=getattr(message.location, 'live_period', None),
+    )
+    state = user_state.get(user_id) or {}
+    await message.answer(
+        "📍 Геопозиция получена, слежу за расстоянием до аэропорта.",
+        reply_markup=courier_module_keyboard(state.get('category')),
     )
 
 @router.edited_message(lambda message: getattr(message, 'location', None) is not None and user_state.get(message.from_user.id, {}).get('airport_queue_active'))
