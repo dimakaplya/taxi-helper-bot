@@ -3880,9 +3880,27 @@ def seconds_until_hour(target_hour, tz='Europe/Moscow'):
 
 
 def _data_file_age_minutes(path):
-    """Возраст файла в минутах по mtime, или None если файла нет/не читается."""
+    """Возраст ДАННЫХ в минутах по полю 'generated_at' ВНУТРИ файла (не по
+    mtime на диске!) - или None если файла нет/не читается/нет поля.
+
+    ИСПРАВЛЕНО 19.09.2026 в ночь: изначально использовался os.path.getmtime()
+    (время последнего изменения файла на диске). На Railway это оказалось
+    БЕССМЫСЛЕННЫМ - при каждом деплое контейнер собирается заново из git
+    checkout, и mtime файла становится временем СБОРКИ образа, а не временем
+    реального сбора данных. В логах это выглядело как "flights_data.json
+    свежий (5мин < 25мин)" сразу после рестарта, хотя данные внутри были
+    54.9 ЧАСА устаревшими (см. поле generated_at) - защита от лишних
+    прогонов при рестарте из-за этого сама блокировала получение свежих
+    данных после разблокировки ключа. Теперь читаем реальную дату сбора из
+    содержимого файла."""
     try:
-        return (time.time() - os.path.getmtime(path)) / 60
+        with open(path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        generated_at = data.get('generated_at')
+        if not generated_at:
+            return None
+        generated_dt = datetime.fromisoformat(generated_at)
+        return (datetime.now() - generated_dt).total_seconds() / 60
     except Exception:
         return None
 
