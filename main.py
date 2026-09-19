@@ -2648,6 +2648,40 @@ async def switch_peak_hours_day(callback_query: types.CallbackQuery):
 # когда-нибудь изменятся (см. QUEUE_RANGES выше по файлу).
 WHERE_TO_GO_QUEUE_LONG_RANGES = {f'{lo}-{hi}' for lo, hi in QUEUE_RANGES if lo >= 21}
 
+def pluralize_ru(n, one, few, many):
+    """Русское склонение по числу: 1 рейс / 2 рейса / 5 рейсов. Стандартное
+    правило падежей (11-14 - всегда "many", иначе по последней цифре)."""
+    n_abs = abs(n)
+    if 11 <= n_abs % 100 <= 14:
+        return many
+    last = n_abs % 10
+    if last == 1:
+        return one
+    if 2 <= last <= 4:
+        return few
+    return many
+
+def score_station_candidate(city, code, station, category):
+    """Балл и обоснование для одного вокзала города - тот же принцип, что
+    score_airport_candidate, но на бинарной шкале вокзалов (см.
+    get_train_load_symbol/get_train_load_label) вместо 4-уровневой шкалы
+    аэропортов. По просьбе пользователя (21.09.2026) вокзалы тоже участвуют
+    в "Куда ехать", а не только аэропорты. score - тот же % загрузки
+    текущего получаса, что показывается на кнопке вокзала в разделе
+    "✈️🚆 Транспорт" - шкалы сопоставимы (обе - % от часовой ёмкости),
+    прямое сравнение с score аэропорта корректно."""
+    load, trains_in_period, _ = compute_current_train_period_load(code, category)
+    reasons = []
+    if trains_in_period > 0:
+        train_word = pluralize_ru(trains_in_period, "поезд", "поезда", "поездов")
+        reasons.append(f"{trains_in_period} {train_word} в этот получас")
+    else:
+        reasons.append("прибытий в этот получас нет")
+    label = get_train_load_label(load)
+    if label == 'ЕХАТЬ':
+        reasons.append("стоит подъехать")
+    return {'label': f"🚆 {station['name']}", 'score': load, 'reasons': reasons, 'closed': False, 'advice': None}
+
 async def score_airport_candidate(city, airport, category):
     """Считает балл и обоснование для одного аэропорта города. Возвращает
     dict {label, score, reasons: [str, ...], closed: bool}. relevant_class -
@@ -2659,13 +2693,14 @@ async def score_airport_candidate(city, airport, category):
 
     status, _notice = get_airport_status(icao)
     if airport.get('closed') or status == 'closed':
-        return {'label': airport['name'], 'score': -1000, 'reasons': ['аэропорт закрыт'], 'closed': True}
+        return {'label': airport['name'], 'score': -1000, 'reasons': ['аэропорт закрыт'], 'closed': True, 'advice': None}
 
     avail = compute_current_availability(icao, relevant_class, zone_key=zone_key)
     score = avail['load']  # базовый балл - % загрузки прилётов на текущий час
     n_flights = len(avail['arrivals_now'])
     if n_flights > 0:
-        reasons.append(f"{n_flights} рейсов в этот час")
+        flight_word = pluralize_ru(n_flights, "рейс", "рейса", "рейсов")
+        reasons.append(f"{n_flights} {flight_word} в этот час")
     else:
         reasons.append("прилётов в этот час нет")
 
@@ -2691,7 +2726,63 @@ async def score_airport_candidate(city, airport, category):
         score *= 0.6
         reasons.append(f"уже большая очередь ({worst_range} машин)")
 
-    return {'label': airport['name'], 'score': score, 'reasons': reasons, 'closed': False}
+    return {'label': airport['name'], 'score': score, 'reasons': reasons, 'closed': False, 'advice': None}
+
+# Развёрнутая рекомендация по типам заведений для "Город/центр" - по
+# просьбе пользователя (21.09.2026): просто "повышенный спрос" мало что
+# говорит водителю, нужен конкретный совет КУДА именно в центре ехать/
+# держаться, в зависимости от дня недели и текущего уровня спроса. Пятница/
+# суббота вечер-ночь - ночная жизнь (клубы/бары/рестораны/стриптиз-клубы),
+# будни вечер - рестораны/бары после работы, будни утро/день - деловой
+# центр/офисы/ТЦ. Формулировки водитель дал сам (пятница-суббота = ночная
+# жизнь, будни = обычный деловой трафик) - остальное подобрано по аналогии,
+# не строгий факт, а ориентир ("держись центра и этих заведений").
+_CITY_ADVICE_WEEKEND_NIGHT = (
+    "ночь клубов, баров и ресторанов - держись центра и заведений ночной "
+    "жизни (клубы, бары, рестораны, стриптиз-клубы): люди разъезжаются "
+    "поздно и часто берут такси именно от входа"
+)
+_CITY_ADVICE_WEEKEND_EVENING = (
+    "вечер пятницы/субботы - люди едут в центр в рестораны, бары и клубы: "
+    "держись районов с заведениями, спрос будет расти к ночи"
+)
+_CITY_ADVICE_WORKDAY_EVENING = (
+    "вечер буднего дня - спрос из бизнес-центров/офисов и ресторанов/баров "
+    "после работы, держись делового центра"
+)
+_CITY_ADVICE_WORKDAY_PEAK = (
+    "час пик буднего дня - основной поток из жилых районов в центр/офисы "
+    "(или обратно вечером), держись крупных транспортных направлений"
+)
+_CITY_ADVICE_DEFAULT = "держись центра города и оживлённых районов"
+
+def get_city_advice(city, level):
+    """Развёрнутый совет ПО ТИПАМ ЗАВЕДЕНИЙ для "Город/центр", в зависимости
+    от дня недели (местное время города) и текущего уровня спроса. См.
+    комментарий у _CITY_ADVICE_* выше про логику. weekday 4=пятница,
+    5=суббота, 6=воскресенье (как в get_city_now().weekday())."""
+    now = get_city_now(city)
+    weekday = now.weekday()
+    hour = now.hour
+    # Ночная зона пятницы/субботы переходит через полночь на следующий день
+    # недели (пятница ночью -> уже суббота, суббота ночью -> уже
+    # воскресенье) - поэтому проверяем ЧАСЫ ПОСЛЕ полуночи (hour < 4) у
+    # СЛЕДУЮЩЕГО дня (5=суббота, 6=воскресенье), а не у самого (4,5).
+    is_weekend_night_zone = (
+        (weekday in (4, 5) and hour >= 22) or
+        (weekday in (5, 6) and hour < 4)
+    )
+    is_weekend_evening = weekday in (4, 5) and 18 <= hour < 22
+    if is_weekend_night_zone:
+        return _CITY_ADVICE_WEEKEND_NIGHT
+    if is_weekend_evening:
+        return _CITY_ADVICE_WEEKEND_EVENING
+    if weekday <= 3:  # будни (пн-чт)
+        if level == 'peak':
+            return _CITY_ADVICE_WORKDAY_PEAK
+        if hour >= 18:
+            return _CITY_ADVICE_WORKDAY_EVENING
+    return _CITY_ADVICE_DEFAULT
 
 async def score_city_candidate(city):
     """Балл для обобщённого "Город/центр" - на основе часа пика + погоды.
@@ -2713,13 +2804,17 @@ async def score_city_candidate(city):
             score += bonus
             reasons.append(f"{emoji} осадки сейчас - спрос выше обычного")
 
-    return {'label': 'Город / центр', 'score': score, 'reasons': reasons, 'closed': False}
+    advice = get_city_advice(city, level)
+    return {'label': 'Город / центр', 'score': score, 'reasons': reasons, 'closed': False, 'advice': advice}
 
 async def compute_where_to_go(city, category):
-    """Считает и сортирует всех кандидатов (аэропорты города + "Город/центр")
-    по баллу - возвращает список dict от score_airport_candidate/
-    score_city_candidate, отсортированный по убыванию score, закрытые
-    аэропорты (score=-1000) уходят в конец списка."""
+    """Считает и сортирует всех кандидатов (аэропорты + вокзалы города +
+    "Город/центр") по баллу - возвращает список dict от
+    score_airport_candidate/score_station_candidate/score_city_candidate,
+    отсортированный по убыванию score, закрытые аэропорты (score=-1000)
+    уходят в конец списка. Вокзалы добавлены по просьбе пользователя
+    (21.09.2026) - только для городов из TRAIN_CITIES (см. STATION_CITY),
+    иначе городов без вокзалов в списке STATION_CITY просто нет данных."""
     candidates = []
     seen_icao = set()
     for airport in AIRPORTS_INFO.get(city, []):
@@ -2727,6 +2822,12 @@ async def compute_where_to_go(city, category):
         # с одним icao (B/C и D), каждая - самостоятельный кандидат (разная
         # загрузка по зоне), дедуп не нужен, в отличие от ICAO_TO_AIRPORT.
         candidates.append(await score_airport_candidate(city, airport, category))
+    if city in TRAIN_CITIES:
+        trains_data = load_trains_data()
+        if trains_data and trains_data.get('stations'):
+            city_stations = {code: st for code, st in trains_data['stations'].items() if STATION_CITY.get(code) == city}
+            for code, station in city_stations.items():
+                candidates.append(score_station_candidate(city, code, station, category))
     candidates.append(await score_city_candidate(city))
     candidates.sort(key=lambda c: c['score'], reverse=True)
     return candidates
@@ -2743,7 +2844,10 @@ def format_where_to_go_text(city, category, candidates):
     best = open_candidates[0]
     reasons_str = ', '.join(best['reasons'])
     lines.append(f"📍 *Сейчас лучше всего: {best['label']}*")
-    lines.append(f"_{reasons_str}_\n")
+    lines.append(f"_{reasons_str}_")
+    if best.get('advice'):
+        lines.append(f"\n{best['advice'][0].upper()}{best['advice'][1:]}.")
+    lines.append("")
 
     if len(open_candidates) > 1:
         lines.append("Остальные варианты:")
@@ -3967,7 +4071,9 @@ async def show_availability_details(callback_query: types.CallbackQuery):
         text += "\n"
         text += f"{load_emoji} *{status}*\n"
         text += f"📊 Загруженность сейчас: *{load:.0f}%* (от {info['relevant_cap']:.0f} пас/час)\n\n"
-        text += f"🛬 Прилетает в {info['current_hour']:02d}:00-{(info['current_hour']+1)%24:02d}:00: {len(info['arrivals_now'])} рейсов\n\n"
+        n_arrivals = len(info['arrivals_now'])
+        arrivals_word = pluralize_ru(n_arrivals, "рейс", "рейса", "рейсов")
+        text += f"🛬 Прилетает в {info['current_hour']:02d}:00-{(info['current_hour']+1)%24:02d}:00: {n_arrivals} {arrivals_word}\n\n"
 
         notices = get_notices_for_airport(airport['icao'])
         if notices:
