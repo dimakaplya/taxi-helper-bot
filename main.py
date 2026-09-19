@@ -4147,7 +4147,15 @@ async def main():
         logger.warning("⚠️ YANDEX_RASP_API_KEY не задан в переменных окружения Railway - flights_data.json и trains_data.json не будут обновляться автоматически")
     asyncio.create_task(favt_notices_updater())
     asyncio.create_task(road_events_updater())
-    asyncio.create_task(mos_road_data_updater())
+    # mos_road_data_updater() ОТКЛЮЧЁН - apidata.mos.ru не резолвится даже с
+    # серверов Railway (NameResolutionError на 'apidata.mos.ru' в логах),
+    # не только из среды разработки. Похоже, домен просто недоступен из
+    # датацентров вообще (частая практика блокировки у российских
+    # госпорталов данных для зарубежных/датацентровых IP) - дело не в ключе
+    # и не в датасете. Код (fetch_mos_road_data.py, load_mos_road_data,
+    # mos_road_data_updater) оставлен на будущее - вдруг ограничение снимут
+    # или появится способ ходить туда не с датацентрового IP.
+    # asyncio.create_task(mos_road_data_updater())
     asyncio.create_task(high_demand_alert_checker())
     asyncio.create_task(rain_checker())
     asyncio.create_task(holiday_checker())
