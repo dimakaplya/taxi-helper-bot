@@ -127,10 +127,11 @@ TRAINS_UPDATE_INTERVAL_HOURS = 6  # 4 запуска/сутки (было 12ч/2
 # вперёд (было 8, увеличено по просьбе пользователя). У аэропортов свой,
 # отдельный 8-часовой прогноз (см. show_airport_details) - не путать.
 TRAIN_FORECAST_HOURS = 12
-# Гранулярность прогноза - блоками по TRAIN_FORECAST_PERIOD_MINUTES минут
-# (было по часу целиком, уменьшено до получаса по просьбе пользователя).
+# Гранулярность прогноза - блоками по TRAIN_FORECAST_PERIOD_MINUTES минут.
+# Было по часу целиком -> уменьшено до получаса -> ВОЗВРАЩЕНО обратно к часу
+# по просьбе пользователя (19.09.2026).
 # Число периодов на весь прогноз = TRAIN_FORECAST_HOURS*60/TRAIN_FORECAST_PERIOD_MINUTES.
-TRAIN_FORECAST_PERIOD_MINUTES = 30
+TRAIN_FORECAST_PERIOD_MINUTES = 60
 
 # Расчёт по квоте (500 запросов/сутки на ключ, общий для fetch_yandex_data.py
 # и fetch_trains_data.py - см. их докстринги; доступ к общему счётчику
