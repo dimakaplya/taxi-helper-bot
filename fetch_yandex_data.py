@@ -69,10 +69,15 @@ USAGE_LOG_FILE = os.path.join(DATA_DIR, 'api_usage_log.json')
 
 # Дневной лимит ключа Yandex Rasp API. Если сегодня уже потрачено
 # DAILY_SAFETY_LIMIT запросов - скрипт откажется запускаться, чтобы не
-# словить блокировку ключа за превышение (оставляем запас 10% под сам
-# этот запуск + ретраи).
+# словить блокировку ключа за превышение.
+# УМЕНЬШЕНО с 90% до 70% ПОСЛЕ инцидента 19.09.2026 (ключ заблокирован
+# Яндексом на сутки за превышение лимита) - см. письмо от Яндекса:
+# "Доступ к сервису API Яндекс.Расписаний заблокирован из-за превышений
+# лимита". Этот порог реально защищает ТОЛЬКО если DATA_DIR указывает на
+# постоянный volume на Railway (см. комментарий выше) - без него счётчик
+# обнуляется при каждом рестарте контейнера и эта защита не работает.
 DAILY_QUOTA = 500
-DAILY_SAFETY_LIMIT = int(DAILY_QUOTA * 0.9)
+DAILY_SAFETY_LIMIT = int(DAILY_QUOTA * 0.7)
 
 
 def load_usage_log():
@@ -419,9 +424,22 @@ def main():
         'airports': {},
     }
 
+    # CIRCUIT BREAKER (добавлено 19.09.2026): если ключ целиком заблокирован
+    # Яндексом (см. инцидент 19.09.2026 - письмо "Доступ к сервису API
+    # Яндекс.Расписаний заблокирован из-за превышений лимита", ключ висит
+    # заблокированным ДО СЛЕДУЮЩИХ СУТОК), то долбить ОСТАЛЬНЫЕ ~12
+    # аэропортов подряд после первых же провалов - чистая трата времени и
+    # только усугубляет ситуацию (лишние запросы к уже заблокированному
+    # ключу). Если подряд провалилось CONSECUTIVE_FAILURES_CIRCUIT_BREAK
+    # аэропортов - останавливаем весь прогон досрочно, сохраняя прошлые
+    # данные для всех ОСТАВШИХСЯ аэропортов как есть (без единого лишнего
+    # запроса), вместо того чтобы упрямо идти по всему списку.
+    CONSECUTIVE_FAILURES_CIRCUIT_BREAK = 3
+    consecutive_failures = 0
+    circuit_broken = False
+
     for airport in AIRPORTS:
         iata, icao, name, station_code = airport['iata'], airport['icao'], airport['name'], airport['yandex_code']
-        logger.info(f"✈️  Обрабатываю {name} ({iata}/{icao})...")
 
         if airport.get('closed'):
             logger.info(f"⏭️  {name} ({iata}) закрыт - пропускаю без единого запроса к API")
@@ -433,6 +451,18 @@ def main():
             result['airports'][icao] = {'iata': iata, 'arrivals': []}
             continue
 
+        if circuit_broken:
+            # Ключ, судя по всему, заблокирован целиком - не делаем ни
+            # одного лишнего запроса, просто сохраняем прошлые данные.
+            prev_airport = (previous_result or {}).get('airports', {}).get(icao)
+            if prev_airport and prev_airport.get('arrivals'):
+                result['airports'][icao] = prev_airport
+                logger.warning(f"⏭️  {name}: пропускаю запрос (ключ похоже заблокирован) - оставляю предыдущие данные")
+            else:
+                result['airports'][icao] = {'iata': iata, 'arrivals': []}
+            continue
+
+        logger.info(f"✈️  Обрабатываю {name} ({iata}/{icao})...")
         raw_schedule = fetch_schedule(station_code, 'arrival', today)
 
         if raw_schedule is None:
@@ -450,9 +480,21 @@ def main():
             else:
                 result['airports'][icao] = {'iata': iata, 'arrivals': []}
                 logger.error(f"❌ {name}: не удалось получить данные, и прошлых данных тоже нет")
-            time.sleep(2.0)
+
+            consecutive_failures += 1
+            if consecutive_failures >= CONSECUTIVE_FAILURES_CIRCUIT_BREAK:
+                circuit_broken = True
+                logger.error(
+                    f"🚫 {consecutive_failures} аэропорта(ов) подряд не удалось получить - похоже, ключ "
+                    f"заблокирован Яндексом целиком (см. письмо 'Доступ к сервису API Яндекс.Расписаний "
+                    f"заблокирован'). Останавливаю прогон досрочно, оставшиеся аэропорты беру из кэша "
+                    f"без дополнительных запросов."
+                )
+            else:
+                time.sleep(2.0)
             continue
 
+        consecutive_failures = 0
         arrivals_today = parse_flights(raw_schedule, 'arrival')
 
         result['airports'][icao] = {

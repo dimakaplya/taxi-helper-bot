@@ -322,8 +322,25 @@ def main():
         'stations': {},
     }
 
+    # CIRCUIT BREAKER (см. тот же паттерн в fetch_yandex_data.py, добавлено
+    # 19.09.2026 после блокировки ключа Яндексом за превышение лимита) -
+    # если ключ заблокирован целиком, не долбим оставшиеся вокзалы подряд.
+    CONSECUTIVE_FAILURES_CIRCUIT_BREAK = 3
+    consecutive_failures = 0
+    circuit_broken = False
+
     for station in STATIONS:
         name, code = station['name'], station['code']
+
+        if circuit_broken:
+            prev_station = (previous_result or {}).get('stations', {}).get(code)
+            if prev_station and prev_station.get('arrivals'):
+                result['stations'][code] = prev_station
+                logger.warning(f"⏭️  {name}: пропускаю запрос (ключ похоже заблокирован) - оставляю предыдущие данные")
+            else:
+                result['stations'][code] = {'name': name, 'arrivals': []}
+            continue
+
         logger.info(f"🚆 Обрабатываю {name}...")
         raw_schedule = fetch_station_arrivals(code, today)
 
@@ -342,9 +359,20 @@ def main():
             else:
                 result['stations'][code] = {'name': name, 'arrivals': []}
                 logger.error(f"❌ {name}: не удалось получить данные, и прошлых данных тоже нет")
-            time.sleep(2.0)
+
+            consecutive_failures += 1
+            if consecutive_failures >= CONSECUTIVE_FAILURES_CIRCUIT_BREAK:
+                circuit_broken = True
+                logger.error(
+                    f"🚫 {consecutive_failures} вокзала(ов) подряд не удалось получить - похоже, ключ "
+                    f"заблокирован Яндексом целиком. Останавливаю прогон досрочно, оставшиеся вокзалы "
+                    f"беру из кэша без дополнительных запросов."
+                )
+            else:
+                time.sleep(2.0)
             continue
 
+        consecutive_failures = 0
         arrivals = parse_trains(raw_schedule)
         result['stations'][code] = {
             'name': name,
