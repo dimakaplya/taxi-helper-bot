@@ -419,8 +419,8 @@ AIRPORTS_INFO = {
         # статуса - ОБЩИЕ на весь icao (Росавиация не делит по терминалам),
         # так что обе записи получают один и тот же статус - это осознанно,
         # не баг.
-        {'name': 'SVO (Шереметьево A/B/C/VIP)', 'emoji': '✈️', 'icao': 'UUEE', 'iata': 'SVO', 'zone_key': 'abc_vip'},
-        {'name': 'SVO (Шереметьево Терминал D)', 'emoji': '✈️', 'icao': 'UUEE', 'iata': 'SVO', 'zone_key': 'd'},
+        {'name': 'SVO (Шереметьево B/C)', 'emoji': '✈️', 'icao': 'UUEE', 'iata': 'SVO', 'zone_key': 'abc_vip'},
+        {'name': 'SVO (Шереметьево D/E/F)', 'emoji': '✈️', 'icao': 'UUEE', 'iata': 'SVO', 'zone_key': 'd'},
         {'name': 'DME (Домодедово)', 'emoji': '✈️', 'icao': 'UUDD', 'iata': 'DME'},
         {'name': 'VKO (Внуково)', 'emoji': '✈️', 'icao': 'UUWW', 'iata': 'VKO'},
     ],
@@ -512,27 +512,43 @@ AIRPORT_COORDS = {
 
 # Шереметьево (UUEE) физически состоит из двух отдельных терминальных
 # комплексов с разными подъездами - по просьбе пользователя "Очередь у
-# аэропорта" и список рейсов различают именно эти две зоны:
-#   - "abc_vip": терминалы A, B, C и VIP-зал - единый северный комплекс,
-#     общий подъезд (координаты терминала C - практически совпадают с B,
-#     ~400м разницы, у A и VIP отдельных координат в открытых картах нет,
-#     но они примыкают к тому же комплексу)
-#   - "d": терминал D - отдельная территория южнее, свой подъезд с
-#     Международного шоссе, добраться из зоны A/B/C/VIP можно только по
-#     дороге в объезд (или на аэроэкспрессе/шаттле)
+# аэропорта" и список рейсов различают именно эти две зоны. ВАЖНО (исправлено
+# 19.09.2026 - см. отчёт пользователя "рейсов мало не все показывает"):
+# реальная структура Шереметьево - это терминалы B/C (северный кластер) и
+# D/E/F (южный кластер), а НЕ "A/B/C/VIP" и "D", как считалось раньше.
+# Терминал A - отдельная площадка БИЗНЕС-авиации (частные джеты), к обычным
+# пассажирским рейсам не относится и в расписании Yandex Rasp практически
+# не встречается; "VIP" вообще не является буквой терминала в данных API -
+# это была ошибочная выдумка более раннего кода. Терминалы E и F - реальные,
+# но раньше отсутствовали в TERMINAL_LETTER_TO_ZONE вообще, из-за чего рейсы
+# в эти терминалы не попадали НИ В ОДНУ зону и пропадали из разбивки.
+# Ключи зон ('abc_vip'/'d') оставлены как есть (не переименованы), чтобы не
+# ломать уже сохранённое состояние очереди у водителей, которые сейчас её
+# отслеживают - меняются только буквы терминалов в TERMINAL_LETTER_TO_ZONE и
+# подписи/названия для пользователя.
+#   - "abc_vip" (ключ не переименован, по факту это северный кластер): терминалы
+#     B и C, соединены наземными галереями, общий подъезд (координаты терминала
+#     C - практически совпадают с B, ~400м разницы)
+#   - "d" (ключ не переименован, по факту это южный кластер): терминалы D, E и
+#     F, соединены между собой крытыми переходами (5-10 минут пешком), общий
+#     подъезд с Международного шоссе - отдельный от северного кластера, между
+#     кластерами только автоматический подземный поезд (10-15 минут)
 # Координаты найдены по официальным адресам терминалов (2ГИС).
 AIRPORT_TERMINAL_ZONES = {
     'UUEE': {
-        'abc_vip': {'coords': (55.980579, 37.409522), 'label': 'Терминалы A/B/C/VIP'},
-        'd': {'coords': (55.962927, 37.406064), 'label': 'Терминал D'},
+        'abc_vip': {'coords': (55.980579, 37.409522), 'label': 'Терминалы B/C'},
+        'd': {'coords': (55.962927, 37.406064), 'label': 'Терминалы D/E/F'},
     },
 }
 
 # Буква терминала из данных Yandex Rasp API (flight['terminal'], см.
 # fetch_yandex_data.py) -> ключ зоны в AIRPORT_TERMINAL_ZONES[icao]. Нужно
-# только для аэропортов с несколькими зонами - сейчас только UUEE.
+# только для аэропортов с несколькими зонами - сейчас только UUEE. Терминал A
+# (бизнес-авиация) сюда намеренно не включён - см. комментарий выше, обычным
+# пассажирским рейсам он не соответствует, и его появление в данных было бы
+# аномалией, а не нормой.
 TERMINAL_LETTER_TO_ZONE = {
-    'UUEE': {'A': 'abc_vip', 'B': 'abc_vip', 'C': 'abc_vip', 'D': 'd'},
+    'UUEE': {'B': 'abc_vip', 'C': 'abc_vip', 'D': 'd', 'E': 'd', 'F': 'd'},
 }
 
 def flight_terminal_zone(icao, terminal_letter):
@@ -544,6 +560,33 @@ def flight_terminal_zone(icao, terminal_letter):
     if not terminal_letter:
         return None
     return TERMINAL_LETTER_TO_ZONE.get(icao, {}).get(terminal_letter.strip().upper())
+
+def compute_zone_capacity_shares(icao):
+    """Доля общей пропускной способности аэропорта (AIRPORT_CAPACITY[icao]) на
+    каждую терминальную зону - вычисляется по ФАКТИЧЕСКОМУ распределению
+    сегодняшних рейсов между зонами (сколько рейсов сегодня реально прилетает
+    в каждую зону), а не по захардкоженной оценке - официальных цифр по
+    пропускной способности именно по терминалам B/C и D/E/F по отдельности
+    нет (есть только по терминалу в целом, а терминалы делят зоны по
+    несколько штук), а прикидывать было бы менее точно, чем считать по
+    реальному расписанию на сегодня. Если у аэропорта нет зон - возвращает {}.
+    Если СЕГОДНЯ ни у одного рейса нет распознанного терминала (например,
+    Yandex Rasp не прислал поле terminal ни разу) - делит капасити поровну
+    между зонами, честный фолбэк при отсутствии данных, а не перекос в
+    одну сторону."""
+    zones = AIRPORT_TERMINAL_ZONES.get(icao)
+    if not zones:
+        return {}
+    counts = {zk: 0 for zk in zones}
+    for f in get_airport_flights(icao):
+        zk = flight_terminal_zone(icao, f.get('terminal'))
+        if zk in counts:
+            counts[zk] += 1
+    total_known = sum(counts.values())
+    if total_known == 0:
+        share = 1.0 / len(zones)
+        return {zk: share for zk in zones}
+    return {zk: counts[zk] / total_known for zk in zones}
 
 CATEGORIES = {
     'taxi': {'name': '🚕 ТАКСИ', 'tariffs': ['Эконом', 'Комфорт', 'Комфорт+', 'Минивэн']},
@@ -3168,7 +3211,7 @@ async def show_airport_info(callback_query: types.CallbackQuery):
         if airport.get('closed'):
             button_text = f"{airport['emoji']} {airport['name']} 🔴 ЗАКРЫТ"
         else:
-            current_load, _, _ = compute_current_hour_load(airport['icao'], relevant_class)
+            current_load, _, _ = compute_current_hour_load(airport['icao'], relevant_class, zone_key=airport.get('zone_key'))
             emoji = get_load_emoji(current_load)
             button_text = f"{airport['emoji']} {airport['name']} {emoji} {current_load:.0f}%"
         keyboard.inline_keyboard.append([InlineKeyboardButton(text=button_text, callback_data=f"airport_details_{city}_{i}")])
@@ -3273,14 +3316,26 @@ async def show_airport_details(callback_query: types.CallbackQuery):
     await msg.edit_text(text, parse_mode='Markdown')
     await callback_query.answer()
 
-def compute_current_hour_load(airport_icao, relevant_class, hour_offset=0):
+def compute_current_hour_load(airport_icao, relevant_class, hour_offset=0, zone_key=None):
     """Загрузка на ТЕКУЩИЙ час по ПРИЛЁТАМ - используется в списке аэропортов
     (show_airport_info) и в пуше о повышенном спросе (high_demand_alert_checker).
-    hour_offset сдвигает "текущий" час вперёд - для заблаговременных пушей."""
+    hour_offset сдвигает "текущий" час вперёд - для заблаговременных пушей.
+    zone_key (опционально, см. AIRPORT_TERMINAL_ZONES) - если у аэропорта есть
+    деление на терминальные зоны (сейчас только Шереметьево), фильтрует рейсы
+    ТОЛЬКО этой зоны и делит capacity пропорционально её доле трафика (см.
+    compute_zone_capacity_shares). ИСПРАВЛЕНО 19.09.2026: раньше zone_key
+    вообще не принимался и не использовался - обе зоны Шереметьево (B/C и
+    D/E/F) в списке аэропортов показывали ОДИНАКОВУЮ загрузку, посчитанную
+    по всем рейсам аэропорта сразу, что вводило в заблуждение (см. отчёт
+    пользователя "Загрузка неверная Шереметьево...")."""
     now = get_airport_now(airport_icao)
     target_hour = (now.hour + hour_offset) % 24
     flights = get_airport_flights(airport_icao)
     capacity = AIRPORT_CAPACITY.get(airport_icao, 1000)
+    if zone_key:
+        shares = compute_zone_capacity_shares(airport_icao)
+        capacity = capacity * shares.get(zone_key, 1.0 / max(len(shares), 1))
+        flights = [f for f in flights if flight_terminal_zone(airport_icao, f.get('terminal')) == zone_key]
     relevant_cap = {'economy': capacity * ECONOMY_SHARE, 'business': capacity * BUSINESS_SHARE, 'total': capacity}[relevant_class]
     key = {'economy': 'passengers_economy', 'business': 'passengers_business', 'total': 'passengers'}[relevant_class]
     flights_now = [f for f in flights if datetime.fromtimestamp(f.get('firstSeen', 0)).hour == target_hour]
@@ -3288,16 +3343,22 @@ def compute_current_hour_load(airport_icao, relevant_class, hour_offset=0):
     load = (total_passengers / relevant_cap) * 100 if total_passengers > 0 else 0
     return load, len(flights_now), target_hour
 
-def compute_current_availability(airport_icao, relevant_class):
+def compute_current_availability(airport_icao, relevant_class, zone_key=None):
     """Загруженность аэропорта ПРЯМО СЕЙЧАС для конкретного класса (эконом/бизнес/все):
     только прилёты в текущий час (эти пассажиры выходят из терминала прямо сейчас) -
     вылеты больше не собираются (убраны ради экономии квоты, см. get_airport_flights).
     Сравнивается с ЧАСОВОЙ пропускной способностью - раньше тут по ошибке складывались
-    пассажиры ВСЕХ рейсов за весь день, что давало 1000-2000%+."""
+    пассажиры ВСЕХ рейсов за весь день, что давало 1000-2000%+.
+    zone_key - см. compute_current_hour_load выше, тот же принцип фильтрации
+    по терминальной зоне и пропорционального деления capacity (фикс 19.09.2026)."""
     now = get_airport_now(airport_icao)
     current_hour = now.hour
     arrivals = get_airport_flights(airport_icao)
     capacity = AIRPORT_CAPACITY.get(airport_icao, 1000)
+    if zone_key:
+        shares = compute_zone_capacity_shares(airport_icao)
+        capacity = capacity * shares.get(zone_key, 1.0 / max(len(shares), 1))
+        arrivals = [f for f in arrivals if flight_terminal_zone(airport_icao, f.get('terminal')) == zone_key]
     relevant_cap = {'economy': capacity * ECONOMY_SHARE, 'business': capacity * BUSINESS_SHARE, 'total': capacity}[relevant_class]
     key = {'economy': 'passengers_economy', 'business': 'passengers_business', 'total': 'passengers'}[relevant_class]
 
@@ -3338,7 +3399,7 @@ async def show_airport_availability(callback_query: types.CallbackQuery):
             if airport.get('closed'):
                 button_text = f"🔴 {airport['emoji']} {airport['name']} ЗАКРЫТ"
             else:
-                info = compute_current_availability(airport['icao'], relevant_class)
+                info = compute_current_availability(airport['icao'], relevant_class, zone_key=airport.get('zone_key'))
                 emoji = get_load_emoji(info['load'])
                 airport_status, _ = get_airport_status(airport['icao'])
                 status_icon, _ = AIRPORT_STATUS_DISPLAY[airport_status]
@@ -3382,7 +3443,7 @@ async def show_availability_details(callback_query: types.CallbackQuery):
     msg = await callback_query.message.edit_text(f"⏳ Загружаю {airport['name']}...")
 
     try:
-        info = compute_current_availability(airport['icao'], relevant_class)
+        info = compute_current_availability(airport['icao'], relevant_class, zone_key=airport.get('zone_key'))
         load = info['load']
         if load < 50:
             status, load_emoji = "✅ Свободен", "🟢"
