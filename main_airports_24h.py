@@ -1218,6 +1218,16 @@ def init_db():
         )
     ''')
     cursor.execute('''
+        CREATE TABLE IF NOT EXISTS green_demand_alerts_sent (
+            icao TEXT,
+            relevant_class TEXT,
+            target_date TEXT,
+            target_hour INTEGER,
+            sent_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (icao, relevant_class, target_date, target_hour)
+        )
+    ''')
+    cursor.execute('''
         CREATE TABLE IF NOT EXISTS shared_orders (
             order_id INTEGER PRIMARY KEY AUTOINCREMENT,
             sender_id INTEGER NOT NULL,
@@ -1448,6 +1458,45 @@ def cleanup_old_high_demand_alerts():
         conn.close()
     except Exception as e:
         logger.error(f"❌ Не удалось почистить high_demand_alerts_sent: {e}")
+
+def was_green_demand_alert_sent(icao, relevant_class, target_date, target_hour):
+    """Тот же дедуп-паттерн, что was_high_demand_alert_sent, но отдельная
+    таблица для зелёного уровня (71-100%, "Занимай очередь") - чтобы не
+    конфликтовать с дедупом фиолетового уровня по тому же (icao,
+    relevant_class, дата, час): это разные пуши с разными условиями и должны
+    дедуплицироваться независимо."""
+    init_db()
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        'SELECT 1 FROM green_demand_alerts_sent WHERE icao=? AND relevant_class=? AND target_date=? AND target_hour=?',
+        (icao, relevant_class, target_date, target_hour)
+    )
+    row = cursor.fetchone()
+    conn.close()
+    return row is not None
+
+def mark_green_demand_alert_sent(icao, relevant_class, target_date, target_hour):
+    init_db()
+    conn = get_db_connection()
+    conn.execute(
+        'INSERT OR IGNORE INTO green_demand_alerts_sent (icao, relevant_class, target_date, target_hour, sent_at) VALUES (?, ?, ?, ?, ?)',
+        (icao, relevant_class, target_date, target_hour, datetime.now(ZoneInfo('UTC')).strftime('%Y-%m-%d %H:%M:%S'))
+    )
+    conn.commit()
+    conn.close()
+
+def cleanup_old_green_demand_alerts():
+    """Чистим отметки старше 2 дней - тот же принцип, что cleanup_old_high_demand_alerts."""
+    try:
+        init_db()
+        conn = get_db_connection()
+        cutoff = (datetime.now(ZoneInfo('UTC')) - timedelta(days=2)).strftime('%Y-%m-%d')
+        conn.execute('DELETE FROM green_demand_alerts_sent WHERE target_date < ?', (cutoff,))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"❌ Не удалось почистить green_demand_alerts_sent: {e}")
 
 def was_peak_hour_alert_sent(city, target_date, target_hour):
     """Тот же дедуп-паттерн, что was_high_demand_alert_sent, но по (город,
@@ -4920,6 +4969,104 @@ async def high_demand_alert_checker():
             logger.error(f"❌ Ошибка фоновой проверки повышенного спроса: {e}")
         await asyncio.sleep(HIGH_DEMAND_CHECK_INTERVAL_MINUTES * 60)
 
+# ==================== ПУШ О ЗЕЛЁНОМ УРОВНЕ СПРОСА (71-100%) ====================
+# По просьбе пользователя - отдельный пуш для зелёного уровня (🟢 71-100%,
+# "Занимай очередь"), не только для фиолетового (>100%, "Срочно ехать").
+# Текст и тон специально другие - зелёный это НЕ срочность, а "имеет смысл
+# подъехать и встать в очередь заранее", отдельная от фиолетового формулировка.
+GREEN_DEMAND_LEAD_HOURS = 2
+# По условию пользователя - "3 часа подряд" (не 2, как у фиолетового уровня).
+GREEN_DEMAND_STREAK_HOURS = 3
+GREEN_DEMAND_THRESHOLD_LOW = 70   # нижняя граница зелёного (см. get_load_emoji)
+GREEN_DEMAND_THRESHOLD_HIGH = 100  # верхняя граница - выше уже фиолетовый, это отдельный пуш
+GREEN_DEMAND_CHECK_INTERVAL_MINUTES = 15
+
+async def push_green_demand_alert(icao, airport, relevant_class, hour_from, hour_to, target_date, loads):
+    """Пуш о зелёном уровне спроса (71-100%, "Занимай очередь") -
+    GREEN_DEMAND_STREAK_HOURS часов подряд в этом диапазоне. Отдельная от
+    push_high_demand_alert формулировка: без "СРОЧНО", тон - "стоит подъехать
+    заранее и занять очередь", а не "аврал"."""
+    city = ICAO_TO_CITY.get(icao)
+    category = RELEVANT_CLASS_TO_CATEGORY.get(relevant_class)
+    if not city or not bot or not category:
+        return
+    class_name = CATEGORIES[category]['name']
+    hour_to_end = (hour_to + 1) % 24
+    loads_str = ', '.join(f"{l:.0f}%" for l in loads)
+    base_text = (
+        f"🟢 *{airport['emoji']} {airport['name']}*\n\n"
+        f"Через {GREEN_DEMAND_LEAD_HOURS} часа (~{hour_from:02d}:00-{hour_to_end:02d}:00) ожидается "
+        f"*повышенный спрос* на прилёты ({class_name}) - "
+        f"{GREEN_DEMAND_STREAK_HOURS} часа подряд прогноз загрузки 71-100% ({loads_str}). "
+        f"*Занимай очередь* заранее - к началу окна освободится место."
+    )
+
+    recipients = [
+        (uid, state) for uid, state in list(user_state.items())
+        if isinstance(state, dict) and state.get('city') == city and state.get('category') == category
+        and notifications_enabled(state, 'high_demand')
+    ]
+    if not recipients:
+        logger.info(f"📢 Прогноз зелёного спроса {icao} ({relevant_class}, {hour_from:02d}:00-{hour_to_end:02d}:00), но в городе {city} нет известных водителей категории {category} (либо все отключили эти пуши)")
+        return
+
+    logger.info(f"📢 Прогноз зелёного спроса {icao} ({relevant_class}, {hour_from:02d}:00-{hour_to_end:02d}:00, загрузка {loads_str}) - рассылаю {len(recipients)} водителям категории {category}")
+    sent, failed = 0, 0
+    for user_id, state in recipients:
+        driver_category = state.get('category')
+        text = base_text + format_queue_breakdown(city, icao, driver_category)
+        text += "\n\n_Подробности во вкладке «Доступность»._"
+        try:
+            await bot.send_message(user_id, text, parse_mode='Markdown')
+            sent += 1
+        except Exception as e:
+            failed += 1
+            logger.warning(f"⚠️ Не удалось отправить пуш о зелёном спросе пользователю {user_id}: {e}")
+        await asyncio.sleep(0.05)
+    logger.info(f"📢 Пуш о зелёном спросе по {icao} разослан: {sent} успешно, {failed} ошибок")
+
+async def check_green_demand_alerts():
+    """Тот же принцип, что check_high_demand_alerts, но для зелёного уровня
+    (71-100%, GREEN_DEMAND_STREAK_HOURS=3 часа подряд) с отдельным дедупом,
+    чтобы не пересекаться с фиолетовым пушем по тому же слоту."""
+    cleanup_old_green_demand_alerts()
+    for icao, airport in ICAO_TO_AIRPORT.items():
+        if icao in PERMANENTLY_CLOSED_AIRPORTS or airport.get('closed'):
+            continue
+        for relevant_class in ('economy', 'business'):
+            try:
+                streak = [
+                    compute_current_hour_load(icao, relevant_class, hour_offset=GREEN_DEMAND_LEAD_HOURS + i)
+                    for i in range(GREEN_DEMAND_STREAK_HOURS)
+                ]
+            except Exception as e:
+                logger.error(f"❌ Не удалось посчитать прогноз зелёного спроса {icao}/{relevant_class}: {e}")
+                continue
+            loads = [s[0] for s in streak]
+            # Все часы окна должны быть строго в зелёном диапазоне (71-100%) -
+            # если хоть один час выходит за пределы (ниже 71% или выше 100%,
+            # т.е. уже фиолетовый уровень), это не устойчивый зелёный период.
+            if any(load <= GREEN_DEMAND_THRESHOLD_LOW or load > GREEN_DEMAND_THRESHOLD_HIGH for load in loads):
+                continue
+            hour_from = streak[0][2]
+            hour_to = streak[-1][2]
+            target_date = (get_airport_now(icao) + timedelta(hours=GREEN_DEMAND_LEAD_HOURS)).strftime('%Y-%m-%d')
+            if was_green_demand_alert_sent(icao, relevant_class, target_date, hour_from):
+                continue
+            await push_green_demand_alert(icao, airport, relevant_class, hour_from, hour_to, target_date, loads)
+            mark_green_demand_alert_sent(icao, relevant_class, target_date, hour_from)
+
+async def green_demand_alert_checker():
+    """Фоновая задача: раз в GREEN_DEMAND_CHECK_INTERVAL_MINUTES минут проверяет
+    прогноз на зелёный уровень спроса (71-100%, 3 часа подряд) и шлёт пуш
+    заранее, отдельно от фиолетового high_demand_alert_checker."""
+    while True:
+        try:
+            await check_green_demand_alerts()
+        except Exception as e:
+            logger.error(f"❌ Ошибка фоновой проверки зелёного спроса: {e}")
+        await asyncio.sleep(GREEN_DEMAND_CHECK_INTERVAL_MINUTES * 60)
+
 # ==================== ПУШ "ЧАСЫ ПИКА" ====================
 # По просьбе пользователя - пуш за PEAK_HOUR_PUSH_LEAD_MINUTES (30) минут ДО
 # начала часа пика (см. WEEKDAY_HOUR_LOAD/find_upcoming_peak_start выше).
@@ -5061,6 +5208,7 @@ async def main():
     # или появится способ ходить туда не с датацентрового IP.
     # asyncio.create_task(mos_road_data_updater())
     asyncio.create_task(high_demand_alert_checker())
+    asyncio.create_task(green_demand_alert_checker())
     asyncio.create_task(rain_checker())
     asyncio.create_task(holiday_checker())
     asyncio.create_task(airport_queue_checker())
