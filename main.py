@@ -18,6 +18,7 @@ import fetch_yandex_data  # логика похода в Yandex Rasp API, зап
 import fetch_trains_data  # поезда дальнего следования (Казанский, Ленинградский) - тот же ключ и квота
 import fetch_favt_notices  # логика сбора уведомлений Росавиации (@favt_info), тоже фоново
 import fetch_road_events   # ДТП по городам (Москва: @dtp777+@DtOperativno слиты в одну ленту, СПб: @dtp_spb78) - тем же способом, фоново
+import fetch_concert_events  # афиша концертов из Telegram-каналов (Москва: @concerts_moscow, СПб: @spb_conc) - второй источник для "🎭 События города", тем же способом, фоново
 import fetch_mos_road_data  # официальный API data.mos.ru (доп. источник для Москвы) - см. MOS_DATA_API_KEY ниже
 import fetch_timepad_data  # афиша города (TimePad) для кнопки "🎭 События города" - используется
                             # только для TIMEPAD_CITY_MAP; timepad_data.json обновляется ЛОКАЛЬНО
@@ -137,6 +138,14 @@ FAVT_UPDATE_INTERVAL_MINUTES = 15
 # требует ключа, поэтому обновляем каждые 10 минут.
 ROAD_EVENTS_DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'road_events_data.json')
 ROAD_EVENTS_UPDATE_INTERVAL_MINUTES = 10
+
+# Афиша концертов из Telegram-каналов (Москва: @concerts_moscow, СПб:
+# @spb_conc) - второй источник для "🎭 События города" вместе с TimePad, тот
+# же способ сбора, что и ROAD_EVENTS_* выше (см. fetch_concert_events.py).
+# Афиша меняется медленнее, чем сводки ДТП - обновляем реже (раз в 3 часа,
+# как FAVT/TimePad-подобные источники, а не каждые 10 минут).
+CONCERT_EVENTS_DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'concert_events_data.json')
+CONCERT_EVENTS_UPDATE_INTERVAL_MINUTES = 180
 
 # Официальный API data.mos.ru (apidata.mos.ru) - дополнительный источник для
 # Москвы, доп. к @dtp777/@DtOperativno выше (см. fetch_mos_road_data.py).
@@ -774,6 +783,36 @@ def get_road_events_for_city(city):
     """Последние сообщения о ДТП для города бота ('moscow'/'spb') - пусто,
     если для города канал не настроен или файл ещё не собран."""
     data = load_road_events()
+    if not data:
+        return []
+    return data.get('cities', {}).get(city, [])
+
+_concert_events_cache = None
+_concert_events_mtime = None
+
+def load_concert_events():
+    """Загружает concert_events_data.json (афиша концертов из
+    @concerts_moscow/@spb_conc, см. fetch_concert_events.py)."""
+    global _concert_events_cache, _concert_events_mtime
+    try:
+        mtime = os.path.getmtime(CONCERT_EVENTS_DATA_FILE)
+        if _concert_events_cache is not None and mtime == _concert_events_mtime:
+            return _concert_events_cache
+        with open(CONCERT_EVENTS_DATA_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        _concert_events_cache = data
+        _concert_events_mtime = mtime
+        return data
+    except FileNotFoundError:
+        return None
+    except Exception as e:
+        logger.error(f"❌ Ошибка чтения concert_events_data.json: {e}")
+        return None
+
+def get_concert_events_for_city(city):
+    """Последние посты афиши концертов для города бота ('moscow'/'spb') -
+    пусто, если для города канал не настроен или файл ещё не собран."""
+    data = load_concert_events()
     if not data:
         return []
     return data.get('cities', {}).get(city, [])
@@ -3565,12 +3604,21 @@ async def show_road_events(message: types.Message):
 
 @router.message(lambda message: message.text == "🎭 События города")
 async def show_city_events(message: types.Message):
-    """Афиша - источник ТОЛЬКО TimePad (см. fetch_timepad_data.py; KudaGo
-    убран по просьбе пользователя - кнопка "Поехали" по координатам
-    открывала именно приложение Яндекс.Навигатор вместо карт/браузера,
-    события были не нужны). Показываем топ-10 ближайших крупных событий
-    (см. get_events_for_user, limit=10). Для городов вне покрытия TimePad
-    явно говорим "нет данных", а не показываем пустой экран."""
+    """Афиша - ДВА источника: афиша концертов из Telegram-каналов
+    @concerts_moscow/@spb_conc (см. fetch_concert_events.py,
+    get_concert_events_for_city) - добавлена по просьбе пользователя
+    (21.09.2026), тем же способом, что "⛔ Дорожные события" (пересылаем сами
+    тексты постов - у канала нет структурированных дата/адреса как полей,
+    только текст); и TimePad (см. fetch_timepad_data.py) - показываем
+    топ-10 ближайших крупных событий (см. get_events_for_user, limit=10).
+    ВАЖНО: TimePad собирается ЛОКАЛЬНЫМ запуском скрипта (Cloudflare
+    блокирует запросы с датацентровых IP, см. докстринг
+    fetch_timepad_data.py) - если пользователь давно его не запускал,
+    timepad_data.json может быть пустым/устаревшим, поэтому Telegram-афиша
+    (собирается АВТОМАТИЧЕСКИ на Railway, всегда свежая) показывается
+    ПЕРВОЙ - она надёжнее прямо сейчас. "Нет данных" - только если ОБА
+    источника пусты; если хотя бы один что-то нашёл, показываем то, что
+    есть."""
     user_id = message.from_user.id
     if user_id not in user_state or 'city' not in user_state[user_id]:
         await message.answer("Сначала выбери город!")
@@ -3579,22 +3627,14 @@ async def show_city_events(message: types.Message):
     category = user_state[user_id].get('category', 'taxi')
 
     events, city_supported = get_events_for_user(city, category, limit=10)
+    concert_posts = get_concert_events_for_city(city)
 
-    if not city_supported:
+    if not events and not concert_posts:
         text = (
             "🎭 *События города*\n\n"
-            "Для этого города пока нет данных об афише - источник событий "
-            "(TimePad) пока покрывает только Москву. Будем искать источник "
-            "и для остальных городов."
-        )
-        await message.answer(text, reply_markup=services_keyboard(category, city), parse_mode='Markdown')
-        return
-
-    if not events:
-        text = (
-            "🎭 *События города*\n\n"
-            "На ближайшее время подходящих событий не нашлось. Загляни позже - "
-            "афиша обновляется каждые несколько часов."
+            "На ближайшее время подходящих событий не нашлось (или для этого "
+            "города пока нет источника афиши). Загляни позже - данные "
+            "обновляются каждые несколько часов."
         )
         await message.answer(text, reply_markup=services_keyboard(category, city), parse_mode='Markdown')
         return
@@ -3603,12 +3643,26 @@ async def show_city_events(message: types.Message):
     header = f"🎭 *События города* ({class_label.title() if class_label else 'все'})"
     # Заголовок - обычным сообщением с прикреплённой нижней клавиатурой услуг
     # (она остаётся видна и дальше, повторно прикреплять на каждое сообщение
-    # не нужно). Каждое событие - ОТДЕЛЬНЫМ сообщением со СВОЕЙ инлайн-кнопкой
+    # не нужно).
+    await message.answer(header, reply_markup=services_keyboard(category, city), parse_mode='Markdown')
+
+    if concert_posts:
+        concert_lines = ["🎤 *Афиша концертов*\n"]
+        for post in concert_posts[:ROAD_EVENTS_SHOW_COUNT]:
+            time_str = format_road_event_time(post.get('time', ''), city)
+            text = escape_md(strip_urls_for_display(post.get('text', '').strip()))
+            prefix = f"🕐 {time_str}\n" if time_str else ""
+            concert_lines.append(f"{prefix}{text}")
+        concert_message = '\n\n'.join(concert_lines)
+        if len(concert_message) > 4000:
+            concert_message = concert_message[:4000] + "…"
+        await message.answer(concert_message, parse_mode='Markdown', disable_web_page_preview=True)
+
+    # Каждое событие TimePad - ОТДЕЛЬНЫМ сообщением со СВОЕЙ инлайн-кнопкой
     # "Поехали", чтобы кнопка однозначно вела именно к этому месту, а не к
     # первому/последнему в общем списке. Небольшая пауза между отправками -
     # чтобы Telegram не сворачивал быстро идущие подряд сообщения от одного
     # бота визуально в одну группу у пользователя.
-    await message.answer(header, reply_markup=services_keyboard(category, city), parse_mode='Markdown')
     for event in events:
         text, keyboard = build_event_message(event, city)
         await message.answer(text, reply_markup=keyboard, parse_mode='Markdown', disable_web_page_preview=True)
@@ -5325,6 +5379,21 @@ async def road_events_updater():
             logger.error(f"❌ Ошибка фонового обновления road_events_data.json: {e}")
         await asyncio.sleep(ROAD_EVENTS_UPDATE_INTERVAL_MINUTES * 60)
 
+async def concert_events_updater():
+    """Фоновая задача: раз в CONCERT_EVENTS_UPDATE_INTERVAL_MINUTES минут
+    читает публичные веб-версии каналов @concerts_moscow (Москва) и
+    @spb_conc (СПб) и обновляет concert_events_data.json (см.
+    fetch_concert_events.py - тот же способ сбора, что и у
+    road_events_updater выше)."""
+    while True:
+        try:
+            logger.info("🔄 Обновляю concert_events_data.json (афиша концертов)...")
+            await asyncio.to_thread(fetch_concert_events.main)
+            logger.info("✅ concert_events_data.json обновлён")
+        except Exception as e:
+            logger.error(f"❌ Ошибка фонового обновления concert_events_data.json: {e}")
+        await asyncio.sleep(CONCERT_EVENTS_UPDATE_INTERVAL_MINUTES * 60)
+
 async def mos_road_data_updater():
     """Фоновая задача: раз в MOS_ROAD_DATA_UPDATE_INTERVAL_MINUTES минут
     запрашивает официальный API data.mos.ru (см. fetch_mos_road_data.py).
@@ -5355,6 +5424,7 @@ async def main():
         logger.warning("⚠️ YANDEX_RASP_API_KEY не задан в переменных окружения Railway - flights_data.json и trains_data.json не будут обновляться автоматически")
     asyncio.create_task(favt_notices_updater())
     asyncio.create_task(road_events_updater())
+    asyncio.create_task(concert_events_updater())
     # mos_road_data_updater() ОТКЛЮЧЁН - apidata.mos.ru не резолвится даже с
     # серверов Railway (NameResolutionError на 'apidata.mos.ru' в логах),
     # не только из среды разработки. Похоже, домен просто недоступен из
