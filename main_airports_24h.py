@@ -17,6 +17,7 @@ import fetch_yandex_data  # логика похода в Yandex Rasp API, зап
 import fetch_trains_data  # поезда дальнего следования (Казанский, Ленинградский) - тот же ключ и квота
 import fetch_favt_notices  # логика сбора уведомлений Росавиации (@favt_info), тоже фоново
 import fetch_road_events   # ДТП по городам (Москва: @dtp777+@DtOperativno слиты в одну ленту, СПб: @dtp_spb78) - тем же способом, фоново
+import fetch_mos_road_data  # официальный API data.mos.ru (доп. источник для Москвы) - см. MOS_DATA_API_KEY ниже
 import fetch_timepad_data  # афиша города (TimePad) для кнопки "🎭 События города" - используется
                             # только для TIMEPAD_CITY_MAP; timepad_data.json обновляется ЛОКАЛЬНО
                             # (см. fetch_timepad_data.py), Railway не может дотянуться до TimePad
@@ -129,6 +130,15 @@ FAVT_UPDATE_INTERVAL_MINUTES = 15
 # требует ключа, поэтому обновляем каждые 10 минут.
 ROAD_EVENTS_DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'road_events_data.json')
 ROAD_EVENTS_UPDATE_INTERVAL_MINUTES = 10
+
+# Официальный API data.mos.ru (apidata.mos.ru) - дополнительный источник для
+# Москвы, доп. к @dtp777/@DtOperativno выше (см. fetch_mos_road_data.py).
+# Ключ пользователь зарегистрировал и прислал сам (не хранится в коде) -
+# передаётся через переменную окружения MOS_DATA_API_KEY на Railway. Если
+# переменная не задана, источник просто молча не участвует (как и
+# YANDEX_RASP_API_KEY выше по файлу).
+MOS_ROAD_DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'mos_road_data.json')
+MOS_ROAD_DATA_UPDATE_INTERVAL_MINUTES = 10
 
 # Афиша города (TimePad, см. fetch_timepad_data.py) - события меняются
 # медленно (не по минутам, как рейсы/статусы). Обновляется ЛОКАЛЬНО (см.
@@ -727,6 +737,30 @@ def get_road_events_for_city(city):
     if not data:
         return []
     return data.get('cities', {}).get(city, [])
+
+_mos_road_data_cache = None
+_mos_road_data_mtime = None
+
+def load_mos_road_data():
+    """Загружает mos_road_data.json (см. fetch_mos_road_data.py) - сырой
+    ответ официального API data.mos.ru. Формат полей датасета ещё не
+    финализирован (см. докстринг fetch_mos_road_data.py) - используется
+    только чтобы не падать, если файла ещё нет или API вернул ошибку."""
+    global _mos_road_data_cache, _mos_road_data_mtime
+    try:
+        mtime = os.path.getmtime(MOS_ROAD_DATA_FILE)
+        if _mos_road_data_cache is not None and mtime == _mos_road_data_mtime:
+            return _mos_road_data_cache
+        with open(MOS_ROAD_DATA_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        _mos_road_data_cache = data
+        _mos_road_data_mtime = mtime
+        return data
+    except FileNotFoundError:
+        return None
+    except Exception as e:
+        logger.error(f"❌ Ошибка чтения mos_road_data.json: {e}")
+        return None
 
 _timepad_data_cache = None
 _timepad_data_mtime = None
@@ -4083,6 +4117,23 @@ async def road_events_updater():
             logger.error(f"❌ Ошибка фонового обновления road_events_data.json: {e}")
         await asyncio.sleep(ROAD_EVENTS_UPDATE_INTERVAL_MINUTES * 60)
 
+async def mos_road_data_updater():
+    """Фоновая задача: раз в MOS_ROAD_DATA_UPDATE_INTERVAL_MINUTES минут
+    запрашивает официальный API data.mos.ru (см. fetch_mos_road_data.py).
+    Молча ничего не делает, если MOS_DATA_API_KEY не задан в переменных
+    окружения Railway (ключ пользователь регистрирует и присылает сам)."""
+    if not os.getenv('MOS_DATA_API_KEY'):
+        logger.warning("⚠️ MOS_DATA_API_KEY не задан в переменных окружения Railway - mos_road_data.json не будет обновляться автоматически")
+        return
+    while True:
+        try:
+            logger.info("🔄 Обновляю mos_road_data.json из API data.mos.ru...")
+            await asyncio.to_thread(fetch_mos_road_data.main)
+            logger.info("✅ mos_road_data.json обновлён")
+        except Exception as e:
+            logger.error(f"❌ Ошибка фонового обновления mos_road_data.json: {e}")
+        await asyncio.sleep(MOS_ROAD_DATA_UPDATE_INTERVAL_MINUTES * 60)
+
 async def main():
     global bot
     if not await initialize_bot():
@@ -4096,6 +4147,7 @@ async def main():
         logger.warning("⚠️ YANDEX_RASP_API_KEY не задан в переменных окружения Railway - flights_data.json и trains_data.json не будут обновляться автоматически")
     asyncio.create_task(favt_notices_updater())
     asyncio.create_task(road_events_updater())
+    asyncio.create_task(mos_road_data_updater())
     asyncio.create_task(high_demand_alert_checker())
     asyncio.create_task(rain_checker())
     asyncio.create_task(holiday_checker())
