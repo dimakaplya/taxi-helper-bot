@@ -2592,15 +2592,29 @@ async def send_courier_finance_result(message: types.Message, data):
     category = user_state.get(message.from_user.id, {}).get('category')
     await message.answer('\n'.join(lines), reply_markup=courier_module_keyboard(category), parse_mode='Markdown')
 
-@router.message(lambda message: any(city in message.text for city in ["Москва", "СПб", "Новосибирск", "Екатеринбург", "Казань", "Челябинск", "Омск", "Самара", "Ростов", "Нижний Новгород", "Краснодар", "Сочи"]))
+CITY_MAP = {
+    "🏛️ Москва": "moscow", "🕯️ СПб": "spb", "🌲 Новосибирск": "novosibirsk",
+    "🏔️ Екатеринбург": "ekb", "🎓 Казань": "kazan", "❄️ Челябинск": "chelyabinsk",
+    "🌾 Омск": "omsk", "🏭 Самара": "samara", "🌊 Ростов": "rostov",
+    "🏰 Нижний Новгород": "nnovgorod", "🌴 Краснодар": "krasnodar", "🏖️ Сочи": "sochi"
+}
+
+@router.message(lambda message: message.text in CITY_MAP)
 async def select_city(message: types.Message):
-    city_map = {
-        "🏛️ Москва": "moscow", "🕯️ СПб": "spb", "🌲 Новосибирск": "novosibirsk",
-        "🏔️ Екатеринбург": "ekb", "🎓 Казань": "kazan", "❄️ Челябинск": "chelyabinsk",
-        "🌾 Омск": "omsk", "🏭 Самара": "samara", "🌊 Ростов": "rostov",
-        "🏰 Нижний Новгород": "nnovgorod", "🌴 Краснодар": "krasnodar", "🏖️ Сочи": "sochi"
-    }
-    user_state[message.from_user.id] = {'city': city_map.get(message.text, "moscow")}
+    """ВАЖНО: фильтр - точное совпадение с текстом кнопки из city_keyboard()
+    (message.text in CITY_MAP), а НЕ проверка "название города - подстрока
+    где-то в тексте сообщения" (было раньше - any(city in message.text ...)).
+    Раньше это означало, что город мог неожиданно смениться на любом экране,
+    если пользователь просто написал в чат что-то, содержащее название
+    города как часть текста - по просьбе пользователя город теперь меняется
+    ТОЛЬКО явным нажатием кнопки на экране выбора города (после /start или
+    "🏙 Выбор города", см. send_start_screen) - больше нигде и никогда сам не
+    "слетает". Фолбэк на "moscow" по умолчанию тоже убран - раз попадание
+    сюда теперь возможно только по точному совпадению кнопки из CITY_MAP,
+    city_map.get(...) всегда находит город, запасной вариант был не нужен и
+    маскировал бы реальную ошибку, если бы вдруг не нашёл."""
+    city = CITY_MAP[message.text]
+    user_state[message.from_user.id] = {'city': city}
     text = f"Вы выбрали {message.text}\n\nВыбери категорию 👇"
     await message.answer(text, reply_markup=category_keyboard())
 
