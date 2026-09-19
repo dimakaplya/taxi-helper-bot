@@ -240,6 +240,37 @@ def notifications_enabled(state, notif_key):
     prefs = state.get('notif_prefs') or {}
     return prefs.get(notif_key, True)
 
+# ==================== ОЧЕРЕДЬ У АЭРОПОРТА (гео) ====================
+# Идея пользователя: водитель/курьер включает в Telegram трансляцию живой
+# геопозиции, бот сам считает расстояние до ближайшего аэропорта
+# (nearest_airport(), см. haversine_km) и присылает 4 пуша за поездку:
+# вход в AIRPORT_QUEUE_RADIUS_OUTER_KM, вход в AIRPORT_QUEUE_RADIUS_INNER_KM,
+# и дальше "уже N минут рядом" на каждой отметке из AIRPORT_QUEUE_TIME_PUSHES_MIN
+# - помогает не терять счёт времени в очереди на посадку у аэропорта.
+# Включается/выключается кнопкой "📍 Очередь у аэропорта" в Инструментах
+# водителя (обычный toggle) - НЕ добавлена в NOTIFICATION_TYPES/notif_prefs,
+# потому что сам факт включения трансляции уже и есть согласие на эти пуши;
+# отдельная on/off настройка была бы избыточной.
+# Состояние - НЕ отдельная таблица в БД, а user_state[uid]['airport_queue']
+# (dict) и user_state[uid]['airport_queue_active'] (bool) - у user_state уже
+# есть персистентность (см. PersistentUserDict выше), дублировать её в SQL
+# нет смысла. См. process_airport_queue_ping/check_airport_queue_timers ниже
+# (рядом с push_airport_status_change).
+AIRPORT_QUEUE_RADIUS_OUTER_KM = 3.0
+AIRPORT_QUEUE_RADIUS_INNER_KM = 1.5
+AIRPORT_QUEUE_TIME_PUSHES_MIN = (30, 60)  # "уже 30 минут рядом" / "уже 1 час рядом"
+# Как часто (минуты) фоновый чекер досылает пуши по времени - основные 2
+# пуша (3км/1.5км) шлются сразу по факту нового пинга геопозиции, а эти два
+# идут по прошедшему времени, поэтому нужен отдельный фоновый прогон (см.
+# airport_queue_checker) - иначе они бы не пришли, если юзер просто стоит на
+# месте и новых пингов долго нет.
+AIRPORT_QUEUE_CHECK_INTERVAL_MINUTES = 5
+# Если новых обновлений геопозиции нет дольше заявленного времени трансляции
+# (live_period, из самого сообщения Telegram) + этот запас - считаем, что
+# трансляция закончилась или юзер давно уехал, и молча гасим отслеживание
+# (чтобы не пушить бесконечно тому, кто уже улетел).
+AIRPORT_QUEUE_STALE_BUFFER_SECONDS = 600
+
 # ==================== ПРАЗДНИКИ ====================
 # Идея пользователя: праздники (особенно Новый год, 8 марта, 9 мая, День
 # города) заметно поднимают спрос на такси/курьеров - люди едут в гости,
@@ -416,6 +447,28 @@ for _city_key, _airports_list in AIRPORTS_INFO.items():
     for _airport in _airports_list:
         ICAO_TO_CITY[_airport['icao']] = _city_key
         ICAO_TO_AIRPORT[_airport['icao']] = _airport
+
+# Координаты (широта, долгота) каждого аэропорта - открытые авиационные
+# данные, нужны для фичи "Очередь у аэропорта" (см. блок AIRPORT_QUEUE_*
+# ниже): по живой геопозиции водителя считаем расстояние до ближайшего
+# аэропорта (haversine_km, см. nearest_airport() рядом с haversine_km).
+AIRPORT_COORDS = {
+    'UUWW': (55.9736, 37.4125),   # Шереметьево
+    'UUDD': (55.4088, 37.9063),   # Домодедово
+    'UUWL': (55.5983, 37.2615),   # Внуково
+    'UULP': (59.8003, 30.2625),   # Пулково
+    'UNNT': (55.0126, 82.6507),   # Толмачёво
+    'USSS': (56.7431, 60.8027),   # Кольцово
+    'UWKD': (55.6062, 49.2787),   # Казань
+    'UUCC': (55.3058, 61.5033),   # Баландино
+    'UNOO': (54.9669, 73.3105),   # Омск Центральный
+    'UWWW': (53.5047, 50.1644),   # Курумоч
+    'URRP': (47.4939, 39.9247),   # Платов (закрыт для гражданских полётов,
+                                   # но координаты держим - вдруг откроют)
+    'UWGG': (56.2301, 43.7844),   # Стригино
+    'URKK': (45.0347, 39.1708),   # Пашковский
+    'URSS': (43.4499, 39.9566),   # Сочи/Адлер
+}
 
 CATEGORIES = {
     'taxi': {'name': 'ТАКСИ', 'tariffs': ['Эконом', 'Комфорт', 'Комфорт+', 'Минивэн']},
@@ -1473,7 +1526,7 @@ def courier_module_keyboard():
         [KeyboardButton(text="🔧 Шиномонтаж"), KeyboardButton(text="🚿 Мойки")],
         [KeyboardButton(text="🍷 Алкомаркеты 24ч"), KeyboardButton(text="🛒 Магазины 24ч")],
         [KeyboardButton(text="🔌 Электрозарядки"), KeyboardButton(text="🛠 ТО транспорта")],
-        [KeyboardButton(text="🔔 Уведомления")],
+        [KeyboardButton(text="📍 Очередь у аэропорта"), KeyboardButton(text="🔔 Уведомления")],
         [KeyboardButton(text="← Назад"), KeyboardButton(text="🏙 Выбор города")],
     ]
     return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=buttons)
@@ -1575,6 +1628,18 @@ def haversine_km(lat1, lon1, lat2, lon2):
     dlambda = radians(lon2 - lon1)
     a = sin(dphi / 2) ** 2 + cos(phi1) * cos(phi2) * sin(dlambda / 2) ** 2
     return 2 * r * asin(sqrt(a))
+
+def nearest_airport(lat, lon):
+    """Ближайший аэропорт (из AIRPORT_COORDS) к точке (lat, lon) - основа
+    фичи "Очередь у аэропорта" (см. блок AIRPORT_QUEUE_* и
+    process_airport_queue_ping ниже, рядом с push_airport_status_change).
+    Возвращает (icao, dist_km) или (None, None), если AIRPORT_COORDS пуст."""
+    best_icao, best_dist = None, None
+    for icao, (a_lat, a_lon) in AIRPORT_COORDS.items():
+        dist = haversine_km(lat, lon, a_lat, a_lon)
+        if best_dist is None or dist < best_dist:
+            best_icao, best_dist = icao, dist
+    return best_icao, best_dist
 
 def nearest_nearby_points(kind, city, lat, lon, count=NEARBY_RESULTS_COUNT):
     """Возвращает (расстояние_км, точка) для ближайших count точек в городе,
@@ -2070,6 +2135,138 @@ async def toggle_notification_setting(callback_query: types.CallbackQuery):
     prefs[notif_key] = not notifications_enabled(state, notif_key)
     state['notif_prefs'] = prefs
     await callback_query.message.edit_reply_markup(reply_markup=notification_settings_keyboard(state))
+
+@router.message(lambda message: message.text == "📍 Очередь у аэропорта" and user_state.get(message.from_user.id, {}).get('in_courier_module'))
+async def toggle_airport_queue_tracking(message: types.Message):
+    """Кнопка-переключатель (toggle, без отдельного экрана): первое нажатие
+    включает отслеживание живой геопозиции и объясняет, как её включить в
+    самом Telegram (бот не может запросить живую геопозицию сам - только
+    обычный request_location=True, разовую точку, см. handle_nearby_location
+    выше - для живой трансляции юзер обязательно жмёт 📎 сам). Повторное
+    нажатие выключает и сбрасывает накопленное состояние (см.
+    process_airport_queue_ping/check_airport_queue_timers рядом с
+    push_airport_status_change)."""
+    user_id = message.from_user.id
+    state = user_state[user_id]
+    if state.get('airport_queue_active'):
+        state['airport_queue_active'] = False
+        state['airport_queue'] = {}
+        await message.answer("⏹ Отслеживание очереди у аэропорта остановлено.", reply_markup=courier_module_keyboard())
+        return
+    state['airport_queue_active'] = True
+    state['airport_queue'] = {}
+    text = (
+        "📍 *Очередь у аэропорта*\n\n"
+        "Как включить: скрепка 📎 → Геопозиция → *«Транслировать геопозицию»* → "
+        "выбери *«1 час»*, а лучше сразу *«8 часов»* - если выбрать «15 минут», "
+        "трансляция может закончиться раньше, чем придут все уведомления.\n\n"
+        "Дальше всё автоматически: как только окажешься в 3 км от аэропорта - пришлю пуш, "
+        "затем на 1.5 км, и потом ещё два - через 30 минут и через 1 час, если всё ещё рядом. "
+        "Помогает не терять счёт времени в очереди на посадку.\n\n"
+        "Чтобы остановить - нажми эту же кнопку ещё раз."
+    )
+    await message.answer(text, reply_markup=courier_module_keyboard(), parse_mode='Markdown')
+
+def airport_queue_bonus_line(user_id, icao):
+    """Необязательная строка-бонус в пуше - последняя САМООТЧЁТНАЯ отметка
+    длины очереди от других водителей (см. queue_latest_report/"🚗 Занять
+    очередь" - уже существующая, отдельная от геолокации фича). Если свежей
+    отметки нет или класс не совпал - просто не добавляем строку, ничего не
+    ломается."""
+    city = ICAO_TO_CITY.get(icao)
+    if not city:
+        return ""
+    range_str, ts = queue_latest_report(city, icao, queue_class_key(user_id))
+    if not range_str:
+        return ""
+    local_time = format_airport_local_time(ts, icao)
+    return f"\n\n🚗 Последняя отметка водителей: *{range_str}* машин в {local_time}"
+
+def format_airport_queue_push(kind, airport, dist_km):
+    name = f"{airport['emoji']} {airport['name']}"
+    if kind == 'enter_outer':
+        return f"📍 Вы примерно в {dist_km:.1f} км от {name}.\n\nОтслеживаю время рядом - напомню на 1.5 км, а дальше через 30 минут и через час, если всё ещё будете рядом."
+    if kind == 'enter_inner':
+        return f"📍 Вы уже в {dist_km:.1f} км от {name} - почти на месте."
+    if kind == 30:
+        return f"⏱ Вы уже 30 минут рядом с {name}."
+    if kind == 60:
+        return (
+            f"⏱ Вы уже 1 час рядом с {name}.\n\n"
+            f"Если уже уехали - нажми «📍 Очередь у аэропорта» в Инструментах водителя ещё раз, "
+            f"чтобы остановить отслеживание и не получать лишних пушей."
+        )
+    return ""
+
+async def send_airport_queue_push(user_id, icao, kind, dist_km=None):
+    if not bot:
+        return
+    airport = ICAO_TO_AIRPORT.get(icao)
+    if not airport:
+        return
+    text = format_airport_queue_push(kind, airport, dist_km if dist_km is not None else 0)
+    text += airport_queue_bonus_line(user_id, icao)
+    try:
+        await bot.send_message(user_id, text, parse_mode='Markdown')
+    except Exception as e:
+        logger.warning(f"⚠️ Не удалось отправить пуш об очереди у аэропорта пользователю {user_id}: {e}")
+
+async def process_airport_queue_ping(user_id, lat, lon, live_period=None):
+    """Обрабатывает один пинг геопозиции (и разовый message.location, и
+    последующие edited_message.location трансляции - см. хендлеры ниже) -
+    считает расстояние до ближайшего аэропорта, шлёт пуш на вход в 3 км/1.5
+    км, обновляет user_state[uid]['airport_queue'] для фонового чекера
+    (30 мин/1 час - см. check_airport_queue_timers)."""
+    state = user_state.get(user_id)
+    if not state or not state.get('airport_queue_active'):
+        return
+    icao, dist_km = nearest_airport(lat, lon)
+    if icao is None:
+        return
+    now = datetime.now(ZoneInfo('UTC'))
+    aq = dict(state.get('airport_queue') or {})
+    if aq.get('icao') != icao:
+        # Другой (или первый) аэропорт - начинаем отслеживание с чистого листа.
+        aq = {'icao': icao}
+    aq['last_update_at'] = now.isoformat()
+    if live_period:
+        aq['live_period'] = live_period
+
+    if dist_km <= AIRPORT_QUEUE_RADIUS_OUTER_KM:
+        if not aq.get('entered_outer_at'):
+            aq['entered_outer_at'] = now.isoformat()
+            aq['pushed_30'] = False
+            aq['pushed_60'] = False
+            await send_airport_queue_push(user_id, icao, 'enter_outer', dist_km)
+        if dist_km <= AIRPORT_QUEUE_RADIUS_INNER_KM and not aq.get('entered_inner_at'):
+            aq['entered_inner_at'] = now.isoformat()
+            await send_airport_queue_push(user_id, icao, 'enter_inner', dist_km)
+    else:
+        # Вышел за пределы внешнего радиуса - сбрасываем: при возвращении
+        # отсчёт (и пуши на вход/по времени) начнётся заново.
+        if aq.get('entered_outer_at'):
+            aq = {'icao': icao, 'last_update_at': now.isoformat()}
+            if live_period:
+                aq['live_period'] = live_period
+
+    state['airport_queue'] = aq
+
+@router.message(lambda message: getattr(message, 'location', None) is not None and user_state.get(message.from_user.id, {}).get('airport_queue_active'))
+async def handle_airport_queue_location(message: types.Message):
+    await process_airport_queue_ping(
+        message.from_user.id, message.location.latitude, message.location.longitude,
+        live_period=getattr(message.location, 'live_period', None),
+    )
+
+@router.edited_message(lambda message: getattr(message, 'location', None) is not None and user_state.get(message.from_user.id, {}).get('airport_queue_active'))
+async def handle_airport_queue_location_update(message: types.Message):
+    """Дальнейшие обновления живой геопозиции приходят в Telegram НЕ новыми
+    сообщениями, а правками (edit) первого - отдельный апдейт edited_message,
+    поэтому отдельный хендлер (обычный @router.message его не ловит)."""
+    await process_airport_queue_ping(
+        message.from_user.id, message.location.latitude, message.location.longitude,
+        live_period=getattr(message.location, 'live_period', None),
+    )
 
 @router.message(lambda message: message.text in NEARBY_BUTTON_TO_KIND and user_state.get(message.from_user.id, {}).get('in_courier_module'))
 async def show_nearby_prompt(message: types.Message):
@@ -3453,6 +3650,69 @@ async def holiday_checker():
             logger.error(f"❌ Ошибка фоновой проверки праздников: {e}")
         await asyncio.sleep(HOLIDAY_CHECK_INTERVAL_MINUTES * 60)
 
+async def check_airport_queue_timers():
+    """Раз в AIRPORT_QUEUE_CHECK_INTERVAL_MINUTES проходит по всем активным
+    отслеживаниям (user_state[...]['airport_queue_active']) и досылает пуши
+    "уже 30 минут/1 час рядом" по прошедшему времени - независимо от того,
+    приходят ли новые пинги геопозиции прямо сейчас (см. docstring у
+    AIRPORT_QUEUE_CHECK_INTERVAL_MINUTES). Молча гасит отслеживание, если
+    трансляция геопозиции, судя по всему, уже закончилась (нет новых пингов
+    дольше live_period + AIRPORT_QUEUE_STALE_BUFFER_SECONDS) - иначе водитель,
+    который давно уехал, продолжал бы получать пуши бесконечно."""
+    now = datetime.now(ZoneInfo('UTC'))
+    for user_id, state in list(user_state.items()):
+        if not isinstance(state, dict) or not state.get('airport_queue_active'):
+            continue
+        aq = state.get('airport_queue') or {}
+        icao = aq.get('icao')
+        entered_at_str = aq.get('entered_outer_at')
+        if not icao or not entered_at_str:
+            continue
+
+        last_update_str = aq.get('last_update_at')
+        live_period = aq.get('live_period') or 3600
+        if last_update_str:
+            try:
+                last_update = datetime.fromisoformat(last_update_str)
+            except ValueError:
+                last_update = now
+            if (now - last_update).total_seconds() > live_period + AIRPORT_QUEUE_STALE_BUFFER_SECONDS:
+                state['airport_queue_active'] = False
+                state['airport_queue'] = {}
+                continue
+
+        try:
+            entered_at = datetime.fromisoformat(entered_at_str)
+        except ValueError:
+            continue
+        elapsed_minutes = (now - entered_at).total_seconds() / 60
+
+        aq_updated = dict(aq)
+        changed = False
+        pushed_30, pushed_60 = AIRPORT_QUEUE_TIME_PUSHES_MIN
+        if elapsed_minutes >= pushed_30 and not aq.get('pushed_30'):
+            await send_airport_queue_push(user_id, icao, 30)
+            aq_updated['pushed_30'] = True
+            changed = True
+        if elapsed_minutes >= pushed_60 and not aq.get('pushed_60'):
+            await send_airport_queue_push(user_id, icao, 60)
+            aq_updated['pushed_60'] = True
+            changed = True
+        if changed:
+            state['airport_queue'] = aq_updated
+
+async def airport_queue_checker():
+    """Фоновая задача: раз в AIRPORT_QUEUE_CHECK_INTERVAL_MINUTES минут
+    проверяет таймеры "давно рядом с аэропортом" (см. check_airport_queue_timers)
+    - пуши на вход в 3 км/1.5 км шлются сразу по факту пинга геопозиции (см.
+    process_airport_queue_ping), эта задача только за пуши по времени."""
+    while True:
+        try:
+            await check_airport_queue_timers()
+        except Exception as e:
+            logger.error(f"❌ Ошибка фоновой проверки очереди у аэропорта: {e}")
+        await asyncio.sleep(AIRPORT_QUEUE_CHECK_INTERVAL_MINUTES * 60)
+
 async def push_airport_status_change(icao, airport, old_status, new_status, notice):
     """Рассылает пуш всем водителям, у кого выбран город этого аэропорта, о
     смене статуса (например ОТКРЫТ -> ЗАКРЫТ). Бот может писать первым только
@@ -3678,6 +3938,7 @@ async def main():
     asyncio.create_task(high_demand_alert_checker())
     asyncio.create_task(rain_checker())
     asyncio.create_task(holiday_checker())
+    asyncio.create_task(airport_queue_checker())
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
