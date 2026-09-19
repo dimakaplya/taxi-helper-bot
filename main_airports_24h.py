@@ -11,6 +11,9 @@ from math import radians, sin, cos, asin, sqrt
 from aiogram import Bot, Dispatcher, Router, types
 from aiogram.filters import Command
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.client.session.middlewares.base import BaseRequestMiddleware
+from aiogram.methods import SendMessage, TelegramMethod
+from aiogram.methods.base import TelegramType
 import os
 import aiohttp  # прямой запрос к Open-Meteo (публичный API без ключа) - см. блок "ДОЖДЬ" ниже
 
@@ -1726,11 +1729,43 @@ bot = None
 dp = Dispatcher()
 router = Router()
 
+# По просьбе пользователя (19.09.2026): "режим одного сообщения" - бот
+# держит в чате только своё САМОЕ ПОСЛЕДНЕЕ сообщение, стирая предыдущее
+# перед отправкой нового (вместо накопления истории кнопок/карточек).
+# Реализовано ОДНИМ местом на уровне HTTP-запросов к Telegram API (aiogram
+# request middleware), а не правкой каждого из ~285 мест с .answer() в
+# коде бота - middleware перехватывает КАЖДЫЙ исходящий sendMessage,
+# удаляет ранее сохранённый для этого чата message_id (если есть) прямо
+# перед отправкой, а после успешной отправки запоминает id нового
+# сообщения. Если удаление не удалось (сообщение уже стёрто пользователем,
+# прошло >48ч и Telegram сам не даёт удалить, и т.п.) - тихо игнорируем,
+# это не должно ломать отправку нового сообщения.
+_last_bot_message_id = {}  # chat_id -> message_id последнего отправленного ботом сообщения
+
+class SingleMessageMiddleware(BaseRequestMiddleware):
+    async def __call__(self, make_request, bot_instance: Bot, method: TelegramMethod[TelegramType]):
+        if isinstance(method, SendMessage):
+            chat_id = method.chat_id
+            prev_id = _last_bot_message_id.get(chat_id)
+            if prev_id is not None:
+                try:
+                    await bot_instance.delete_message(chat_id=chat_id, message_id=prev_id)
+                except Exception:
+                    pass  # сообщение уже удалено/недоступно для удаления - не критично
+            result = await make_request(bot_instance, method)
+            try:
+                _last_bot_message_id[chat_id] = result.message_id
+            except Exception:
+                pass
+            return result
+        return await make_request(bot_instance, method)
+
 async def initialize_bot():
     global bot
     try:
         logger.info("📡 Инициализирую бота...")
         bot = Bot(token=BOT_TOKEN)
+        bot.session.middleware(SingleMessageMiddleware())
         me = await bot.get_me()
         logger.info(f"✅ Бот: @{me.username}")
         # На боте где-то раньше (вручную или другим запуском) был включён
@@ -3791,9 +3826,17 @@ def build_concert_event_message(post, city):
     buttons = []
     if place:
         from urllib.parse import quote
-        buttons.append(InlineKeyboardButton(text="🚗 Поехали", url=f"https://yandex.ru/maps/?text={quote(place)}"))
-    if post.get('link'):
-        buttons.append(InlineKeyboardButton(text="🔗 Подробнее", url=post['link']))
+        # По просьбе пользователя (19.09.2026): кнопка "Подробнее" убрана,
+        # "Поехали" переключена на схему Яндекс.Навигатора (yandexnavi://).
+        # ВАЖНО: у этой схемы нет веб-фолбэка (см. комментарий у
+        # build_event_message выше про ту же развилку для TimePad) - если у
+        # водителя не установлено именно приложение Яндекс.Навигатор, кнопка
+        # ничего не откроет. Пользователь осознанно выбрал этот вариант
+        # (19.09.2026) вместо более надёжной https-ссылки на Яндекс.Карты.
+        buttons.append(InlineKeyboardButton(
+            text="🚗 Поехали",
+            url=f"yandexnavi://build_route_on_map?text_to={quote(place)}",
+        ))
     keyboard = InlineKeyboardMarkup(inline_keyboard=[buttons]) if buttons else None
     return text, keyboard
 
