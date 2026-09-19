@@ -1569,6 +1569,141 @@ VPN_BOT_URL = "https://t.me/Vpntaxihelper_bot?start=633742909"
 # VPN_BOT_URL выше - пользователь сам переходит в его чат.
 KEF_BOT_URL = "https://t.me/Yan_rus_bot"
 
+# ==================== ЧАСЫ ПИКА ПО ДНЯМ НЕДЕЛИ ====================
+# Общероссийская модель спроса такси по дням недели/часам - ОДНА и та же
+# для всех 12 городов бота (структура рабочего дня - офисы к 9:00, конец
+# в 18:00 - общероссийский паттерн, не специфичный для города; открытых
+# данных с разбивкой по конкретным городам не нашлось). Час считается по
+# МЕСТНОМУ времени каждого города (см. get_city_now ниже), не по Москве -
+# так же, как AIRPORT_TIMEZONE/get_airport_now для рейсов.
+#
+# Источники (подтверждено пользователем по опыту водителей):
+# - https://taxi.yandex.ru/blog/kak-perekhitrit-chas-pik/ (блог Яндекс.Такси) -
+#   утренний пик 8:30-8:45, вечерний 18:00-18:50, пятница/суббота ночью
+#   22:00-03:00 с локальными всплесками в первые 10-20 минут после целого
+#   часа (0:10, 1:10, 2:20).
+# - https://vc.ru/transport/57190 (анализ заказов по России) - будни (пн-чт)
+#   дают ~13% заказов в день каждый, пятница/суббота ~16%, воскресенье ~14%;
+#   в будни пиковые часы 8, 9, 18 (по 6% от заказов дня), минимум 1-6 утра
+#   (не более 2%); в выходные пик смещается на 22:00 (6.2%), утреннего пика
+#   нет, рост начинается с 10:00, после 3 ночи спрос падает до 2%.
+#
+# WEEKDAY_HOUR_LOAD: для каждого дня недели (0=понедельник...6=воскресенье)
+# список (час_начала, час_конца, уровень, подпись) - уровень: 'low'/'mid'/
+# 'high'/'peak', используется и для эмодзи, и для цвета в тексте. Диапазоны
+# НЕ обязаны покрывать все 24 часа - часы вне списка показываются как
+# обычный/средний спрос без отдельной строки (не загромождаем вывод).
+PEAK_LEVEL_EMOJI = {'low': '🟢', 'mid': '🔵', 'high': '🟡', 'peak': '🔴'}
+PEAK_LEVEL_LABEL = {'low': 'низкий спрос', 'mid': 'обычный спрос', 'high': 'повышенный спрос', 'peak': 'час пик'}
+
+_WEEKDAY_PATTERN_WORKDAY = [  # понедельник-четверг - стабильный паттерн будня
+    (1, 6, 'low', 'ночной минимум'),
+    (8, 9, 'peak', 'утренний час пик'),
+    (9, 10, 'high', 'утро, спрос ещё повышен'),
+    (18, 19, 'peak', 'вечерний час пик'),
+    (19, 20, 'high', 'вечер, спрос ещё повышен'),
+]
+_WEEKDAY_PATTERN_FRIDAY = [  # пятница - паттерн буднего дня + ночной пик "перед выходными"
+    # Час 00:00-01:00 намеренно НЕ включён сюда - технически это начало самой
+    # пятницы (а не конец ночи с четверга), в будний паттерн он и так попадает
+    # под общий ночной минимум ниже. Пик "ночь пятницы" 22:00-24:00 относится
+    # к вечеру САМОЙ пятницы - его "продолжение" после полуночи (уже суббота)
+    # см. в начале _WEEKDAY_PATTERN_SATURDAY.
+    (1, 6, 'low', 'ночной минимум'),
+    (8, 9, 'peak', 'утренний час пик'),
+    (9, 10, 'high', 'утро, спрос ещё повышен'),
+    (18, 19, 'peak', 'вечерний час пик'),
+    (19, 20, 'high', 'вечер, спрос ещё повышен'),
+    (22, 24, 'peak', 'ночь пятницы - высокий спрос'),
+]
+_WEEKDAY_PATTERN_SATURDAY = [  # суббота - нет утреннего пика, вечер/ночь смещены
+    (0, 3, 'peak', 'ночь - высокий спрос (после пятницы)'),
+    (3, 10, 'low', 'раннее утро - минимум'),
+    (22, 24, 'peak', 'ночь субботы - высокий спрос'),
+]
+_WEEKDAY_PATTERN_SUNDAY = [  # воскресенье - самый спокойный день, без ночного разгула
+    (0, 3, 'high', 'ночь - спрос ещё повышен (после субботы)'),
+    (3, 10, 'low', 'раннее утро - минимум'),
+    (18, 22, 'mid', 'вечер - спрос чуть выше обычного'),
+]
+
+WEEKDAY_HOUR_LOAD = {
+    0: _WEEKDAY_PATTERN_WORKDAY,   # понедельник
+    1: _WEEKDAY_PATTERN_WORKDAY,   # вторник
+    2: _WEEKDAY_PATTERN_WORKDAY,   # среда
+    3: _WEEKDAY_PATTERN_WORKDAY,   # четверг
+    4: _WEEKDAY_PATTERN_FRIDAY,    # пятница
+    5: _WEEKDAY_PATTERN_SATURDAY,  # суббота
+    6: _WEEKDAY_PATTERN_SUNDAY,    # воскресенье
+}
+WEEKDAY_NAMES = ['Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота', 'Воскресенье']
+
+def get_city_now(city):
+    """Текущее время в часовом поясе города - переиспользует AIRPORT_TIMEZONE
+    через первый аэропорт города (все города бота однозонные по времени -
+    даже там, где несколько аэропортов/зон Шереметьево, часовой пояс один
+    и тот же на весь город), тем же паттерном, что get_airport_now."""
+    airports = AIRPORTS_INFO.get(city) or []
+    tz_name = AIRPORT_TIMEZONE.get(airports[0]['icao'], 'Europe/Moscow') if airports else 'Europe/Moscow'
+    try:
+        return datetime.now(ZoneInfo(tz_name))
+    except Exception:
+        return datetime.now()
+
+def format_peak_hours_text(city, target_weekday=None):
+    """Текст с часами пика для города. target_weekday=None - текущий день
+    (по местному времени города); 0-6 - конкретный день недели (для кнопок
+    "смотреть другой день"). Показывает ТОЛЬКО заданные в WEEKDAY_HOUR_LOAD
+    диапазоны - часы вне списка не перечисляются (обычный/средний спрос,
+    отдельная строка не нужна)."""
+    now = get_city_now(city)
+    weekday = target_weekday if target_weekday is not None else now.weekday()
+    city_name = CITY_DISPLAY_NAMES.get(city, city)
+    pattern = WEEKDAY_HOUR_LOAD[weekday]
+
+    lines = [f"📅 *Часы пика — {city_name}, {WEEKDAY_NAMES[weekday]}*\n"]
+    for start_h, end_h, level, label in pattern:
+        emoji = PEAK_LEVEL_EMOJI[level]
+        if start_h < end_h:
+            time_range = f"{start_h:02d}:00–{end_h:02d}:00"
+        else:  # диапазон через полночь (например, 22-24 + 0-1 показаны отдельными строками - не переносим через день)
+            time_range = f"{start_h:02d}:00–{end_h:02d}:00"
+        lines.append(f"{emoji} {time_range} — {label}")
+
+    if target_weekday is None:
+        cur_hour = now.hour
+        cur_level = None
+        for start_h, end_h, level, label in pattern:
+            if start_h <= cur_hour < end_h:
+                cur_level = level
+                break
+        if cur_level:
+            lines.append(f"\n_Сейчас ({now.strftime('%H:%M')}): {PEAK_LEVEL_EMOJI[cur_level]} {PEAK_LEVEL_LABEL[cur_level]}_")
+        else:
+            lines.append(f"\n_Сейчас ({now.strftime('%H:%M')}): {PEAK_LEVEL_EMOJI['mid']} {PEAK_LEVEL_LABEL['mid']}_")
+
+    lines.append(
+        "\n_Общая модель по данным Яндекс.Такси и статистике заказов по России - "
+        "ориентир, не точный прогноз для конкретной минуты. Погода (дождь/снег) "
+        "может резко повысить спрос вне этих часов._"
+    )
+    return '\n'.join(lines)
+
+def peak_hours_weekday_keyboard(current_weekday):
+    """Инлайн-кнопки переключения дня недели - 7 кнопок, текущий день
+    отмечен, остальные ведут на peak_day_{0-6}."""
+    buttons = []
+    row = []
+    for i, name in enumerate(WEEKDAY_NAMES):
+        label = f"• {name[:2]} •" if i == current_weekday else name[:2]
+        row.append(InlineKeyboardButton(text=label, callback_data=f"peak_day_{i}"))
+        if len(row) == 4:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
 def services_keyboard(category=None, city=None):
     # Итоговый набор кнопок меню услуг (по заданному порядку). "Заказы
     # города" (было "Повышенный спрос") убрана по просьбе пользователя - была
@@ -1652,10 +1787,11 @@ def courier_module_keyboard(category=None):
     логика, что у "✈️🚆 Транспорт" в services_keyboard."""
     buttons = [
         [KeyboardButton(text="💰 Финансы"), KeyboardButton(text="📈 Спрос сейчас")],
-        [KeyboardButton(text="🚻 Туалеты"), KeyboardButton(text="🅿️ Парковка")],
-        [KeyboardButton(text="🔧 Шиномонтаж"), KeyboardButton(text="🚿 Мойки")],
-        [KeyboardButton(text="🍷 Алкомаркеты 24ч"), KeyboardButton(text="🛒 Магазины 24ч")],
-        [KeyboardButton(text="🔌 Электрозарядки"), KeyboardButton(text="🛠 ТО транспорта")],
+        [KeyboardButton(text="📅 Часы пика"), KeyboardButton(text="🚻 Туалеты")],
+        [KeyboardButton(text="🅿️ Парковка"), KeyboardButton(text="🔧 Шиномонтаж")],
+        [KeyboardButton(text="🚿 Мойки"), KeyboardButton(text="🍷 Алкомаркеты 24ч")],
+        [KeyboardButton(text="🛒 Магазины 24ч"), KeyboardButton(text="🔌 Электрозарядки")],
+        [KeyboardButton(text="🛠 ТО транспорта")],
     ]
     if category not in CATEGORIES_WITHOUT_AIRPORTS:
         buttons.append([KeyboardButton(text="📍 Очередь у аэропорта"), KeyboardButton(text="🔔 Уведомления")])
@@ -2289,6 +2425,43 @@ async def show_kef_bot(message: types.Message):
         "Нажми кнопку ниже, чтобы открыть его."
     )
     await message.answer(text, reply_markup=keyboard, parse_mode='Markdown')
+
+@router.message(lambda message: message.text == "📅 Часы пика" and user_state.get(message.from_user.id, {}).get('in_courier_module'))
+async def show_peak_hours(message: types.Message):
+    """Часы пика по дням недели (см. блок "ЧАСЫ ПИКА ПО ДНЯМ НЕДЕЛИ" выше
+    по файлу) - показывает ТЕКУЩИЙ день недели по местному времени города
+    (get_city_now), с инлайн-кнопками переключения на любой другой день
+    (peak_hours_weekday_keyboard -> peak_day_{0-6})."""
+    user_id = message.from_user.id
+    state = user_state.get(user_id, {})
+    city = state.get('city')
+    if not city:
+        await message.answer("Сначала выбери город 🏙")
+        return
+    now = get_city_now(city)
+    text = format_peak_hours_text(city, target_weekday=None)
+    keyboard = peak_hours_weekday_keyboard(now.weekday())
+    await message.answer(text, reply_markup=keyboard, parse_mode='Markdown')
+
+@router.callback_query(lambda c: c.data.startswith('peak_day_'))
+async def switch_peak_hours_day(callback_query: types.CallbackQuery):
+    """Переключение дня недели на экране "Часы пика" - перерисовывает то же
+    сообщение (edit_text), без "Сейчас: ..." строки (она осмысленна только
+    для текущего реального дня, см. format_peak_hours_text)."""
+    user_id = callback_query.from_user.id
+    state = user_state.get(user_id, {})
+    city = state.get('city')
+    if not city:
+        await callback_query.answer("Начни заново с /start", show_alert=True)
+        return
+    weekday = int(callback_query.data.split('_')[-1])
+    if weekday < 0 or weekday > 6:
+        await callback_query.answer("Ошибка!", show_alert=True)
+        return
+    text = format_peak_hours_text(city, target_weekday=weekday)
+    keyboard = peak_hours_weekday_keyboard(weekday)
+    await callback_query.message.edit_text(text, reply_markup=keyboard, parse_mode='Markdown')
+    await callback_query.answer()
 
 @router.message(lambda message: message.text == "🔔 Уведомления" and user_state.get(message.from_user.id, {}).get('in_courier_module'))
 async def show_notification_settings(message: types.Message):
