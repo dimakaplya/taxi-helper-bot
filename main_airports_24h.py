@@ -790,6 +790,14 @@ def get_road_events_for_city(city):
         return []
     return data.get('cities', {}).get(city, [])
 
+def count_active_road_closures(city):
+    """Число сообщений о перекрытиях (is_closure=True, см. is_road_closure
+    в fetch_road_events.py) в свежей ленте города - используется в сводке
+    "Куда ехать" (по просьбе пользователя, 19.09.2026) как общий сигнал
+    "сейчас в городе есть активные перекрытия", без привязки к конкретному
+    месту (см. format_where_to_go_text)."""
+    return sum(1 for e in get_road_events_for_city(city) if e.get('is_closure'))
+
 _concert_events_cache = None
 _concert_events_mtime = None
 
@@ -3140,6 +3148,19 @@ def format_where_to_go_text(city, category, candidates):
     if closed:
         lines.append("━━━━━━━━━━━━━━━━━━")
         lines.append("⛔ Закрыто сейчас: " + ', '.join(c['label'] for c in closed))
+
+    # По просьбе пользователя (19.09.2026): "оценка перекрытий" - число
+    # активных перекрытий в городе (тот же источник, что "⛔ Дорожные
+    # события" - is_closure, см. fetch_road_events.py) добавлено сюда общим
+    # предупреждением, БЕЗ привязки к конкретному аэропорту/вокзалу/месту -
+    # по тексту поста нельзя надёжно понять, у какого именно места
+    # перекрытие, так что это просто общий сигнал "сейчас в городе неспокойно
+    # на дорогах", а не часть расчёта score конкретного варианта.
+    closures_count = count_active_road_closures(city)
+    if closures_count:
+        lines.append("━━━━━━━━━━━━━━━━━━")
+        word = "перекрытие" if closures_count == 1 else ("перекрытия" if 2 <= closures_count <= 4 else "перекрытий")
+        lines.append(f"🚧 Сейчас в городе {closures_count} активных {word} - см. «⛔ Дорожные события».")
 
     lines.append("━━━━━━━━━━━━━━━━━━")
     lines.append(
