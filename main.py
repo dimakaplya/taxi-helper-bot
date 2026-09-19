@@ -3828,8 +3828,27 @@ async def show_road_events(message: types.Message):
         )
         return
 
+    # По просьбе пользователя (19.09.2026): "оценка перекрытий города" -
+    # посты с is_closure=True (перекрытие/ограничение проезда, см.
+    # is_road_closure в fetch_road_events.py) выносятся отдельным блоком
+    # НАВЕРХ сообщения - водителю важнее всего видеть в первую очередь то,
+    # где вообще нельзя проехать, а не листать всю ленту ДТП. Остальные
+    # события (обычные ДТП/аварии без явного перекрытия) идут дальше, как
+    # раньше, единым списком.
+    closures = [e for e in events[:ROAD_EVENTS_SHOW_COUNT] if e.get('is_closure')]
+    others = [e for e in events[:ROAD_EVENTS_SHOW_COUNT] if not e.get('is_closure')]
+
     lines = [f"⛔ *Дорожные события — {city_name}* (за последние {ROAD_EVENTS_LOOKBACK_HOURS_LABEL})\n"]
-    for event in events[:ROAD_EVENTS_SHOW_COUNT]:
+    if closures:
+        lines.append(f"🚧 *Активные перекрытия ({len(closures)})*")
+        for event in closures:
+            time_str = format_road_event_time(event.get('time', ''), city)
+            text = escape_md(strip_urls_for_display(event.get('text', '').strip()))
+            prefix = f"🕐 {time_str}\n" if time_str else ""
+            lines.append(f"{prefix}{text}")
+        if others:
+            lines.append("— — —")
+    for event in others:
         time_str = format_road_event_time(event.get('time', ''), city)
         text = escape_md(strip_urls_for_display(event.get('text', '').strip()))
         prefix = f"🕐 {time_str}\n" if time_str else ""
