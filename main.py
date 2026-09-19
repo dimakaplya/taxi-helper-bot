@@ -1106,6 +1106,44 @@ AIRPORT_STATUS_DISPLAY = {
     'closed': ('🔴', 'ЗАКРЫТ (ограничения)'),
 }
 
+# Кадры анимации "загрузки" для show_loading_animation ниже - по просьбе
+# пользователя (22.09.2026, "поработать над визуалом... строки состояния
+# загрузки"), везде, где есть заметная задержка перед ответом (сетевой запрос
+# к внешнему API, подсчёт нескольких кандидатов и т.п.), вместо статичного
+# "⏳ Загружаю..." показываем бегущие точки - несколько edit_text подряд с
+# небольшой паузой, создающие ощущение живого процесса, а не зависшего бота.
+LOADING_ANIMATION_FRAMES = ["", ".", "..", "..."]
+LOADING_ANIMATION_FRAME_DELAY = 0.35
+
+async def show_loading_animation(message_sender, label):
+    """Отправляет ПЕРВЫЙ кадр анимации загрузки (label + "") и возвращает
+    отправленное сообщение - вызывающий код затем должен вызвать
+    animate_loading(msg, label) ПАРАЛЛЕЛЬНО с реальной работой (через
+    asyncio.create_task), либо просто использовать возвращённое сообщение и
+    вызвать .edit_text() на нём по готовности результата (анимация тогда не
+    доигрывает до конца, а сразу сменяется финальным текстом - это ожидаемо
+    и нормально, не ошибка). message_sender - bound-метод answer у
+    message/callback_query.message, чтобы функция была универсальной для
+    обоих контекстов вызова."""
+    return await message_sender(f"{label}{LOADING_ANIMATION_FRAMES[0]}")
+
+async def animate_loading(msg, label, cycles=2):
+    """Проигрывает бегущие точки на уже отправленном сообщении msg -
+    cycles повторов по 4 кадра. Вызывается как фоновая asyncio.create_task
+    ПАРАЛЛЕЛЬНО с реальной сетевой работой (а не await до неё - иначе
+    анимация просто отыграет и застынет, не давая никакого ощущения
+    "живого" процесса на время самого долгого ожидания). Молча проглатывает
+    ошибки редактирования (сообщение могло быть уже заменено финальным
+    текстом реальным ответом раньше, чем анимация успела доиграть - гонка
+    состояний здесь ожидаема и не является багом)."""
+    try:
+        for _ in range(cycles):
+            for frame in LOADING_ANIMATION_FRAMES[1:]:
+                await asyncio.sleep(LOADING_ANIMATION_FRAME_DELAY)
+                await msg.edit_text(f"{label}{frame}")
+    except Exception:
+        pass
+
 def escape_md(text):
     """Экранирует спецсимволы legacy Markdown (parse_mode='Markdown'), чтобы
     непредсказуемый внешний текст (уведомления Росавиации и т.п.) не ломал
@@ -2293,7 +2331,16 @@ async def send_start_screen(message: types.Message):
     services_keyboard, courier_module_keyboard)."""
     init_db()
     user_state.pop(message.from_user.id, None)
-    text = "🚕 *Taxi Helper*\n\nВыбери город 👇"
+    # Обновлённый визуал стартового экрана (по просьбе пользователя,
+    # 22.09.2026 - "поработать над визуалом бота на всех страницах", начиная с
+    # главного меню) - тот же стиль оформления, что уже прижился в "Куда
+    # ехать": крупный заголовок, разделитель, короткая подпись назначения.
+    text = (
+        "🚕✨ *TAXI HELPER*\n"
+        "_Помощник водителя такси и курьера_\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        "🏙 Выбери свой город 👇"
+    )
     await message.answer(text, reply_markup=city_keyboard(), parse_mode='Markdown')
 
 @router.message(Command("start"))
@@ -3036,8 +3083,10 @@ async def show_where_to_go(message: types.Message):
         # откуда-то ещё (например, старая клавиатура в чате).
         await message.answer("Этот раздел пока доступен только для Такси и Ultima.")
         return
-    status_msg = await message.answer("🧭 Считаю варианты…")
+    status_msg = await show_loading_animation(message.answer, "🧭 Считаю варианты")
+    anim_task = asyncio.create_task(animate_loading(status_msg, "🧭 Считаю варианты"))
     candidates = await compute_where_to_go(city, category)
+    anim_task.cancel()
     text = format_where_to_go_text(city, category, candidates)
     await status_msg.edit_text(text, parse_mode='Markdown')
 
@@ -3495,8 +3544,8 @@ async def select_city(message: types.Message):
     маскировал бы реальную ошибку, если бы вдруг не нашёл."""
     city = CITY_MAP[message.text]
     user_state[message.from_user.id] = {'city': city}
-    text = f"Вы выбрали {message.text}\n\nВыбери категорию 👇"
-    await message.answer(text, reply_markup=category_keyboard())
+    text = f"✅ *{message.text}*\n━━━━━━━━━━━━━━━━━━\n\n🚕 Выбери свою категорию 👇"
+    await message.answer(text, reply_markup=category_keyboard(), parse_mode='Markdown')
 
 @router.message(lambda message: any(cat_data['name'] in message.text for cat_data in CATEGORIES.values()))
 async def select_category(message: types.Message):
@@ -3512,8 +3561,9 @@ async def select_category(message: types.Message):
             user_state[user_id]['category'] = cat_key
             selected_category = cat_key
             break
-    text = "Выбери услугу 👇"
-    await message.answer(text, reply_markup=services_keyboard(selected_category, user_state[user_id].get('city')))
+    cat_label = CATEGORIES.get(selected_category, {}).get('name', '')
+    text = f"✅ *{cat_label}*\n━━━━━━━━━━━━━━━━━━\n\n🧰 Выбери, что нужно 👇"
+    await message.answer(text, reply_markup=services_keyboard(selected_category, user_state[user_id].get('city')), parse_mode='Markdown')
 
     # По просьбе пользователя - сразу после выбора категории предлагаем
     # включить "Очередь у аэропорта" (для тех категорий, кому она вообще
