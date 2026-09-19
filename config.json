@@ -1,0 +1,105 @@
+{
+  "_comment": "Единый справочник аэропортов и вокзалов для Taxi Helper бота. Раньше этот список дублировался в main.py (AIRPORTS_INFO/STATION_CITY/STATION_CAPACITY/AIRPORT_CAPACITY/AIRPORT_TIMEZONE/AIRPORT_COORDS), fetch_yandex_data.py (AIRPORTS) и fetch_trains_data.py (STATIONS) - три места, которые нужно было держать синхронными вручную. Именно рассинхрон между такими списками уже приводил к реальному багу (Шереметьево показывал 'все нули'). Теперь это единственный источник правды: main.py/fetch_yandex_data.py/fetch_trains_data.py читают его через config_loader.py при старте. Логика терминальных зон Шереметьево (AIRPORT_TERMINAL_ZONES/TERMINAL_LETTER_TO_ZONE) сюда намеренно НЕ вынесена - она слишком тесно связана с кодом (flight_terminal_zone/compute_zone_capacity_shares), остаётся в main.py.",
+  "cities": {
+    "moscow": {
+      "airports": [
+        {"iata": "SVO", "icao": "UUEE", "name": "SVO (Шереметьево B/C)", "emoji": "✈️", "yandex_code": "s9600213", "zone_key": "bc", "capacity": 4966, "timezone": "Europe/Moscow", "coords": [55.9736, 37.4125]},
+        {"iata": "SVO", "icao": "UUEE", "name": "SVO (Шереметьево Терминал D)", "emoji": "✈️", "yandex_code": "s9600213", "zone_key": "d", "capacity": 4966, "timezone": "Europe/Moscow", "coords": [55.9736, 37.4125]},
+        {"iata": "DME", "icao": "UUDD", "name": "DME (Домодедово)", "emoji": "✈️", "yandex_code": "s9600216", "capacity": 1586, "timezone": "Europe/Moscow", "coords": [55.4088, 37.9063]},
+        {"iata": "VKO", "icao": "UUWW", "name": "VKO (Внуково)", "emoji": "✈️", "yandex_code": "s9600215", "capacity": 1838, "timezone": "Europe/Moscow", "coords": [55.5983, 37.2615]}
+      ],
+      "stations": [
+        {"name": "Казанский вокзал", "code": "s2000003", "capacity": 2100},
+        {"name": "Ленинградский вокзал", "code": "s2006004", "capacity": 1300}
+      ]
+    },
+    "spb": {
+      "airports": [
+        {"iata": "LED", "icao": "ULLI", "name": "LED (Пулково)", "emoji": "✈️", "yandex_code": "s9600366", "capacity": 2373, "timezone": "Europe/Moscow", "coords": [59.8003, 30.2625]}
+      ],
+      "stations": [
+        {"name": "Московский вокзал (СПб)", "code": "s9602494", "capacity": 1750}
+      ]
+    },
+    "novosibirsk": {
+      "airports": [
+        {"iata": "OVB", "icao": "UNNT", "name": "OVB (Толмачёво)", "emoji": "✈️", "yandex_code": "s9600374", "capacity": 1084, "timezone": "Asia/Novosibirsk", "coords": [55.0126, 82.6507]}
+      ],
+      "stations": [
+        {"name": "Новосибирск-Главный", "code": "s9610189", "capacity": 1000}
+      ]
+    },
+    "ekb": {
+      "airports": [
+        {"iata": "SVX", "icao": "USSS", "name": "SVX (Кольцово)", "emoji": "✈️", "yandex_code": "s9600370", "capacity": 947, "timezone": "Asia/Yekaterinburg", "coords": [56.7431, 60.8027]}
+      ],
+      "stations": [
+        {"name": "Екатеринбург-Пасс.", "code": "s9607404", "capacity": 1000}
+      ]
+    },
+    "kazan": {
+      "airports": [
+        {"iata": "KZN", "icao": "UWKD", "name": "KZN (Казань)", "emoji": "✈️", "yandex_code": "s9600379", "capacity": 616, "timezone": "Europe/Moscow", "coords": [55.6062, 49.2787]}
+      ],
+      "stations": [
+        {"name": "Казань-Пасс.", "code": "s9623141", "capacity": 1100}
+      ]
+    },
+    "chelyabinsk": {
+      "airports": [
+        {"iata": "CEK", "icao": "USCC", "name": "CEK (Баландино)", "emoji": "✈️", "yandex_code": "s9623444", "capacity": 251, "timezone": "Asia/Yekaterinburg", "coords": [55.3058, 61.5033]}
+      ],
+      "stations": [
+        {"name": "Челябинск-Главный", "code": "s9609235", "capacity": 800}
+      ]
+    },
+    "omsk": {
+      "airports": [
+        {"iata": "OMS", "icao": "UNOO", "name": "OMS (Омск)", "emoji": "✈️", "yandex_code": "s9600390", "capacity": 183, "timezone": "Asia/Omsk", "coords": [54.9669, 73.3105]}
+      ],
+      "stations": [
+        {"name": "Омск-Пасс.", "code": "s9610384", "capacity": 750}
+      ]
+    },
+    "samara": {
+      "airports": [
+        {"iata": "KUF", "icao": "UWWW", "name": "KUF (Курумоч)", "emoji": "✈️", "yandex_code": "s9600380", "capacity": 411, "timezone": "Europe/Samara", "coords": [53.5047, 50.1644]}
+      ],
+      "stations": [
+        {"name": "Самара", "code": "s9606096", "capacity": 900}
+      ]
+    },
+    "rostov": {
+      "airports": [
+        {"iata": "RND", "icao": "URRP", "name": "RND (Ростов-на-Дону)", "emoji": "✈️", "yandex_code": "s9866615", "capacity": 171, "timezone": "Europe/Moscow", "coords": [47.4939, 39.9247], "closed": true, "closed_comment": "Платов закрыт для гражданских полётов - данные не собираем, бот показывает статичную заглушку 'закрыт'"}
+      ],
+      "stations": [
+        {"name": "Ростов-Главный", "code": "s9612913", "capacity": 900}
+      ]
+    },
+    "nnovgorod": {
+      "airports": [
+        {"iata": "GOJ", "icao": "UWGG", "name": "GOJ (Нижний Новгород)", "emoji": "✈️", "yandex_code": "s9623052", "capacity": 400, "timezone": "Europe/Moscow", "coords": [56.2301, 43.7844]}
+      ],
+      "stations": [
+        {"name": "Московский вокзал (Нижний Новгород)", "code": "s9612089", "capacity": 850}
+      ]
+    },
+    "krasnodar": {
+      "airports": [
+        {"iata": "KRR", "icao": "URKK", "name": "KRR (Краснодар)", "emoji": "✈️", "yandex_code": "s9623123", "capacity": 525, "timezone": "Europe/Moscow", "coords": [45.0347, 39.1708]}
+      ],
+      "stations": [
+        {"name": "Краснодар-1", "code": "s9613602", "capacity": 700}
+      ]
+    },
+    "sochi": {
+      "airports": [
+        {"iata": "AER", "icao": "URSS", "name": "AER (Адлер)", "emoji": "✈️", "yandex_code": "s9623547", "capacity": 1427, "timezone": "Europe/Moscow", "coords": [43.4499, 39.9566]}
+      ],
+      "stations": [
+        {"name": "Адлер", "code": "s9613054", "capacity": 950}
+      ]
+    }
+  }
+}

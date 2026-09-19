@@ -43,33 +43,20 @@ from fetch_yandex_data import (
     load_usage_log, save_usage_log, get_today_usage,
     DAILY_QUOTA, DAILY_SAFETY_LIMIT,
 )
+from config_loader import get_all_stations
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 OUTPUT_FILE = os.path.join(DATA_DIR, 'trains_data.json')
 
-# Коды станций (система "yandex", префикс "s") - найдены по rasp.yandex.ru/station/<id>/
+# Коды станций (система "yandex", префикс "s") теперь читаются из
+# config.json (см. config_loader.py) - раньше дублировались вручную здесь
+# и в main.py/STATION_CITY, рассинхрон таких копий уже приводил к
+# реальному багу с аэропортами (см. коммент выше про общий счётчик квоты -
+# та же логика применима и к вокзалам). Найдены по rasp.yandex.ru/station/<id>/
 # и проверены по прямым ссылкам вида rasp.yandex.ru/station/<id>/?event=arrival.
-STATIONS = [
-    {'name': 'Казанский вокзал', 'code': 's2000003'},
-    {'name': 'Ленинградский вокзал', 'code': 's2006004'},
-    {'name': 'Московский вокзал (СПб)', 'code': 's9602494'},
-    {'name': 'Краснодар-1', 'code': 's9613602'},
-    {'name': 'Адлер', 'code': 's9613054'},
-    {'name': 'Московский вокзал (Нижний Новгород)', 'code': 's9612089'},
-    {'name': 'Казань-Пасс.', 'code': 's9623141'},
-    # ДОБАВЛЕНО 19.09.2026 по просьбе пользователя - раньше вокзалы покрывали
-    # только 6 из 12 городов бота, теперь все 12. Коды найдены и перепроверены
-    # через rasp.yandex.ru/station/<id>/ (двойная проверка через поиск для
-    # каждого - см. обсуждение с пользователем).
-    {'name': 'Новосибирск-Главный', 'code': 's9610189'},
-    {'name': 'Екатеринбург-Пасс.', 'code': 's9607404'},
-    {'name': 'Челябинск-Главный', 'code': 's9609235'},
-    {'name': 'Омск-Пасс.', 'code': 's9610384'},
-    {'name': 'Самара', 'code': 's9606096'},
-    {'name': 'Ростов-Главный', 'code': 's9612913'},
-]
+STATIONS = [{'name': s['name'], 'code': s['code']} for s in get_all_stations()]
 
 REQUEST_COUNT = 0  # счётчик реальных запросов к API за этот запуск (см. quota-комментарий выше)
 

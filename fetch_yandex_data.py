@@ -48,6 +48,8 @@ from datetime import datetime, timedelta
 
 import requests
 
+from config_loader import get_all_airports
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -99,25 +101,24 @@ def get_today_usage(log):
     today = datetime.now().strftime('%Y-%m-%d')
     return today, log.get(today, 0)
 
-# 14 аэропортов бота: IATA/ICAO коды + yandex_code станции (найден вручную
-# сопоставлением по названию через stations_list, см. примечание выше).
-# yandex_code = None -> аэропорт не найден / закрыт.
-AIRPORTS = [
-    {'iata': 'SVO', 'icao': 'UUEE', 'name': 'Шереметьево',       'yandex_code': 's9600213'},
-    {'iata': 'DME', 'icao': 'UUDD', 'name': 'Домодедово',        'yandex_code': 's9600216'},
-    {'iata': 'VKO', 'icao': 'UUWW', 'name': 'Внуково',           'yandex_code': 's9600215'},
-    {'iata': 'LED', 'icao': 'ULLI', 'name': 'Пулково',           'yandex_code': 's9600366'},
-    {'iata': 'OVB', 'icao': 'UNNT', 'name': 'Толмачёво',         'yandex_code': 's9600374'},
-    {'iata': 'SVX', 'icao': 'USSS', 'name': 'Кольцово',          'yandex_code': 's9600370'},
-    {'iata': 'KZN', 'icao': 'UWKD', 'name': 'Казань',            'yandex_code': 's9600379'},
-    {'iata': 'CEK', 'icao': 'USCC', 'name': 'Баландино',         'yandex_code': 's9623444'},
-    {'iata': 'OMS', 'icao': 'UNOO', 'name': 'Омск',              'yandex_code': 's9600390'},
-    {'iata': 'KUF', 'icao': 'UWWW', 'name': 'Курумоч',           'yandex_code': 's9600380'},
-    {'iata': 'RND', 'icao': 'URRP', 'name': 'Платов (Ростов)',   'yandex_code': 's9866615', 'closed': True},  # ⚠️ закрыт для гражданских полётов - данные не собираем, экономим квоту
-    {'iata': 'GOJ', 'icao': 'UWGG', 'name': 'Стригино (Нижний Новгород)', 'yandex_code': 's9623052'},  # заменил Уфу по просьбе пользователя (11-й город бота)
-    {'iata': 'KRR', 'icao': 'URKK', 'name': 'Пашковский (Краснодар)', 'yandex_code': 's9623123'},  # вновь открыт с 11.09.2025 (был закрыт с 2022) - запросы к API не пропускаем
-    {'iata': 'AER', 'icao': 'URSS', 'name': 'Сочи',              'yandex_code': 's9623547'},
-]
+# Список 14 аэропортов бота (IATA/ICAO коды + yandex_code станции) теперь
+# читается из config.json (см. config_loader.py) - раньше дублировался
+# вручную здесь и в main.py/AIRPORTS_INFO, рассинхрон таких копий уже
+# приводил к реальному багу (Шереметьево показывал "все нули"). Дедуп по
+# icao: у Шереметьево в config.json ДВЕ записи (терминальные зоны bc/d,
+# нужны для main.py), но здесь достаточно опросить API один раз на icao -
+# fetch_schedule() всё равно тянет ВЕСЬ аэропорт целиком, зоны фильтруются
+# уже в main.py при показе (flight_terminal_zone), а не на этапе сбора.
+_seen_icao = set()
+AIRPORTS = []
+for _a in get_all_airports():
+    if _a['icao'] in _seen_icao:
+        continue
+    _seen_icao.add(_a['icao'])
+    entry = {'iata': _a['iata'], 'icao': _a['icao'], 'name': _a['name'], 'yandex_code': _a['yandex_code']}
+    if _a.get('closed'):
+        entry['closed'] = True
+    AIRPORTS.append(entry)
 
 # Оценка пассажировместимости по типу борта (используется когда Yandex
 # отдаёт модель самолёта в thread.vehicle). Если тип неизвестен - дефолт.
