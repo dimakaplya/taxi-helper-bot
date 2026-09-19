@@ -3372,7 +3372,8 @@ async def show_airport_details(callback_query: types.CallbackQuery):
         text += "\n"
 
     text += "_🔴0-50% Не ехать | 🟡51-70% Уточни очередь | 🟢71-100% Занимай очередь | 🟣>100% Срочно ехать_"
-    await msg.edit_text(text, parse_mode='Markdown')
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="airport_arrivals")]])
+    await msg.edit_text(text, reply_markup=keyboard, parse_mode='Markdown')
     await callback_query.answer()
 
 def compute_current_hour_load(airport_icao, relevant_class, hour_offset=0, zone_key=None):
@@ -3552,12 +3553,13 @@ async def show_availability_details(callback_query: types.CallbackQuery):
         else:
             text += "_Уведомлений Росавиации по этому аэропорту за последние 12ч нет_\n"
 
+        back_keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="airport_availability")]])
         try:
-            await msg.edit_text(text, parse_mode='Markdown')
+            await msg.edit_text(text, reply_markup=back_keyboard, parse_mode='Markdown')
         except Exception as e:
             logger.error(f"❌ Не удалось отправить доступность с Markdown-разметкой: {e}")
             plain_text = text.replace('*', '').replace('_', '')
-            await msg.edit_text(plain_text)
+            await msg.edit_text(plain_text, reply_markup=back_keyboard)
     except Exception as e:
         logger.error(f"❌ Непредвиденная ошибка в show_availability_details: {e}")
         try:
