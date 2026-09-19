@@ -1874,6 +1874,17 @@ def services_keyboard(category=None, city=None):
     # "🔓 Бесплатный VPN TAXI HELPER" - НЕ в общей 2-колоночной сетке ниже, а
     # отдельной строкой в самом низу (перед "← Назад"/"🏙 Выбор города") - по
     # просьбе пользователя.
+    # "🧭💰 Куда ехать" - самая верхняя строка меню, отдельной строкой (по
+    # просьбе пользователя) - раньше была внутри "Инструменты водителя",
+    # перенесена сюда как самая важная кнопка (решает, куда именно ехать
+    # прямо сейчас). Доступна только категориям с аэропортами (см.
+    # CATEGORIES_WITHOUT_AIRPORTS) - сводка построена на аэропортах/вокзалах/
+    # часах пика для ПАССАЖИРСКИХ поездок, для курьера/грузового такси не
+    # актуальна (см. обсуждение с пользователем 19.09.2026).
+    top_row = []
+    if category not in CATEGORIES_WITHOUT_AIRPORTS:
+        top_row.append(KeyboardButton(text="🧭💰 Куда ехать"))
+
     items = []
     if category in SHARED_ORDER_CATEGORIES:
         items.append("🔄 Отдать заказ")
@@ -1887,10 +1898,13 @@ def services_keyboard(category=None, city=None):
         items.append("🎭 События города")
     items.append("⛔ Дорожные события")
 
-    buttons = [
+    buttons = []
+    if top_row:
+        buttons.append(top_row)
+    buttons.extend(
         [KeyboardButton(text=t) for t in items[i:i + 2]]
         for i in range(0, len(items), 2)
-    ]
+    )
     buttons.append([KeyboardButton(text="🔓 Бесплатный VPN TAXI HELPER")])
     buttons.append([KeyboardButton(text="← Назад"), KeyboardButton(text="🏙 Выбор города")])
     return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=buttons)
@@ -1935,16 +1949,11 @@ def courier_module_keyboard(category=None):
         [KeyboardButton(text="🛒 Магазины 24ч"), KeyboardButton(text="🔌 Электрозарядки")],
         [KeyboardButton(text="🛠 ТО транспорта")],
     ]
+    # "🧭💰 Куда ехать" отсюда убрана - перенесена в services_keyboard как
+    # верхняя строка главного меню (по просьбе пользователя, 19.09.2026).
     if category not in CATEGORIES_WITHOUT_AIRPORTS:
-        buttons.append([KeyboardButton(text="🧭 Куда ехать"), KeyboardButton(text="📍 Очередь у аэропорта")])
-        buttons.append([KeyboardButton(text="🔔 Уведомления")])
-    else:
-        # "🧭 Куда ехать" пока только для такси/Ultima (см. WHERE_TO_GO_*
-        # ниже) - сводка построена на аэропортах/вокзалах/часах пика для
-        # ПАССАЖИРСКИХ поездок, для курьера/грузового такси это не
-        # актуально (им важны склады/ТЦ/стройрынки - для этого нет
-        # источника данных, см. обсуждение с пользователем 19.09.2026).
-        buttons.append([KeyboardButton(text="🔔 Уведомления")])
+        buttons.append([KeyboardButton(text="📍 Очередь у аэропорта")])
+    buttons.append([KeyboardButton(text="🔔 Уведомления")])
     buttons.append([KeyboardButton(text="← Назад"), KeyboardButton(text="🏙 Выбор города")])
     return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=buttons)
 
@@ -2744,7 +2753,7 @@ def format_where_to_go_text(city, category, candidates):
     )
     return '\n'.join(lines)
 
-@router.message(lambda message: message.text == "🧭 Куда ехать" and user_state.get(message.from_user.id, {}).get('in_courier_module'))
+@router.message(lambda message: message.text == "🧭💰 Куда ехать")
 async def show_where_to_go(message: types.Message):
     user_id = message.from_user.id
     state = user_state.get(user_id, {})
