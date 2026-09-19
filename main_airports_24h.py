@@ -265,11 +265,16 @@ AIRPORT_QUEUE_TIME_PUSHES_MIN = (30, 60)  # "уже 30 минут рядом" / 
 # airport_queue_checker) - иначе они бы не пришли, если юзер просто стоит на
 # месте и новых пингов долго нет.
 AIRPORT_QUEUE_CHECK_INTERVAL_MINUTES = 5
-# Если новых обновлений геопозиции нет дольше заявленного времени трансляции
-# (live_period, из самого сообщения Telegram) + этот запас - считаем, что
-# трансляция закончилась или юзер давно уехал, и молча гасим отслеживание
-# (чтобы не пушить бесконечно тому, кто уже улетел).
-AIRPORT_QUEUE_STALE_BUFFER_SECONDS = 600
+# Инструкция рекомендует делиться геопозицией «Пока не отключу» (бессрочно) -
+# так трансляция не обрывается сама, водителю не нужно вспоминать её включить
+# заново каждые несколько часов. У такого режима Telegram шлёт live_period =
+# 0x7FFFFFFF (условная "бесконечность"), поэтому ориентироваться на live_period
+# при определении "трансляция скорее всего закончилась" больше нельзя - вместо
+# этого просто следим за тем, сколько времени НЕТ новых пингов геопозиции:
+# дольше AIRPORT_QUEUE_STALE_TIMEOUT_MINUTES без единого обновления - считаем,
+# что трансляция прервалась (юзер сам отключил, разрядился телефон и т.п.), и
+# шлём напоминание включить её заново (см. send_airport_queue_expired_push).
+AIRPORT_QUEUE_STALE_TIMEOUT_MINUTES = 30
 
 # ==================== ПРАЗДНИКИ ====================
 # Идея пользователя: праздники (особенно Новый год, 8 марта, 9 мая, День
@@ -2151,6 +2156,31 @@ async def toggle_notification_setting(callback_query: types.CallbackQuery):
     state['notif_prefs'] = prefs
     await callback_query.message.edit_reply_markup(reply_markup=notification_settings_keyboard(state))
 
+def airport_queue_enable_text():
+    """Общий текст-инструкция - используется и в toggle_airport_queue_tracking
+    (кнопка в Инструментах водителя), и в suggest_airport_queue_tracking (пуш
+    сразу после выбора категории, см. select_category) - чтобы не разъезжались
+    две копии текста. Рекомендуем «Пока не отключу» (а не «8 часов», как было
+    раньше) - при таком выборе трансляция не обрывается сама вообще, водителю
+    не нужно ничего вспоминать (если он всё же сам остановит её или она
+    прервётся по другой причине - see send_airport_queue_expired_push)."""
+    return (
+        "📍 *Очередь у аэропорта*\n\n"
+        "Как включить: скрепка 📎 → Геопозиция → *«Транслировать геопозицию»* → "
+        "выбирай *«Пока не отключу»* - трансляция не оборвётся сама, и ты не "
+        "пропустишь уведомления. Если сама прервётся (например разрядится "
+        "телефон) - напомню включить заново.\n\n"
+        "Дальше всё автоматически: как только окажешься в 3 км от аэропорта - пришлю пуш, "
+        "затем на 1.5 км, и потом ещё два - через 30 минут и через 1 час, если всё ещё рядом. "
+        "Помогает не терять счёт времени в очереди на посадку.\n\n"
+        "Чтобы остановить - нажми «📍 Очередь у аэропорта» в Инструментах водителя ещё раз."
+    )
+
+def enable_airport_queue_tracking(user_id):
+    state = user_state[user_id]
+    state['airport_queue_active'] = True
+    state['airport_queue'] = {}
+
 @router.message(lambda message: message.text == "📍 Очередь у аэропорта" and user_state.get(message.from_user.id, {}).get('in_courier_module') and user_state.get(message.from_user.id, {}).get('category') not in CATEGORIES_WITHOUT_AIRPORTS)
 async def toggle_airport_queue_tracking(message: types.Message):
     """Кнопка-переключатель (toggle, без отдельного экрана): первое нажатие
@@ -2172,20 +2202,8 @@ async def toggle_airport_queue_tracking(message: types.Message):
         state['airport_queue'] = {}
         await message.answer("⏹ Отслеживание очереди у аэропорта остановлено.", reply_markup=courier_module_keyboard(category))
         return
-    state['airport_queue_active'] = True
-    state['airport_queue'] = {}
-    text = (
-        "📍 *Очередь у аэропорта*\n\n"
-        "Как включить: скрепка 📎 → Геопозиция → *«Транслировать геопозицию»* → "
-        "сразу выбирай *«8 часов»* (если выбрать «15 минут» или «1 час», трансляция "
-        "может закончиться раньше, чем придут все уведомления).\n\n"
-        "Дальше всё автоматически: как только окажешься в 3 км от аэропорта - пришлю пуш, "
-        "затем на 1.5 км, и потом ещё два - через 30 минут и через 1 час, если всё ещё рядом. "
-        "Помогает не терять счёт времени в очереди на посадку. Когда трансляция закончится - "
-        "напомню включить её заново, если ты всё ещё на линии.\n\n"
-        "Чтобы остановить - нажми эту же кнопку ещё раз."
-    )
-    await message.answer(text, reply_markup=courier_module_keyboard(category), parse_mode='Markdown')
+    enable_airport_queue_tracking(user_id)
+    await message.answer(airport_queue_enable_text(), reply_markup=courier_module_keyboard(category), parse_mode='Markdown')
 
 def airport_queue_bonus_line(user_id, icao):
     """Необязательная строка-бонус в пуше - последняя САМООТЧЁТНАЯ отметка
@@ -2527,6 +2545,38 @@ async def select_category(message: types.Message):
             break
     text = "Выбери услугу 👇"
     await message.answer(text, reply_markup=services_keyboard(selected_category, user_state[user_id].get('city')))
+
+    # По просьбе пользователя - сразу после выбора категории предлагаем
+    # включить "Очередь у аэропорта" (для тех категорий, кому она вообще
+    # видна - см. CATEGORIES_WITHOUT_AIRPORTS), чтобы бот корректно отображал
+    # очередь с первой же поездки, а не только если водитель сам вспомнит
+    # про эту кнопку внутри "Инструменты водителя". Кнопка "Включить сейчас"
+    # сразу активирует отслеживание (enable_airport_queue_tracking) - см.
+    # enable_airport_queue_now ниже.
+    if selected_category and selected_category not in CATEGORIES_WITHOUT_AIRPORTS:
+        suggest_text = (
+            "📍 Чтобы бот мог правильно показывать очередь у аэропорта, включи "
+            "трансляцию живой геопозиции - тогда уведомления о подъезде к аэропорту "
+            "и времени ожидания будут приходить автоматически."
+        )
+        suggest_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📍 Включить сейчас", callback_data="airport_queue_enable_now")]
+        ])
+        await message.answer(suggest_text, reply_markup=suggest_kb)
+
+@router.callback_query(lambda c: c.data == "airport_queue_enable_now")
+async def enable_airport_queue_now(callback_query: types.CallbackQuery):
+    """Кнопка "📍 Включить сейчас" на подсказке сразу после выбора категории
+    (см. select_category выше) - включает отслеживание, не заставляя
+    водителя идти искать кнопку в "Инструменты водителя" отдельно."""
+    user_id = callback_query.from_user.id
+    state = user_state.get(user_id)
+    if not state or state.get('category') in CATEGORIES_WITHOUT_AIRPORTS:
+        await callback_query.answer()
+        return
+    await callback_query.answer("Включено")
+    enable_airport_queue_tracking(user_id)
+    await callback_query.message.answer(airport_queue_enable_text(), parse_mode='Markdown')
 
 @router.message(lambda message: message.text == "🌤 Погода")
 async def show_weather_forecast(message: types.Message):
@@ -3717,13 +3767,14 @@ async def check_airport_queue_timers():
     отслеживаниям (user_state[...]['airport_queue_active']) и досылает пуши
     "уже 30 минут/1 час рядом" по прошедшему времени - независимо от того,
     приходят ли новые пинги геопозиции прямо сейчас (см. docstring у
-    AIRPORT_QUEUE_CHECK_INTERVAL_MINUTES). Если трансляция геопозиции, судя
-    по всему, уже закончилась (нет новых пингов дольше live_period +
-    AIRPORT_QUEUE_STALE_BUFFER_SECONDS) - гасит отслеживание и присылает
-    напоминание включить трансляцию заново (по просьбе пользователя, чтобы
-    водитель не забывал) вместо того, чтобы молча пушить бесконечно того,
-    кто уже уехал, ИЛИ молча остановиться без единого слова тому, кто
-    забыл, что нужно включить трансляцию заново."""
+    AIRPORT_QUEUE_CHECK_INTERVAL_MINUTES). Если новых пингов геопозиции нет
+    дольше AIRPORT_QUEUE_STALE_TIMEOUT_MINUTES (инструкция рекомендует делиться
+    "Пока не отключу", так что ориентироваться на live_period самого сообщения
+    больше нельзя - см. комментарий у константы) - трансляция, судя по всему,
+    прервалась: гасит отслеживание и присылает напоминание включить её заново
+    (по просьбе пользователя, чтобы водитель не забывал) вместо того, чтобы
+    молча пушить бесконечно того, кто уже уехал, ИЛИ молча остановиться без
+    единого слова тому, кто забыл, что нужно включить трансляцию заново."""
     now = datetime.now(ZoneInfo('UTC'))
     for user_id, state in list(user_state.items()):
         if not isinstance(state, dict) or not state.get('airport_queue_active'):
@@ -3732,12 +3783,11 @@ async def check_airport_queue_timers():
 
         last_update_str = aq.get('last_update_at')
         if last_update_str:
-            live_period = aq.get('live_period') or 3600
             try:
                 last_update = datetime.fromisoformat(last_update_str)
             except ValueError:
                 last_update = now
-            if (now - last_update).total_seconds() > live_period + AIRPORT_QUEUE_STALE_BUFFER_SECONDS:
+            if (now - last_update).total_seconds() > AIRPORT_QUEUE_STALE_TIMEOUT_MINUTES * 60:
                 state['airport_queue_active'] = False
                 state['airport_queue'] = {}
                 await send_airport_queue_expired_push(user_id, aq.get('icao'))
