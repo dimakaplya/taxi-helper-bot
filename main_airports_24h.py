@@ -1465,7 +1465,7 @@ FUEL_BOT_URL = "https://t.me/gde_benzin_rubot"
 # Ещё одна внешняя ссылка того же типа (кнопка -> открывает чат/страницу
 # стороннего сервиса напрямую, без интеграции с данными бота) - по просьбе
 # пользователя, реферальная ссылка на бота VPN-сервиса.
-VPN_BOT_URL = "https://t.me/Strelka_vpn_bot?start=147611511"
+VPN_BOT_URL = "https://t.me/Vpntaxihelper_bot?start=633742909"
 
 def services_keyboard(category=None, city=None):
     # Итоговый набор кнопок меню услуг (по заданному порядку). "Заказы
