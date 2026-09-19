@@ -54,6 +54,169 @@ PROMO_TAIL_RE = re.compile(
 )
 
 
+# === Парсинг структурированных полей из текста поста ===
+# По просьбе пользователя (22.09.2026) нужны не просто сырые тексты постов,
+# а структурированные данные: дата/время начала, место (для адреса/навигации),
+# цена (для фильтра доступности по категории). Посты в этих каналах НЕ имеют
+# машиночитаемой разметки - только свободный текст вида "Дата: 18 ноября" /
+# "Место: Pravda" / "Цена: 1300 ₽" (не всегда все три строки присутствуют, не
+# всегда в этом порядке). Парсим построчно по префиксу - надёжнее, чем одна
+# большая регулярка на весь текст, и не ломается, если порядок строк другой.
+MONTHS_RU = {
+    'январ': 1, 'феврал': 2, 'март': 3, 'апрел': 4, 'ма': 5, 'июн': 6,
+    'июл': 7, 'август': 8, 'сентябр': 9, 'октябр': 10, 'ноябр': 11, 'декабр': 12,
+}
+
+_DATE_LINE_RE = re.compile(r'^\s*(?:дата|когда)\s*:\s*(.+)$', re.IGNORECASE)
+_PLACE_LINE_RE = re.compile(r'^\s*(?:место|адрес|площадка|локация)\s*:\s*(.+)$', re.IGNORECASE)
+_PRICE_LINE_RE = re.compile(r'^\s*(?:цена|вход|билет[ыи]?|стоимость)\s*:\s*(.+)$', re.IGNORECASE)
+# "18 ноября" / "18 ноября 20:00" / "19 сентября 14:30"
+_DATE_VALUE_RE = re.compile(
+    r'(\d{1,2})\s+([а-яё]+)(?:\s+(\d{1,2}):(\d{2}))?', re.IGNORECASE
+)
+_PRICE_NUMBER_RE = re.compile(r'(\d[\d\s]*\d|\d)\s*(?:₽|руб)')
+_FREE_KEYWORDS = ('свободный', 'бесплатн', 'вход своб')
+
+# Средняя длительность мероприятия, когда время окончания в посте не указано
+# (почти никогда не указано) - по просьбе пользователя, чисто оценка, не факт.
+DEFAULT_EVENT_DURATION_HOURS = 1.5
+
+# Порог цены для правила категорий (по просьбе пользователя, 22.09.2026):
+# от PRICE_THRESHOLD_RUB - показываем и такси, и Ultima; дешевле - только
+# такси (Ultima это не интересно, публика не премиальная). Если цена в посте
+# вообще не указана ("вход свободный"/нет строки цены) - считаем БЕСПЛАТНЫМ и
+# тоже показываем только такси (см. обсуждение с пользователем 22.09.2026).
+PRICE_THRESHOLD_RUB = 900
+
+
+def _parse_month(word):
+    word_lower = word.lower()
+    for prefix, month_num in MONTHS_RU.items():
+        if word_lower.startswith(prefix):
+            return month_num
+    return None
+
+
+def parse_event_datetime(date_value, post_time_iso):
+    """Разбирает значение строки "Дата: ..." в (start_dt, has_explicit_time).
+    Год не указывается в постах - берём ближайшее будущее (если получившаяся
+    дата в прошлом относительно даты самого поста, значит имелся в виду
+    следующий год - актуально только на стыке декабря/января). Время может
+    отсутствовать (только дата) - тогда has_explicit_time=False и дальше
+    используется заглушка вечернего времени, а не полночь, чтобы не путать
+    сортировку/отображение."""
+    m = _DATE_VALUE_RE.search(date_value)
+    if not m:
+        return None, False
+    day = int(m.group(1))
+    month = _parse_month(m.group(2))
+    if month is None:
+        return None, False
+    hour = int(m.group(3)) if m.group(3) else 20  # заглушка - типичное вечернее время концерта
+    minute = int(m.group(4)) if m.group(4) else 0
+    has_explicit_time = m.group(3) is not None
+
+    try:
+        post_dt = datetime.fromisoformat(post_time_iso)
+    except Exception:
+        post_dt = datetime.now(timezone.utc)
+    year = post_dt.year
+    try:
+        candidate = datetime(year, month, day, hour, minute, tzinfo=post_dt.tzinfo or timezone.utc)
+    except ValueError:
+        return None, False
+    if candidate < post_dt - timedelta(days=3):
+        # Дата "в прошлом" относительно поста больше чем на пару дней - скорее
+        # всего, имелся в виду следующий год (пост в декабре про январь).
+        try:
+            candidate = candidate.replace(year=year + 1)
+        except ValueError:
+            pass
+    return candidate, has_explicit_time
+
+
+def parse_price(price_value):
+    """Возвращает (price_rub или None, is_free). is_free=True для явных
+    "вход свободный"/"бесплатно" - price_rub остаётся None, но это НЕ то же
+    самое, что "цена не указана вообще" (см. compute_price_category ниже -
+    обе ситуации сейчас трактуются одинаково по просьбе пользователя, но
+    оставлены разными полями на случай, если логика позже разъедется)."""
+    value_lower = price_value.lower()
+    if any(kw in value_lower for kw in _FREE_KEYWORDS):
+        return None, True
+    m = _PRICE_NUMBER_RE.search(price_value)
+    if m:
+        digits = re.sub(r'\s', '', m.group(1))
+        try:
+            return int(digits), False
+        except ValueError:
+            return None, False
+    return None, False
+
+
+def compute_price_category(price_rub, is_free, has_price_info):
+    """Правило по просьбе пользователя (22.09.2026): цена >= PRICE_THRESHOLD_RUB
+    -> событие показывается И такси, И Ultima ('all'); дешевле, бесплатное или
+    вообще без указанной цены ("по регистрации" и т.п.) -> только такси
+    ('taxi_only') - Ultima это не интересно."""
+    if price_rub is not None and price_rub >= PRICE_THRESHOLD_RUB:
+        return 'all'
+    return 'taxi_only'
+
+
+def parse_event_fields(text, post_time_iso):
+    """Построчно ищет "Дата:"/"Место:"/"Цена:" (и синонимы) в тексте поста,
+    плюс заголовок (первая строка, обычно КАПСОМ - название мероприятия).
+    Возвращает dict с разобранными полями - что не нашлось, остаётся None.
+    Не падает и не бросает исключений на постах без разметки вообще (просто
+    все поля будут None, кроме title)."""
+    lines = text.split('\n')
+    title = lines[0].strip() if lines else ''
+    date_value = None
+    place_value = None
+    price_value = None
+    for line in lines[1:]:
+        if date_value is None:
+            m = _DATE_LINE_RE.match(line)
+            if m:
+                date_value = m.group(1).strip()
+                continue
+        if place_value is None:
+            m = _PLACE_LINE_RE.match(line)
+            if m:
+                place_value = m.group(1).strip()
+                continue
+        if price_value is None:
+            m = _PRICE_LINE_RE.match(line)
+            if m:
+                price_value = m.group(1).strip()
+
+    start_dt, has_explicit_time = (None, False)
+    if date_value:
+        start_dt, has_explicit_time = parse_event_datetime(date_value, post_time_iso)
+
+    end_dt = None
+    if start_dt:
+        end_dt = start_dt + timedelta(hours=DEFAULT_EVENT_DURATION_HOURS)
+
+    price_rub, is_free = (None, False)
+    if price_value:
+        price_rub, is_free = parse_price(price_value)
+
+    price_category = compute_price_category(price_rub, is_free, has_price_info=price_value is not None)
+
+    return {
+        'title': title or None,
+        'start': start_dt.isoformat() if start_dt else None,
+        'start_has_explicit_time': has_explicit_time,
+        'end': end_dt.isoformat() if end_dt else None,
+        'place': place_value,
+        'price_rub': price_rub,
+        'is_free': is_free,
+        'price_category': price_category,
+    }
+
+
 def strip_channel_promo(text, channel_username):
     """Тот же принцип очистки, что strip_channel_promo в fetch_road_events.py -
     убираем рекламный хвост самого канала и любые ссылки/юзернеймы, чтобы
@@ -117,11 +280,13 @@ def fetch_channel_messages(channel_username):
         link_tag = time_tag.find_parent('a')
         msg_link = link_tag.get('href') if link_tag else None
 
-        posts.append({
+        post = {
             'time': msg_time.isoformat(),
             'text': text,
             'link': msg_link,
-        })
+        }
+        post.update(parse_event_fields(text, post['time']))
+        posts.append(post)
 
     posts.sort(key=lambda p: p['time'], reverse=True)
     return posts[:MAX_MESSAGES_PER_CITY]

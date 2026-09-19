@@ -810,12 +810,43 @@ def load_concert_events():
         return None
 
 def get_concert_events_for_city(city):
-    """Последние посты афиши концертов для города бота ('moscow'/'spb') -
-    пусто, если для города канал не настроен или файл ещё не собран."""
+    """ВСЕ последние посты афиши концертов для города бота ('moscow'/'spb') -
+    пусто, если для города канал не настроен или файл ещё не собран. Без
+    фильтра по категории/актуальности - для этого см.
+    get_upcoming_concert_events_for_category ниже."""
     data = load_concert_events()
     if not data:
         return []
     return data.get('cities', {}).get(city, [])
+
+def get_upcoming_concert_events_for_category(city, category, limit=10):
+    """Предстоящие события афиши концертов для КОНКРЕТНОЙ категории водителя -
+    по просьбе пользователя (22.09.2026): события с ценой >= PRICE_THRESHOLD_RUB
+    (см. fetch_concert_events.py) показываются И такси, И Ultima
+    (price_category='all'); дешевле/бесплатные/без указанной цены - ТОЛЬКО
+    такси (price_category='taxi_only') - Ultima это не интересно. Курьер/
+    Грузовое такси эту кнопку вообще не видят (см. CATEGORIES_WITHOUT_EVENTS),
+    поэтому фильтр здесь рассчитан только на 'taxi'/'ultima'. Событие без
+    распознанной даты (start=None - разметка поста не подошла под парсер)
+    пропускается: без даты нельзя понять, актуально ли оно ещё."""
+    posts = get_concert_events_for_city(city)
+    now_ts = datetime.now(ZoneInfo('UTC')).timestamp()
+    upcoming = []
+    for post in posts:
+        if not post.get('start'):
+            continue
+        try:
+            start_dt = datetime.fromisoformat(post['start'])
+        except Exception:
+            continue
+        if start_dt.timestamp() < now_ts:
+            continue
+        price_category = post.get('price_category', 'taxi_only')
+        if category == 'ultima' and price_category != 'all':
+            continue
+        upcoming.append(post)
+    upcoming.sort(key=lambda p: p['start'])
+    return upcoming[:limit]
 
 _mos_road_data_cache = None
 _mos_road_data_mtime = None
@@ -2846,14 +2877,63 @@ async def score_city_candidate(city):
     advice = get_city_advice(city, level)
     return {'label': 'Город / центр', 'score': score, 'reasons': reasons, 'closed': False, 'advice': advice}
 
+# Концертное событие начинает давать всплеск спроса ЗА CONCERT_EVENT_LEAD_HOURS
+# часов до начала (люди подъезжают заранее) и ОСТАЁТСЯ актуальным ещё
+# CONCERT_EVENT_TAIL_HOURS часов после заявленного окончания (расходятся не
+# все разом) - за пределами этого окна событие не показываем кандидатом в
+# "Куда ехать" вообще (см. score_concert_event_candidates ниже).
+CONCERT_EVENT_LEAD_HOURS = 1
+CONCERT_EVENT_TAIL_HOURS = 1
+
+def score_concert_event_candidates(city, category, limit=3):
+    """Кандидаты "Куда ехать" на основе афиши концертов (см.
+    get_upcoming_concert_events_for_category) - по просьбе пользователя
+    (22.09.2026). Показываем только события, которые СЕЙЧАС релевантны по
+    времени (см. CONCERT_EVENT_LEAD_HOURS/TAIL_HOURS выше), не всю афишу -
+    иначе список "Куда ехать" был бы забит мероприятиями через неделю.
+    Балл выше для события, которое вот-вот начнётся/только что началось
+    (момент максимального наплыва - и подвоза, и разъезда), чем для того,
+    что скоро закончится. Единицы условные, той же шкалы, что у
+    score_city_candidate (peak=100), чтобы конкретное крупное событие могло
+    обгонять общий уровень "Город/центр", но не обгоняло автоматически
+    любой аэропорт с реальными прилётами."""
+    events = get_upcoming_concert_events_for_category(city, category, limit=20)
+    now_ts = datetime.now(ZoneInfo('UTC')).timestamp()
+    candidates = []
+    for post in events:
+        try:
+            start_ts = datetime.fromisoformat(post['start']).timestamp()
+            end_ts = datetime.fromisoformat(post['end']).timestamp() if post.get('end') else start_ts
+        except Exception:
+            continue
+        window_start = start_ts - CONCERT_EVENT_LEAD_HOURS * 3600
+        window_end = end_ts + CONCERT_EVENT_TAIL_HOURS * 3600
+        if not (window_start <= now_ts <= window_end):
+            continue  # ещё рано или уже неактуально - не показываем кандидатом
+        if now_ts < start_ts:
+            score = 90  # скоро начнётся - подвоз гостей
+        elif now_ts <= end_ts:
+            score = 70  # мероприятие идёт - спрос ровнее, чем на входе/выходе
+        else:
+            score = 95  # уже закончилось (в пределах "хвоста") - самый пик разъезда
+        reasons = ["мероприятие по афише"]
+        if post.get('place'):
+            reasons.append(post['place'])
+        label = f"🎤 {post.get('title') or 'Мероприятие'}"
+        candidates.append({'label': label, 'score': score, 'reasons': reasons, 'closed': False, 'advice': None})
+    candidates.sort(key=lambda c: c['score'], reverse=True)
+    return candidates[:limit]
+
 async def compute_where_to_go(city, category):
-    """Считает и сортирует всех кандидатов (аэропорты + вокзалы города +
-    "Город/центр") по баллу - возвращает список dict от
-    score_airport_candidate/score_station_candidate/score_city_candidate,
-    отсортированный по убыванию score, закрытые аэропорты (score=-1000)
-    уходят в конец списка. Вокзалы добавлены по просьбе пользователя
-    (21.09.2026) - только для городов из TRAIN_CITIES (см. STATION_CITY),
-    иначе городов без вокзалов в списке STATION_CITY просто нет данных."""
+    """Считает и сортирует всех кандидатов (аэропорты + вокзалы + актуальные
+    события афиши + "Город/центр") по баллу - возвращает список dict от
+    score_airport_candidate/score_station_candidate/score_concert_event_candidates/
+    score_city_candidate, отсортированный по убыванию score, закрытые
+    аэропорты (score=-1000) уходят в конец списка. Вокзалы добавлены по
+    просьбе пользователя (21.09.2026) - только для городов из TRAIN_CITIES
+    (см. STATION_CITY). Афиша концертов добавлена по просьбе пользователя
+    (22.09.2026) - только события, актуальные ПРЯМО СЕЙЧАС (см.
+    score_concert_event_candidates), не более 3, чтобы не забивать список."""
     candidates = []
     seen_icao = set()
     for airport in AIRPORTS_INFO.get(city, []):
@@ -2867,6 +2947,7 @@ async def compute_where_to_go(city, category):
             city_stations = {code: st for code, st in trains_data['stations'].items() if STATION_CITY.get(code) == city}
             for code, station in city_stations.items():
                 candidates.append(score_station_candidate(city, code, station, category))
+    candidates.extend(score_concert_event_candidates(city, category))
     candidates.append(await score_city_candidate(city))
     candidates.sort(key=lambda c: c['score'], reverse=True)
     return candidates
@@ -3602,23 +3683,65 @@ async def show_road_events(message: types.Message):
         disable_web_page_preview=True,
     )
 
+
+def build_concert_event_message(post, city):
+    """Текст + инлайн-кнопки для ОДНОГО структурированного концертного
+    события (см. parse_event_fields в fetch_concert_events.py) - тот же стиль,
+    что build_event_message у TimePad. "🚗 Поехали" - поиск по названию места
+    на Яндекс.Картах (как и у TimePad, координат у канала нет, только текстовое
+    название площадки/адреса); показывается только если место распознано."""
+    tz = ZoneInfo(EVENT_CITY_TIMEZONE.get(city, 'Europe/Moscow'))
+    lines = [f"🎤 *{post.get('title') or 'Мероприятие'}*"]
+    place = post.get('place')
+    if place:
+        lines.append(f"📍 {place.capitalize()}")
+    try:
+        start_dt = datetime.fromisoformat(post['start']).astimezone(tz)
+        end_dt = datetime.fromisoformat(post['end']).astimezone(tz) if post.get('end') else None
+        if start_dt.date() == (end_dt.date() if end_dt else start_dt.date()) and end_dt:
+            date_str = f"{start_dt.strftime('%d.%m, %H:%M')}–{end_dt.strftime('%H:%M')} (окончание ориентировочно)"
+        else:
+            date_str = start_dt.strftime('%d.%m, %H:%M')
+        if not post.get('start_has_explicit_time'):
+            date_str += " (точное время не указано в афише)"
+        lines.append(f"🗓 {date_str}")
+    except Exception:
+        pass
+    price_rub = post.get('price_rub')
+    if price_rub:
+        lines.append(f"💵 {price_rub} ₽")
+    elif post.get('is_free'):
+        lines.append("💵 вход свободный")
+    text = '\n'.join(lines)
+
+    buttons = []
+    if place:
+        from urllib.parse import quote
+        buttons.append(InlineKeyboardButton(text="🚗 Поехали", url=f"https://yandex.ru/maps/?text={quote(place)}"))
+    if post.get('link'):
+        buttons.append(InlineKeyboardButton(text="🔗 Подробнее", url=post['link']))
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[buttons]) if buttons else None
+    return text, keyboard
+
 @router.message(lambda message: message.text == "🎭 События города")
 async def show_city_events(message: types.Message):
     """Афиша - ДВА источника: афиша концертов из Telegram-каналов
-    @concerts_moscow/@spb_conc (см. fetch_concert_events.py,
-    get_concert_events_for_city) - добавлена по просьбе пользователя
-    (21.09.2026), тем же способом, что "⛔ Дорожные события" (пересылаем сами
-    тексты постов - у канала нет структурированных дата/адреса как полей,
-    только текст); и TimePad (см. fetch_timepad_data.py) - показываем
-    топ-10 ближайших крупных событий (см. get_events_for_user, limit=10).
-    ВАЖНО: TimePad собирается ЛОКАЛЬНЫМ запуском скрипта (Cloudflare
-    блокирует запросы с датацентровых IP, см. докстринг
-    fetch_timepad_data.py) - если пользователь давно его не запускал,
-    timepad_data.json может быть пустым/устаревшим, поэтому Telegram-афиша
-    (собирается АВТОМАТИЧЕСКИ на Railway, всегда свежая) показывается
-    ПЕРВОЙ - она надёжнее прямо сейчас. "Нет данных" - только если ОБА
-    источника пусты; если хотя бы один что-то нашёл, показываем то, что
-    есть."""
+    @concerts_moscow/@spb_conc (см. fetch_concert_events.py) - добавлена по
+    просьбе пользователя (21.09.2026, структурированный парсинг добавлен
+    22.09.2026 - дата/время/место/цена вытаскиваются из текста поста, см.
+    parse_event_fields); и TimePad (см. fetch_timepad_data.py) - топ-10
+    ближайших крупных событий (см. get_events_for_user, limit=10).
+    Фильтр по категории для афиши концертов (по просьбе пользователя,
+    22.09.2026): события с ценой >= PRICE_THRESHOLD_RUB видят И такси, И
+    Ultima; дешевле/бесплатные/без цены - только такси (см.
+    get_upcoming_concert_events_for_category, price_category в
+    fetch_concert_events.py). TimePad-события такого фильтра не имеют (там
+    свой источник данных без этого деления). ВАЖНО: TimePad собирается
+    ЛОКАЛЬНЫМ запуском скрипта (Cloudflare блокирует запросы с датацентровых
+    IP) - если пользователь давно его не запускал, timepad_data.json может
+    быть пустым/устаревшим, поэтому Telegram-афиша (собирается АВТОМАТИЧЕСКИ
+    на Railway, всегда свежая) показывается ПЕРВОЙ. "Нет данных" - только
+    если ОБА источника пусты."""
     user_id = message.from_user.id
     if user_id not in user_state or 'city' not in user_state[user_id]:
         await message.answer("Сначала выбери город!")
@@ -3627,9 +3750,9 @@ async def show_city_events(message: types.Message):
     category = user_state[user_id].get('category', 'taxi')
 
     events, city_supported = get_events_for_user(city, category, limit=10)
-    concert_posts = get_concert_events_for_city(city)
+    concert_events = get_upcoming_concert_events_for_category(city, category, limit=10)
 
-    if not events and not concert_posts:
+    if not events and not concert_events:
         text = (
             "🎭 *События города*\n\n"
             "На ближайшее время подходящих событий не нашлось (или для этого "
@@ -3643,26 +3766,17 @@ async def show_city_events(message: types.Message):
     header = f"🎭 *События города* ({class_label.title() if class_label else 'все'})"
     # Заголовок - обычным сообщением с прикреплённой нижней клавиатурой услуг
     # (она остаётся видна и дальше, повторно прикреплять на каждое сообщение
-    # не нужно).
+    # не нужно). Каждое событие - ОТДЕЛЬНЫМ сообщением со СВОЕЙ инлайн-кнопкой
+    # "Поехали" (и у концертов, и у TimePad), чтобы кнопка однозначно вела
+    # именно к этому месту. Небольшая пауза между отправками - чтобы Telegram
+    # не сворачивал быстро идущие подряд сообщения визуально в одну группу.
     await message.answer(header, reply_markup=services_keyboard(category, city), parse_mode='Markdown')
 
-    if concert_posts:
-        concert_lines = ["🎤 *Афиша концертов*\n"]
-        for post in concert_posts[:ROAD_EVENTS_SHOW_COUNT]:
-            time_str = format_road_event_time(post.get('time', ''), city)
-            text = escape_md(strip_urls_for_display(post.get('text', '').strip()))
-            prefix = f"🕐 {time_str}\n" if time_str else ""
-            concert_lines.append(f"{prefix}{text}")
-        concert_message = '\n\n'.join(concert_lines)
-        if len(concert_message) > 4000:
-            concert_message = concert_message[:4000] + "…"
-        await message.answer(concert_message, parse_mode='Markdown', disable_web_page_preview=True)
+    for post in concert_events:
+        text, keyboard = build_concert_event_message(post, city)
+        await message.answer(text, reply_markup=keyboard, parse_mode='Markdown', disable_web_page_preview=True)
+        await asyncio.sleep(0.1)
 
-    # Каждое событие TimePad - ОТДЕЛЬНЫМ сообщением со СВОЕЙ инлайн-кнопкой
-    # "Поехали", чтобы кнопка однозначно вела именно к этому месту, а не к
-    # первому/последнему в общем списке. Небольшая пауза между отправками -
-    # чтобы Telegram не сворачивал быстро идущие подряд сообщения от одного
-    # бота визуально в одну группу у пользователя.
     for event in events:
         text, keyboard = build_event_message(event, city)
         await message.answer(text, reply_markup=keyboard, parse_mode='Markdown', disable_web_page_preview=True)
