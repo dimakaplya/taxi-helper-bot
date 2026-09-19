@@ -1823,7 +1823,7 @@ async def handle_nearby_location(message: types.Message):
         return
     if not scored:
         await message.answer(
-            f"{cfg['emoji']} Для твоего города пока нет собранных точек «{cfg['label']}» - начали со сбора по Москве, остальные города добавим позже.",
+            f"{cfg['emoji']} Для твоего города пока нет собранных точек «{cfg['label']}» - сбор идёт постепенно по городам, скоро дойдём и до тебя.",
             reply_markup=courier_module_keyboard(),
         )
         return
