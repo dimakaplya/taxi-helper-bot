@@ -1556,6 +1556,19 @@ FUEL_BOT_URL = "https://t.me/gde_benzin_rubot"
 # пользователя, реферальная ссылка на бота VPN-сервиса.
 VPN_BOT_URL = "https://t.me/Vpntaxihelper_bot?start=633742909"
 
+# Ещё один сторонний бот того же типа (кнопка -> открывает чат напрямую,
+# БЕЗ интеграции с данными) - @Yan_rus_bot показывает коэффициент
+# повышенного спроса (surge/"кэф") по зонам города. По просьбе пользователя
+# рассматривали встроить это напрямую в Taxi Helper, но технической
+# возможности нет: сам сторонний бот получает эти данные через авторизацию
+# в личном кабинете водителя Яндекс.Про (эмуляция внутреннего API Яндекс
+# Такси) - это не публичный API, а обход системы Яндекса, чреватый банами
+# аккаунтов и нарушением условий использования. Такое в Taxi Helper не
+# делаем ни для одного, ни для нескольких аккаунтов - вместо этого просто
+# кнопка-ссылка на сторонний бот, тем же паттерном, что FUEL_BOT_URL/
+# VPN_BOT_URL выше - пользователь сам переходит в его чат.
+KEF_BOT_URL = "https://t.me/Yan_rus_bot"
+
 def services_keyboard(category=None, city=None):
     # Итоговый набор кнопок меню услуг (по заданному порядку). "Заказы
     # города" (было "Повышенный спрос") убрана по просьбе пользователя - была
@@ -1619,7 +1632,6 @@ def services_keyboard(category=None, city=None):
 COURIER_MODULE_CATEGORIES = set(CATEGORIES.keys())  # все категории
 
 COURIER_STUB_SECTIONS = {
-    "📈 Спрос сейчас",
     "🛠 ТО транспорта",
 }
 
@@ -2252,12 +2264,31 @@ async def start_courier_finance(message: types.Message):
 
 @router.message(lambda message: message.text in COURIER_STUB_SECTIONS and user_state.get(message.from_user.id, {}).get('in_courier_module'))
 async def courier_stub_section(message: types.Message):
-    # Спрос сейчас/ТО - пока без реальных точек (нужна карта + источники
-    # данных, см. README прототипа), тот же текст, что в самом HTML-прототипе
-    # на экране-заглушке (data-view="soon"). Туалеты/парковка/шиномонтаж/мойки
+    # ТО - пока без реальных точек (нужна карта + источники данных, см.
+    # README прототипа), тот же текст, что в самом HTML-прототипе на
+    # экране-заглушке (data-view="soon"). Туалеты/парковка/шиномонтаж/мойки
     # больше НЕ заглушки - см. show_nearby_prompt/handle_nearby_location ниже.
+    # "Спрос сейчас" тоже больше не заглушка - см. show_kef_bot ниже.
     category = user_state.get(message.from_user.id, {}).get('category')
     await message.answer("Этот раздел в разработке 🚧 — скоро будет", reply_markup=courier_module_keyboard(category))
+
+@router.message(lambda message: message.text == "📈 Спрос сейчас" and user_state.get(message.from_user.id, {}).get('in_courier_module'))
+async def show_kef_bot(message: types.Message):
+    """Ссылка на стороннего бота @Yan_rus_bot (коэффициент повышенного
+    спроса/"кэф" по зонам города) - тот же паттерн, что show_fuel_bot/
+    show_vpn_bot: кнопка просто открывает чужой чат напрямую, без какой-либо
+    интеграции с данными самого Taxi Helper (см. комментарий у KEF_BOT_URL -
+    прямая интеграция потребовала бы обхода Яндекса, этого не делаем)."""
+    category = user_state.get(message.from_user.id, {}).get('category')
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📈 Открыть бота с кэфом", url=KEF_BOT_URL)]
+    ])
+    text = (
+        "📈 *Спрос сейчас*\n\n"
+        "Коэффициент повышенного спроса по районам - отдельный бот. "
+        "Нажми кнопку ниже, чтобы открыть его."
+    )
+    await message.answer(text, reply_markup=keyboard, parse_mode='Markdown')
 
 @router.message(lambda message: message.text == "🔔 Уведомления" and user_state.get(message.from_user.id, {}).get('in_courier_module'))
 async def show_notification_settings(message: types.Message):
