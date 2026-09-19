@@ -98,14 +98,14 @@ def get_today_usage(log):
 # сопоставлением по названию через stations_list, см. примечание выше).
 # yandex_code = None -> аэропорт не найден / закрыт.
 AIRPORTS = [
-    {'iata': 'SVO', 'icao': 'UUWW', 'name': 'Шереметьево',       'yandex_code': 's9600213'},
+    {'iata': 'SVO', 'icao': 'UUEE', 'name': 'Шереметьево',       'yandex_code': 's9600213'},
     {'iata': 'DME', 'icao': 'UUDD', 'name': 'Домодедово',        'yandex_code': 's9600216'},
-    {'iata': 'VKO', 'icao': 'UUWL', 'name': 'Внуково',           'yandex_code': 's9600215'},
-    {'iata': 'LED', 'icao': 'UULP', 'name': 'Пулково',           'yandex_code': 's9600366'},
+    {'iata': 'VKO', 'icao': 'UUWW', 'name': 'Внуково',           'yandex_code': 's9600215'},
+    {'iata': 'LED', 'icao': 'ULLI', 'name': 'Пулково',           'yandex_code': 's9600366'},
     {'iata': 'OVB', 'icao': 'UNNT', 'name': 'Толмачёво',         'yandex_code': 's9600374'},
     {'iata': 'SVX', 'icao': 'USSS', 'name': 'Кольцово',          'yandex_code': 's9600370'},
     {'iata': 'KZN', 'icao': 'UWKD', 'name': 'Казань',            'yandex_code': 's9600379'},
-    {'iata': 'CEK', 'icao': 'UUCC', 'name': 'Баландино',         'yandex_code': 's9623444'},
+    {'iata': 'CEK', 'icao': 'USCC', 'name': 'Баландино',         'yandex_code': 's9623444'},
     {'iata': 'OMS', 'icao': 'UNOO', 'name': 'Омск',              'yandex_code': 's9600390'},
     {'iata': 'KUF', 'icao': 'UWWW', 'name': 'Курумоч',           'yandex_code': 's9600380'},
     {'iata': 'RND', 'icao': 'URRP', 'name': 'Платов (Ростов)',   'yandex_code': 's9866615', 'closed': True},  # ⚠️ закрыт для гражданских полётов - данные не собираем, экономим квоту

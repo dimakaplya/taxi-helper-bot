@@ -364,8 +364,8 @@ logger = logging.getLogger(__name__)
 # найдётся более точный источник или другая методика калибровки исходного
 # словаря.
 AIRPORT_CAPACITY = {
-    'UUWW': 4966, 'UUDD': 1586, 'UUWL': 1838, 'UULP': 2373,
-    'UNNT': 1084, 'USSS': 947, 'UWKD': 616, 'UUCC': 251,
+    'UUEE': 4966, 'UUDD': 1586, 'UUWW': 1838, 'ULLI': 2373,
+    'UNNT': 1084, 'USSS': 947, 'UWKD': 616, 'USCC': 251,
     'UNOO': 183, 'UWWW': 411, 'URRP': 171, 'UWGG': 400,
     'URKK': 525, 'URSS': 1427,
 }
@@ -376,11 +376,11 @@ AIRPORT_CAPACITY = {
 # конкретного аэропорта, а не по системному времени сервера - иначе все
 # расчёты "сейчас"/"через 2 часа" будут сдвинуты на несколько часов.
 AIRPORT_TIMEZONE = {
-    'UUWW': 'Europe/Moscow', 'UUDD': 'Europe/Moscow', 'UUWL': 'Europe/Moscow',
-    'UULP': 'Europe/Moscow', 'UWKD': 'Europe/Moscow', 'URRP': 'Europe/Moscow',
+    'UUEE': 'Europe/Moscow', 'UUDD': 'Europe/Moscow', 'UUWW': 'Europe/Moscow',
+    'ULLI': 'Europe/Moscow', 'UWKD': 'Europe/Moscow', 'URRP': 'Europe/Moscow',
     'URKK': 'Europe/Moscow', 'URSS': 'Europe/Moscow', 'UWGG': 'Europe/Moscow',
     'UNNT': 'Asia/Novosibirsk',
-    'USSS': 'Asia/Yekaterinburg', 'UUCC': 'Asia/Yekaterinburg',
+    'USSS': 'Asia/Yekaterinburg', 'USCC': 'Asia/Yekaterinburg',
     'UNOO': 'Asia/Omsk',
     'UWWW': 'Europe/Samara',
 }
@@ -407,12 +407,25 @@ CATEGORY_TO_CLASS = {
 
 AIRPORTS_INFO = {
     'moscow': [
-        {'name': 'SVO (Шереметьево)', 'emoji': '✈️', 'icao': 'UUWW', 'iata': 'SVO'},
+        # SVO (Шереметьево) - две отдельные записи с ОДНИМ И ТЕМ ЖЕ icao,
+        # по одной на каждую терминальную зону (см. AIRPORT_TERMINAL_ZONES) -
+        # по просьбе пользователя, чтобы в списке аэропортов сразу было
+        # видно раздельный выбор, а не только внутри карточки. 'zone_key'
+        # используется в show_airport_details/compute_current_hour_load/
+        # compute_current_availability, чтобы фильтровать рейсы ТОЛЬКО этой
+        # зоны (по flight['terminal'], см. flight_terminal_zone) - у
+        # обычных однозонных аэропортов поля zone_key нет вообще, ничего не
+        # меняется. Статус аэропорта, ограничения Росавиации и пуши о смене
+        # статуса - ОБЩИЕ на весь icao (Росавиация не делит по терминалам),
+        # так что обе записи получают один и тот же статус - это осознанно,
+        # не баг.
+        {'name': 'SVO (Шереметьево A/B/C/VIP)', 'emoji': '✈️', 'icao': 'UUEE', 'iata': 'SVO', 'zone_key': 'abc_vip'},
+        {'name': 'SVO (Шереметьево Терминал D)', 'emoji': '✈️', 'icao': 'UUEE', 'iata': 'SVO', 'zone_key': 'd'},
         {'name': 'DME (Домодедово)', 'emoji': '✈️', 'icao': 'UUDD', 'iata': 'DME'},
-        {'name': 'VKO (Внуково)', 'emoji': '✈️', 'icao': 'UUWL', 'iata': 'VKO'},
+        {'name': 'VKO (Внуково)', 'emoji': '✈️', 'icao': 'UUWW', 'iata': 'VKO'},
     ],
     'spb': [
-        {'name': 'LED (Пулково)', 'emoji': '✈️', 'icao': 'UULP', 'iata': 'LED'},
+        {'name': 'LED (Пулково)', 'emoji': '✈️', 'icao': 'ULLI', 'iata': 'LED'},
     ],
     'novosibirsk': [
         {'name': 'OVB (Толмачёво)', 'emoji': '✈️', 'icao': 'UNNT', 'iata': 'OVB'},
@@ -424,7 +437,7 @@ AIRPORTS_INFO = {
         {'name': 'KZN (Казань)', 'emoji': '✈️', 'icao': 'UWKD', 'iata': 'KZN'},
     ],
     'chelyabinsk': [
-        {'name': 'CEK (Баландино)', 'emoji': '✈️', 'icao': 'UUCC', 'iata': 'CEK'},
+        {'name': 'CEK (Баландино)', 'emoji': '✈️', 'icao': 'USCC', 'iata': 'CEK'},
     ],
     'omsk': [
         {'name': 'OMS (Омск)', 'emoji': '✈️', 'icao': 'UNOO', 'iata': 'OMS'},
@@ -455,30 +468,39 @@ AIRPORTS_INFO = {
 
 # Обратный индекс ICAO -> город/данные аэропорта - нужен для пушей об
 # изменении статуса аэропорта: по коду аэропорта нужно быстро понять, каким
-# водителям (по выбранному городу) это разослать.
+# водителям (по выбранному городу) это разослать. Статус/ограничения
+# Росавиации ОБЩИЕ на весь аэропорт (см. комментарий у SVO в AIRPORTS_INFO
+# выше - Росавиация не делит по терминалам), поэтому для аэропорта с
+# несколькими зональными записями (одинаковый icao, разные zone_key) сюда
+# должна попасть ОДНА нейтральная запись без привязки к конкретной зоне -
+# иначе пуши о статусе называли бы "Шереметьево Терминал D" даже когда речь
+# не про конкретный терминал, а про весь аэропорт. Раз zone-записи всегда
+# идут ПОСЛЕ первой (см. порядок в AIRPORTS_INFO), достаточно не
+# перезаписывать уже существующую запись без zone_key записью с zone_key.
 ICAO_TO_CITY = {}
 ICAO_TO_AIRPORT = {}
 for _city_key, _airports_list in AIRPORTS_INFO.items():
     for _airport in _airports_list:
         ICAO_TO_CITY[_airport['icao']] = _city_key
-        ICAO_TO_AIRPORT[_airport['icao']] = _airport
+        if _airport['icao'] not in ICAO_TO_AIRPORT or not _airport.get('zone_key'):
+            ICAO_TO_AIRPORT[_airport['icao']] = _airport
 
 # Координаты (широта, долгота) каждого аэропорта - открытые авиационные
 # данные, нужны для фичи "Очередь у аэропорта" (см. блок AIRPORT_QUEUE_*
 # ниже): по живой геопозиции водителя считаем расстояние до ближайшего
 # аэропорта (haversine_km, см. nearest_airport_zone() рядом с haversine_km).
-# UUWW (Шереметьево) - средняя точка между терминальными зонами, см.
+# UUEE (Шереметьево) - средняя точка между терминальными зонами, см.
 # AIRPORT_TERMINAL_ZONES ниже - используется как фолбэк, если AIRPORT_TERMINAL_ZONES
 # почему-то не задан для этого icao (не должно происходить, но на всякий случай).
 AIRPORT_COORDS = {
-    'UUWW': (55.9736, 37.4125),   # Шереметьево
+    'UUEE': (55.9736, 37.4125),   # Шереметьево
     'UUDD': (55.4088, 37.9063),   # Домодедово
-    'UUWL': (55.5983, 37.2615),   # Внуково
-    'UULP': (59.8003, 30.2625),   # Пулково
+    'UUWW': (55.5983, 37.2615),   # Внуково
+    'ULLI': (59.8003, 30.2625),   # Пулково
     'UNNT': (55.0126, 82.6507),   # Толмачёво
     'USSS': (56.7431, 60.8027),   # Кольцово
     'UWKD': (55.6062, 49.2787),   # Казань
-    'UUCC': (55.3058, 61.5033),   # Баландино
+    'USCC': (55.3058, 61.5033),   # Баландино
     'UNOO': (54.9669, 73.3105),   # Омск Центральный
     'UWWW': (53.5047, 50.1644),   # Курумоч
     'URRP': (47.4939, 39.9247),   # Платов (закрыт для гражданских полётов,
@@ -488,7 +510,7 @@ AIRPORT_COORDS = {
     'URSS': (43.4499, 39.9566),   # Сочи/Адлер
 }
 
-# Шереметьево (UUWW) физически состоит из двух отдельных терминальных
+# Шереметьево (UUEE) физически состоит из двух отдельных терминальных
 # комплексов с разными подъездами - по просьбе пользователя "Очередь у
 # аэропорта" и список рейсов различают именно эти две зоны:
 #   - "abc_vip": терминалы A, B, C и VIP-зал - единый северный комплекс,
@@ -500,7 +522,7 @@ AIRPORT_COORDS = {
 #     дороге в объезд (или на аэроэкспрессе/шаттле)
 # Координаты найдены по официальным адресам терминалов (2ГИС).
 AIRPORT_TERMINAL_ZONES = {
-    'UUWW': {
+    'UUEE': {
         'abc_vip': {'coords': (55.980579, 37.409522), 'label': 'Терминалы A/B/C/VIP'},
         'd': {'coords': (55.962927, 37.406064), 'label': 'Терминал D'},
     },
@@ -508,9 +530,9 @@ AIRPORT_TERMINAL_ZONES = {
 
 # Буква терминала из данных Yandex Rasp API (flight['terminal'], см.
 # fetch_yandex_data.py) -> ключ зоны в AIRPORT_TERMINAL_ZONES[icao]. Нужно
-# только для аэропортов с несколькими зонами - сейчас только UUWW.
+# только для аэропортов с несколькими зонами - сейчас только UUEE.
 TERMINAL_LETTER_TO_ZONE = {
-    'UUWW': {'A': 'abc_vip', 'B': 'abc_vip', 'C': 'abc_vip', 'D': 'd'},
+    'UUEE': {'A': 'abc_vip', 'B': 'abc_vip', 'C': 'abc_vip', 'D': 'd'},
 }
 
 def flight_terminal_zone(icao, terminal_letter):
@@ -1082,7 +1104,7 @@ def get_airport_flights(airport_icao):
             return flights
 
         # Запасной вариант - только для SVO, пока нет свежего flights_data.json
-        if airport_icao == 'UUWW':
+        if airport_icao == 'UUEE':
             for flight_data in FALLBACK_ARRIVALS_SVO:
                 time_parts = flight_data['time'].split(':')
                 hour, minute = int(time_parts[0]), int(time_parts[1])
@@ -1748,11 +1770,11 @@ def nearest_airport(lat, lon):
 
 def nearest_airport_zone(lat, lon):
     """Как nearest_airport(), но для аэропортов с несколькими терминальными
-    зонами (см. AIRPORT_TERMINAL_ZONES - сейчас только UUWW/Шереметьево:
+    зонами (см. AIRPORT_TERMINAL_ZONES - сейчас только UUEE/Шереметьево:
     "abc_vip" и "d") дополнительно определяет БЛИЖАЙШУЮ зону внутри этого
     аэропорта, а не просто центр аэропорта в целом. Логика в два шага:
     1) находим ближайший АЭРОПОРТ как раньше (nearest_airport) - это не
-       меняется, у Шереметьево остаётся один ICAO-код UUWW, просто внутри
+       меняется, у Шереметьево остаётся один ICAO-код UUEE, просто внутри
        него теперь есть под-деление;
     2) если у найденного аэропорта есть зоны в AIRPORT_TERMINAL_ZONES -
        среди НИХ отдельно ищем ближайшую и считаем расстояние уже до неё
@@ -3190,7 +3212,7 @@ async def show_airport_details(callback_query: types.CallbackQuery):
         domestic_in_hour = 0
         international_in_hour = 0
         # Для аэропортов с несколькими терминальными зонами (сейчас только
-        # UUWW/Шереметьево - см. AIRPORT_TERMINAL_ZONES) отдельно считаем
+        # UUEE/Шереметьево - см. AIRPORT_TERMINAL_ZONES) отдельно считаем
         # рейсы/пассажиров по зоне (flight_terminal_zone -> zone_key),
         # по просьбе пользователя разделить прогноз загрузки по терминалам.
         # У остальных аэропортов zones_in_hour остаётся пустым - ничего не
