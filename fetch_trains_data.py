@@ -68,33 +68,67 @@ def fetch_station_arrivals(station_code, date_str):
     """Только прибытия (event=arrival), только поезда дальнего следования
     (transport_types=train, БЕЗ электричек). Пагинация - на случай если
     вдруг рейсов окажется больше лимита страницы (для двух вокзалов дальнего
-    следования это маловероятно, но не будем на это полагаться молча)."""
+    следования это маловероятно, но не будем на это полагаться молча).
+
+    При 429 (Too Many Requests) делает повторы с нарастающей паузой, как и
+    fetch_schedule в fetch_yandex_data.py - ИСПРАВЛЕНО 19.09.2026: раньше тут
+    вообще не было обработки 429, любой отказ API молча превращался в пустой
+    список и затирал реальные данные вокзала нулями в trains_data.json (тот
+    же класс бага, что был у аэропортов). Возвращает None (а не []), если
+    САМАЯ ПЕРВАЯ страница не получена даже после ретраев - main() тогда
+    сохраняет предыдущие данные вокзала вместо перезаписи нулями."""
     global REQUEST_COUNT
     all_items = []
     offset = 0
     page_limit = 100
     max_pages = 5
-    for _ in range(max_pages):
-        try:
-            resp = requests.get(
-                f'{BASE_URL}/schedule/',
-                params={
-                    'apikey': API_KEY,
-                    'station': station_code,
-                    'date': date_str,
-                    'event': 'arrival',
-                    'transport_types': 'train',
-                    'lang': 'ru_RU',
-                    'limit': page_limit,
-                    'offset': offset,
-                },
-                timeout=30,
-            )
-            REQUEST_COUNT += 1
-            resp.raise_for_status()
-            data = resp.json()
-        except Exception as e:
-            logger.error(f"❌ Ошибка запроса schedule (arrival, {station_code}, offset={offset}): {e}")
+    RETRY_ATTEMPTS = 5
+    RETRY_BACKOFF_BASE = 6  # секунды: 6, 12, 18, 24 - см. тот же комментарий в fetch_yandex_data.py
+    first_page_failed = False
+    for page_num in range(max_pages):
+        data = None
+        for attempt in range(1, RETRY_ATTEMPTS + 1):
+            try:
+                resp = requests.get(
+                    f'{BASE_URL}/schedule/',
+                    params={
+                        'apikey': API_KEY,
+                        'station': station_code,
+                        'date': date_str,
+                        'event': 'arrival',
+                        'transport_types': 'train',
+                        'lang': 'ru_RU',
+                        'limit': page_limit,
+                        'offset': offset,
+                    },
+                    timeout=30,
+                )
+                REQUEST_COUNT += 1
+                if resp.status_code == 429:
+                    if attempt < RETRY_ATTEMPTS:
+                        wait_s = RETRY_BACKOFF_BASE * attempt
+                        logger.warning(
+                            f"⏳ 429 Too Many Requests (arrival, {station_code}, offset={offset}), "
+                            f"попытка {attempt}/{RETRY_ATTEMPTS} - жду {wait_s}с..."
+                        )
+                        time.sleep(wait_s)
+                        continue
+                    else:
+                        logger.error(
+                            f"❌ 429 Too Many Requests (arrival, {station_code}, offset={offset}) - "
+                            f"исчерпаны все {RETRY_ATTEMPTS} попыток"
+                        )
+                        break
+                resp.raise_for_status()
+                data = resp.json()
+                break
+            except Exception as e:
+                logger.error(f"❌ Ошибка запроса schedule (arrival, {station_code}, offset={offset}): {e}")
+                break
+
+        if data is None:
+            if page_num == 0:
+                first_page_failed = True
             break
 
         batch = data.get('schedule', [])
@@ -103,8 +137,10 @@ def fetch_station_arrivals(station_code, date_str):
         if len(batch) < page_limit:
             break
         offset += page_limit
-        time.sleep(0.2)
+        time.sleep(1.5)
 
+    if first_page_failed:
+        return None
     return all_items
 
 
@@ -271,6 +307,15 @@ def main():
         return
     logger.info(f"📊 Уже потрачено сегодня (общий счётчик): {used_today}/{DAILY_QUOTA} запросов")
 
+    import json
+    previous_result = None
+    if os.path.exists(OUTPUT_FILE):
+        try:
+            with open(OUTPUT_FILE, 'r', encoding='utf-8') as f:
+                previous_result = json.load(f)
+        except Exception as e:
+            logger.warning(f"⚠️ Не удалось прочитать предыдущий {OUTPUT_FILE}: {e}")
+
     result = {
         'generated_at': datetime.now().isoformat(),
         'date': today,
@@ -280,16 +325,35 @@ def main():
     for station in STATIONS:
         name, code = station['name'], station['code']
         logger.info(f"🚆 Обрабатываю {name}...")
-        arrivals = parse_trains(fetch_station_arrivals(code, today))
+        raw_schedule = fetch_station_arrivals(code, today)
+
+        if raw_schedule is None:
+            # Не удалось получить данные (429/ошибка) даже после ретраев -
+            # оставляем прошлые данные этого вокзала, если они были, вместо
+            # того чтобы писать пустой список (см. докстринг fetch_station_arrivals).
+            prev_station = (previous_result or {}).get('stations', {}).get(code)
+            if prev_station and prev_station.get('arrivals'):
+                result['stations'][code] = prev_station
+                logger.warning(
+                    f"⚠️ {name}: не удалось получить свежие данные - оставляю "
+                    f"предыдущие ({len(prev_station['arrivals'])} прибытий, "
+                    f"устарели с {previous_result.get('generated_at', '?')})"
+                )
+            else:
+                result['stations'][code] = {'name': name, 'arrivals': []}
+                logger.error(f"❌ {name}: не удалось получить данные, и прошлых данных тоже нет")
+            time.sleep(2.0)
+            continue
+
+        arrivals = parse_trains(raw_schedule)
         result['stations'][code] = {
             'name': name,
             'arrivals': arrivals,
         }
         logger.info(f"✅ {name}: {len(arrivals)} прибытий")
-        time.sleep(0.3)
+        time.sleep(2.0)
 
     with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
-        import json
         json.dump(result, f, ensure_ascii=False, indent=2)
     logger.info(f"💾 Сохранено в {OUTPUT_FILE}")
 

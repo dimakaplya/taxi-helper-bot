@@ -250,8 +250,14 @@ def fetch_schedule(station_code, event, date_str):
     offset = 0
     page_limit = 500
     max_pages = 10  # защита от бесконечного цикла - максимум 5000 рейсов на аэропорт/направление
-    RETRY_ATTEMPTS = 4
-    RETRY_BACKOFF_BASE = 3  # секунды: 3, 6, 9, 12 - суммарно ~30с максимум на одну страницу
+    RETRY_ATTEMPTS = 5
+    RETRY_BACKOFF_BASE = 6  # секунды: 6, 12, 18, 24 - суммарно ~60с максимум на одну страницу.
+    # УВЕЛИЧЕНО 19.09.2026: с базой 3с (макс. ожидание 9с перед последней
+    # попыткой) почти ВСЕ аэропорты подряд ловили 429 даже на 4-й попытке -
+    # см. Railway-логи за 19.09.2026 20:20-20:24, где 429 держался несколько
+    # МИНУТ подряд независимо от паузы. Значит окно лимита Yandex Rasp шире,
+    # чем предполагалось - официальной цифры rps/rpm в доках нет (только
+    # суточная квота 500), поэтому увеличиваем паузы эмпирически.
     first_page_failed = False
     for page_num in range(max_pages):
         data = None
@@ -314,7 +320,7 @@ def fetch_schedule(station_code, event, date_str):
         if len(batch) < page_limit:
             break
         offset += page_limit
-        time.sleep(0.5)
+        time.sleep(1.5)
 
     if first_page_failed:
         return None  # сигнал "не удалось получить данные", отличается от [] ("рейсов правда нет")
@@ -444,7 +450,7 @@ def main():
             else:
                 result['airports'][icao] = {'iata': iata, 'arrivals': []}
                 logger.error(f"❌ {name}: не удалось получить данные, и прошлых данных тоже нет")
-            time.sleep(0.5)
+            time.sleep(2.0)
             continue
 
         arrivals_today = parse_flights(raw_schedule, 'arrival')
@@ -454,7 +460,8 @@ def main():
             'arrivals': arrivals_today,
         }
         logger.info(f"✅ {name}: {len(arrivals_today)} прилётов")
-        time.sleep(0.5)  # не долбим API слишком часто (был 0.3с - оказалось мало, см. 429 19.09.2026)
+        time.sleep(2.0)  # не долбим API слишком часто (было 0.3с, потом 0.5с - всё равно 429
+        # почти на каждом аэропорте подряд, см. инцидент 19.09.2026 20:20-20:24 МСК)
 
     with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
