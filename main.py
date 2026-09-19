@@ -4160,7 +4160,20 @@ async def main():
     asyncio.create_task(rain_checker())
     asyncio.create_task(holiday_checker())
     asyncio.create_task(airport_queue_checker())
-    await dp.start_polling(bot)
+    # allowed_updates передаём ЯВНО (а не полагаемся на автоматическое
+    # dp.resolve_used_update_types()) - похоже, это и была причина, почему
+    # пуши "Очередь у аэропорта" не приходили: Telegram Bot API запоминает
+    # список allowed_updates между вызовами getUpdates на своей стороне, и
+    # если хоть раз polling стартовал БЕЗ edited_message в списке (например,
+    # до того как в коде появился хендлер @router.edited_message, много
+    # деплоев назад) - сервер мог продолжать не присылать edited_message
+    # апдейты вообще, даже после того как код научился их обрабатывать. В
+    # логах Railway это выглядело как "Update id=... is not handled" на
+    # каждое обновление живой геопозиции - апдейт до бота не долетал в
+    # обрабатываемом виде. message/edited_message/callback_query - все типы
+    # апдейтов, которые реально используются хендлерами в этом файле (см.
+    # @router.message/@router.edited_message/@router.callback_query).
+    await dp.start_polling(bot, allowed_updates=['message', 'edited_message', 'callback_query'])
 
 if __name__ == '__main__':
     asyncio.run(main())
