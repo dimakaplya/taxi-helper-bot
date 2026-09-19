@@ -237,33 +237,73 @@ REQUEST_COUNT = 0  # глобальный счётчик реальных зап
 def fetch_schedule(station_code, event, date_str):
     """event: 'arrival' или 'departure'. Пагинирует через offset, пока не соберёт все
     рейсы за день. Останавливается как только страница пришла неполной (batch < page_limit) -
-    это значит что дальше данных нет, и лишний "пустой" запрос на подтверждение не нужен."""
+    это значит что дальше данных нет, и лишний "пустой" запрос на подтверждение не нужен.
+
+    При 429 (Too Many Requests) делает до RETRY_ATTEMPTS повторов с нарастающей
+    паузой (RETRY_BACKOFF_BASE * попытка секунд) вместо немедленного отказа -
+    иначе временный rate-limit молча превращается в "0 рейсов" и затирает в
+    flights_data.json реальные данные пустыми (см. инцидент 19.09.2026: почти
+    все запросы подряд поймали 429, и файл перезаписался нулями для ВСЕХ
+    аэропортов, включая те, что вообще не при чём)."""
     global REQUEST_COUNT
     all_items = []
     offset = 0
     page_limit = 500
     max_pages = 10  # защита от бесконечного цикла - максимум 5000 рейсов на аэропорт/направление
-    for _ in range(max_pages):
-        try:
-            resp = requests.get(
-                f'{BASE_URL}/schedule/',
-                params={
-                    'apikey': API_KEY,
-                    'station': station_code,
-                    'date': date_str,
-                    'event': event,
-                    'transport_types': 'plane',
-                    'lang': 'ru_RU',
-                    'limit': page_limit,
-                    'offset': offset,
-                },
-                timeout=30,
-            )
-            REQUEST_COUNT += 1
-            resp.raise_for_status()
-            data = resp.json()
-        except Exception as e:
-            logger.error(f"❌ Ошибка запроса schedule ({event}, {station_code}, offset={offset}): {e}")
+    RETRY_ATTEMPTS = 4
+    RETRY_BACKOFF_BASE = 3  # секунды: 3, 6, 9, 12 - суммарно ~30с максимум на одну страницу
+    first_page_failed = False
+    for page_num in range(max_pages):
+        data = None
+        for attempt in range(1, RETRY_ATTEMPTS + 1):
+            try:
+                resp = requests.get(
+                    f'{BASE_URL}/schedule/',
+                    params={
+                        'apikey': API_KEY,
+                        'station': station_code,
+                        'date': date_str,
+                        'event': event,
+                        'transport_types': 'plane',
+                        'lang': 'ru_RU',
+                        'limit': page_limit,
+                        'offset': offset,
+                    },
+                    timeout=30,
+                )
+                REQUEST_COUNT += 1
+                if resp.status_code == 429:
+                    if attempt < RETRY_ATTEMPTS:
+                        wait_s = RETRY_BACKOFF_BASE * attempt
+                        logger.warning(
+                            f"⏳ 429 Too Many Requests ({event}, {station_code}, offset={offset}), "
+                            f"попытка {attempt}/{RETRY_ATTEMPTS} - жду {wait_s}с..."
+                        )
+                        time.sleep(wait_s)
+                        continue
+                    else:
+                        logger.error(
+                            f"❌ 429 Too Many Requests ({event}, {station_code}, offset={offset}) - "
+                            f"исчерпаны все {RETRY_ATTEMPTS} попыток"
+                        )
+                        break
+                resp.raise_for_status()
+                data = resp.json()
+                break
+            except Exception as e:
+                logger.error(f"❌ Ошибка запроса schedule ({event}, {station_code}, offset={offset}): {e}")
+                break
+
+        if data is None:
+            # Не удалось получить страницу (429 после всех попыток, либо другая
+            # ошибка). Если это была САМАЯ ПЕРВАЯ страница - помечаем весь
+            # запрос как провалившийся (first_page_failed), чтобы main() не
+            # спутал "не смогли получить данные" с "сегодня рейсов нет" и не
+            # затёр реальный кэш нулями. Если провалилась страница пагинации
+            # НЕ первая - данные, собранные до этого, всё равно возвращаем
+            # (лучше неполный список, чем ничего).
+            if page_num == 0:
+                first_page_failed = True
             break
 
         batch = data.get('schedule', [])
@@ -274,8 +314,10 @@ def fetch_schedule(station_code, event, date_str):
         if len(batch) < page_limit:
             break
         offset += page_limit
-        time.sleep(0.2)
+        time.sleep(0.5)
 
+    if first_page_failed:
+        return None  # сигнал "не удалось получить данные", отличается от [] ("рейсов правда нет")
     return all_items
 
 
@@ -352,6 +394,19 @@ def main():
         return
     logger.info(f"📊 Уже потрачено сегодня: {used_today}/{DAILY_QUOTA} запросов")
 
+    # Предыдущий результат - на случай, если запрос к какому-то аэропорту
+    # провалится (см. fetch_schedule/first_page_failed): тогда оставляем в
+    # новом файле его СТАРЫЕ данные вместо того, чтобы затирать нулями (см.
+    # инцидент 19.09.2026 - массовый 429 от Yandex Rasp API на старте бота
+    # переписал flights_data.json пустыми прилётами для всех аэропортов).
+    previous_result = None
+    if os.path.exists(OUTPUT_FILE):
+        try:
+            with open(OUTPUT_FILE, 'r', encoding='utf-8') as f:
+                previous_result = json.load(f)
+        except Exception as e:
+            logger.warning(f"⚠️ Не удалось прочитать предыдущий {OUTPUT_FILE}: {e}")
+
     result = {
         'generated_at': datetime.now().isoformat(),
         'date': today,
@@ -372,22 +427,46 @@ def main():
             result['airports'][icao] = {'iata': iata, 'arrivals': []}
             continue
 
-        arrivals_today = parse_flights(fetch_schedule(station_code, 'arrival', today), 'arrival')
+        raw_schedule = fetch_schedule(station_code, 'arrival', today)
+
+        if raw_schedule is None:
+            # Не удалось получить данные (429/ошибка) даже после ретраев -
+            # оставляем прошлые данные этого аэропорта как есть, если они
+            # были, вместо того чтобы писать пустой список.
+            prev_airport = (previous_result or {}).get('airports', {}).get(icao)
+            if prev_airport and prev_airport.get('arrivals'):
+                result['airports'][icao] = prev_airport
+                logger.warning(
+                    f"⚠️ {name}: не удалось получить свежие данные - оставляю "
+                    f"предыдущие ({len(prev_airport['arrivals'])} прилётов, "
+                    f"устарели с {previous_result.get('generated_at', '?')})"
+                )
+            else:
+                result['airports'][icao] = {'iata': iata, 'arrivals': []}
+                logger.error(f"❌ {name}: не удалось получить данные, и прошлых данных тоже нет")
+            time.sleep(0.5)
+            continue
+
+        arrivals_today = parse_flights(raw_schedule, 'arrival')
 
         result['airports'][icao] = {
             'iata': iata,
             'arrivals': arrivals_today,
         }
         logger.info(f"✅ {name}: {len(arrivals_today)} прилётов")
-        time.sleep(0.3)  # не долбим API слишком часто
+        time.sleep(0.5)  # не долбим API слишком часто (был 0.3с - оказалось мало, см. 429 19.09.2026)
 
     with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
 
-    total_flights = sum(len(a['arrivals']) + len(a['departures']) for a in result['airports'].values())
+    # 'departures' больше не собираются (см. докстринг модуля - убраны ради
+    # экономии квоты), поэтому считаем только arrivals. Раньше здесь было
+    # a['departures'], которого в словаре нет - падало с KeyError: 'departures'
+    # на каждом запуске (см. лог "Ошибка фонового обновления: 'departures'").
+    total_flights = sum(len(a.get('arrivals', [])) for a in result['airports'].values())
     logger.info(f"💾 Сохранено в {OUTPUT_FILE} ({total_flights} рейсов всего)")
 
-    empty_airports = [a['name'] for a in AIRPORTS if not a.get('closed') and result['airports'].get(a['icao'], {}).get('arrivals') == [] and result['airports'].get(a['icao'], {}).get('departures') == []]
+    empty_airports = [a['name'] for a in AIRPORTS if not a.get('closed') and result['airports'].get(a['icao'], {}).get('arrivals') == []]
     if empty_airports:
         logger.warning(f"⚠️  Без рейсов на сегодня: {', '.join(empty_airports)} (может быть нормально для некоторых южных аэропортов, или просто нет рейсов в системе на сегодняшнюю дату)")
 
