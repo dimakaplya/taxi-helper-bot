@@ -3426,6 +3426,22 @@ async def show_queue_airport_picker(message, user_id):
     keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"{airport['emoji']} {airport['name']}", callback_data=f"queue_airport_{city}_{i}")] for i, airport in enumerate(airports)])
     await message.edit_text("Выбери аэропорт 👇", reply_markup=keyboard)
 
+def queue_tariff_multiselect_keyboard(tariffs, selected_idxs):
+    """Клавиатура множественного выбора тарифов для отметки в очереди - по
+    просьбе пользователя: одна и та же машина/водитель может одновременно
+    стоять в очереди сразу НЕСКОЛЬКИХ тарифов (например, "в очереди на
+    Эконом 11-15 машин, на Комфорт 15-20") - это разные очереди в одном и
+    том же месте, каждая со своей длиной, а не одна отметка на все тарифы
+    сразу. ✅/⬜ - чисто визуальный чекбокс, отмеченные тарифы хранятся в
+    user_state[uid]['queue_tariffs_selected'] (индексы) до нажатия "Готово"."""
+    buttons = []
+    for i, t in enumerate(tariffs):
+        mark = "✅" if i in selected_idxs else "⬜"
+        buttons.append([InlineKeyboardButton(text=f"{mark} {t}", callback_data=f"queue_tariff_toggle_{i}")])
+    done_label = f"▶️ Готово ({len(selected_idxs)})" if selected_idxs else "▶️ Готово"
+    buttons.append([InlineKeyboardButton(text=done_label, callback_data="queue_tariffs_done")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
 @router.callback_query(lambda c: c.data == "airport_queue")
 async def show_queue_menu(callback_query: types.CallbackQuery):
     user_id = callback_query.from_user.id
@@ -3441,20 +3457,24 @@ async def show_queue_menu(callback_query: types.CallbackQuery):
     category = user_state[user_id]['category']
     tariffs = CATEGORIES.get(category, {}).get('tariffs', [])
     if tariffs:
-        # Сначала спрашиваем конкретный класс - у ТАКСИ и ТАКСИ ULTIMA свои
+        # Сначала спрашиваем классы (можно несколько сразу - см.
+        # queue_tariff_multiselect_keyboard) - у ТАКСИ и ТАКСИ ULTIMA свои
         # варианты (эконом/комфорт/... у такси, business/premier/... у ultima),
-        # поэтому кнопки берутся из тарифов уже выбранной категории.
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text=t, callback_data=f"queue_tariff_{i}")] for i, t in enumerate(tariffs)
-        ])
-        await callback_query.message.edit_text("Выбери класс 👇", reply_markup=keyboard)
+        # поэтому кнопки берутся из тарифов уже выбранной категории. Начинаем
+        # с чистого выбора при каждом открытии меню - предыдущий набор не
+        # запоминается между заходами, чтобы не отметить случайно старым
+        # набором тарифов.
+        user_state[user_id]['queue_tariffs_selected'] = []
+        keyboard = queue_tariff_multiselect_keyboard(tariffs, [])
+        await callback_query.message.edit_text("Выбери класс(ы) - можно несколько 👇", reply_markup=keyboard)
     else:
         user_state[user_id]['queue_tariff'] = None
+        user_state[user_id]['queue_tariffs_selected'] = None
         await show_queue_airport_picker(callback_query.message, user_id)
     await callback_query.answer()
 
-@router.callback_query(lambda c: c.data.startswith('queue_tariff_'))
-async def select_queue_tariff(callback_query: types.CallbackQuery):
+@router.callback_query(lambda c: c.data.startswith('queue_tariff_toggle_'))
+async def toggle_queue_tariff(callback_query: types.CallbackQuery):
     user_id = callback_query.from_user.id
     if user_id not in user_state or 'category' not in user_state[user_id]:
         await callback_query.answer("Начни заново с /start", show_alert=True)
@@ -3465,9 +3485,48 @@ async def select_queue_tariff(callback_query: types.CallbackQuery):
     if idx < 0 or idx >= len(tariffs):
         await callback_query.answer("Ошибка!", show_alert=True)
         return
-    user_state[user_id]['queue_tariff'] = tariffs[idx]
+    selected = list(user_state[user_id].get('queue_tariffs_selected') or [])
+    if idx in selected:
+        selected.remove(idx)
+    else:
+        selected.append(idx)
+    user_state[user_id]['queue_tariffs_selected'] = selected
+    keyboard = queue_tariff_multiselect_keyboard(tariffs, selected)
+    await callback_query.message.edit_reply_markup(reply_markup=keyboard)
+    await callback_query.answer()
+
+@router.callback_query(lambda c: c.data == "queue_tariffs_done")
+async def finish_queue_tariff_selection(callback_query: types.CallbackQuery):
+    user_id = callback_query.from_user.id
+    if user_id not in user_state or 'category' not in user_state[user_id]:
+        await callback_query.answer("Начни заново с /start", show_alert=True)
+        return
+    category = user_state[user_id]['category']
+    tariffs = CATEGORIES.get(category, {}).get('tariffs', [])
+    selected = user_state[user_id].get('queue_tariffs_selected') or []
+    if not selected:
+        await callback_query.answer("Выбери хотя бы один класс", show_alert=True)
+        return
+    # Сортируем по индексу - порядок показа тарифов дальше (при вводе
+    # диапазона для каждого по очереди) совпадает с порядком в CATEGORIES,
+    # а не с порядком нажатия кнопок.
+    selected_names = [tariffs[i] for i in sorted(selected)]
+    user_state[user_id]['queue_tariff'] = selected_names[0] if len(selected_names) == 1 else None
+    user_state[user_id]['queue_tariffs_multi'] = selected_names
     await show_queue_airport_picker(callback_query.message, user_id)
     await callback_query.answer()
+
+def queue_multi_tariff_line(user_id):
+    """Строка "Класс: ..." для шапки сообщений - если выбрано НЕСКОЛЬКО
+    тарифов сразу (queue_tariffs_multi, см. queue_tariff_multiselect_keyboard),
+    перечисляет их через запятую; иначе - как раньше, через
+    queue_class_display (один тариф или категория без тарифов вообще)."""
+    multi = user_state.get(user_id, {}).get('queue_tariffs_multi')
+    if multi and len(multi) > 1:
+        category = user_state.get(user_id, {}).get('category', '')
+        cat_name = CATEGORIES.get(category, {}).get('name', category)
+        return f"{cat_name} ({', '.join(multi)})"
+    return queue_class_display(user_id)
 
 @router.callback_query(lambda c: c.data.startswith('queue_airport_'))
 async def show_queue_options(callback_query: types.CallbackQuery):
@@ -3481,16 +3540,34 @@ async def show_queue_options(callback_query: types.CallbackQuery):
         [InlineKeyboardButton(text="📋 Текущая очередь", callback_data=f"view_queue_{city}_{airport_idx}")],
         [InlineKeyboardButton(text="🚗 Занять очередь", callback_data=f"join_queue_{city}_{airport_idx}")]
     ])
-    text = f"*{airport['emoji']} {airport['name']}*\nКласс: {queue_class_display(user_id)}"
+    text = f"*{airport['emoji']} {airport['name']}*\nКласс: {queue_multi_tariff_line(user_id)}"
     await callback_query.message.edit_text(text, reply_markup=keyboard, parse_mode='Markdown')
     await callback_query.answer()
+
+def start_queue_multi_progress(user_id):
+    """Инициализирует пошаговый проход по нескольким выбранным тарифам
+    (queue_tariffs_multi) - для каждого нужно спросить СВОЙ диапазон машин
+    (Эконом 11-15, Комфорт 15-20 и т.п. - разные очереди с разной длиной,
+    см. queue_tariff_multiselect_keyboard). Прогресс (на каком тарифе
+    остановились, что уже собрали) хранится в
+    user_state[uid]['queue_multi_progress'] между шагами, а не в
+    callback_data - там уже и так city+airport_idx+range_idx, а тарифов
+    может быть несколько сразу. Возвращает (tariffs, idx) - список тарифов
+    для прохода и индекс текущего (0, если это одиночный тариф/без
+    тарифов - тогда список из одного None)."""
+    multi = user_state.get(user_id, {}).get('queue_tariffs_multi')
+    tariffs = multi if multi else [user_state.get(user_id, {}).get('queue_tariff')]
+    user_state[user_id]['queue_multi_progress'] = {'tariffs': tariffs, 'idx': 0, 'results': {}}
+    return tariffs, 0
 
 @router.callback_query(lambda c: c.data.startswith('join_queue_'))
 async def show_range_picker(callback_query: types.CallbackQuery):
     """Кнопка "Занять очередь" на самом деле не ставит водителя в реальную
     очередь, а открывает выбор диапазона - сколько машин водитель сейчас видит
     в очереди на аэропорту (1-5, 6-10, ... 96-100). Точное число никто не
-    посчитает на глаз, а диапазон - реально."""
+    посчитает на глаз, а диапазон - реально. Если выбрано несколько тарифов -
+    начинает пошаговый проход (см. start_queue_multi_progress): сначала
+    спрашивает диапазон для первого, потом для следующего и так далее."""
     user_id = callback_query.from_user.id
     if user_id not in user_state or 'category' not in user_state[user_id]:
         await callback_query.answer("Начни заново с /start", show_alert=True)
@@ -3499,6 +3576,14 @@ async def show_range_picker(callback_query: types.CallbackQuery):
     airport_idx = int(airport_idx_str)
     airport = AIRPORTS_INFO[city][airport_idx]
 
+    tariffs, idx = start_queue_multi_progress(user_id)
+    await render_range_picker(callback_query.message, user_id, city, airport_idx, airport, tariffs, idx)
+    await callback_query.answer()
+
+async def render_range_picker(message, user_id, city, airport_idx, airport, tariffs, idx):
+    """Рисует клавиатуру выбора диапазона для tariffs[idx] - вынесено в
+    отдельную функцию, т.к. вызывается и из show_range_picker (первый
+    тариф), и из submit_range (переход к следующему тарифу)."""
     buttons = []
     row = []
     for i in range(len(QUEUE_RANGES)):
@@ -3510,12 +3595,20 @@ async def show_range_picker(callback_query: types.CallbackQuery):
         buttons.append(row)
     buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="airport_queue")])
 
-    text = f"*{airport['emoji']} {airport['name']}*\nКласс: {queue_class_display(user_id)}\n\nСколько машин сейчас в очереди? Выбери диапазон 👇"
-    await callback_query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode='Markdown')
-    await callback_query.answer()
+    current_tariff = tariffs[idx]
+    step_line = f" ({idx + 1}/{len(tariffs)})" if len(tariffs) > 1 else ""
+    tariff_line = f"{current_tariff}{step_line}" if current_tariff else queue_class_display(user_id)
+    text = f"*{airport['emoji']} {airport['name']}*\nКласс: {tariff_line}\n\nСколько машин сейчас в очереди? Выбери диапазон 👇"
+    await message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode='Markdown')
 
 @router.callback_query(lambda c: c.data.startswith('qsub_'))
 async def submit_range(callback_query: types.CallbackQuery):
+    """Сохраняет отметку для ТЕКУЩЕГО тарифа в пошаговом проходе
+    (queue_multi_progress, см. start_queue_multi_progress/render_range_picker).
+    Если это был не последний выбранный тариф - сразу показывает выбор
+    диапазона для следующего (без возврата в предыдущие меню); если
+    последний - сохраняет все собранные отметки и показывает итог по всем
+    тарифам сразу."""
     user_id = callback_query.from_user.id
     if user_id not in user_state or 'category' not in user_state[user_id]:
         await callback_query.answer("Начни заново с /start", show_alert=True)
@@ -3526,14 +3619,47 @@ async def submit_range(callback_query: types.CallbackQuery):
     airport = AIRPORTS_INFO[city][airport_idx]
     range_str = queue_range_label(range_idx)
 
-    queue_submit_report(user_id, city, airport['icao'], queue_class_key(user_id), range_str)
-    local_time = get_airport_now(airport['icao']).strftime('%H:%M')
+    progress = user_state[user_id].get('queue_multi_progress')
+    if not progress:
+        # Защитный случай - progress мог не сохраниться (например, старая
+        # сессия/рестарт бота между шагами). Ведём себя как раньше: одна
+        # отметка под текущим queue_class_key().
+        tariffs, idx = [user_state[user_id].get('queue_tariff')], 0
+        progress = {'tariffs': tariffs, 'idx': 0, 'results': {}}
 
-    text = (
-        f"✅ Спасибо! Отметка *{range_str}* сохранена в *{local_time}*\n\n"
-        f"{airport['emoji']} {airport['name']}\n"
-        f"Класс: {queue_class_display(user_id)}"
-    )
+    tariffs = progress['tariffs']
+    idx = progress['idx']
+    current_tariff = tariffs[idx]
+    category = user_state[user_id]['category']
+    class_key = f"{category}:{current_tariff}" if current_tariff else category
+    queue_submit_report(user_id, city, airport['icao'], class_key, range_str)
+    progress['results'][current_tariff or category] = range_str
+
+    if idx + 1 < len(tariffs):
+        # Есть ещё тарифы в очереди на отметку - сразу спрашиваем диапазон
+        # для следующего, без промежуточного экрана.
+        progress['idx'] = idx + 1
+        user_state[user_id]['queue_multi_progress'] = progress
+        await render_range_picker(callback_query.message, user_id, city, airport_idx, airport, tariffs, idx + 1)
+        await callback_query.answer("Отметка сохранена, дальше 👇")
+        return
+
+    # Последний (или единственный) тариф - всё собрано, показываем итог.
+    user_state[user_id].pop('queue_multi_progress', None)
+    local_time = get_airport_now(airport['icao']).strftime('%H:%M')
+    if len(progress['results']) > 1:
+        results_lines = '\n'.join(f"• {name}: *{rng}*" for name, rng in progress['results'].items())
+        text = (
+            f"✅ Спасибо! Отметки сохранены в *{local_time}*\n\n"
+            f"{airport['emoji']} {airport['name']}\n"
+            f"{results_lines}"
+        )
+    else:
+        text = (
+            f"✅ Спасибо! Отметка *{range_str}* сохранена в *{local_time}*\n\n"
+            f"{airport['emoji']} {airport['name']}\n"
+            f"Класс: {queue_multi_tariff_line(user_id)}"
+        )
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🚗 Отметить ещё раз", callback_data=f"join_queue_{city}_{airport_idx}")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="airport_queue")]
