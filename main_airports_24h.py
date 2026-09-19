@@ -2141,11 +2141,9 @@ COURIER_STUB_SECTIONS = {
 # где были длинные (см. NEARBY_BUTTON_TO_KIND). "🔔 Уведомления" - отдельная
 # настройка, какие типы автопушей получать (см. блок "НАСТРОЙКИ ПУШЕЙ" ниже).
 def courier_module_keyboard(category=None):
-    """category=None показывает "📍 Очередь у аэропорта" (совместимость со
-    старыми вызовами) - по просьбе пользователя кнопка скрыта для
-    courier/cargo (см. CATEGORIES_WITHOUT_AIRPORTS): эти категории не
-    забирают пассажиров в аэропорту, аэропортовые пуши им не нужны - та же
-    логика, что у "✈️🚆 Авиа/ЖД" в services_keyboard."""
+    """"📍 Очередь у аэропорта" здесь больше НЕТ (перенесена в "⚙️ Настройки",
+    см. notification_settings_keyboard/toggle_airport_queue_inline, по
+    просьбе пользователя 19.09.2026)."""
     buttons = [
         [KeyboardButton(text="💰 Финансы"), KeyboardButton(text="📈 Спрос сейчас")],
         [KeyboardButton(text="📅 Часы пика"), KeyboardButton(text="🚻 Туалеты")],
@@ -2161,21 +2159,32 @@ def courier_module_keyboard(category=None):
     # верхняя строка главного меню (по просьбе пользователя, 19.09.2026).
     # "🔔 Уведомления" тоже отсюда убрана - теперь доступна через
     # "⚙️ Настройки" в главном меню (по просьбе пользователя, 19.09.2026).
-    if category not in CATEGORIES_WITHOUT_AIRPORTS:
-        buttons.append([KeyboardButton(text="📍 Очередь у аэропорта")])
+    # "📍 Очередь у аэропорта" тоже отсюда убрана (по просьбе пользователя,
+    # 19.09.2026) - переключатель перенесён в "⚙️ Настройки" (см.
+    # notification_settings_keyboard/toggle_airport_queue_inline).
     buttons.append([KeyboardButton(text="← Назад"), KeyboardButton(text="🏙 Выбор города")])
     return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=buttons)
 
-def notification_settings_keyboard(state):
+def notification_settings_keyboard(state, category=None):
     """Инлайн-клавиатура с переключателями по каждому типу пуша (✅/☐) -
     нажатие на кнопку тоглит именно этот тип и перерисовывает клавиатуру на
-    месте (см. toggle_notification_setting), без отправки нового сообщения."""
+    месте (см. toggle_notification_setting), без отправки нового сообщения.
+    "📍 Очередь у аэропорта" добавлена сюда же отдельной строкой-
+    переключателем (по просьбе пользователя, 19.09.2026 - раньше была
+    отдельной кнопкой в "Инструменты водителя", теперь тоже настройка) -
+    скрыта для courier/cargo (см. CATEGORIES_WITHOUT_AIRPORTS), как и была."""
     buttons = []
     for key, info in NOTIFICATION_TYPES.items():
         mark = '✅' if notifications_enabled(state, key) else '☐'
         buttons.append([InlineKeyboardButton(
             text=f"{mark} {info['emoji']} {info['label']}",
             callback_data=f"notif_toggle_{key}",
+        )])
+    if category not in CATEGORIES_WITHOUT_AIRPORTS:
+        queue_mark = '✅' if state.get('airport_queue_active') else '☐'
+        buttons.append([InlineKeyboardButton(
+            text=f"{queue_mark} 📍 Очередь у аэропорта",
+            callback_data="notif_toggle_airport_queue",
         )])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -3230,13 +3239,14 @@ async def show_notification_settings(message: types.Message):
     настройки - здесь будет промежуточное меню."""
     user_id = message.from_user.id
     state = user_state.get(user_id, {})
+    category = state.get('category')
     await message.answer(
         "🔔 *Уведомления*\n\nВыбери, какие пуши получать - нажми, чтобы включить/выключить:",
-        reply_markup=notification_settings_keyboard(state),
+        reply_markup=notification_settings_keyboard(state, category),
         parse_mode='Markdown',
     )
 
-@router.callback_query(lambda c: c.data.startswith("notif_toggle_"))
+@router.callback_query(lambda c: c.data.startswith("notif_toggle_") and c.data != "notif_toggle_airport_queue")
 async def toggle_notification_setting(callback_query: types.CallbackQuery):
     await callback_query.answer()
     user_id = callback_query.from_user.id
@@ -3247,7 +3257,33 @@ async def toggle_notification_setting(callback_query: types.CallbackQuery):
     prefs = dict(state.get('notif_prefs') or {})
     prefs[notif_key] = not notifications_enabled(state, notif_key)
     state['notif_prefs'] = prefs
-    await callback_query.message.edit_reply_markup(reply_markup=notification_settings_keyboard(state))
+    await callback_query.message.edit_reply_markup(reply_markup=notification_settings_keyboard(state, state.get('category')))
+
+@router.callback_query(lambda c: c.data == "notif_toggle_airport_queue")
+async def toggle_airport_queue_inline(callback_query: types.CallbackQuery):
+    """Переключатель "📍 Очередь у аэропорта" внутри "⚙️ Настройки" (по
+    просьбе пользователя, 19.09.2026 - перенесена сюда из "Инструменты
+    водителя", где раньше была отдельной reply-кнопкой, см.
+    toggle_airport_queue_tracking - та же логика влкл/выкл живой геопозиции,
+    только теперь тоглится инлайн-кнопкой на месте, без ухода с экрана
+    настроек). При первом включении показываем инструкцию по трансляции
+    геопозиции отдельным сообщением (её нельзя уместить в подпись
+    инлайн-кнопки)."""
+    await callback_query.answer()
+    user_id = callback_query.from_user.id
+    state = user_state[user_id]
+    category = state.get('category')
+    if category in CATEGORIES_WITHOUT_AIRPORTS:
+        return
+    if state.get('airport_queue_active'):
+        state['airport_queue_active'] = False
+        state['airport_queue'] = {}
+        await callback_query.message.edit_reply_markup(reply_markup=notification_settings_keyboard(state, category))
+        await callback_query.message.answer("⏹ Отслеживание очереди у аэропорта остановлено.")
+        return
+    enable_airport_queue_tracking(user_id)
+    await callback_query.message.edit_reply_markup(reply_markup=notification_settings_keyboard(state, category))
+    await callback_query.message.answer(airport_queue_enable_text(), parse_mode='Markdown')
 
 def airport_queue_enable_text():
     """Общий текст-инструкция - используется и в toggle_airport_queue_tracking
@@ -3266,7 +3302,7 @@ def airport_queue_enable_text():
         "Дальше всё автоматически: как только окажешься в 3 км от аэропорта - пришлю пуш, "
         "затем на 1.5 км, и потом ещё два - через 30 минут и через 1 час, если всё ещё рядом. "
         "Помогает не терять счёт времени в очереди на получение заказа.\n\n"
-        "Чтобы остановить очередь - нажми «📍 Очередь у аэропорта» в Инструментах водителя ещё раз."
+        "Чтобы остановить очередь - зайди в «⚙️ Настройки» и нажми «📍 Очередь у аэропорта» ещё раз."
     )
 
 def enable_airport_queue_tracking(user_id):
