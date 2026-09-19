@@ -2873,7 +2873,15 @@ def format_where_to_go_text(city, category, candidates):
         for i, c in enumerate(open_candidates[1:]):
             rank_emoji = WHERE_TO_GO_RANK_EMOJI[i] if i < len(WHERE_TO_GO_RANK_EMOJI) else '▫️'
             lines.append(f"{rank_emoji} *{c['label']}*")
-            lines.append(f"{_where_to_go_score_bar(c['score'])}  _{', '.join(c['reasons'])}_\n")
+            lines.append(f"{_where_to_go_score_bar(c['score'])}  _{', '.join(c['reasons'])}_")
+            # "Город/центр" не всегда занимает 1 место, но развёрнутый совет
+            # по заведениям (см. get_city_advice) важен водителю в любом
+            # случае - показываем его и здесь, а не только когда "Город"
+            # лучший вариант (по просьбе пользователя, 21.09.2026: совет
+            # пропадал, если аэропорт набирал больше баллов).
+            if c.get('advice'):
+                lines.append(f"💡 _{c['advice'][0].upper()}{c['advice'][1:]}._")
+            lines.append("")
 
     closed = [c for c in candidates if c['closed']]
     if closed:
