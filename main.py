@@ -216,6 +216,97 @@ PRECIP_WEATHERCODES = {code for code, (_, weight, _) in WEATHERCODE_INFO.items()
 def describe_weathercode(code):
     return WEATHERCODE_INFO.get(code, ('осадки', 1, '🌧'))
 
+# ==================== НАСТРОЙКИ ПУШЕЙ ====================
+# По просьбе пользователя - каждый тип автопуша можно включить/выключить
+# отдельно (кнопка "🔔 Уведомления" в "Инструменты водителя", см.
+# notification_settings_keyboard/show_notification_settings ниже). Настройка
+# хранится в user_state[uid]['notif_prefs'][key] - словарь key->bool, читается
+# через notifications_enabled(). Отсутствие ключа = включено (все типы по
+# умолчанию ON, чтобы не заставлять существующих пользователей заново всё
+# включать после обновления бота).
+NOTIFICATION_TYPES = {
+    'weather': {'label': 'Погода/осадки', 'emoji': '🌤'},
+    'airport_status': {'label': 'Статус аэропорта', 'emoji': '✈️'},
+    'high_demand': {'label': 'Повышенный спрос', 'emoji': '📈'},
+    'holidays': {'label': 'Праздники', 'emoji': '🎉'},
+}
+
+def notifications_enabled(state, notif_key):
+    """True, если пользователь не выключал явно этот тип пуша - отсутствие
+    записи в notif_prefs (новый пользователь или пуш добавлен позже, чем
+    пользователь в последний раз открывал настройки) трактуется как ON."""
+    if not isinstance(state, dict):
+        return True
+    prefs = state.get('notif_prefs') or {}
+    return prefs.get(notif_key, True)
+
+# ==================== ПРАЗДНИКИ ====================
+# Идея пользователя: праздники (особенно Новый год, 8 марта, 9 мая, День
+# города) заметно поднимают спрос на такси/курьеров - люди едут в гости,
+# на салюты, доставляют подарки. Два пуша на каждый праздник: один раз за
+# HOLIDAY_LEAD_DAYS день(-я) до, и затем каждые HOLIDAY_DAY_CHECK_INTERVAL_
+# MINUTES минут (по факту - раз в HOLIDAY_CHECK_INTERVAL_MINUTES минут, но
+# фильтруется по дате) в САМ день праздника - см. holiday_checker ниже.
+#
+# Даты вручную, не вычисляются по формуле - потому что для Дней городов
+# устойчивой формулы физически нет (администрации сами каждый год выбирают
+# дату, иногда меняя даже сам принцип выбора - см. историю Екатеринбурга/
+# Нижнего Новгорода). Федеральные праздники РФ фиксированы законом (кроме
+# отдельных переносов выходных, которые тут не важны - переносят ВЫХОДНОЙ
+# день, а не сам праздник). Список дат на 2026-2027:
+# - 2026: даты Дня города подтверждены официально/СМИ на месте (см. историю
+#   ресёрча) - Москва 5 сент, СПб 27 мая (фиксирован законом), Новосибирск
+#   28 июня, Екатеринбург 1 авг, Казань 30 авг (фиксирован законом,
+#   совпадает с Днём Татарстана), Челябинск 7 сент, Омск 1 авг, Самара
+#   13 сент, Ростов-на-Дону 20 сент, Нижний Новгород 15 авг, Краснодар
+#   26 сент, Сочи 30 мая.
+# - 2027: федеральные даты фиксированы и надёжны. Дни городов на 2027 ещё
+#   НЕ объявлены администрациями (ближе к дате скорректировать) - здесь
+#   проставлена лучшая оценка по обычной традиции города (первая/последняя
+#   суббота такого-то месяца и т.п.) - см. TODO у каждой такой записи.
+# is_national=True - пушим ВО ВСЕХ городах; иначе - только city (ключ из
+# CITY_DISPLAY_NAMES).
+HOLIDAYS = [
+    # --- Федеральные (2026, оставшаяся часть года) ---
+    {'date': (2026, 12, 31), 'name': 'Новый год', 'emoji': '🎄', 'is_national': True},
+    # --- Федеральные (2027) ---
+    {'date': (2027, 1, 1), 'name': 'Новый год', 'emoji': '🎄', 'is_national': True},
+    {'date': (2027, 2, 23), 'name': 'День защитника Отечества', 'emoji': '🎖', 'is_national': True},
+    {'date': (2027, 3, 8), 'name': 'Международный женский день', 'emoji': '🌷', 'is_national': True},
+    {'date': (2027, 5, 1), 'name': 'Праздник Весны и Труда', 'emoji': '🌱', 'is_national': True},
+    {'date': (2027, 5, 9), 'name': 'День Победы', 'emoji': '🎗', 'is_national': True},
+    {'date': (2027, 6, 12), 'name': 'День России', 'emoji': '🇷🇺', 'is_national': True},
+    {'date': (2027, 11, 4), 'name': 'День народного единства', 'emoji': '🤝', 'is_national': True},
+    {'date': (2027, 12, 31), 'name': 'Новый год', 'emoji': '🎄', 'is_national': True},
+    # --- Дни городов (2026) ---
+    {'date': (2026, 9, 5), 'name': 'День города', 'emoji': '🎉', 'city': 'moscow'},
+    {'date': (2026, 9, 7), 'name': 'День города', 'emoji': '🎉', 'city': 'chelyabinsk'},
+    {'date': (2026, 9, 13), 'name': 'День города', 'emoji': '🎉', 'city': 'samara'},
+    {'date': (2026, 9, 20), 'name': 'День города', 'emoji': '🎉', 'city': 'rostov'},
+    {'date': (2026, 9, 26), 'name': 'День города', 'emoji': '🎉', 'city': 'krasnodar'},
+    # --- Дни городов (2027) - фиксированные законом (надёжно) ---
+    {'date': (2027, 5, 27), 'name': 'День города', 'emoji': '🎉', 'city': 'spb'},
+    {'date': (2027, 8, 30), 'name': 'День города (День Татарстана)', 'emoji': '🎉', 'city': 'kazan'},
+    # --- Дни городов (2027) - оценка по традиции, TODO сверить ближе к дате ---
+    {'date': (2027, 6, 27), 'name': 'День города', 'emoji': '🎉', 'city': 'novosibirsk'},  # TODO: последнее воскресенье июня, уточнить
+    {'date': (2027, 8, 7), 'name': 'День города', 'emoji': '🎉', 'city': 'ekb'},  # TODO: первая суббота августа (правило менялось в 2026), уточнить
+    {'date': (2027, 8, 7), 'name': 'День города', 'emoji': '🎉', 'city': 'omsk'},  # TODO: первая суббота августа, уточнить
+    {'date': (2027, 8, 21), 'name': 'День города', 'emoji': '🎉', 'city': 'nnovgorod'},  # TODO: третья суббота августа, уточнить
+    {'date': (2027, 9, 4), 'name': 'День города', 'emoji': '🎉', 'city': 'moscow'},  # TODO: первые/вторые выходные сентября, уточнить
+    {'date': (2027, 9, 12), 'name': 'День города', 'emoji': '🎉', 'city': 'chelyabinsk'},  # TODO: обычно ближе к 13 сентября, уточнить
+    {'date': (2027, 9, 12), 'name': 'День города', 'emoji': '🎉', 'city': 'samara'},  # TODO: вторая суббота/воскресенье сентября, уточнить
+    {'date': (2027, 9, 19), 'name': 'День города', 'emoji': '🎉', 'city': 'rostov'},  # TODO: третье воскресенье сентября, уточнить
+    {'date': (2027, 9, 25), 'name': 'День города', 'emoji': '🎉', 'city': 'krasnodar'},  # TODO: последняя суббота сентября, уточнить
+    {'date': (2027, 5, 29), 'name': 'День города', 'emoji': '🎉', 'city': 'sochi'},  # TODO: дата плавает год от года без правила, уточнить
+]
+# За сколько дней ДО праздника слать разовый пуш-напоминание.
+HOLIDAY_LEAD_DAYS = 1
+# Как часто (в минутах) проверять праздничный календарь - раз в прогон
+# смотрим "есть ли праздник завтра (ровно HOLIDAY_LEAD_DAYS дней) - если
+# есть и ещё не пушили - шлём разовое напоминание" и "идёт ли сегодня
+# праздник - если да, шлём" (дедуп внутри дня - см. holiday_pushes_sent).
+HOLIDAY_CHECK_INTERVAL_MINUTES = 60
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -966,6 +1057,15 @@ def init_db():
         )
     ''')
     cursor.execute('''
+        CREATE TABLE IF NOT EXISTS holiday_pushes_sent (
+            holiday_key TEXT,
+            city TEXT,
+            kind TEXT,
+            sent_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (holiday_key, city, kind)
+        )
+    ''')
+    cursor.execute('''
         CREATE TABLE IF NOT EXISTS high_demand_alerts_sent (
             icao TEXT,
             relevant_class TEXT,
@@ -1063,6 +1163,36 @@ def load_all_rain_states():
     rows = cursor.fetchall()
     conn.close()
     return {city: (event_start, weight) for city, event_start, weight in rows}
+
+def was_holiday_push_sent(holiday_key, city, kind):
+    """kind - 'lead' (за HOLIDAY_LEAD_DAYS до) или 'day' (в сам день, дедуп
+    внутри ОДНОГО дня - см. mark_holiday_push_sent/holiday_checker). city -
+    ключ города или 'ALL' для национального праздника (используем единую
+    запись вместо 12 отдельных, т.к. рассылка национального праздника всё
+    равно идёт одним проходом по всем городам сразу)."""
+    init_db()
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        'SELECT 1 FROM holiday_pushes_sent WHERE holiday_key = ? AND city = ? AND kind = ?',
+        (holiday_key, city, kind)
+    )
+    row = cursor.fetchone()
+    conn.close()
+    return row is not None
+
+def mark_holiday_push_sent(holiday_key, city, kind):
+    try:
+        init_db()
+        conn = get_db_connection()
+        conn.execute(
+            'INSERT OR IGNORE INTO holiday_pushes_sent (holiday_key, city, kind) VALUES (?, ?, ?)',
+            (holiday_key, city, kind)
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"❌ Не удалось отметить пуш о празднике ({holiday_key}, {city}, {kind}): {e}")
 
 def format_user_contact(user):
     """Контакт для связи между водителями - ник через @ (как просил
@@ -1327,32 +1457,46 @@ COURIER_STUB_SECTIONS = {
     "🛠 ТО транспорта",
 }
 
-# "🚻 Туалеты рядом"/"🅿️ Парковка / остановка" переведены с заглушки на
-# реальные точки (OpenStreetMap) + добавлены "🔧 Шиномонтаж"/"🚿 Мойки" - см.
+# "🚻 Туалеты"/"🅿️ Парковка" переведены с заглушки на реальные точки
+# (OpenStreetMap) + добавлены "🔧 Шиномонтаж"/"🚿 Мойки" - см.
 # NEARBY_SERVICES/show_nearby_prompt/handle_nearby_location ниже. Кнопка
 # запрашивает геолокацию, показывает ближайшие NEARBY_RESULTS_COUNT точек с
 # расстоянием и часами работы (если есть в OSM) и кнопкой "Поехали" (открывает
 # маршрут в Яндекс Навигаторе) на каждую.
+# Раскладка в 2 колонки (по просьбе пользователя) - тексты кнопок сокращены,
+# где были длинные (см. NEARBY_BUTTON_TO_KIND). "🔔 Уведомления" - отдельная
+# настройка, какие типы автопушей получать (см. блок "НАСТРОЙКИ ПУШЕЙ" ниже).
 def courier_module_keyboard():
     buttons = [
-        [KeyboardButton(text="💰 Финансы")],
-        [KeyboardButton(text="📈 Спрос сейчас")],
-        [KeyboardButton(text="🚻 Туалеты рядом")],
-        [KeyboardButton(text="🅿️ Парковка / остановка")],
-        [KeyboardButton(text="🔧 Шиномонтаж")],
-        [KeyboardButton(text="🚿 Мойки")],
-        [KeyboardButton(text="🍷 Алкомаркеты 24ч")],
-        [KeyboardButton(text="🛒 Магазины 24ч")],
-        [KeyboardButton(text="🔌 Электрозарядки")],
-        [KeyboardButton(text="🛠 ТО транспорта")],
+        [KeyboardButton(text="💰 Финансы"), KeyboardButton(text="📈 Спрос сейчас")],
+        [KeyboardButton(text="🚻 Туалеты"), KeyboardButton(text="🅿️ Парковка")],
+        [KeyboardButton(text="🔧 Шиномонтаж"), KeyboardButton(text="🚿 Мойки")],
+        [KeyboardButton(text="🍷 Алкомаркеты 24ч"), KeyboardButton(text="🛒 Магазины 24ч")],
+        [KeyboardButton(text="🔌 Электрозарядки"), KeyboardButton(text="🛠 ТО транспорта")],
+        [KeyboardButton(text="🔔 Уведомления")],
         [KeyboardButton(text="← Назад"), KeyboardButton(text="🏙 Выбор города")],
     ]
     return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=buttons)
 
-# Кнопка (текст меню) -> ключ в NEARBY_SERVICES.
+def notification_settings_keyboard(state):
+    """Инлайн-клавиатура с переключателями по каждому типу пуша (✅/☐) -
+    нажатие на кнопку тоглит именно этот тип и перерисовывает клавиатуру на
+    месте (см. toggle_notification_setting), без отправки нового сообщения."""
+    buttons = []
+    for key, info in NOTIFICATION_TYPES.items():
+        mark = '✅' if notifications_enabled(state, key) else '☐'
+        buttons.append([InlineKeyboardButton(
+            text=f"{mark} {info['emoji']} {info['label']}",
+            callback_data=f"notif_toggle_{key}",
+        )])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+# Кнопка (текст меню) -> ключ в NEARBY_SERVICES. Тексты сокращены под
+# раскладку в 2 колонки (см. courier_module_keyboard) - было "🅿️ Парковка /
+# остановка", стало "🅿️ Парковка".
 NEARBY_BUTTON_TO_KIND = {
-    "🚻 Туалеты рядом": 'toilets',
-    "🅿️ Парковка / остановка": 'parking',
+    "🚻 Туалеты": 'toilets',
+    "🅿️ Парковка": 'parking',
     "🔧 Шиномонтаж": 'tires',
     "🚿 Мойки": 'car_wash',
     "🍷 Алкомаркеты 24ч": 'alcohol',
@@ -1901,9 +2045,35 @@ async def courier_stub_section(message: types.Message):
     # больше НЕ заглушки - см. show_nearby_prompt/handle_nearby_location ниже.
     await message.answer("Этот раздел в разработке 🚧 — скоро будет", reply_markup=courier_module_keyboard())
 
+@router.message(lambda message: message.text == "🔔 Уведомления" and user_state.get(message.from_user.id, {}).get('in_courier_module'))
+async def show_notification_settings(message: types.Message):
+    """Настройка автопушей по типам (см. блок "НАСТРОЙКИ ПУШЕЙ" выше по
+    файлу) - каждый тип переключается отдельной инлайн-кнопкой (✅/☐),
+    нажатие тоглит и перерисовывает клавиатуру на месте."""
+    user_id = message.from_user.id
+    state = user_state.get(user_id, {})
+    await message.answer(
+        "🔔 *Уведомления*\n\nВыбери, какие пуши получать - нажми, чтобы включить/выключить:",
+        reply_markup=notification_settings_keyboard(state),
+        parse_mode='Markdown',
+    )
+
+@router.callback_query(lambda c: c.data.startswith("notif_toggle_"))
+async def toggle_notification_setting(callback_query: types.CallbackQuery):
+    await callback_query.answer()
+    user_id = callback_query.from_user.id
+    notif_key = callback_query.data[len("notif_toggle_"):]
+    if notif_key not in NOTIFICATION_TYPES:
+        return
+    state = user_state[user_id]
+    prefs = dict(state.get('notif_prefs') or {})
+    prefs[notif_key] = not notifications_enabled(state, notif_key)
+    state['notif_prefs'] = prefs
+    await callback_query.message.edit_reply_markup(reply_markup=notification_settings_keyboard(state))
+
 @router.message(lambda message: message.text in NEARBY_BUTTON_TO_KIND and user_state.get(message.from_user.id, {}).get('in_courier_module'))
 async def show_nearby_prompt(message: types.Message):
-    """Нажатие на "🚻 Туалеты рядом"/"🅿️ Парковка / остановка"/"🔧 Шиномонтаж"/
+    """Нажатие на "🚻 Туалеты"/"🅿️ Парковка"/"🔧 Шиномонтаж"/
     "🚿 Мойки" - запрашивает у водителя геолокацию (кнопка request_location в
     nearby_location_keyboard). Сама выдача ближайших точек - в
     handle_nearby_location ниже, после того как Telegram пришлёт location."""
@@ -3077,10 +3247,10 @@ async def push_rain_alert(city, event):
     )
     recipients = [
         uid for uid, state in list(user_state.items())
-        if isinstance(state, dict) and state.get('city') == city
+        if isinstance(state, dict) and state.get('city') == city and notifications_enabled(state, 'weather')
     ]
     if not recipients:
-        logger.info(f"{event['emoji']} В городе {city} ожидаются осадки ({event['name']}), но известных пользователей нет")
+        logger.info(f"{event['emoji']} В городе {city} ожидаются осадки ({event['name']}), но известных пользователей нет (либо все отключили эти пуши)")
         return
     logger.info(f"{event['emoji']} В городе {city} ожидаются осадки ({event['name']}) - рассылаю {len(recipients)} пользователям")
     sent, failed = 0, 0
@@ -3183,6 +3353,106 @@ async def rain_checker():
             logger.error(f"❌ Ошибка фоновой проверки погоды: {e}")
         await asyncio.sleep(RAIN_CHECK_INTERVAL_MINUTES * 60)
 
+# ==================== ПРАЗДНИКИ (пуши) ====================
+
+def holiday_key(holiday):
+    """Уникальный идентификатор конкретной записи HOLIDAYS - дата+название+
+    город - используется для дедупа в holiday_pushes_sent (нельзя просто
+    использовать дату, т.к. в один день теоретически может быть больше
+    одного праздника)."""
+    y, m, d = holiday['date']
+    return f"{y:04d}-{m:02d}-{d:02d}:{holiday['name']}:{holiday.get('city', 'ALL')}"
+
+async def push_holiday_alert(holiday, kind):
+    """Рассылает пуш о празднике - 'lead' (за HOLIDAY_LEAD_DAYS до) или 'day'
+    (в сам день праздника). Национальный праздник (is_national=True) - всем
+    известным пользователям во всех городах; городской (День города) -
+    только пользователям этого конкретного города."""
+    if not bot:
+        return
+    if holiday.get('is_national'):
+        recipients = [
+            uid for uid, state in list(user_state.items())
+            if isinstance(state, dict) and notifications_enabled(state, 'holidays')
+        ]
+        where = "по всем городам"
+    else:
+        city = holiday.get('city')
+        city_name = CITY_DISPLAY_NAMES.get(city, city)
+        recipients = [
+            uid for uid, state in list(user_state.items())
+            if isinstance(state, dict) and state.get('city') == city and notifications_enabled(state, 'holidays')
+        ]
+        where = f"в городе {city_name}"
+
+    if kind == 'lead':
+        when_text = f"Завтра, {holiday['date'][2]:02d}.{holiday['date'][1]:02d} - {holiday['name']}"
+    else:
+        when_text = f"Сегодня {holiday['name']}"
+    text = (
+        f"{holiday['emoji']} *{when_text}*\n\n"
+        f"В праздники обычно растёт спрос на такси и доставку - люди едут в гости, "
+        f"на мероприятия, заказывают подарки. Хорошее время быть на линии."
+    )
+
+    if not recipients:
+        logger.info(f"{holiday['emoji']} {holiday['name']} ({kind}), но известных пользователей {where} нет (либо все отключили эти пуши)")
+        return
+    logger.info(f"{holiday['emoji']} {holiday['name']} ({kind}) - рассылаю {len(recipients)} пользователям {where}")
+    sent, failed = 0, 0
+    for user_id in recipients:
+        try:
+            await bot.send_message(user_id, text, parse_mode='Markdown')
+            sent += 1
+        except Exception as e:
+            failed += 1
+            logger.warning(f"⚠️ Не удалось отправить пуш о празднике пользователю {user_id}: {e}")
+        await asyncio.sleep(0.05)
+    logger.info(f"{holiday['emoji']} Пуш о празднике «{holiday['name']}» ({kind}) разослан: {sent} успешно, {failed} ошибок")
+
+async def check_holidays():
+    """Раз в прогон смотрит календарь HOLIDAYS: для каждого праздника,
+    который наступает РОВНО через HOLIDAY_LEAD_DAYS дней - шлёт разовое
+    напоминание (kind='lead', дедуп через holiday_pushes_sent - лишний прогон
+    в пределах того же дня не дублирует); для каждого праздника, который
+    идёт СЕГОДНЯ - шлёт пуш (kind='day'), и т.к. пользователь просил "каждые
+    12 часов" в сам день, day-пуш дедупится не на весь день, а на
+    12-часовой слот (00:00-11:59 / 12:00-23:59 по UTC), поэтому один и тот
+    же holiday_key+kind='day' может уйти дважды за день (утром и вечером),
+    но не чаще."""
+    today = datetime.now(ZoneInfo('UTC')).date()
+    lead_target = today + timedelta(days=HOLIDAY_LEAD_DAYS)
+    half_day_slot = 0 if datetime.now(ZoneInfo('UTC')).hour < 12 else 1
+
+    for holiday in HOLIDAYS:
+        y, m, d = holiday['date']
+        h_date = datetime(y, m, d).date()
+        key = holiday_key(holiday)
+        city_key = 'ALL' if holiday.get('is_national') else holiday.get('city', 'ALL')
+
+        if h_date == lead_target:
+            if not was_holiday_push_sent(key, city_key, 'lead'):
+                mark_holiday_push_sent(key, city_key, 'lead')
+                await push_holiday_alert(holiday, 'lead')
+
+        if h_date == today:
+            slot_kind = f'day_{half_day_slot}'
+            if not was_holiday_push_sent(key, city_key, slot_kind):
+                mark_holiday_push_sent(key, city_key, slot_kind)
+                await push_holiday_alert(holiday, 'day')
+
+async def holiday_checker():
+    """Фоновая задача: раз в HOLIDAY_CHECK_INTERVAL_MINUTES минут проверяет
+    календарь праздников (см. check_holidays) - разовый пуш за
+    HOLIDAY_LEAD_DAYS день(-я) до и до двух пушей (утро/вечер) в сам день
+    праздника."""
+    while True:
+        try:
+            await check_holidays()
+        except Exception as e:
+            logger.error(f"❌ Ошибка фоновой проверки праздников: {e}")
+        await asyncio.sleep(HOLIDAY_CHECK_INTERVAL_MINUTES * 60)
+
 async def push_airport_status_change(icao, airport, old_status, new_status, notice):
     """Рассылает пуш всем водителям, у кого выбран город этого аэропорта, о
     смене статуса (например ОТКРЫТ -> ЗАКРЫТ). Бот может писать первым только
@@ -3206,9 +3476,10 @@ async def push_airport_status_change(icao, airport, old_status, new_status, noti
     recipients = [
         (uid, state) for uid, state in list(user_state.items())
         if isinstance(state, dict) and state.get('city') == city and state.get('category') not in CATEGORIES_WITHOUT_AIRPORTS
+        and notifications_enabled(state, 'airport_status')
     ]
     if not recipients:
-        logger.info(f"📢 Статус {icao} изменился ({old_status} -> {new_status}), но в городе {city} сейчас нет известных водителей с доступом к аэропортам")
+        logger.info(f"📢 Статус {icao} изменился ({old_status} -> {new_status}), но в городе {city} сейчас нет известных водителей с доступом к аэропортам (либо все отключили эти пуши)")
         return
 
     logger.info(f"📢 Статус {icao} изменился ({old_status} -> {new_status}) - рассылаю {len(recipients)} водителям города {city}")
@@ -3288,9 +3559,10 @@ async def push_high_demand_alert(icao, airport, relevant_class, hour_from, hour_
     recipients = [
         (uid, state) for uid, state in list(user_state.items())
         if isinstance(state, dict) and state.get('city') == city and state.get('category') == category
+        and notifications_enabled(state, 'high_demand')
     ]
     if not recipients:
-        logger.info(f"📢 Прогноз устойчивого спроса {icao} ({relevant_class}, {hour_from:02d}:00-{hour_to_end:02d}:00), но в городе {city} нет известных водителей категории {category}")
+        logger.info(f"📢 Прогноз устойчивого спроса {icao} ({relevant_class}, {hour_from:02d}:00-{hour_to_end:02d}:00), но в городе {city} нет известных водителей категории {category} (либо все отключили эти пуши)")
         return
 
     logger.info(f"📢 Прогноз устойчивого спроса {icao} ({relevant_class}, {hour_from:02d}:00-{hour_to_end:02d}:00, загрузка {loads_str}) - рассылаю {len(recipients)} водителям категории {category}")
@@ -3405,6 +3677,7 @@ async def main():
     asyncio.create_task(road_events_updater())
     asyncio.create_task(high_demand_alert_checker())
     asyncio.create_task(rain_checker())
+    asyncio.create_task(holiday_checker())
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
