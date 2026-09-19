@@ -1003,13 +1003,19 @@ def get_events_for_user(city, category, limit=10):
     return upcoming[:limit], True
 
 # Часовой пояс городов афиши (используется только для событий - не путать с
-# AIRPORT_TIMEZONE, который привязан к конкретным аэропортам). Пока только
-# Москва (TimePad), остальные оставлены на будущее расширение покрытия.
+# AIRPORT_TIMEZONE, который привязан к конкретным аэропортам). Дополнено
+# 22.09.2026 городами с концертными Telegram-каналами (см.
+# CONCERT_EVENTS_CHANNELS в fetch_concert_events.py) - остальные города пока
+# без событий, оставлены на будущее расширение покрытия.
 EVENT_CITY_TIMEZONE = {
     'moscow': 'Europe/Moscow',
     'spb': 'Europe/Moscow',
     'ekb': 'Asia/Yekaterinburg',
     'kazan': 'Europe/Moscow',
+    'samara': 'Europe/Samara',
+    'chelyabinsk': 'Asia/Yekaterinburg',
+    'krasnodar': 'Europe/Moscow',
+    'sochi': 'Europe/Moscow',
 }
 
 def format_event_datetime(event, city):
