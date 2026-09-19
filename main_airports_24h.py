@@ -1689,6 +1689,18 @@ def format_peak_hours_text(city, target_weekday=None):
     )
     return '\n'.join(lines)
 
+def get_current_peak_level(city):
+    """Уровень спроса ('low'/'mid'/'high'/'peak') ПРЯМО СЕЙЧАС по местному
+    времени города, по той же модели WEEKDAY_HOUR_LOAD, что и
+    format_peak_hours_text - переиспользуется в компоновке "Куда ехать"
+    (see WHERE_TO_GO_* ниже), чтобы не дублировать поиск текущего диапазона."""
+    now = get_city_now(city)
+    pattern = WEEKDAY_HOUR_LOAD[now.weekday()]
+    for start_h, end_h, level, _label in pattern:
+        if start_h <= now.hour < end_h:
+            return level
+    return 'mid'
+
 def peak_hours_weekday_keyboard(current_weekday):
     """Инлайн-кнопки переключения дня недели - 7 кнопок, текущий день
     отмечен, остальные ведут на peak_day_{0-6}."""
@@ -1794,8 +1806,14 @@ def courier_module_keyboard(category=None):
         [KeyboardButton(text="🛠 ТО транспорта")],
     ]
     if category not in CATEGORIES_WITHOUT_AIRPORTS:
-        buttons.append([KeyboardButton(text="📍 Очередь у аэропорта"), KeyboardButton(text="🔔 Уведомления")])
+        buttons.append([KeyboardButton(text="🧭 Куда ехать"), KeyboardButton(text="📍 Очередь у аэропорта")])
+        buttons.append([KeyboardButton(text="🔔 Уведомления")])
     else:
+        # "🧭 Куда ехать" пока только для такси/Ultima (см. WHERE_TO_GO_*
+        # ниже) - сводка построена на аэропортах/вокзалах/часах пика для
+        # ПАССАЖИРСКИХ поездок, для курьера/грузового такси это не
+        # актуально (им важны склады/ТЦ/стройрынки - для этого нет
+        # источника данных, см. обсуждение с пользователем 19.09.2026).
         buttons.append([KeyboardButton(text="🔔 Уведомления")])
     buttons.append([KeyboardButton(text="← Назад"), KeyboardButton(text="🏙 Выбор города")])
     return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=buttons)
@@ -2462,6 +2480,159 @@ async def switch_peak_hours_day(callback_query: types.CallbackQuery):
     keyboard = peak_hours_weekday_keyboard(weekday)
     await callback_query.message.edit_text(text, reply_markup=keyboard, parse_mode='Markdown')
     await callback_query.answer()
+
+# ==================== "КУДА ЕХАТЬ" (сводная рекомендация) ====================
+# Пока ТОЛЬКО для такси/Ultima (см. courier_module_keyboard - кнопка скрыта
+# для CATEGORIES_WITHOUT_AIRPORTS). Сравнивает несколько "кандидатов" -
+# каждый аэропорт города и обобщённый "Город/центр" - по условному баллу
+# спроса, собранному из уже существующих источников данных бота:
+#   - аэропорт: загрузка прилётов ПРЯМО СЕЙЧАС (compute_current_availability),
+#     статус Росавиации (get_airport_status - штраф, если закрыт/по
+#     согласованию) и живая очередь у аэропорта (queue_latest_report по ЛЮБОМУ
+#     тарифу - штраф, если очередь уже большая, даже при высокой загрузке)
+#   - "Город/центр": уровень часа пика (get_current_peak_level) + бонус за
+#     дождь/снег (weathercode из fetch_rain_forecast, тот же источник, что
+#     уже используется для пуш-уведомлений о дожде)
+# Разные единицы измерения (% загрузки аэропорта vs уровень пика города) -
+# ЗНАЧИТ, это не физически точный расчёт, а понятный водителю ориентир с
+# объяснением "почему" - как и WEEKDAY_HOUR_LOAD выше, ориентир, не прогноз.
+# "Длинная" очередь для целей этого скоринга - от 21 машины (5-й диапазон
+# QUEUE_RANGES и дальше). Строится из самого QUEUE_RANGES, а не захардкожена
+# отдельным списком строк - чтобы не разъехаться, если шаг/границы диапазонов
+# когда-нибудь изменятся (см. QUEUE_RANGES выше по файлу).
+WHERE_TO_GO_QUEUE_LONG_RANGES = {f'{lo}-{hi}' for lo, hi in QUEUE_RANGES if lo >= 21}
+
+async def score_airport_candidate(city, airport, category):
+    """Считает балл и обоснование для одного аэропорта города. Возвращает
+    dict {label, score, reasons: [str, ...], closed: bool}. relevant_class -
+    та же логика, что CATEGORY_TO_CLASS в остальном боте (эконом/бизнес/все)."""
+    icao = airport['icao']
+    zone_key = airport.get('zone_key')
+    relevant_class = CATEGORY_TO_CLASS.get(category, 'total')
+    reasons = []
+
+    status, _notice = get_airport_status(icao)
+    if airport.get('closed') or status == 'closed':
+        return {'label': airport['name'], 'score': -1000, 'reasons': ['аэропорт закрыт'], 'closed': True}
+
+    avail = compute_current_availability(icao, relevant_class, zone_key=zone_key)
+    score = avail['load']  # базовый балл - % загрузки прилётов на текущий час
+    n_flights = len(avail['arrivals_now'])
+    if n_flights > 0:
+        reasons.append(f"{n_flights} рейсов в этот час")
+    else:
+        reasons.append("прилётов в этот час нет")
+
+    if status == 'coordinated':
+        score *= 0.7
+        reasons.append("работает по согласованию")
+
+    # Очередь - берём самую свежую отметку СРЕДИ ВСЕХ тарифов этой категории
+    # на этом аэропорту (а не только тарифа, который сейчас выбран у
+    # пользователя) - для сводки "куда ехать" важна общая картина, не
+    # конкретный класс. Ключ в БД - НЕ просто название тарифа, а
+    # "{category}:{tariff}" (см. queue_class_key) - без category без
+    # тарифа тоже проверяем (вдруг отмечали без выбора конкретного тарифа).
+    tariffs = CATEGORIES.get(category, {}).get('tariffs') or []
+    class_keys = {category} | {f"{category}:{t}" for t in tariffs}
+    worst_range = None
+    for class_key in class_keys:
+        range_str, _ts = queue_latest_report(city, icao, class_key)
+        if range_str in WHERE_TO_GO_QUEUE_LONG_RANGES:
+            worst_range = range_str
+            break
+    if worst_range:
+        score *= 0.6
+        reasons.append(f"уже большая очередь ({worst_range} машин)")
+
+    return {'label': airport['name'], 'score': score, 'reasons': reasons, 'closed': False}
+
+async def score_city_candidate(city):
+    """Балл для обобщённого "Город/центр" - на основе часа пика + погоды.
+    Единицы условные (не %, как у аэропортов) - подобраны так, чтобы часы
+    пика были заметно приоритетнее аэропорта со средней загрузкой, а низкий
+    спрос - явно ниже почти любого аэропорта с прилётами."""
+    level = get_current_peak_level(city)
+    level_score = {'low': 10, 'mid': 40, 'high': 70, 'peak': 100}[level]
+    reasons = [PEAK_LEVEL_LABEL[level]]
+
+    score = level_score
+    forecast = await fetch_rain_forecast(city)
+    if forecast:
+        current = forecast.get('current', {})
+        code = current.get('weathercode')
+        if code in PRECIP_WEATHERCODES:
+            _name, weight, emoji = describe_weathercode(code)
+            bonus = weight * 8  # вес 1-8 -> бонус 8-64 баллов
+            score += bonus
+            reasons.append(f"{emoji} осадки сейчас - спрос выше обычного")
+
+    return {'label': 'Город / центр', 'score': score, 'reasons': reasons, 'closed': False}
+
+async def compute_where_to_go(city, category):
+    """Считает и сортирует всех кандидатов (аэропорты города + "Город/центр")
+    по баллу - возвращает список dict от score_airport_candidate/
+    score_city_candidate, отсортированный по убыванию score, закрытые
+    аэропорты (score=-1000) уходят в конец списка."""
+    candidates = []
+    seen_icao = set()
+    for airport in AIRPORTS_INFO.get(city, []):
+        # Как и в ICAO_TO_AIRPORT - у Шереметьево несколько зональных записей
+        # с одним icao (B/C и D), каждая - самостоятельный кандидат (разная
+        # загрузка по зоне), дедуп не нужен, в отличие от ICAO_TO_AIRPORT.
+        candidates.append(await score_airport_candidate(city, airport, category))
+    candidates.append(await score_city_candidate(city))
+    candidates.sort(key=lambda c: c['score'], reverse=True)
+    return candidates
+
+def format_where_to_go_text(city, category, candidates):
+    city_name = CITY_DISPLAY_NAMES.get(city, city)
+    lines = [f"🧭 *Куда ехать — {city_name}*\n"]
+
+    open_candidates = [c for c in candidates if not c['closed']]
+    if not open_candidates:
+        lines.append("Все аэропорты города сейчас закрыты - ориентируйся на центр города и часы пика (см. «📅 Часы пика»).")
+        return '\n'.join(lines)
+
+    best = open_candidates[0]
+    reasons_str = ', '.join(best['reasons'])
+    lines.append(f"📍 *Сейчас лучше всего: {best['label']}*")
+    lines.append(f"_{reasons_str}_\n")
+
+    if len(open_candidates) > 1:
+        lines.append("Остальные варианты:")
+        for c in open_candidates[1:]:
+            lines.append(f"• {c['label']} — {', '.join(c['reasons'])}")
+
+    closed = [c for c in candidates if c['closed']]
+    if closed:
+        lines.append("\n⛔ Закрыто сейчас: " + ', '.join(c['label'] for c in closed))
+
+    lines.append(
+        "\n_Ориентир на основе прилётов, статуса аэропортов, очереди и часов "
+        "пика - не гарантия заработка, реальный спрос может отличаться._"
+    )
+    return '\n'.join(lines)
+
+@router.message(lambda message: message.text == "🧭 Куда ехать" and user_state.get(message.from_user.id, {}).get('in_courier_module'))
+async def show_where_to_go(message: types.Message):
+    user_id = message.from_user.id
+    state = user_state.get(user_id, {})
+    city = state.get('city')
+    category = state.get('category')
+    if not city:
+        await message.answer("Сначала выбери город 🏙")
+        return
+    if category in CATEGORIES_WITHOUT_AIRPORTS:
+        # Кнопка и так скрыта для этих категорий (courier_module_keyboard),
+        # но хендлер матчится по тексту - на случай, если сообщение пришло
+        # откуда-то ещё (например, старая клавиатура в чате).
+        await message.answer("Этот раздел пока доступен только для Такси и Ultima.")
+        return
+    status_msg = await message.answer("🧭 Считаю варианты…")
+    candidates = await compute_where_to_go(city, category)
+    text = format_where_to_go_text(city, category, candidates)
+    await status_msg.edit_text(text, parse_mode='Markdown')
 
 @router.message(lambda message: message.text == "🔔 Уведомления" and user_state.get(message.from_user.id, {}).get('in_courier_module'))
 async def show_notification_settings(message: types.Message):
