@@ -3588,7 +3588,9 @@ def queue_class_display(user_id):
 async def show_queue_airport_picker(message, user_id):
     city = user_state[user_id]['city']
     airports = AIRPORTS_INFO.get(city, [])
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"{airport['emoji']} {airport['name']}", callback_data=f"queue_airport_{city}_{i}")] for i, airport in enumerate(airports)])
+    buttons = [[InlineKeyboardButton(text=f"{airport['emoji']} {airport['name']}", callback_data=f"queue_airport_{city}_{i}")] for i, airport in enumerate(airports)]
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="airport_queue")])
+    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
     await message.edit_text("Выбери аэропорт 👇", reply_markup=keyboard)
 
 def queue_tariff_multiselect_keyboard(tariffs, selected_idxs):
@@ -3605,6 +3607,7 @@ def queue_tariff_multiselect_keyboard(tariffs, selected_idxs):
         buttons.append([InlineKeyboardButton(text=f"{mark} {t}", callback_data=f"queue_tariff_toggle_{i}")])
     done_label = f"▶️ Готово ({len(selected_idxs)})" if selected_idxs else "▶️ Готово"
     buttons.append([InlineKeyboardButton(text=done_label, callback_data="queue_tariffs_done")])
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="airport_queue")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 @router.callback_query(lambda c: c.data == "airport_queue")
@@ -3703,7 +3706,8 @@ async def show_queue_options(callback_query: types.CallbackQuery):
     airport = AIRPORTS_INFO[city][airport_idx]
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📋 Текущая очередь", callback_data=f"view_queue_{city}_{airport_idx}")],
-        [InlineKeyboardButton(text="🚗 Занять очередь", callback_data=f"join_queue_{city}_{airport_idx}")]
+        [InlineKeyboardButton(text="🚗 Занять очередь", callback_data=f"join_queue_{city}_{airport_idx}")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="airport_queue")]
     ])
     text = f"*{airport['emoji']} {airport['name']}*\nКласс: {queue_multi_tariff_line(user_id)}"
     await callback_query.message.edit_text(text, reply_markup=keyboard, parse_mode='Markdown')
