@@ -466,7 +466,10 @@ for _city_key, _airports_list in AIRPORTS_INFO.items():
 # Координаты (широта, долгота) каждого аэропорта - открытые авиационные
 # данные, нужны для фичи "Очередь у аэропорта" (см. блок AIRPORT_QUEUE_*
 # ниже): по живой геопозиции водителя считаем расстояние до ближайшего
-# аэропорта (haversine_km, см. nearest_airport() рядом с haversine_km).
+# аэропорта (haversine_km, см. nearest_airport_zone() рядом с haversine_km).
+# UUWW (Шереметьево) - средняя точка между терминальными зонами, см.
+# AIRPORT_TERMINAL_ZONES ниже - используется как фолбэк, если AIRPORT_TERMINAL_ZONES
+# почему-то не задан для этого icao (не должно происходить, но на всякий случай).
 AIRPORT_COORDS = {
     'UUWW': (55.9736, 37.4125),   # Шереметьево
     'UUDD': (55.4088, 37.9063),   # Домодедово
@@ -484,6 +487,41 @@ AIRPORT_COORDS = {
     'URKK': (45.0347, 39.1708),   # Пашковский
     'URSS': (43.4499, 39.9566),   # Сочи/Адлер
 }
+
+# Шереметьево (UUWW) физически состоит из двух отдельных терминальных
+# комплексов с разными подъездами - по просьбе пользователя "Очередь у
+# аэропорта" и список рейсов различают именно эти две зоны:
+#   - "abc_vip": терминалы A, B, C и VIP-зал - единый северный комплекс,
+#     общий подъезд (координаты терминала C - практически совпадают с B,
+#     ~400м разницы, у A и VIP отдельных координат в открытых картах нет,
+#     но они примыкают к тому же комплексу)
+#   - "d": терминал D - отдельная территория южнее, свой подъезд с
+#     Международного шоссе, добраться из зоны A/B/C/VIP можно только по
+#     дороге в объезд (или на аэроэкспрессе/шаттле)
+# Координаты найдены по официальным адресам терминалов (2ГИС).
+AIRPORT_TERMINAL_ZONES = {
+    'UUWW': {
+        'abc_vip': {'coords': (55.980579, 37.409522), 'label': 'Терминалы A/B/C/VIP'},
+        'd': {'coords': (55.962927, 37.406064), 'label': 'Терминал D'},
+    },
+}
+
+# Буква терминала из данных Yandex Rasp API (flight['terminal'], см.
+# fetch_yandex_data.py) -> ключ зоны в AIRPORT_TERMINAL_ZONES[icao]. Нужно
+# только для аэропортов с несколькими зонами - сейчас только UUWW.
+TERMINAL_LETTER_TO_ZONE = {
+    'UUWW': {'A': 'abc_vip', 'B': 'abc_vip', 'C': 'abc_vip', 'D': 'd'},
+}
+
+def flight_terminal_zone(icao, terminal_letter):
+    """Ключ зоны (см. AIRPORT_TERMINAL_ZONES) для буквы терминала конкретного
+    рейса - None, если у аэропорта нет деления на зоны, буква не пришла от
+    Yandex Rasp API (terminal_letter пуст/None), либо буква не входит в
+    TERMINAL_LETTER_TO_ZONE (новый/неизвестный терминал - лучше молча не
+    отнести рейс ни к одной зоне, чем ошибиться)."""
+    if not terminal_letter:
+        return None
+    return TERMINAL_LETTER_TO_ZONE.get(icao, {}).get(terminal_letter.strip().upper())
 
 CATEGORIES = {
     'taxi': {'name': '🚕 ТАКСИ', 'tariffs': ['Эконом', 'Комфорт', 'Комфорт+', 'Минивэн']},
@@ -1038,6 +1076,7 @@ def get_airport_flights(airport_icao):
                     'passengers_economy': economy_pax,
                     'passengers_business': business_pax,
                     'domestic': domestic,
+                    'terminal': flight_data.get('terminal'),
                 })
             logger.info(f"✅ Загружено {len(flights)} реальных прилётов {airport_icao}")
             return flights
@@ -1707,6 +1746,33 @@ def nearest_airport(lat, lon):
             best_icao, best_dist = icao, dist
     return best_icao, best_dist
 
+def nearest_airport_zone(lat, lon):
+    """Как nearest_airport(), но для аэропортов с несколькими терминальными
+    зонами (см. AIRPORT_TERMINAL_ZONES - сейчас только UUWW/Шереметьево:
+    "abc_vip" и "d") дополнительно определяет БЛИЖАЙШУЮ зону внутри этого
+    аэропорта, а не просто центр аэропорта в целом. Логика в два шага:
+    1) находим ближайший АЭРОПОРТ как раньше (nearest_airport) - это не
+       меняется, у Шереметьево остаётся один ICAO-код UUWW, просто внутри
+       него теперь есть под-деление;
+    2) если у найденного аэропорта есть зоны в AIRPORT_TERMINAL_ZONES -
+       среди НИХ отдельно ищем ближайшую и считаем расстояние уже до неё
+       (точнее, чем до усреднённой точки всего аэропорта), иначе zone_key/
+       zone_label = None и расстояние - как раньше, до AIRPORT_COORDS[icao].
+    Возвращает (icao, dist_km, zone_key, zone_label)."""
+    icao, dist_km = nearest_airport(lat, lon)
+    if icao is None:
+        return None, None, None, None
+    zones = AIRPORT_TERMINAL_ZONES.get(icao)
+    if not zones:
+        return icao, dist_km, None, None
+    best_zone_key, best_zone_label, best_zone_dist = None, None, None
+    for zone_key, zone_data in zones.items():
+        z_lat, z_lon = zone_data['coords']
+        d = haversine_km(lat, lon, z_lat, z_lon)
+        if best_zone_dist is None or d < best_zone_dist:
+            best_zone_key, best_zone_label, best_zone_dist = zone_key, zone_data['label'], d
+    return icao, best_zone_dist, best_zone_key, best_zone_label
+
 def nearest_nearby_points(kind, city, lat, lon, count=NEARBY_RESULTS_COUNT):
     """Возвращает (расстояние_км, точка) для ближайших count точек в городе,
     отсортированные по расстоянию. None - данные вообще не собраны (файла
@@ -2267,8 +2333,14 @@ def airport_queue_bonus_line(user_id, icao):
     local_time = format_airport_local_time(ts, icao)
     return f"\n\n🚗 Последняя отметка водителей: *{range_str}* машин в {local_time}"
 
-def format_airport_queue_push(kind, airport, dist_km):
+def format_airport_queue_push(kind, airport, dist_km, zone_label=None):
+    """zone_label - для Шереметьево (см. AIRPORT_TERMINAL_ZONES) уточняет,
+    к какому именно терминальному комплексу ближе водитель ("Терминалы
+    A/B/C/VIP" или "Терминал D") - у остальных аэропортов всегда None,
+    текст не меняется."""
     name = f"{airport['emoji']} {airport['name']}"
+    if zone_label:
+        name += f" ({zone_label})"
     if kind == 'enter_outer':
         return f"📍 Вы примерно в {dist_km:.1f} км от {name}.\n\nОтслеживаю время рядом - напомню на 1.5 км, а дальше через 30 минут и через час, если всё ещё будете рядом."
     if kind == 'enter_inner':
@@ -2283,13 +2355,13 @@ def format_airport_queue_push(kind, airport, dist_km):
         )
     return ""
 
-async def send_airport_queue_push(user_id, icao, kind, dist_km=None):
+async def send_airport_queue_push(user_id, icao, kind, dist_km=None, zone_label=None):
     if not bot:
         return
     airport = ICAO_TO_AIRPORT.get(icao)
     if not airport:
         return
-    text = format_airport_queue_push(kind, airport, dist_km if dist_km is not None else 0)
+    text = format_airport_queue_push(kind, airport, dist_km if dist_km is not None else 0, zone_label)
     text += airport_queue_bonus_line(user_id, icao)
     try:
         await bot.send_message(user_id, text, parse_mode='Markdown')
@@ -2321,9 +2393,11 @@ async def send_airport_queue_expired_push(user_id, icao):
 async def process_airport_queue_ping(user_id, lat, lon, live_period=None):
     """Обрабатывает один пинг геопозиции (и разовый message.location, и
     последующие edited_message.location трансляции - см. хендлеры ниже) -
-    считает расстояние до ближайшего аэропорта, шлёт пуш на вход в 3 км/1.5
-    км, обновляет user_state[uid]['airport_queue'] для фонового чекера
-    (30 мин/1 час - см. check_airport_queue_timers)."""
+    считает расстояние до ближайшего аэропорта (и, для Шереметьево, до
+    ближайшей терминальной зоны - см. nearest_airport_zone/
+    AIRPORT_TERMINAL_ZONES), шлёт пуш на вход в 3 км/1.5 км, обновляет
+    user_state[uid]['airport_queue'] для фонового чекера (30 мин/1 час -
+    см. check_airport_queue_timers)."""
     state = user_state.get(user_id)
     if not state or not state.get('airport_queue_active'):
         return
@@ -2331,14 +2405,18 @@ async def process_airport_queue_ping(user_id, lat, lon, live_period=None):
         # Защитный случай - активная трансляция, начатая ДО смены категории
         # на courier/cargo, не должна продолжать слать аэропортовые пуши.
         return
-    icao, dist_km = nearest_airport(lat, lon)
+    icao, dist_km, zone_key, zone_label = nearest_airport_zone(lat, lon)
     if icao is None:
         return
     now = datetime.now(ZoneInfo('UTC'))
     aq = dict(state.get('airport_queue') or {})
-    if aq.get('icao') != icao:
-        # Другой (или первый) аэропорт - начинаем отслеживание с чистого листа.
-        aq = {'icao': icao}
+    # Смена АЭРОПОРТА или, для Шереметьево, смена ЗОНЫ (A/B/C/VIP <-> D,
+    # это отдельные подъезды - водитель, переехавший из одной в другую,
+    # по факту заново въезжает в радиус) - начинаем отслеживание с чистого
+    # листа. У однозонных аэропортов zone_key всегда None, so сравнение
+    # (icao, zone_key) для них эквивалентно старому сравнению icao.
+    if (aq.get('icao'), aq.get('zone_key')) != (icao, zone_key):
+        aq = {'icao': icao, 'zone_key': zone_key}
     aq['last_update_at'] = now.isoformat()
     if live_period:
         aq['live_period'] = live_period
@@ -2348,15 +2426,15 @@ async def process_airport_queue_ping(user_id, lat, lon, live_period=None):
             aq['entered_outer_at'] = now.isoformat()
             aq['pushed_30'] = False
             aq['pushed_60'] = False
-            await send_airport_queue_push(user_id, icao, 'enter_outer', dist_km)
+            await send_airport_queue_push(user_id, icao, 'enter_outer', dist_km, zone_label)
         if dist_km <= AIRPORT_QUEUE_RADIUS_INNER_KM and not aq.get('entered_inner_at'):
             aq['entered_inner_at'] = now.isoformat()
-            await send_airport_queue_push(user_id, icao, 'enter_inner', dist_km)
+            await send_airport_queue_push(user_id, icao, 'enter_inner', dist_km, zone_label)
     else:
         # Вышел за пределы внешнего радиуса - сбрасываем: при возвращении
         # отсчёт (и пуши на вход/по времени) начнётся заново.
         if aq.get('entered_outer_at'):
-            aq = {'icao': icao, 'last_update_at': now.isoformat()}
+            aq = {'icao': icao, 'zone_key': zone_key, 'last_update_at': now.isoformat()}
             if live_period:
                 aq['live_period'] = live_period
 
@@ -3111,6 +3189,14 @@ async def show_airport_details(callback_query: types.CallbackQuery):
         business_in_hour = 0
         domestic_in_hour = 0
         international_in_hour = 0
+        # Для аэропортов с несколькими терминальными зонами (сейчас только
+        # UUWW/Шереметьево - см. AIRPORT_TERMINAL_ZONES) отдельно считаем
+        # рейсы/пассажиров по зоне (flight_terminal_zone -> zone_key),
+        # по просьбе пользователя разделить прогноз загрузки по терминалам.
+        # У остальных аэропортов zones_in_hour остаётся пустым - ничего не
+        # меняется, дополнительная строка ниже просто не печатается.
+        airport_zones = AIRPORT_TERMINAL_ZONES.get(airport['icao'])
+        zones_in_hour = {zk: {'flights': 0, 'pax': 0} for zk in airport_zones} if airport_zones else {}
         for flight in flights:
             flight_time = datetime.fromtimestamp(flight.get('firstSeen', 0))
             if flight_time.hour == order_hour_of_day:
@@ -3121,6 +3207,11 @@ async def show_airport_details(callback_query: types.CallbackQuery):
                     domestic_in_hour += 1
                 else:
                     international_in_hour += 1
+                if airport_zones:
+                    zone_key = flight_terminal_zone(airport['icao'], flight.get('terminal'))
+                    if zone_key and zone_key in zones_in_hour:
+                        zones_in_hour[zone_key]['flights'] += 1
+                        zones_in_hour[zone_key]['pax'] += flight.get('passengers', 0)
         total_in_hour = economy_in_hour + business_in_hour
 
         relevant_pax = {'economy': economy_in_hour, 'business': business_in_hour, 'total': total_in_hour}[relevant_class]
@@ -3130,7 +3221,16 @@ async def show_airport_details(callback_query: types.CallbackQuery):
         action = get_load_recommendation(load)
         text += f"{emoji} *{hour_display}* | Нагрузка ({class_label.lower()}): *{load:.0f}%*\n"
         text += f"   Рекомендация: *{action}*\n"
-        text += f"   🛬 Рейсов: {flights_in_hour} (🇷🇺 внутр. {domestic_in_hour} / 🌍 межд. {international_in_hour})  |  ✈️ Пассажиры: {total_in_hour} (эконом {economy_in_hour} / бизнес {business_in_hour})\n\n"
+        text += f"   🛬 Рейсов: {flights_in_hour} (🇷🇺 внутр. {domestic_in_hour} / 🌍 межд. {international_in_hour})  |  ✈️ Пассажиры: {total_in_hour} (эконом {economy_in_hour} / бизнес {business_in_hour})\n"
+        if airport_zones:
+            # Рейсы, для которых Yandex не прислал terminal (null) не попадают
+            # ни в одну зону - поэтому сумма по зонам может быть МЕНЬШЕ
+            # flights_in_hour, это не баг, а честное "для части рейсов
+            # терминал неизвестен".
+            zone_parts = [f"{data['label'].replace('Терминал', 'Терм.').replace('ы ', ' ')}: {zones_in_hour[zk]['flights']} ({zones_in_hour[zk]['pax']} пас.)"
+                          for zk, data in airport_zones.items()]
+            text += f"   🛫 По терминалам: {' | '.join(zone_parts)}\n"
+        text += "\n"
 
     text += "_🔴0-50% Не ехать | 🟡51-70% Уточни очередь | 🟢71-100% Занимай очередь | 🟣>100% Срочно ехать_"
     await msg.edit_text(text, parse_mode='Markdown')
@@ -3896,15 +3996,26 @@ async def check_airport_queue_timers():
             continue
         elapsed_minutes = (now - entered_at).total_seconds() / 60
 
+        # zone_label для 30/60-минутных пушей восстанавливаем из сохранённого
+        # zone_key (см. process_airport_queue_ping) - у аэропортов без зон
+        # (AIRPORT_TERMINAL_ZONES) zone_key всегда None, .get(None) тоже даст
+        # None, текст пуша не меняется.
+        zone_label = None
+        zone_key = aq.get('zone_key')
+        if zone_key:
+            zone_data = AIRPORT_TERMINAL_ZONES.get(icao, {}).get(zone_key)
+            if zone_data:
+                zone_label = zone_data['label']
+
         aq_updated = dict(aq)
         changed = False
         pushed_30, pushed_60 = AIRPORT_QUEUE_TIME_PUSHES_MIN
         if elapsed_minutes >= pushed_30 and not aq.get('pushed_30'):
-            await send_airport_queue_push(user_id, icao, 30)
+            await send_airport_queue_push(user_id, icao, 30, zone_label=zone_label)
             aq_updated['pushed_30'] = True
             changed = True
         if elapsed_minutes >= pushed_60 and not aq.get('pushed_60'):
-            await send_airport_queue_push(user_id, icao, 60)
+            await send_airport_queue_push(user_id, icao, 60, zone_label=zone_label)
             aq_updated['pushed_60'] = True
             changed = True
         if changed:

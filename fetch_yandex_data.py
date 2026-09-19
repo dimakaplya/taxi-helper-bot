@@ -312,6 +312,15 @@ def parse_flights(schedule_items, event):
         if not point_title:
             point_title = extract_point_city(title, event)
 
+        # Yandex Rasp API отдаёт terminal прямо на item ("A", "B", "C", "D"
+        # и т.п. или null, если данных нет) - см. документацию "Расписание
+        # рейсов по станции". Нужен для аэропортов с несколькими
+        # терминалами (по просьбе пользователя - Шереметьево: бот делит
+        # рейсы на зону "A/B/C/VIP" и отдельно "D", см. TERMINAL_ZONE_MAP
+        # в main.py). Для остальных аэропортов (один терминал или Яндекс не
+        # прислал данные) - просто None, ничего не меняется.
+        terminal = item.get('terminal')
+
         flights.append({
             'time': dt.strftime('%H:%M'),
             'point': point_title,
@@ -322,6 +331,7 @@ def parse_flights(schedule_items, event):
             'passengers_economy': economy,
             'passengers_business': business,
             'domestic': is_domestic_flight(point_title),
+            'terminal': terminal,
         })
     return flights
 
