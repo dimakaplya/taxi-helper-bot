@@ -476,10 +476,10 @@ AIRPORT_COORDS = {
 }
 
 CATEGORIES = {
-    'taxi': {'name': 'ТАКСИ', 'tariffs': ['Эконом', 'Комфорт', 'Комфорт+', 'Минивэн']},
-    'ultima': {'name': 'ТАКСИ ULTIMA', 'tariffs': ['Business', 'Premier', 'Elite', 'Cruise']},
-    'courier': {'name': 'КУРЬЕР', 'tariffs': ['Пеший', 'Авто']},
-    'cargo': {'name': 'ГРУЗОВОЕ ТАКСИ', 'tariffs': []}
+    'taxi': {'name': '🚕 ТАКСИ', 'tariffs': ['Эконом', 'Комфорт', 'Комфорт+', 'Минивэн']},
+    'ultima': {'name': '💎 ТАКСИ ULTIMA', 'tariffs': ['Business', 'Premier', 'Elite', 'Cruise']},
+    'courier': {'name': '📦 КУРЬЕР', 'tariffs': ['Пеший', 'Авто']},
+    'cargo': {'name': '🚚 ГРУЗОВОЕ ТАКСИ', 'tariffs': []}
 }
 
 # ==================== ЗАПАСНЫЕ ДАННЫЕ SVO (fallback, если flights_data.json ещё не сгенерирован) ====================
@@ -2328,14 +2328,30 @@ async def process_airport_queue_ping(user_id, lat, lon, live_period=None):
 
     state['airport_queue'] = aq
 
-@router.message(lambda message: getattr(message, 'location', None) is not None and user_state.get(message.from_user.id, {}).get('airport_queue_active'))
+@router.message(lambda message: getattr(message, 'location', None) is not None and user_state.get(message.from_user.id, {}).get('airport_queue_active') and not user_state.get(message.from_user.id, {}).get('nearby_pending'))
 async def handle_airport_queue_location(message: types.Message):
     """Срабатывает только на ПЕРВЫЙ пинг живой геопозиции (сама отправка -
     обычное новое сообщение); все следующие обновления той же трансляции
     приходят как edited_message, см. handle_airport_queue_location_update
     ниже - отдельный хендлер их не трогает. Поэтому именно тут (а не там)
     место для разового "геопозиция получена" - по просьбе пользователя,
-    чтобы после отправки геопозиции чат не оставался без клавиатуры меню."""
+    чтобы после отправки геопозиции чат не оставался без клавиатуры меню.
+
+    БАГФИКС: "and not ...nearby_pending" в фильтре обязателен. Кнопки
+    "🚻 Туалеты"/"🚿 Мойки"/и т.п. (см. show_nearby_prompt/handle_nearby_location
+    ниже) просят разовую геопозицию тем же способом - обычным
+    message.location. Без этого условия, если у водителя уже включена
+    "Очередь у аэропорта" (airport_queue_active=True) и он ОДНОВРЕМЕННО
+    ищет, например, туалеты, aiogram матчит хендлеры по порядку регистрации
+    и останавливается на первом подошедшем - этот хендлер (зарегистрирован
+    раньше handle_nearby_location) перехватывал сообщение с геопозицией
+    целиком: вместо списка туалетов/моек пользователь видел пуш про
+    аэропорт, а handle_nearby_location вообще не срабатывал. Теперь, пока
+    nearby_pending активен (разовый запрос геопозиции для другой кнопки в
+    процессе), эта конкретная геопозиция достаётся ЕМУ, а не отслеживанию
+    очереди - следующий пинг живой трансляции (edited_message,
+    handle_airport_queue_location_update ниже, её этот фильтр не касается)
+    обработается как обычно."""
     user_id = message.from_user.id
     await process_airport_queue_ping(
         user_id, message.location.latitude, message.location.longitude,
