@@ -137,12 +137,13 @@ ROAD_EVENTS_UPDATE_INTERVAL_MINUTES = 10
 # покрывает только Москву.
 TIMEPAD_DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'timepad_data.json')
 
-# Дождь - Open-Meteo (open-meteo.com), публичный API без ключа и лимита на
-# наш объём запросов (бесплатный тариф - до 10 000 запросов/сутки, нам хватит
-# 12 городов раз в RAIN_CHECK_INTERVAL_MINUTES с большим запасом). В отличие
-# от Overpass (см. fetch_toilets_data.py и остальные fetch_*_data.py) Open-Meteo
-# НЕ блокирует датацентровые IP - работает напрямую с Railway, как и
-# fetch_favt_notices.py/fetch_road_events.py, без браузерного обхода.
+# Погода/осадки - Open-Meteo (open-meteo.com), публичный API без ключа и
+# лимита на наш объём запросов (бесплатный тариф - до 10 000 запросов/сутки,
+# нам хватит 12 городов раз в RAIN_CHECK_INTERVAL_MINUTES с большим запасом).
+# В отличие от Overpass (см. fetch_toilets_data.py и остальные
+# fetch_*_data.py) Open-Meteo НЕ блокирует датацентровые IP - работает
+# напрямую с Railway, как и fetch_favt_notices.py/fetch_road_events.py, без
+# браузерного обхода.
 # Координаты - центр bbox каждого города (см. CITY_BBOX в fetch_toilets_data.py
 # и остальных fetch_*_data.py - тот же набор из 12 городов).
 RAIN_CITY_COORDS = {
@@ -160,17 +161,60 @@ RAIN_CITY_COORDS = {
     'sochi': (43.540, 39.800),
 }
 OPEN_METEO_URL = 'https://api.open-meteo.com/v1/forecast'
-# Как часто опрашивать Open-Meteo по каждому городу и сравнивать с последним
-# известным состоянием (идёт/не идёт дождь) - на переходе шлём пуш (см.
-# rain_checker ниже, тот же паттерн diff-and-broadcast, что и у
-# notify_airport_status_changes()/favt_notices_updater).
+# Как часто опрашивать Open-Meteo по каждому городу и пересчитывать
+# упреждающий пуш (см. rain_checker ниже) - тот же интервал, что и у
+# остальных фоновых проверок (favt_notices/road_events).
 RAIN_CHECK_INTERVAL_MINUTES = 20
-# Порог осадков (мм/ч), начиная с которого считаем, что "идёт дождь" - лёгкая
-# морось (<0.1 мм/ч) не в счёт, иначе будут ложные срабатывания на шум датчика.
-RAIN_PRECIPITATION_THRESHOLD_MM = 0.3
-# Прогноз на сколько часов вперёд показываем в ручном режиме ("🌧 Дождь") -
-# сколько ещё продлится текущий дождь / когда начнётся следующий.
-RAIN_FORECAST_HOURS = 6
+# За сколько минут до начала (или усиления) осадков слать пуш - по просьбе
+# пользователя: не "уже идёт", а заблаговременное предупреждение.
+RAIN_LEAD_MINUTES = 30
+# Прогноз на сколько часов вперёд показываем в ручном режиме (кнопка
+# "🌤 Погода") - почасовая разбивка: осадки/вид осадка + температура.
+RAIN_FORECAST_HOURS = 12
+
+# Коды погоды Open-Meteo (WMO weathercode) -> (человеческое название, вес
+# "силы" для сравнения при усилении, эмодзи). Вес используется в
+# check_rain_transitions, чтобы решить, считать ли переход "усилением"
+# (дождь -> ливень) и стоит ли из-за этого слать ДОПОЛНИТЕЛЬНЫЙ пуш, даже
+# если пуш о начале осадков уже был отправлен. 0 и коды без активных осадков
+# (туман, облачность) не считаются осадками вообще - PRECIP_WEATHERCODES ниже
+# ограничивает список только теми кодами, что реально означают дождь/снег/град.
+WEATHERCODE_INFO = {
+    0: ('ясно', 0, '☀️'),
+    1: ('малооблачно', 0, '🌤'),
+    2: ('облачно с прояснениями', 0, '⛅'),
+    3: ('пасмурно', 0, '☁️'),
+    45: ('туман', 0, '🌫'),
+    48: ('изморозь', 0, '🌫'),
+    51: ('морось слабая', 1, '🌦'),
+    53: ('морось', 2, '🌦'),
+    55: ('морось сильная', 3, '🌧'),
+    56: ('ледяная морось слабая', 2, '🌧'),
+    57: ('ледяная морось сильная', 3, '🌧'),
+    61: ('дождь слабый', 2, '🌧'),
+    63: ('дождь', 3, '🌧'),
+    65: ('сильный дождь', 5, '🌧'),
+    66: ('ледяной дождь слабый', 3, '🌧'),
+    67: ('ледяной дождь сильный', 5, '🌧'),
+    71: ('снег слабый', 2, '🌨'),
+    73: ('снег', 3, '🌨'),
+    75: ('сильный снегопад', 5, '❄️'),
+    77: ('снежная крупа', 2, '🌨'),
+    80: ('ливень слабый', 3, '🌧'),
+    81: ('ливень', 4, '🌧'),
+    82: ('сильный ливень', 6, '⛈'),
+    85: ('снежный заряд слабый', 3, '🌨'),
+    86: ('снежный заряд сильный', 5, '❄️'),
+    95: ('гроза', 6, '⛈'),
+    96: ('гроза с градом слабая', 7, '⛈'),
+    99: ('гроза с сильным градом', 8, '⛈'),
+}
+# Коды, которые считаем "осадками" для целей пуша/фонового мониторинга -
+# всё, что не входит сюда (ясно/облачно/туман), не запускает предупреждение.
+PRECIP_WEATHERCODES = {code for code, (_, weight, _) in WEATHERCODE_INFO.items() if weight > 0}
+
+def describe_weathercode(code):
+    return WEATHERCODE_INFO.get(code, ('осадки', 1, '🌧'))
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -916,7 +960,8 @@ def init_db():
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS rain_state (
             city TEXT PRIMARY KEY,
-            is_raining INTEGER,
+            last_event_start TEXT,
+            last_weight INTEGER,
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     ''')
@@ -987,32 +1032,37 @@ def load_all_airport_statuses():
     conn.close()
     return {icao: status for icao, status in rows}
 
-def save_rain_state(city, is_raining):
+def save_rain_state(city, event_start, weight):
+    """event_start - ISO-строка начала того события осадков, о котором уже
+    отправлен пуш (или None, если сейчас ничего не запушено). weight - "сила"
+    осадков на момент пуша (см. WEATHERCODE_INFO) - нужна, чтобы отличить
+    усиление (дождь -> ливень, weight вырос) от простого повтора того же
+    прогноза на следующем прогоне."""
     try:
         init_db()
         conn = get_db_connection()
         conn.execute(
-            'INSERT INTO rain_state (city, is_raining, updated_at) VALUES (?, ?, ?) '
-            'ON CONFLICT(city) DO UPDATE SET is_raining = excluded.is_raining, updated_at = excluded.updated_at',
-            (city, int(is_raining), datetime.now(ZoneInfo('UTC')).strftime('%Y-%m-%d %H:%M:%S'))
+            'INSERT INTO rain_state (city, last_event_start, last_weight, updated_at) VALUES (?, ?, ?, ?) '
+            'ON CONFLICT(city) DO UPDATE SET last_event_start = excluded.last_event_start, '
+            'last_weight = excluded.last_weight, updated_at = excluded.updated_at',
+            (city, event_start, weight, datetime.now(ZoneInfo('UTC')).strftime('%Y-%m-%d %H:%M:%S'))
         )
         conn.commit()
         conn.close()
     except Exception as e:
-        logger.error(f"❌ Не удалось сохранить состояние дождя для {city}: {e}")
+        logger.error(f"❌ Не удалось сохранить состояние осадков для {city}: {e}")
 
 def load_all_rain_states():
-    """Последнее известное состояние (идёт/не идёт дождь) по каждому городу -
-    хранится в БД по тому же принципу, что и load_all_airport_statuses():
-    рестарт/редеплой бота не должен считаться "начался дождь" и рассылать
-    ложный пуш всем водителям города."""
+    """Последнее запушенное событие осадков по каждому городу (время начала +
+    сила) - хранится в БД по тому же принципу, что и load_all_airport_statuses():
+    рестарт/редеплой бота не должен считаться поводом для нового пуша."""
     init_db()
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute('SELECT city, is_raining FROM rain_state')
+    cursor.execute('SELECT city, last_event_start, last_weight FROM rain_state')
     rows = cursor.fetchall()
     conn.close()
-    return {city: bool(is_raining) for city, is_raining in rows}
+    return {city: (event_start, weight) for city, event_start, weight in rows}
 
 def format_user_contact(user):
     """Контакт для связи между водителями - ник через @ (как просил
@@ -1241,9 +1291,13 @@ def services_keyboard(category=None, city=None):
     # заглушки под карту точек; изначально делался под курьеров, но по
     # просьбе пользователя открыт всем категориям (калькулятор дохода/км/
     # топлива/часов одинаково полезен и такси, и грузовому такси).
+    # "🌤 Погода" - на верхнем уровне (не внутри "Инструменты водителя") по
+    # просьбе пользователя - почасовой прогноз + автопуш за RAIN_LEAD_MINUTES
+    # минут до начала осадков (см. блок "ПОГОДА / ОСАДКИ" выше по файлу).
     buttons = []
     if category in SHARED_ORDER_CATEGORIES:
         buttons.append([KeyboardButton(text="🔄 Отдать заказ")])
+    buttons.append([KeyboardButton(text="🌤 Погода")])
     if category in COURIER_MODULE_CATEGORIES:
         buttons.append([KeyboardButton(text="🧰 Инструменты водителя")])
     if category not in CATEGORIES_WITHOUT_AIRPORTS:
@@ -1283,7 +1337,6 @@ def courier_module_keyboard():
     buttons = [
         [KeyboardButton(text="💰 Финансы")],
         [KeyboardButton(text="📈 Спрос сейчас")],
-        [KeyboardButton(text="🌧 Дождь")],
         [KeyboardButton(text="🚻 Туалеты рядом")],
         [KeyboardButton(text="🅿️ Парковка / остановка")],
         [KeyboardButton(text="🔧 Шиномонтаж")],
@@ -1848,23 +1901,6 @@ async def courier_stub_section(message: types.Message):
     # больше НЕ заглушки - см. show_nearby_prompt/handle_nearby_location ниже.
     await message.answer("Этот раздел в разработке 🚧 — скоро будет", reply_markup=courier_module_keyboard())
 
-@router.message(lambda message: message.text == "🌧 Дождь" and user_state.get(message.from_user.id, {}).get('in_courier_module'))
-async def show_rain_forecast(message: types.Message):
-    """Ручной просмотр текущего дождя и прогноза по своему городу (второй
-    режим фичи - помимо автопуша на начало дождя, см. push_rain_started/
-    rain_checker выше). Тот же источник (Open-Meteo), что и у фоновой
-    проверки, просто без записи состояния в БД - разовый запрос по кнопке."""
-    user_id = message.from_user.id
-    state = user_state.get(user_id, {})
-    city = state.get('city')
-    if not city or city not in RAIN_CITY_COORDS:
-        await message.answer("Сначала выбери город 🏙", reply_markup=courier_module_keyboard())
-        return
-    city_name = CITY_DISPLAY_NAMES.get(city, city)
-    forecast = await fetch_rain_forecast(city)
-    _, summary = summarize_rain_forecast(forecast)
-    await message.answer(f"🌧 *{city_name}*\n\n{summary.capitalize()}.", parse_mode='Markdown', reply_markup=courier_module_keyboard())
-
 @router.message(lambda message: message.text in NEARBY_BUTTON_TO_KIND and user_state.get(message.from_user.id, {}).get('in_courier_module'))
 async def show_nearby_prompt(message: types.Message):
     """Нажатие на "🚻 Туалеты рядом"/"🅿️ Парковка / остановка"/"🔧 Шиномонтаж"/
@@ -2076,6 +2112,26 @@ async def select_category(message: types.Message):
             break
     text = "Выбери услугу 👇"
     await message.answer(text, reply_markup=services_keyboard(selected_category, user_state[user_id].get('city')))
+
+@router.message(lambda message: message.text == "🌤 Погода")
+async def show_weather_forecast(message: types.Message):
+    """Ручной просмотр погоды по своему городу - почасовая разбивка (вид
+    осадков + температура) на RAIN_FORECAST_HOURS часов вперёд. Второй режим
+    фичи - помимо автопуша на скорое начало/усиление осадков (см.
+    push_rain_alert/rain_checker выше). Тот же источник (Open-Meteo), что и
+    у фоновой проверки, просто без записи состояния в БД - разовый запрос
+    по кнопке."""
+    user_id = message.from_user.id
+    state = user_state.get(user_id, {})
+    city = state.get('city')
+    category = state.get('category')
+    if not city or city not in RAIN_CITY_COORDS:
+        await message.answer("Сначала выбери город 🏙")
+        return
+    city_name = CITY_DISPLAY_NAMES.get(city, city)
+    forecast = await fetch_rain_forecast(city)
+    text = format_weather_forecast_text(city_name, forecast)
+    await message.answer(text, parse_mode='Markdown', reply_markup=services_keyboard(category, city))
 
 @router.message(lambda message: message.text == "⛽ Где бензин")
 async def show_fuel_bot(message: types.Message):
@@ -2921,19 +2977,22 @@ def format_queue_breakdown(city, icao, category):
             lines.append(f"   • {tariff}: нет свежих отметок")
     return '\n'.join(lines)
 
-# ==================== ДОЖДЬ ====================
-# Идея пользователя: дождь ощутимо увеличивает спрос на такси и курьеров -
-# люди уходят с улицы под крышу и заказывают вместо того чтобы идти пешком.
-# Два режима: (1) автопуш водителям выбранного города, когда дождь РЕАЛЬНО
-# НАЧИНАЕТСЯ (переход "не было -> есть", тот же diff-and-broadcast паттерн,
-# что и push_airport_status_change/notify_airport_status_changes), и (2)
-# кнопка "🌧 Дождь" в "Инструментах водителя" - ручной просмотр текущего
-# состояния и прогноза на RAIN_FORECAST_HOURS часов вперёд по своему городу.
+# ==================== ПОГОДА / ОСАДКИ ====================
+# Идея пользователя: осадки (дождь/снег/ливень и т.д.) ощутимо увеличивают
+# спрос на такси и курьеров - люди уходят с улицы под крышу и заказывают
+# вместо того чтобы идти пешком. Два режима:
+# (1) упреждающий пуш водителям выбранного города за RAIN_LEAD_MINUTES минут
+#     ДО начала (или заметного усиления) осадков - не "уже идёт", а "скоро
+#     начнётся" (см. check_rain_transitions/push_rain_alert ниже);
+# (2) кнопка "🌤 Погода" на верхнем уровне меню (рядом с "🔄 Отдать заказ") -
+#     ручной просмотр почасовой разбивки на RAIN_FORECAST_HOURS часов вперёд:
+#     вид осадков + температура на каждый час (см. show_weather_forecast).
 
 async def fetch_rain_forecast(city):
-    """Текущие осадки + почасовой прогноз на RAIN_FORECAST_HOURS часов вперёд
-    по городу через Open-Meteo. Возвращает None при ошибке сети/API - вызывающий
-    код должен уметь пропустить город в этом прогоне, а не упасть."""
+    """Почасовой прогноз (weathercode, температура) на RAIN_FORECAST_HOURS
+    часов вперёд по городу через Open-Meteo. Возвращает None при ошибке
+    сети/API - вызывающий код должен уметь пропустить город в этом прогоне,
+    а не упасть."""
     coords = RAIN_CITY_COORDS.get(city)
     if not coords:
         return None
@@ -2941,8 +3000,8 @@ async def fetch_rain_forecast(city):
     params = {
         'latitude': lat,
         'longitude': lon,
-        'current': 'precipitation',
-        'hourly': 'precipitation',
+        'current': 'weathercode,temperature_2m',
+        'hourly': 'weathercode,temperature_2m',
         'forecast_hours': RAIN_FORECAST_HOURS,
         'timezone': 'auto',
     }
@@ -2957,77 +3016,73 @@ async def fetch_rain_forecast(city):
         logger.warning(f"⚠️ Не удалось получить прогноз Open-Meteo для {city}: {e}")
         return None
 
-def is_currently_raining(forecast):
+def find_upcoming_precip_event(forecast):
+    """Ищет ближайшее почасовое окно с осадками в пределах RAIN_LEAD_MINUTES
+    от текущего момента - то есть "начнётся достаточно скоро, чтобы имело
+    смысл предупредить водителя сейчас". Возвращает None, если в этом окне
+    осадков нет, иначе dict {hour_offset, time, code, weight, name, emoji}."""
     if not forecast:
         return None
-    precip = forecast.get('current', {}).get('precipitation')
-    if precip is None:
-        return None
-    return precip >= RAIN_PRECIPITATION_THRESHOLD_MM
-
-def summarize_rain_forecast(forecast):
-    """Человеко-читаемое summary прогноза: идёт ли дождь сейчас и сколько ещё
-    продлится (по первому часу с осадками ниже порога после текущего), либо,
-    если сейчас сухо - начнётся ли дождь в ближайшие RAIN_FORECAST_HOURS часов
-    и через сколько часов. Возвращает (raining_now: bool|None, text: str)."""
-    if not forecast:
-        return None, "не удалось получить прогноз погоды"
     hourly = forecast.get('hourly', {})
     times = hourly.get('time', [])
-    precs = hourly.get('precipitation', [])
-    raining_now = is_currently_raining(forecast)
-    if raining_now is None:
-        return None, "не удалось получить прогноз погоды"
+    codes = hourly.get('weathercode', [])
+    lead_hours_window = max(1, -(-RAIN_LEAD_MINUTES // 60))  # округление вверх - для 30 мин достаточно проверить час[0..1]
+    for i in range(min(lead_hours_window + 1, len(times), len(codes))):
+        code = codes[i]
+        if code in PRECIP_WEATHERCODES:
+            name, weight, emoji = describe_weathercode(code)
+            return {'hour_offset': i, 'time': times[i], 'code': code, 'weight': weight, 'name': name, 'emoji': emoji}
+    return None
 
-    if raining_now:
-        # Ищем первый ЧАС ПОСЛЕ текущего, где осадков ниже порога - до него дождь продолжается.
-        duration_hours = None
-        for i, (t, p) in enumerate(zip(times, precs)):
-            if i == 0:
-                continue  # times[0] - текущий час, уже учли через raining_now
-            if p < RAIN_PRECIPITATION_THRESHOLD_MM:
-                duration_hours = i
-                break
-        if duration_hours is not None:
-            text = f"дождь идёт, ослабнет примерно через {duration_hours} ч"
-        else:
-            text = f"дождь идёт, по прогнозу не прекратится в ближайшие {RAIN_FORECAST_HOURS} ч"
-        return True, text
-    else:
-        start_hours = None
-        for i, (t, p) in enumerate(zip(times, precs)):
-            if i == 0:
-                continue
-            if p >= RAIN_PRECIPITATION_THRESHOLD_MM:
-                start_hours = i
-                break
-        if start_hours is not None:
-            text = f"сейчас сухо, дождь ожидается примерно через {start_hours} ч"
-        else:
-            text = f"сейчас сухо, дождя не ожидается в ближайшие {RAIN_FORECAST_HOURS} ч"
-        return False, text
+def find_precip_event_end(forecast, start_offset):
+    """От часа start_offset ищет первый ЧАС ПОСЛЕ него без осадков - до него
+    считаем, что событие продолжается. Возвращает длительность в часах
+    (минимум 1) или None, если по прогнозу не прекратится в пределах
+    RAIN_FORECAST_HOURS."""
+    hourly = forecast.get('hourly', {})
+    codes = hourly.get('weathercode', [])
+    for i in range(start_offset + 1, len(codes)):
+        if codes[i] not in PRECIP_WEATHERCODES:
+            return i - start_offset
+    return None
 
-async def push_rain_started(city):
-    """Рассылает пуш водителям и курьерам выбранного города о начале дождя -
-    в отличие от push_airport_status_change это касается ВСЕХ категорий
-    (Такси/Ultima/Курьер/Грузовое такси - у всех может вырасти спрос), без
-    фильтра по CATEGORIES_WITHOUT_AIRPORTS."""
+async def push_rain_alert(city, event):
+    """Рассылает упреждающий пуш водителям и курьерам выбранного города о
+    скором начале (или усилении) осадков - в отличие от
+    push_airport_status_change это касается ВСЕХ категорий (Такси/Ultima/
+    Курьер/Грузовое такси - у всех может вырасти спрос), без фильтра по
+    CATEGORIES_WITHOUT_AIRPORTS."""
     if not bot:
         return
     city_name = CITY_DISPLAY_NAMES.get(city, city)
+    # Open-Meteo отдаёт почасовую гранулярность - hour_offset=0 это текущий
+    # час (событие уже идёт), hour_offset=1 - следующий час (начнётся в
+    # пределах ближайших ~60 минут, не обязательно ровно через
+    # RAIN_LEAD_MINUTES - формулировка ниже намеренно не даёт точность до
+    # минуты, которой у источника данных просто нет).
+    if event['hour_offset'] == 0:
+        when_text = "начался"
+    else:
+        when_text = f"ожидается в ближайшие {RAIN_LEAD_MINUTES} минут"
+    duration_hours = find_precip_event_end(event['_forecast'], event['hour_offset'])
+    if duration_hours:
+        duration_text = f"продлится примерно {duration_hours} ч"
+    else:
+        duration_text = f"по прогнозу не прекратится в ближайшие {RAIN_FORECAST_HOURS} ч"
     text = (
-        f"🌧 *{city_name}: начался дождь*\n\n"
-        f"Обычно в такой момент растёт спрос на такси и доставку - люди уходят "
-        f"с улицы. Хорошее время быть на линии."
+        f"{event['emoji']} *{city_name}*\n\n"
+        f"{event['name'].capitalize()} {when_text}, {duration_text}.\n\n"
+        f"Через {RAIN_LEAD_MINUTES} минут в городе ожидается больше заказов - "
+        f"хорошее время быть на линии."
     )
     recipients = [
         uid for uid, state in list(user_state.items())
         if isinstance(state, dict) and state.get('city') == city
     ]
     if not recipients:
-        logger.info(f"🌧 В городе {city} начался дождь, но известных пользователей нет")
+        logger.info(f"{event['emoji']} В городе {city} ожидаются осадки ({event['name']}), но известных пользователей нет")
         return
-    logger.info(f"🌧 В городе {city} начался дождь - рассылаю {len(recipients)} пользователям")
+    logger.info(f"{event['emoji']} В городе {city} ожидаются осадки ({event['name']}) - рассылаю {len(recipients)} пользователям")
     sent, failed = 0, 0
     for user_id in recipients:
         try:
@@ -3035,37 +3090,97 @@ async def push_rain_started(city):
             sent += 1
         except Exception as e:
             failed += 1
-            logger.warning(f"⚠️ Не удалось отправить пуш о дожде пользователю {user_id}: {e}")
+            logger.warning(f"⚠️ Не удалось отправить пуш о погоде пользователю {user_id}: {e}")
         await asyncio.sleep(0.05)
-    logger.info(f"🌧 Пуш о дожде в {city} разослан: {sent} успешно, {failed} ошибок")
+    logger.info(f"{event['emoji']} Пуш о погоде в {city} разослан: {sent} успешно, {failed} ошибок")
 
 async def check_rain_transitions():
-    """Сравнивает текущее состояние дождя в каждом городе с последним
-    сохранённым в БД. Пушит только на РЕАЛЬНЫЙ переход "не было -> есть", а не
-    на каждый прогон, и не пушит вообще на первом прогоне после деплоя (когда
-    сохранённого состояния ещё нет) - иначе все пользователи получили бы пуш
-    просто от того что бот только что узнал текущую погоду."""
+    """Раз в прогон смотрит ближайшее окно осадков (в пределах
+    RAIN_LEAD_MINUTES) по каждому городу и решает, нужен ли пуш:
+    - НЕТ сохранённого события для этого времени начала -> новое событие,
+      пушим (это и есть переход "нет предупреждения -> есть");
+    - ЕСТЬ сохранённое, но с тем же временем начала и той же/меньшей силой ->
+      это тот же прогноз, уже предупредили, повторно не пушим;
+    - ЕСТЬ сохранённое с тем же временем начала, но сила ВЫРОСЛА (дождь ->
+      ливень) -> по просьбе пользователя это отдельный повод для пуша
+      (усиление), пушим ещё раз с обновлённым описанием;
+    - окно осадков закончилось (find_upcoming_precip_event вернул None) ->
+      сбрасываем сохранённое состояние, чтобы следующее событие снова
+      считалось новым.
+    Не пушит вообще на первом прогоне после деплоя эффективно так же, как и
+    остальные проверки - т.к. на первом прогоне previous просто пуст, а
+    записанное состояние появляется до первого возможного пуша (сохраняем
+    ДО отправки), поэтому реальный риск дублей и не имеет значения, что БД
+    "холодная" - худший случай - один лишний пуш сразу после деплоя, если
+    событие уже активно, что не является спамом, а вполне уместным пушом."""
     previous = load_all_rain_states()
     for city in RAIN_CITY_COORDS:
         forecast = await fetch_rain_forecast(city)
-        raining_now = is_currently_raining(forecast)
-        if raining_now is None:
+        if not forecast:
             continue  # не удалось узнать - не трогаем сохранённое состояние
-        was_raining = previous.get(city)
-        if was_raining != raining_now:
-            save_rain_state(city, raining_now)
-            if was_raining is not None and raining_now:
-                await push_rain_started(city)
+        event = find_upcoming_precip_event(forecast)
+        prev_start, prev_weight = previous.get(city, (None, None))
+
+        if event is None:
+            if prev_start is not None:
+                save_rain_state(city, None, None)  # осадки закончились - сбрасываем, следующее событие снова "новое"
+            continue
+
+        event['_forecast'] = forecast
+        # Абсолютное время начала (а не просто offset) - чтобы отличать
+        # "то же самое ещё не наступившее событие" от "новое, отдельное окно
+        # осадков позже" даже если оба сейчас попадают в lead-окно.
+        event_start = event['time']
+        is_new_event = (prev_start != event_start)
+        is_stronger = (prev_weight is not None and event['weight'] > prev_weight)
+
+        if is_new_event or is_stronger:
+            save_rain_state(city, event_start, event['weight'])
+            await push_rain_alert(city, event)
+
+def format_weather_forecast_text(city_name, forecast):
+    """Почасовая разбивка для ручного режима (кнопка "🌤 Погода") -
+    вид осадков (или "ясно"/"облачно" и т.д. по weathercode) + температура на
+    каждый из RAIN_FORECAST_HOURS часов вперёд, не только ближайшее окно
+    (в отличие от find_upcoming_precip_event, который смотрит только на
+    RAIN_LEAD_MINUTES вперёд для целей автопуша)."""
+    if not forecast:
+        return f"🌤 *{city_name}*\n\nНе удалось получить прогноз погоды - попробуй ещё раз через минуту."
+
+    current = forecast.get('current', {})
+    cur_code = current.get('weathercode')
+    cur_temp = current.get('temperature_2m')
+    cur_name, _, cur_emoji = describe_weathercode(cur_code) if cur_code is not None else ('нет данных', 0, '🌤')
+    temp_str = f"{round(cur_temp)}°C" if cur_temp is not None else "н/д"
+    lines = [f"🌤 *{city_name}*", f"\nСейчас: {cur_emoji} {cur_name}, {temp_str}", "\n*Прогноз на 12 часов:*"]
+
+    hourly = forecast.get('hourly', {})
+    times = hourly.get('time', [])
+    codes = hourly.get('weathercode', [])
+    temps = hourly.get('temperature_2m', [])
+    for t, code, temp in zip(times, codes, temps):
+        try:
+            hour_label = datetime.fromisoformat(t).strftime('%H:%M')
+        except ValueError:
+            hour_label = t
+        name, weight, emoji = describe_weathercode(code)
+        temp_label = f"{round(temp)}°C" if temp is not None else "н/д"
+        if weight > 0:
+            lines.append(f"{hour_label} — {emoji} {name}, {temp_label}")
+        else:
+            lines.append(f"{hour_label} — {emoji} {temp_label}")
+    return '\n'.join(lines)
 
 async def rain_checker():
     """Фоновая задача: раз в RAIN_CHECK_INTERVAL_MINUTES минут опрашивает
-    Open-Meteo по каждому из 12 городов и на переходе "не было дождя -> идёт
-    дождь" рассылает пуш пользователям этого города (см. check_rain_transitions)."""
+    Open-Meteo по каждому из 12 городов и шлёт упреждающий пуш, если в
+    ближайшие RAIN_LEAD_MINUTES минут ожидаются осадки (или существующие
+    осадки усиливаются) - см. check_rain_transitions."""
     while True:
         try:
             await check_rain_transitions()
         except Exception as e:
-            logger.error(f"❌ Ошибка фоновой проверки дождя: {e}")
+            logger.error(f"❌ Ошибка фоновой проверки погоды: {e}")
         await asyncio.sleep(RAIN_CHECK_INTERVAL_MINUTES * 60)
 
 async def push_airport_status_change(icao, airport, old_status, new_status, notice):
