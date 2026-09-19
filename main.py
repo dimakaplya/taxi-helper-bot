@@ -1526,6 +1526,21 @@ async def initialize_bot():
         bot = Bot(token=BOT_TOKEN)
         me = await bot.get_me()
         logger.info(f"✅ Бот: @{me.username}")
+        # На боте где-то раньше (вручную или другим запуском) был включён
+        # webhook - Telegram не даёт одновременно webhook и getUpdates
+        # (polling, см. dp.start_polling ниже), из-за чего в логах Railway
+        # сыпался TelegramConflictError "can't use getUpdates method while
+        # webhook is active". Снимаем webhook явно при каждом старте - если
+        # его и не было, вызов просто ничего не делает (безопасно вызывать
+        # всегда), а если был - синхронизирует бота обратно на polling.
+        try:
+            webhook_info = await bot.get_webhook_info()
+            if webhook_info.url:
+                logger.warning(f"⚠️ Обнаружен активный webhook ({webhook_info.url}) - удаляю, бот работает через polling")
+                await bot.delete_webhook(drop_pending_updates=False)
+                logger.info("✅ Webhook удалён")
+        except Exception as e:
+            logger.error(f"❌ Не удалось проверить/удалить webhook: {e}")
         return True
     except Exception as e:
         logger.error(f"❌ Ошибка: {e}")
