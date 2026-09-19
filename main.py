@@ -1906,6 +1906,12 @@ def services_keyboard(category=None, city=None):
         for i in range(0, len(items), 2)
     )
     buttons.append([KeyboardButton(text="🔓 Бесплатный VPN TAXI HELPER")])
+    # "⚙️ Настройки" - самый низ меню, отдельной строкой, выше "← Назад"/
+    # "🏙 Выбор города" (по просьбе пользователя, 19.09.2026). Пока внутри
+    # только уведомления (см. notification_settings_keyboard); раньше кнопка
+    # "🔔 Уведомления" была внутри "Инструменты водителя", теперь убрана
+    # оттуда и доступна только отсюда.
+    buttons.append([KeyboardButton(text="⚙️ Настройки")])
     buttons.append([KeyboardButton(text="← Назад"), KeyboardButton(text="🏙 Выбор города")])
     return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=buttons)
 
@@ -1951,9 +1957,10 @@ def courier_module_keyboard(category=None):
     ]
     # "🧭💰 Куда ехать" отсюда убрана - перенесена в services_keyboard как
     # верхняя строка главного меню (по просьбе пользователя, 19.09.2026).
+    # "🔔 Уведомления" тоже отсюда убрана - теперь доступна через
+    # "⚙️ Настройки" в главном меню (по просьбе пользователя, 19.09.2026).
     if category not in CATEGORIES_WITHOUT_AIRPORTS:
         buttons.append([KeyboardButton(text="📍 Очередь у аэропорта")])
-    buttons.append([KeyboardButton(text="🔔 Уведомления")])
     buttons.append([KeyboardButton(text="← Назад"), KeyboardButton(text="🏙 Выбор города")])
     return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=buttons)
 
@@ -2773,11 +2780,15 @@ async def show_where_to_go(message: types.Message):
     text = format_where_to_go_text(city, category, candidates)
     await status_msg.edit_text(text, parse_mode='Markdown')
 
-@router.message(lambda message: message.text == "🔔 Уведомления" and user_state.get(message.from_user.id, {}).get('in_courier_module'))
+@router.message(lambda message: message.text == "⚙️ Настройки")
 async def show_notification_settings(message: types.Message):
-    """Настройка автопушей по типам (см. блок "НАСТРОЙКИ ПУШЕЙ" выше по
-    файлу) - каждый тип переключается отдельной инлайн-кнопкой (✅/☐),
-    нажатие тоглит и перерисовывает клавиатуру на месте."""
+    """"⚙️ Настройки" в главном меню (по просьбе пользователя, 19.09.2026,
+    перенесена сюда из "Инструменты водителя", где была кнопкой
+    "🔔 Уведомления"). Пока внутри только один раздел - настройка автопушей
+    по типам (см. блок "НАСТРОЙКИ ПУШЕЙ" выше по файлу): каждый тип
+    переключается отдельной инлайн-кнопкой (✅/☐), нажатие тоглит и
+    перерисовывает клавиатуру на месте. Если в будущем добавятся другие
+    настройки - здесь будет промежуточное меню."""
     user_id = message.from_user.id
     state = user_state.get(user_id, {})
     await message.answer(
