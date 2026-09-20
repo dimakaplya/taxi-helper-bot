@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import logging
 import asyncio
+import contextvars
 import sqlite3
 import json
 import re
@@ -2425,17 +2426,33 @@ router = Router()
 KEEP_LAST_N_MESSAGES = 2
 _recent_bot_message_ids = {}  # chat_id -> список последних message_id бота (без reply-клавиатуры), новые в конце
 
+# ДОБАВЛЕНО 21.09.2026 (прямая просьба пользователя - "сделай так чтобы
+# события грузились все бот не удалял и оставлял тока два последних"): по
+# умолчанию KEEP_LAST_N_MESSAGES=2 стирает ВСЕ сообщения бота без разбора,
+# включая карточки афиши ("🎭 События города" - до 20 отдельных сообщений
+# одно за другим), из-за чего в чате оставались только 2 последние карточки,
+# а остальные исчезали почти сразу после отправки. Нужно исключение именно
+# для этого экрана - карточки событий должны оставаться в чате все, не
+# участвуя в общей чистке. Реализовано через contextvar (а не отдельным
+# параметром у каждого из ~285 message.answer() в файле): хендлер, который
+# шлёт события, оборачивает свою рассылку в _skip_message_trim.set(True)/
+# reset(token), а middleware ниже читает этот флаг перед каждой отправкой -
+# сообщения, отправленные внутри такого блока, не попадают в очередь на
+# удаление вообще (та же ветка, что уже была у сообщений с ReplyKeyboardMarkup).
+_skip_message_trim = contextvars.ContextVar('skip_message_trim', default=False)
+
 class SingleMessageMiddleware(BaseRequestMiddleware):
     async def __call__(self, make_request, bot_instance: Bot, method: TelegramMethod[TelegramType]):
         if isinstance(method, SendMessage):
             chat_id = method.chat_id
             has_reply_keyboard = isinstance(method.reply_markup, ReplyKeyboardMarkup)
+            skip_trim = _skip_message_trim.get()
             result = await make_request(bot_instance, method)
             try:
-                if has_reply_keyboard:
-                    # Сообщение с нижним меню не трогаем и не добавляем в
-                    # очередь на удаление - следующее удаление не должно
-                    # снести меню.
+                if has_reply_keyboard or skip_trim:
+                    # Сообщение с нижним меню, ИЛИ сообщение, отправленное
+                    # внутри блока с отключённой чисткой (см. _skip_message_trim
+                    # выше) - не трогаем и не добавляем в очередь на удаление.
                     pass
                 else:
                     queue = _recent_bot_message_ids.setdefault(chat_id, [])
@@ -7286,15 +7303,23 @@ async def show_city_events(message: types.Message, user_id_override=None):
     # не сворачивал быстро идущие подряд сообщения визуально в одну группу.
     await message.answer(header, reply_markup=services_keyboard(category, city, user_id), parse_mode='Markdown')
 
-    for post in concert_events:
-        text, keyboard = build_concert_event_message(post, city)
-        await message.answer(text, reply_markup=keyboard, parse_mode='Markdown', disable_web_page_preview=True)
-        await asyncio.sleep(0.1)
+    # ДОБАВЛЕНО 21.09.2026 (прямая просьба пользователя): карточки афиши не
+    # должны стираться общей чисткой "оставлять только 2 последних сообщения"
+    # - см. _skip_message_trim у SingleMessageMiddleware. Заголовок ВЫШЕ этого
+    # блока НЕ оборачиваем - у него ReplyKeyboardMarkup, он и так не удаляется.
+    token = _skip_message_trim.set(True)
+    try:
+        for post in concert_events:
+            text, keyboard = build_concert_event_message(post, city)
+            await message.answer(text, reply_markup=keyboard, parse_mode='Markdown', disable_web_page_preview=True)
+            await asyncio.sleep(0.1)
 
-    for event in events:
-        text, keyboard = build_event_message(event, city)
-        await message.answer(text, reply_markup=keyboard, parse_mode='Markdown', disable_web_page_preview=True)
-        await asyncio.sleep(0.1)
+        for event in events:
+            text, keyboard = build_event_message(event, city)
+            await message.answer(text, reply_markup=keyboard, parse_mode='Markdown', disable_web_page_preview=True)
+            await asyncio.sleep(0.1)
+    finally:
+        _skip_message_trim.reset(token)
 
 AIRPORT_MENU_KEYBOARD = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="📥 Прилеты", callback_data="airport_arrivals")],
