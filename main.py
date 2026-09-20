@@ -3322,41 +3322,51 @@ def _where_to_go_score_bar(score):
     filled = min(5, max(0, round(score / 20)))
     return '●' * filled + '○' * (5 - filled)
 
+WHERE_TO_GO_DIVIDER = "┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄"
+
 def format_where_to_go_text(city, category, candidates, extra_header=None):
     """extra_header - по просьбе пользователя (20.09.2026): позволяет
     встроить сообщение "СМЕНА НАЧАТА" прямо в начало сводки "Куда ехать"
-    (см. toggle_shift), одним сообщением вместо двух отдельных."""
+    (см. toggle_shift), одним сообщением вместо двух отдельных.
+
+    Визуальное оформление обновлено по просьбе пользователя (20.09.2026,
+    "сделай красивое оформление") - точечный разделитель вместо сплошной
+    линии (легче читается), топ-вариант в рамке из ▓, компактные блоки без
+    лишних пустых строк между заголовком и содержимым."""
     city_name = CITY_DISPLAY_NAMES.get(city, city)
     now = get_city_now(city)
     lines = []
     if extra_header:
         lines.append(extra_header)
-        lines.append("━━━━━━━━━━━━━━━━━━")
+        lines.append(WHERE_TO_GO_DIVIDER)
     lines.extend([
-        f"🧭✨ *КУДА ЕХАТЬ — {city_name.upper()}*",
-        f"_{now.strftime('%H:%M')}, {WEEKDAY_NAMES[now.weekday()]}_",
-        "━━━━━━━━━━━━━━━━━━",
+        f"🧭 *КУДА ЕХАТЬ · {city_name.upper()}*",
+        f"🕐 {now.strftime('%H:%M')} · {WEEKDAY_NAMES[now.weekday()]}",
     ])
 
     open_candidates = [c for c in candidates if not c['closed']]
     if not open_candidates:
-        lines.append("\n⛔ Все аэропорты города сейчас закрыты - ориентируйся на центр города и часы пика (см. «📅 Часы пика»).")
+        lines.append(WHERE_TO_GO_DIVIDER)
+        lines.append("⛔ Все аэропорты города сейчас закрыты - ориентируйся на центр города и часы пика (см. «📅 Часы пика»).")
         return '\n'.join(lines)
 
     best = open_candidates[0]
     reasons_str = ', '.join(best['reasons'])
-    lines.append(f"\n🏆 *{best['label']}*")
-    lines.append(f"{_where_to_go_score_bar(best['score'])}  _{reasons_str}_")
+    lines.append("▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓")
+    lines.append(f"🏆 *{best['label']}*")
+    lines.append(f"{_where_to_go_score_bar(best['score'])}  {reasons_str}")
     if best.get('advice'):
-        lines.append(f"\n💡 {best['advice'][0].upper()}{best['advice'][1:]}.")
+        lines.append(f"💡 {best['advice'][0].upper()}{best['advice'][1:]}.")
+    lines.append("▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓")
 
     if len(open_candidates) > 1:
-        lines.append("\n━━━━━━━━━━━━━━━━━━")
-        lines.append("*Остальные варианты:*\n")
+        lines.append("")
+        lines.append("*Остальные варианты:*")
         for i, c in enumerate(open_candidates[1:]):
             rank_emoji = WHERE_TO_GO_RANK_EMOJI[i] if i < len(WHERE_TO_GO_RANK_EMOJI) else '▫️'
+            lines.append("")
             lines.append(f"{rank_emoji} *{c['label']}*")
-            lines.append(f"{_where_to_go_score_bar(c['score'])}  _{', '.join(c['reasons'])}_")
+            lines.append(f"{_where_to_go_score_bar(c['score'])}  {', '.join(c['reasons'])}")
             # "Город/центр" не всегда занимает 1 место, но развёрнутый совет
             # по заведениям (см. get_city_advice) важен водителю в любом
             # случае - показываем его и здесь, а не только когда "Город"
@@ -3364,12 +3374,11 @@ def format_where_to_go_text(city, category, candidates, extra_header=None):
             # пропадал, если аэропорт набирал больше баллов).
             if c.get('advice'):
                 lines.append(f"💡 _{c['advice'][0].upper()}{c['advice'][1:]}._")
-            lines.append("")
 
     closed = [c for c in candidates if c['closed']]
     if closed:
-        lines.append("━━━━━━━━━━━━━━━━━━")
-        lines.append("⛔ Закрыто сейчас: " + ', '.join(c['label'] for c in closed))
+        lines.append(WHERE_TO_GO_DIVIDER)
+        lines.append("⛔ *Закрыто сейчас:* " + ', '.join(c['label'] for c in closed))
 
     # По просьбе пользователя (19.09.2026): "оценка перекрытий" - число
     # активных перекрытий в городе (тот же источник, что "⛔ Дорожные
@@ -3380,11 +3389,11 @@ def format_where_to_go_text(city, category, candidates, extra_header=None):
     # на дорогах", а не часть расчёта score конкретного варианта.
     closures_count = count_active_road_closures(city)
     if closures_count:
-        lines.append("━━━━━━━━━━━━━━━━━━")
+        lines.append(WHERE_TO_GO_DIVIDER)
         word = "перекрытие" if closures_count == 1 else ("перекрытия" if 2 <= closures_count <= 4 else "перекрытий")
         lines.append(f"🚧 Сейчас в городе {closures_count} активных {word} - см. «⛔ Дорожные события».")
 
-    lines.append("━━━━━━━━━━━━━━━━━━")
+    lines.append(WHERE_TO_GO_DIVIDER)
     lines.append(
         "_Ориентир на основе прилётов, статуса аэропортов, очереди и часов "
         "пика - не гарантия заработка, реальный спрос может отличаться._"
@@ -3674,11 +3683,13 @@ async def toggle_shift(message: types.Message):
         start_shift(user_id)
         started_at = datetime.fromisoformat(user_state[user_id]['shift']['started_at'])
         shift_header = (
-            "✅ *СМЕНА НАЧАТА!*\n\n"
-            f"🕐 Начало: {format_shift_start_label(started_at)}\n\n"
-            "Чтобы считался километраж: скрепка 📎 → Геопозиция → "
-            "*«Транслировать геопозицию»* → выбирай *«Пока не отключу»*.\n\n"
-            "Без трансляции секундомер идёт как обычно, но км не посчитаются."
+            "🟢 *СМЕНА НАЧАТА*\n"
+            "▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓\n"
+            f"🕐 {format_shift_start_label(started_at)}\n"
+            "▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓\n"
+            "📎 Чтобы считался километраж: Геопозиция → "
+            "*«Транслировать геопозицию»* → *«Пока не отключу»*.\n"
+            "_Без трансляции секундомер идёт как обычно, но км не посчитаются._"
         )
         # По просьбе пользователя (20.09.2026): сообщение "СМЕНА НАЧАТА" и
         # сводка "Куда ехать" - теперь ОДНО сообщение (раньше были два
@@ -3698,10 +3709,11 @@ async def toggle_shift(message: types.Message):
         return  # защитный случай - кнопка не должна была показать "Завершить", если смены нет
     duration_minutes, total_km = finish_shift(user_id)
     await message.answer(
-        f"⏹ *СМЕНА ЗАВЕРШЕНА*\n\n"
-        f"⏱ Время: {format_shift_duration(duration_minutes)}\n"
-        f"🛣 Пройдено: {total_km:.1f} км\n\n"
-        f"Запись сохранена в статистику (см. «💰 Финансы» → «📈 Статистика смен»).",
+        "🔴 *СМЕНА ЗАВЕРШЕНА*\n"
+        "▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓\n"
+        f"⏱ {format_shift_duration(duration_minutes)}   🛣 {total_km:.1f} км\n"
+        "▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓\n"
+        "_Запись сохранена в «💰 Финансы» → «📈 Статистика смен»._",
         reply_markup=services_keyboard(category, city, user_id),
         parse_mode='Markdown',
     )
@@ -4615,32 +4627,30 @@ async def send_courier_finance_result(message: types.Message, user_id, data):
     # По просьбе пользователя (20.09.2026): показываем, какие именно данные
     # были учтены в расчёте - все введённые/подставленные цифры одним
     # компактным блоком в начале сообщения, перед разбивкой по статьям.
+    # Визуальное оформление (20.09.2026, "сделай красивое оформление") -
+    # точечный разделитель между блоками, итог в рамке из ▓ для акцента.
     lines = [
         "📊 *ДЕНЬ — ИТОГ*",
-        "",
+        WHERE_TO_GO_DIVIDER,
         "_Учтено в расчёте:_",
-        f"• Доход: {fmt(income)} ₽",
-        f"• Пробег: {fmt(km)} км",
-        f"• Расход топлива: {consumption:g} л/100км",
-        f"• Цена топлива: {fuel_price:g} ₽/л",
-        f"• Машина: {CAR_OWNERSHIP_LABELS.get(car_ownership, CAR_OWNERSHIP_LABELS[CAR_OWNERSHIP_OWN])}",
+        f"💰 Доход: {fmt(income)} ₽",
+        f"🛣 Пробег: {fmt(km)} км  ·  ⛽ {consumption:g} л/100км × {fuel_price:g} ₽/л",
+        f"🚘 Машина: {CAR_OWNERSHIP_LABELS.get(car_ownership, CAR_OWNERSHIP_LABELS[CAR_OWNERSHIP_OWN])}",
     ]
     if rent > 0:
-        lines.append(f"• Аренда ТС: {fmt(rent)} ₽")
-    lines.extend([
-        f"• Доп. расходы: {fmt(expenses)} ₽",
-        f"• Налог: {tax_rate:g}%",
-        f"• Время за рулём: {hours:g} ч",
-    ])
+        lines.append(f"🔑 Аренда ТС: {fmt(rent)} ₽")
+    lines.append(f"📦 Доп. расходы: {fmt(expenses)} ₽  ·  🧾 Налог: {tax_rate:g}%")
+    time_line = f"🕐 За рулём: {hours:g} ч"
     if airport_wait_minutes > 0:
-        lines.append(f"• Простой у аэропорта: {format_shift_duration(airport_wait_minutes)}")
-    lines.append("")
+        time_line += f"  ·  ⏳ простой у аэропорта: {format_shift_duration(airport_wait_minutes)}"
+    lines.append(time_line)
+    lines.append(WHERE_TO_GO_DIVIDER)
     lines.extend([
         f"Валовый доход: {fmt(income)} ₽",
-        f"⛽ Топливо ({fmt(km)} км × {consumption:g} на 100): −{fmt(fuel_cost)} ₽",
+        f"⛽ Топливо: −{fmt(fuel_cost)} ₽",
     ])
     if is_rented:
-        lines.append("🔧 Резерв на износ/ремонт: не учтён (машина в аренде)")
+        lines.append("🔧 Резерв на износ/ремонт: не учтён _(машина в аренде)_")
     else:
         lines.append(f"🔧 Резерв на износ/ремонт (10%): −{fmt(wear_reserve)} ₽")
     if rent > 0:
@@ -4648,9 +4658,10 @@ async def send_courier_finance_result(message: types.Message, user_id, data):
     if expenses > 0:
         lines.append(f"📦 Доп. расходы: −{fmt(expenses)} ₽")
     lines.append(f"🧾 Налог ({tax_rate:g}%): −{fmt(tax_amount)} ₽")
-    lines.append("")
+    lines.append("▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓")
     lines.append(f"✅ *Чистыми за день: {fmt(net_profit)} ₽*")
-    lines.append(f"за {hours:g} ч ≈ {fmt(per_hour)} ₽/ч")
+    lines.append(f"_≈ {fmt(per_hour)} ₽/ч за {hours:g} ч_")
+    lines.append("▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓")
 
     category = user_state.get(user_id, {}).get('category')
     await message.answer('\n'.join(lines), reply_markup=courier_module_keyboard(category), parse_mode='Markdown')
