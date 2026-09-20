@@ -4465,7 +4465,18 @@ async def select_category(message: types.Message):
     # про эту кнопку внутри "Инструменты водителя". Кнопка "Включить сейчас"
     # сразу активирует отслеживание (enable_airport_queue_tracking) - см.
     # enable_airport_queue_now ниже.
-    if selected_category and selected_category not in CATEGORIES_WITHOUT_AIRPORTS:
+    # Не предлагаем повторно, если трансляция живой геопозиции для этого
+    # пользователя УЖЕ активна (по жалобе пользователя, 20.09.2026: "сверху
+    # уже включен сбор локации... а он опять запрашивает") - Telegram
+    # позволяет транслировать только одну геопозицию за раз (см.
+    # _location_tracking_active), так что если уже включена "Очередь у
+    # аэропорта" или идёт смена (счётчик км тоже слушает ту же трансляцию) -
+    # предлагать "Включить сейчас" незачем, водитель и так уже транслирует.
+    if (
+        selected_category
+        and selected_category not in CATEGORIES_WITHOUT_AIRPORTS
+        and not _location_tracking_active(user_id)
+    ):
         suggest_text = (
             "📍 Чтобы бот мог правильно показывать очередь у аэропорта, включи "
             "трансляцию живой геопозиции - тогда уведомления о подъезде к аэропорту "
