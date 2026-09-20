@@ -7,12 +7,14 @@ import re
 import time
 import functools
 import hashlib
+import hmac
+import urllib.parse
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from math import radians, sin, cos, asin, sqrt
 from aiogram import Bot, Dispatcher, Router, types, BaseMiddleware
 from aiogram.filters import Command
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 from aiogram.client.session.middlewares.base import BaseRequestMiddleware
 from aiogram.methods import SendMessage, TelegramMethod
 from aiogram.methods.base import TelegramType
@@ -1582,6 +1584,26 @@ def init_db():
             processed_at DATETIME
         )
     ''')
+    # Карта водителей (по прямой просьбе пользователя, 21.09.2026: "карта
+    # водителей все те кто есть в этом боте чтобы они нажимали и все видели
+    # друг друга") - ТОЛЬКО те, кто явно включил "🗺 Показываться на карте"
+    # в Настройках (отдельное согласие, НЕ автоматически по факту трансляции
+    # геопозиции для других фич - счётчика км/очереди у аэропорта), и только
+    # пока их последний пинг геопозиции не старше MAP_VISIBILITY_STALE_MINUTES
+    # (см. get_map_positions). Одна строка на пользователя (последняя
+    # известная точка), а не история - для карты нужна только текущая
+    # позиция.
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS map_positions (
+            user_id INTEGER PRIMARY KEY,
+            city TEXT NOT NULL,
+            category TEXT NOT NULL,
+            lat REAL NOT NULL,
+            lon REAL NOT NULL,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_map_positions_city ON map_positions (city, updated_at)')
     conn.commit()
     conn.close()
 
@@ -2545,6 +2567,17 @@ def services_keyboard(category=None, city=None, user_id=None):
     # строкой, под VPN - см. блок "РЕФЕРАЛЬНАЯ ПРОГРАММА" ниже
     # (show_referral_program и остальные хендлеры referral_*).
     buttons.append([KeyboardButton(text="🤝 Реферальная программа")])
+    # "🗺 Карта водителей" (21.09.2026, см. блок "КАРТА ВОДИТЕЛЕЙ") - открывает
+    # интерактивную WebApp-карту через web_app=WebAppInfo (единственный
+    # надёжный способ открыть кастомную веб-страницу внутри Telegram).
+    # Показывается только если PUBLIC_URL задан (Telegram требует HTTPS для
+    # WebApp - на локальном/без Public Networking запуске такой ссылки нет) и
+    # известен город (карта показывает водителей конкретного города). Сама
+    # видимость НА карте регулируется отдельным тумблером в Настройках -
+    # кнопка тут просто открывает карту, не включает показ.
+    if category in MAP_CATEGORY_STYLE and PUBLIC_URL and city:
+        map_url = f"{PUBLIC_URL}{MAP_WEBAPP_PATH}?city={urllib.parse.quote(city)}"
+        buttons.append([KeyboardButton(text="🗺 Карта водителей", web_app=WebAppInfo(url=map_url))])
     buttons.append([KeyboardButton(text="← Назад"), KeyboardButton(text="🏙 Выбор города")])
     return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=buttons)
 
@@ -2628,6 +2661,16 @@ def notification_settings_keyboard(state, category=None):
     # по уточнению пользователя перепроектирован в "▶️ Начать смену"/
     # "⏹ Завершить смену" в главном меню - см. блок "СМЕНА" ниже
     # (start_shift/finish_shift). Настройка отсюда убрана.
+    # "🗺 Показываться на карте" (21.09.2026, см. блок "КАРТА ВОДИТЕЛЕЙ") -
+    # ОТДЕЛЬНОЕ согласие от остальных пунктов выше (счётчик км/очередь у
+    # аэропорта уже используют живую геопозицию, но НЕ показывают
+    # автоматически на общей карте - по прямому уточнению пользователя).
+    if category in MAP_CATEGORY_STYLE:
+        map_mark = '✅' if state.get('map_visible_active') else '☐'
+        buttons.append([InlineKeyboardButton(
+            text=f"{map_mark} 🗺 Показываться на карте",
+            callback_data="notif_toggle_map_visible",
+        )])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 # Кнопка (текст меню) -> ключ в NEARBY_SERVICES. Тексты сокращены под
@@ -3991,6 +4034,33 @@ async def toggle_airport_queue_inline(callback_query: types.CallbackQuery):
     await callback_query.message.edit_reply_markup(reply_markup=notification_settings_keyboard(state, category))
     await callback_query.message.answer(airport_queue_enable_text(), parse_mode='Markdown')
 
+@router.callback_query(lambda c: c.data == "notif_toggle_map_visible")
+async def toggle_map_visible_inline(callback_query: types.CallbackQuery):
+    """Переключатель "🗺 Показываться на карте" (21.09.2026, см. блок "КАРТА
+    ВОДИТЕЛЕЙ") - отдельное согласие от остальных настроек на живой
+    геопозиции. При выключении сразу убираем водителя с карты
+    (delete_map_position), не дожидаясь устаревания точки."""
+    await callback_query.answer()
+    user_id = callback_query.from_user.id
+    state = user_state[user_id]
+    category = state.get('category')
+    if category not in MAP_CATEGORY_STYLE:
+        return
+    if state.get('map_visible_active'):
+        state['map_visible_active'] = False
+        try:
+            delete_map_position(user_id)
+        except Exception:
+            logger.exception(f"❌ Не удалось убрать с карты user_id={user_id}")
+        await callback_query.message.edit_reply_markup(reply_markup=notification_settings_keyboard(state, category))
+        await callback_query.message.answer("⏹ Ты больше не отображаешься на карте водителей.")
+        return
+    state['map_visible_active'] = True
+    await callback_query.message.edit_reply_markup(reply_markup=notification_settings_keyboard(state, category))
+    await callback_query.message.answer(
+        "🗺 Готово! Теперь ты виден другим водителям на карте (только категория, без имени) - пока идёт трансляция геопозиции (например, во время смены или очереди у аэропорта). Открыть карту можно кнопкой «🗺 Карта водителей» в главном меню.",
+    )
+
 # ==================== "СМЕНА" ====================
 # По просьбе пользователя (20.09.2026, взамен более раннего варианта с
 # отдельным переключателем "Счётчик км" в Настройках): кнопка "▶️ Начать
@@ -4533,6 +4603,209 @@ def get_fresh_live_location(user_id):
         return None
     return loc['lat'], loc['lon']
 
+# ==================== КАРТА ВОДИТЕЛЕЙ ====================
+# По прямой просьбе пользователя (21.09.2026): "карта водителей все те кто
+# есть в этом боте чтобы они нажимали и все видели друг друга чтобы таксисты
+# были помечены как таксисты допустим жёлтым символом... Ультима... чёрный
+# курьеры... белым грузовые красным". Реализовано как настоящая интерактивная
+# Telegram WebApp-карта (Leaflet.js + OpenStreetMap, без ключей API) - НЕ
+# статичная картинка. Показ на карте - ОТДЕЛЬНОЕ явное согласие
+# ("🗺 Показываться на карте" в Настройках), отдельное от остальных фич на
+# живой геопозиции (счётчик км смены, очередь у аэропорта) - включение той
+# трансляции НЕ включает автоматически показ на карте, по прямому уточнению
+# пользователя при обсуждении фичи. На карте виден только тариф/категория
+# (цветной маркер + подпись), БЕЗ имени и БЕЗ user_id - см. get_map_positions.
+
+# Сколько минут последняя известная точка водителя ещё показывается на общей
+# карте - после этого маркер считается устаревшим и не отдаётся API
+# /map/positions (водитель мог закрыть бота/остановить трансляцию).
+MAP_VISIBILITY_STALE_MINUTES = 15
+
+# Цвет и подпись маркера на карте по категории - см. просьбу пользователя
+# выше (такси-жёлтый/Ultima-чёрный/курьер-белый/грузовой-красный).
+MAP_CATEGORY_STYLE = {
+    'taxi': {'color': '#FFD400', 'label': 'Такси'},
+    'ultima': {'color': '#111111', 'label': 'Ultima'},
+    'courier': {'color': '#FFFFFF', 'label': 'Курьер'},
+    'cargo': {'color': '#E53935', 'label': 'Грузовое такси'},
+}
+
+MAP_WEBAPP_PATH = '/map'
+MAP_POSITIONS_API_PATH = '/map/positions'
+
+def update_map_position(user_id, city, category, lat, lon):
+    """Записывает/обновляет последнюю позицию водителя для общей карты.
+    Вызывается только если водитель явно включил показ на карте (см.
+    maybe_update_map_position) - сюда напрямую лучше не звать."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT INTO map_positions (user_id, city, category, lat, lon, updated_at)
+        VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(user_id) DO UPDATE SET
+            city = excluded.city, category = excluded.category,
+            lat = excluded.lat, lon = excluded.lon,
+            updated_at = CURRENT_TIMESTAMP
+    ''', (user_id, city, category, lat, lon))
+    conn.commit()
+    conn.close()
+
+def delete_map_position(user_id):
+    """Убирает водителя с карты - при выключении "Показываться на карте" или
+    при завершении смены/остановке трансляции геопозиции."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('DELETE FROM map_positions WHERE user_id = ?', (user_id,))
+    conn.commit()
+    conn.close()
+
+def get_map_positions(city):
+    """Отдаёт список позиций для карты конкретного города - только
+    категория/координаты, БЕЗ user_id и имени (приватность, по просьбе
+    пользователя - подпись маркера только "какой тариф"). Отфильтровывает
+    устаревшие точки (см. MAP_VISIBILITY_STALE_MINUTES)."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT category, lat, lon FROM map_positions
+        WHERE city = ? AND updated_at >= datetime('now', ?)
+    ''', (city, f'-{MAP_VISIBILITY_STALE_MINUTES} minutes'))
+    rows = cursor.fetchall()
+    conn.close()
+    return [{'category': r[0], 'lat': r[1], 'lon': r[2]} for r in rows]
+
+def maybe_update_map_position(user_id, lat, lon):
+    """Хук из обработчиков живой геопозиции (см. вызовы ниже) - пишет позицию
+    в map_positions, ТОЛЬКО если у пользователя явно включено
+    map_visible_active (отдельная настройка, см. блок "НАСТРОЙКИ ПУШЕЙ" /
+    notif_toggle_map_visible). Если категория не входит в MAP_CATEGORY_STYLE
+    (на всякий случай) - ничего не пишет."""
+    state = user_state.get(user_id) or {}
+    if not state.get('map_visible_active'):
+        return
+    category = state.get('category')
+    city = state.get('city')
+    if not category or not city or category not in MAP_CATEGORY_STYLE:
+        return
+    try:
+        update_map_position(user_id, city, category, lat, lon)
+    except Exception:
+        logger.exception(f"❌ Не удалось обновить позицию на карте для user_id={user_id}")
+
+def validate_telegram_webapp_init_data(init_data, bot_token):
+    """Проверка подписи initData от Telegram WebApp - официальный алгоритм
+    (https://core.telegram.org/bots/webapps#validating-data-received-via-the-web-app):
+    secret_key = HMAC-SHA256(bot_token, key="WebAppData"), затем
+    hash сравнивается с HMAC-SHA256(data_check_string, key=secret_key), где
+    data_check_string - все поля кроме hash, отсортированные по ключу и
+    склеенные через '\\n' как "key=value". Возвращает распарсенные поля (dict)
+    при успехе, иначе None."""
+    try:
+        parsed = dict(urllib.parse.parse_qsl(init_data, strict_parsing=True))
+    except Exception:
+        return None
+    received_hash = parsed.pop('hash', None)
+    if not received_hash:
+        return None
+    data_check_string = '\n'.join(f'{k}={v}' for k, v in sorted(parsed.items()))
+    secret_key = hmac.new(b'WebAppData', bot_token.encode(), hashlib.sha256).digest()
+    computed_hash = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(computed_hash, received_hash):
+        return None
+    return parsed
+
+def map_webapp_html():
+    """HTML-страница WebApp с интерактивной картой (Leaflet.js + OpenStreetMap
+    тайлы, без API-ключей). Город берётся из query-параметра ?city=, который
+    подставляется в URL кнопки при создании клавиатуры (см. services_keyboard).
+    Запрашивает /map/positions?city=... с заголовком, содержащим initData, для
+    проверки подписи на сервере (см. validate_telegram_webapp_init_data)."""
+    style_json = json.dumps(MAP_CATEGORY_STYLE, ensure_ascii=False)
+    return f"""<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Карта водителей</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<style>
+  html, body, #map {{ height: 100%; margin: 0; padding: 0; }}
+  .legend {{ position: absolute; top: 10px; right: 10px; z-index: 1000; background: #fff; border-radius: 8px; padding: 8px 10px; font-family: -apple-system, sans-serif; font-size: 12px; box-shadow: 0 1px 4px rgba(0,0,0,.25); }}
+  .legend div {{ display: flex; align-items: center; gap: 6px; margin: 3px 0; }}
+  .legend .dot {{ width: 11px; height: 11px; border-radius: 50%; border: 1px solid #999; display: inline-block; }}
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div class="legend" id="legend"></div>
+<script>
+  const CATEGORY_STYLE = {style_json};
+  const tg = window.Telegram && window.Telegram.WebApp;
+  if (tg) {{ tg.ready(); tg.expand(); }}
+  const params = new URLSearchParams(window.location.search);
+  const city = params.get('city') || '';
+  const legend = document.getElementById('legend');
+  for (const key in CATEGORY_STYLE) {{
+    const s = CATEGORY_STYLE[key];
+    legend.innerHTML += `<div><span class="dot" style="background:${{s.color}}"></span>${{s.label}}</div>`;
+  }}
+  const map = L.map('map').setView([55.7558, 37.6173], 11);
+  L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
+    attribution: '© OpenStreetMap',
+    maxZoom: 19,
+  }}).addTo(map);
+  let markers = [];
+  async function loadPositions() {{
+    try {{
+      const initData = tg ? tg.initData : '';
+      const resp = await fetch(`/map/positions?city=${{encodeURIComponent(city)}}`, {{
+        headers: {{ 'X-Telegram-Init-Data': initData }},
+      }});
+      if (!resp.ok) return;
+      const data = await resp.json();
+      markers.forEach(m => map.removeLayer(m));
+      markers = [];
+      let bounds = [];
+      data.positions.forEach(p => {{
+        const style = CATEGORY_STYLE[p.category] || {{ color: '#888', label: p.category }};
+        const marker = L.circleMarker([p.lat, p.lon], {{
+          radius: 9, color: '#333', weight: 1.5, fillColor: style.color, fillOpacity: 0.9,
+        }}).bindPopup(style.label).addTo(map);
+        markers.push(marker);
+        bounds.push([p.lat, p.lon]);
+      }});
+      if (bounds.length) map.fitBounds(bounds, {{ padding: [30, 30], maxZoom: 13 }});
+    }} catch (e) {{ /* тихо - карта просто останется пустой до следующего опроса */ }}
+  }}
+  loadPositions();
+  setInterval(loadPositions, 15000);
+</script>
+</body>
+</html>"""
+
+async def handle_map_webapp(request):
+    return web.Response(text=map_webapp_html(), content_type='text/html')
+
+async def handle_map_positions_api(request):
+    """JSON API для карты - отдаёт только category/lat/lon (без user_id),
+    проверяя подпись initData, если задан BOT_TOKEN. Если initData
+    отсутствует/невалиден - всё равно отдаём данные (это не платёжный webhook,
+    а публичная агрегированная карта без персональных данных), но логируем,
+    чтобы отследить аномальный трафик."""
+    city = request.query.get('city', '')
+    init_data = request.headers.get('X-Telegram-Init-Data', '')
+    if BOT_TOKEN and init_data:
+        if validate_telegram_webapp_init_data(init_data, BOT_TOKEN) is None:
+            logger.warning("⚠️ /map/positions: не прошла проверка initData")
+    try:
+        positions = get_map_positions(city) if city else []
+    except Exception:
+        logger.exception("❌ Ошибка при получении позиций для карты водителей")
+        positions = []
+    return web.json_response({'positions': positions})
+
 @router.message(lambda message: getattr(message, 'location', None) is not None and not _location_tracking_active(message.from_user.id) and not user_state.get(message.from_user.id, {}).get('nearby_pending'))
 async def handle_passive_live_location(message: types.Message):
     """По жалобе пользователя (20.09.2026): "сверху уже включен сбор
@@ -4588,6 +4861,7 @@ async def handle_airport_queue_location(message: types.Message):
     await process_airport_queue_ping(user_id, lat, lon, live_period=getattr(message.location, 'live_period', None))
     km_counter_ping(user_id, lat, lon)
     remember_live_location(user_id, lat, lon)
+    maybe_update_map_position(user_id, lat, lon)
     state = user_state.get(user_id) or {}
     if state.get('airport_queue_active') and is_shift_active(state):
         status_text = "📍 Геопозиция получена, слежу за очередью и считаю километраж смены."
@@ -4609,6 +4883,7 @@ async def handle_airport_queue_location_update(message: types.Message):
     await process_airport_queue_ping(user_id, lat, lon, live_period=getattr(message.location, 'live_period', None))
     km_counter_ping(user_id, lat, lon)
     remember_live_location(user_id, lat, lon)
+    maybe_update_map_position(user_id, lat, lon)
 
 @router.message(lambda message: message.text in NEARBY_BUTTON_TO_KIND and user_state.get(message.from_user.id, {}).get('in_courier_module'))
 async def show_nearby_prompt(message: types.Message):
@@ -7577,6 +7852,10 @@ async def start_subscription_webhook_server():
     app = web.Application()
     app.router.add_post(SUBSCRIPTION_WEBHOOK_PATH, handle_tinkoff_webhook)
     app.router.add_get('/', lambda request: web.Response(text='taxi-helper-bot OK'))
+    # Карта водителей (см. блок "КАРТА ВОДИТЕЛЕЙ" выше) - страница WebApp и
+    # JSON-API с позициями, на этом же лёгком aiohttp-сервере.
+    app.router.add_get(MAP_WEBAPP_PATH, handle_map_webapp)
+    app.router.add_get(MAP_POSITIONS_API_PATH, handle_map_positions_api)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', SUBSCRIPTION_WEBHOOK_PORT)
