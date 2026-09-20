@@ -1412,8 +1412,65 @@ def init_db():
     existing_columns = {row[1] for row in cursor.fetchall()}
     if 'client_phone' not in existing_columns:
         cursor.execute('ALTER TABLE shared_orders ADD COLUMN client_phone TEXT')
+    # "▶️ Начать смену"/"⏹ Завершить смену" (по просьбе пользователя,
+    # 20.09.2026) - история смен водителя: дата, длительность, км. Хранится
+    # ОТДЕЛЬНОЙ таблицей (а не в user_states JSON), чтобы не перезаписывать
+    # растущий блоб на каждое изменение состояния и чтобы можно было делать
+    # обычные SQL-запросы по дате (см. get_shift_history/save_shift_record,
+    # показывается в "💰 Финансы" -> "📈 Статистика смен" за 6 месяцев).
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS shift_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            shift_date TEXT NOT NULL,
+            started_at DATETIME NOT NULL,
+            duration_minutes INTEGER NOT NULL,
+            km REAL NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_shift_history_user_date ON shift_history (user_id, shift_date)')
     conn.commit()
     conn.close()
+
+SHIFT_HISTORY_MONTHS = 6  # сколько месяцев хранить/показывать в статистике (по просьбе пользователя)
+
+def save_shift_record(user_id, started_at, duration_minutes, km):
+    """Сохраняет одну завершённую смену в историю (см. finish_shift) -
+    shift_date берём из started_at по UTC (дата начала смены, не окончания -
+    так смена, начатая поздно вечером и законченная за полночь, попадает в
+    статистику того дня, когда водитель фактически начал работать)."""
+    try:
+        init_db()
+        conn = get_db_connection()
+        conn.execute(
+            'INSERT INTO shift_history (user_id, shift_date, started_at, duration_minutes, km) VALUES (?, ?, ?, ?, ?)',
+            (user_id, started_at.date().isoformat(), started_at.strftime('%Y-%m-%d %H:%M:%S'), duration_minutes, km)
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"❌ Не удалось сохранить смену пользователя {user_id}: {e}")
+
+def get_shift_history(user_id, months=SHIFT_HISTORY_MONTHS):
+    """Смены пользователя за последние `months` месяцев, по дате начала
+    (новые сверху) - используется и для списка по дням (show_shift_stats), и
+    для общих итогов (сумма км/часов за период)."""
+    try:
+        init_db()
+        conn = get_db_connection()
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=months * 30)).date().isoformat()
+        cursor = conn.execute(
+            'SELECT shift_date, duration_minutes, km FROM shift_history '
+            'WHERE user_id = ? AND shift_date >= ? ORDER BY shift_date DESC, started_at DESC',
+            (user_id, cutoff)
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        return rows
+    except Exception as e:
+        logger.error(f"❌ Не удалось прочитать историю смен пользователя {user_id}: {e}")
+        return []
 
 def save_airport_status(icao, status):
     try:
@@ -2053,7 +2110,7 @@ def peak_hours_weekday_keyboard(current_weekday):
         buttons.append(row)
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-def services_keyboard(category=None, city=None):
+def services_keyboard(category=None, city=None, user_id=None):
     # Итоговый набор кнопок меню услуг (по заданному порядку). "Заказы
     # города" (было "Повышенный спрос") убрана по просьбе пользователя - была
     # заглушкой без своей логики. "Дорожные события" тоже пока без
@@ -2081,14 +2138,27 @@ def services_keyboard(category=None, city=None):
     # "🔓 Бесплатный VPN TAXI HELPER" - НЕ в общей 2-колоночной сетке ниже, а
     # отдельной строкой в самом низу (перед "← Назад"/"🏙 Выбор города") - по
     # просьбе пользователя.
-    # "💰 КУДА ЕХАТЬ ➡️" - самая верхняя строка меню, отдельной строкой (по
-    # просьбе пользователя) - раньше была внутри "Инструменты водителя",
-    # перенесена сюда как самая важная кнопка (решает, куда именно ехать
-    # прямо сейчас). Доступна только категориям с аэропортами (см.
-    # CATEGORIES_WITHOUT_AIRPORTS) - сводка построена на аэропортах/вокзалах/
-    # часах пика для ПАССАЖИРСКИХ поездок, для курьера/грузового такси не
-    # актуальна (см. обсуждение с пользователем 19.09.2026).
+    # "▶️ Начать смену"/"⏹ Завершить смену" - САМАЯ верхняя строка меню, ВЫШЕ
+    # "💰 КУДА ЕХАТЬ ➡️" (по прямой просьбе пользователя, 20.09.2026) - одна
+    # кнопка-переключатель (текст меняется в зависимости от того, идёт ли
+    # смена, см. is_shift_active/toggle_shift), доступна ВСЕМ категориям (в
+    # отличие от "Куда ехать" - секундомер и километраж смены равно полезны
+    # курьеру/грузовому такси).
+    # "💰 КУДА ЕХАТЬ ➡️" - следующей строкой (по просьбе пользователя) -
+    # раньше была внутри "Инструменты водителя", перенесена сюда как самая
+    # важная кнопка (решает, куда именно ехать прямо сейчас). Доступна
+    # только категориям с аэропортами (см. CATEGORIES_WITHOUT_AIRPORTS) -
+    # сводка построена на аэропортах/вокзалах/часах пика для ПАССАЖИРСКИХ
+    # поездок, для курьера/грузового такси не актуальна (см. обсуждение с
+    # пользователем 19.09.2026).
+    # user_id - опциональный (по умолчанию None), чтобы не переписывать
+    # КАЖДЫЙ из ~19 существующих вызовов services_keyboard(category, city) в
+    # файле: без него кнопка безопасно показывает "▶️ Начать смену" (тот же
+    # эффект, как если бы смена не шла) - минорная неточность на редких
+    # экранах, где именно этот вызов не передал user_id, а не падение.
+    shift_active = is_shift_active(user_state.get(user_id, {})) if user_id is not None else False
     top_row = []
+    top_row.append(KeyboardButton(text="⏹ ЗАВЕРШИТЬ СМЕНУ" if shift_active else "✅ НАЧАТЬ СМЕНУ"))
     if category not in CATEGORIES_WITHOUT_AIRPORTS:
         top_row.append(KeyboardButton(text="💰 КУДА ЕХАТЬ ➡️"))
 
@@ -2193,15 +2263,10 @@ def notification_settings_keyboard(state, category=None):
             text=f"{queue_mark} 📍 Очередь у аэропорта",
             callback_data="notif_toggle_airport_queue",
         )])
-    # "🛣 Счётчик км" - отдельный переключатель (по просьбе пользователя,
-    # 20.09.2026): считает пройденные за день км по живой геопозиции,
-    # НЕЗАВИСИМО от "Очередь у аэропорта" - водитель включает его отдельно
-    # на весь день работы. См. km_counter_ping/km_counter_today_km.
-    km_mark = '✅' if state.get('km_counter_active') else '☐'
-    buttons.append([InlineKeyboardButton(
-        text=f"{km_mark} 🛣 Счётчик км",
-        callback_data="notif_toggle_km_counter",
-    )])
+    # "🛣 Счётчик км" как отдельный переключатель здесь БЫЛ (20.09.2026), но
+    # по уточнению пользователя перепроектирован в "▶️ Начать смену"/
+    # "⏹ Завершить смену" в главном меню - см. блок "СМЕНА" ниже
+    # (start_shift/finish_shift). Настройка отсюда убрана.
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 # Кнопка (текст меню) -> ключ в NEARBY_SERVICES. Тексты сокращены под
@@ -2477,7 +2542,7 @@ async def go_back(message: types.Message):
     if state.pop('in_courier_module', None):
         # Были в подменю "🧰 Инструменты водителя" -> возвращаемся на экран услуг (категория и город остаются)
         state.pop('nearby_pending', None)  # на случай если "Назад" пришёл, пока ждали геолокацию
-        await message.answer("Выбери услугу 👇", reply_markup=services_keyboard(state.get('category'), state.get('city')))
+        await message.answer("Выбери услугу 👇", reply_markup=services_keyboard(state.get('category'), state.get('city'), user_id))
         return
 
     if 'category' in state:
@@ -2549,7 +2614,7 @@ async def start_shared_order(message: types.Message):
     if state.get('category') not in SHARED_ORDER_CATEGORIES:
         await message.answer(
             "Отдавать заказы могут только категории Такси и Ultima.",
-            reply_markup=services_keyboard(state.get('category'), state.get('city')),
+            reply_markup=services_keyboard(state.get('category'), state.get('city'), user_id),
         )
         return
     state['order_draft'] = {'step': 'pickup', 'data': {}}
@@ -2569,7 +2634,7 @@ async def shared_order_flow(message: types.Message):
 
     if text == "❌ Отмена":
         state.pop('order_draft', None)
-        await message.answer("Черновик заказа отменён.", reply_markup=services_keyboard(category, city))
+        await message.answer("Черновик заказа отменён.", reply_markup=services_keyboard(category, city, user_id))
         return
 
     step = draft['step']
@@ -2686,7 +2751,7 @@ async def cancel_shared_order_draft(callback_query: types.CallbackQuery):
     state.pop('order_draft', None)
     await callback_query.message.edit_text("Черновик заказа отменён.")
     await callback_query.answer()
-    await callback_query.message.answer("Выбери действие 👇", reply_markup=services_keyboard(state.get('category'), state.get('city')))
+    await callback_query.message.answer("Выбери действие 👇", reply_markup=services_keyboard(state.get('category'), state.get('city'), user_id))
 
 @router.callback_query(lambda c: c.data == "order_confirm_send")
 async def confirm_send_shared_order(callback_query: types.CallbackQuery):
@@ -2715,7 +2780,7 @@ async def confirm_send_shared_order(callback_query: types.CallbackQuery):
             f"✅ Заказ #{order_id} создан, но сейчас в городе {city_name} нет других известных водителей Такси/Ultima. "
             f"Как только кто-то из них напишет боту, увидит твой заказ, пока он не истёк."
         )
-    await callback_query.message.answer("Выбери действие 👇", reply_markup=services_keyboard(category, city))
+    await callback_query.message.answer("Выбери действие 👇", reply_markup=services_keyboard(category, city, user_id))
 
 @router.callback_query(lambda c: c.data.startswith('order_accept_'))
 async def accept_shared_order(callback_query: types.CallbackQuery):
@@ -2785,7 +2850,7 @@ async def open_courier_module(message: types.Message):
         # оставляем на случай, если позже какую-то категорию снова исключат.
         await message.answer(
             "Этот раздел пока недоступен для твоей категории.",
-            reply_markup=services_keyboard(state.get('category'), state.get('city')),
+            reply_markup=services_keyboard(state.get('category'), state.get('city'), user_id),
         )
         return
     state['in_courier_module'] = True
@@ -2797,6 +2862,16 @@ async def start_courier_finance(message: types.Message):
     state = user_state[user_id]
     state['courier_finance_draft'] = {'step': 'income', 'data': {}}
     await message.answer(COURIER_FINANCE_STEP_PROMPTS['income'], reply_markup=courier_finance_cancel_keyboard())
+    # "📈 Статистика смен" - по просьбе пользователя (20.09.2026) доступна
+    # прямо отсюда, отдельной инлайн-кнопкой под первым шагом расчёта (см.
+    # show_shift_stats) - не отдельный пункт меню, чтобы не плодить кнопки в
+    # courier_module_keyboard.
+    await message.answer(
+        "Или посмотри статистику своих смен за последние 6 месяцев:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="📈 Статистика смен", callback_data="show_shift_stats"),
+        ]]),
+    )
 
 @router.message(lambda message: message.text in COURIER_STUB_SECTIONS and user_state.get(message.from_user.id, {}).get('in_courier_module'))
 async def courier_stub_section(message: types.Message):
@@ -3262,7 +3337,7 @@ async def show_notification_settings(message: types.Message):
         parse_mode='Markdown',
     )
 
-@router.callback_query(lambda c: c.data.startswith("notif_toggle_") and c.data not in ("notif_toggle_airport_queue", "notif_toggle_km_counter"))
+@router.callback_query(lambda c: c.data.startswith("notif_toggle_") and c.data != "notif_toggle_airport_queue")
 async def toggle_notification_setting(callback_query: types.CallbackQuery):
     await callback_query.answer()
     user_id = callback_query.from_user.id
@@ -3301,87 +3376,109 @@ async def toggle_airport_queue_inline(callback_query: types.CallbackQuery):
     await callback_query.message.edit_reply_markup(reply_markup=notification_settings_keyboard(state, category))
     await callback_query.message.answer(airport_queue_enable_text(), parse_mode='Markdown')
 
-# ==================== "СЧЁТЧИК КМ" ====================
-# По просьбе пользователя (20.09.2026): отдельный переключатель (не связанный
-# с "Очередь у аэропорта") - водитель включает в начале дня, бот считает
-# пройденные км по живой геопозиции (та же трансляция, что и для очереди -
-# Telegram шлёт её как edited_message.location, см. handle_km_counter_location*
-# ниже), сумма за день доступна как подсказка в "💰 Финансы" на шаге "км".
-# km_counter в state: {'date': 'YYYY-MM-DD', 'total_km': float,
-# 'last_lat': float, 'last_lon': float}. Дата - календарная по UTC (просто
-# как ключ сброса "новый день начался", секундная точность тут не нужна).
-KM_COUNTER_MAX_JUMP_KM = 3.0  # скачок между двумя пингами больше этого - считаем сбоем GPS/потерей сигнала, км не прибавляем (просто обновляем точку)
+# ==================== "СМЕНА" ====================
+# По просьбе пользователя (20.09.2026, взамен более раннего варианта с
+# отдельным переключателем "Счётчик км" в Настройках): кнопка "▶️ Начать
+# смену" в главном меню (см. services_keyboard) одновременно запускает
+# секундомер смены и счётчик пройденных км по живой геопозиции (та же
+# трансляция, что и "Очередь у аэропорта" - Telegram шлёт обновления как
+# edited_message.location, см. km_counter_ping ниже и общий фильтр
+# _location_tracking_active рядом с хендлерами location). Кнопка меняется на
+# "⏹ Завершить смену" - при нажатии показывает итог (время + км) и СРАЗУ
+# сохраняет запись в таблицу shift_history (см. save_shift_record) для
+# статистики за 6 месяцев в "💰 Финансы" (см. show_shift_stats).
+#
+# state['shift'] = {'started_at': iso, 'total_km': float, 'last_lat': float,
+# 'last_lon': float} - есть шифт = смена идёт, отсутствует/None = не идёт.
+SHIFT_MAX_JUMP_KM = 3.0  # скачок между двумя пингами больше этого - считаем сбоем GPS/потерей сигнала, км не прибавляем (просто обновляем точку)
 
-def enable_km_counter_tracking(user_id):
+def is_shift_active(state):
+    return bool(state.get('shift'))
+
+def start_shift(user_id):
     state = user_state[user_id]
-    state['km_counter_active'] = True
-    # Не затираем total_km, если счётчик уже что-то насчитал сегодня и
-    # водитель просто выключал/включал его в течение дня - см.
-    # km_counter_today_km ниже (сброс идёт по смене даты, не по тоглу).
-    counter = dict(state.get('km_counter') or {})
-    today_str = datetime.now(timezone.utc).date().isoformat()
-    if counter.get('date') != today_str:
-        counter = {'date': today_str, 'total_km': 0.0}
-    counter.pop('last_lat', None)
-    counter.pop('last_lon', None)
-    state['km_counter'] = counter
-
-def km_counter_today_km(state):
-    """Км, накопленные счётчиком за СЕГОДНЯ (сбрасывается сама, если
-    сохранённая дата не совпадает с текущей - не нужен отдельный фоновый
-    сброс в полночь, дата просто проверяется при каждом обращении)."""
-    counter = state.get('km_counter') or {}
-    today_str = datetime.now(timezone.utc).date().isoformat()
-    if counter.get('date') != today_str:
-        return 0.0
-    return counter.get('total_km', 0.0)
+    state['shift'] = {'started_at': datetime.now(timezone.utc).isoformat(), 'total_km': 0.0}
 
 def km_counter_ping(user_id, lat, lon):
-    """Обрабатывает один пинг живой геопозиции для счётчика км - вызывается
-    из тех же хендлеров location/edited_message, что и process_airport_queue_ping
-    (независимо от неё - обе функции могут отрабатывать на один и тот же
-    пинг, если у водителя включены обе фичи одновременно)."""
+    """Обрабатывает один пинг живой геопозиции для счётчика км текущей смены -
+    вызывается из тех же хендлеров location/edited_message, что и
+    process_airport_queue_ping (независимо от неё - обе функции могут
+    отрабатывать на один и тот же пинг, если у водителя одновременно идёт
+    смена и включена очередь у аэропорта). Ничего не делает, если смена не
+    идёт (see is_shift_active)."""
     state = user_state[user_id]
-    if not state.get('km_counter_active'):
+    shift = state.get('shift')
+    if not shift:
         return
-    counter = dict(state.get('km_counter') or {})
-    today_str = datetime.now(timezone.utc).date().isoformat()
-    if counter.get('date') != today_str:
-        counter = {'date': today_str, 'total_km': 0.0}
-    last_lat, last_lon = counter.get('last_lat'), counter.get('last_lon')
+    shift = dict(shift)
+    last_lat, last_lon = shift.get('last_lat'), shift.get('last_lon')
     if last_lat is not None and last_lon is not None:
         jump = haversine_km(last_lat, last_lon, lat, lon)
-        if jump <= KM_COUNTER_MAX_JUMP_KM:
-            counter['total_km'] = counter.get('total_km', 0.0) + jump
-    counter['last_lat'] = lat
-    counter['last_lon'] = lon
-    state['km_counter'] = counter
+        if jump <= SHIFT_MAX_JUMP_KM:
+            shift['total_km'] = shift.get('total_km', 0.0) + jump
+    shift['last_lat'] = lat
+    shift['last_lon'] = lon
+    state['shift'] = shift
 
-@router.callback_query(lambda c: c.data == "notif_toggle_km_counter")
-async def toggle_km_counter_inline(callback_query: types.CallbackQuery):
-    """Переключатель "🛣 Счётчик км" внутри "⚙️ Настройки" - см. блок выше.
-    Выключение НЕ обнуляет накопленные за сегодня км (state['km_counter']
-    остаётся) - водитель может включать/выключать в течение дня, итог за
-    день не теряется, обнуляется только с наступлением нового дня (по UTC
-    дате в km_counter_ping/km_counter_today_km)."""
-    await callback_query.answer()
-    user_id = callback_query.from_user.id
+def finish_shift(user_id):
+    """Останавливает смену, возвращает (duration_minutes, total_km) и
+    сохраняет запись в БД (save_shift_record) - вызывается из finish_shift_button
+    ниже. Не падает, если смены не было (защитный случай - кнопка не должна
+    быть видна в этом состоянии, но на всякий случай)."""
     state = user_state[user_id]
+    shift = state.pop('shift', None)
+    if not shift:
+        return 0, 0.0
+    started_at = datetime.fromisoformat(shift['started_at'])
+    duration_minutes = max(0, round((datetime.now(timezone.utc) - started_at).total_seconds() / 60))
+    total_km = shift.get('total_km', 0.0)
+    save_shift_record(user_id, started_at, duration_minutes, total_km)
+    return duration_minutes, total_km
+
+def format_shift_duration(minutes):
+    hours, mins = divmod(minutes, 60)
+    if hours and mins:
+        return f"{hours} ч {mins} мин"
+    if hours:
+        return f"{hours} ч"
+    return f"{mins} мин"
+
+@router.message(lambda message: message.text in ("✅ НАЧАТЬ СМЕНУ", "⏹ ЗАВЕРШИТЬ СМЕНУ"))
+async def toggle_shift(message: types.Message):
+    """Одна кнопка-переключатель наверху главного меню (выше "💰 КУДА ЕХАТЬ",
+    см. services_keyboard) - текст меняется в зависимости от того, идёт ли
+    смена, т.к. это одна и та же позиция клавиатуры."""
+    user_id = message.from_user.id
+    state = user_state.get(user_id, {})
     category = state.get('category')
-    if state.get('km_counter_active'):
-        state['km_counter_active'] = False
-        await callback_query.message.edit_reply_markup(reply_markup=notification_settings_keyboard(state, category))
-        today_km = km_counter_today_km(state)
-        await callback_query.message.answer(f"⏹ Счётчик км остановлен. Пройдено сегодня: {today_km:.1f} км.")
+    city = state.get('city')
+    if not city:
+        await message.answer("Сначала выбери город!")
         return
-    enable_km_counter_tracking(user_id)
-    await callback_query.message.edit_reply_markup(reply_markup=notification_settings_keyboard(state, category))
-    await callback_query.message.answer(
-        "🛣 *Счётчик км включён*\n\n"
-        "Как и для «Очереди у аэропорта»: скрепка 📎 → Геопозиция → "
-        "*«Транслировать геопозицию»* → выбирай *«Пока не отключу»*. "
-        "Пока трансляция активна, буду считать пройденные км - итог за "
-        "сегодня подставлю в «💰 Финансы» на шаге «Километраж».",
+
+    if message.text == "✅ НАЧАТЬ СМЕНУ":
+        if is_shift_active(state):
+            return  # защитный случай - кнопка не должна была показать "Начать", если смена уже идёт
+        start_shift(user_id)
+        await message.answer(
+            "✅ *СМЕНА НАЧАТА!*\n\n"
+            "Чтобы считался километраж: скрепка 📎 → Геопозиция → "
+            "*«Транслировать геопозицию»* → выбирай *«Пока не отключу»*.\n\n"
+            "Без трансляции секундомер идёт как обычно, но км не посчитаются.",
+            reply_markup=services_keyboard(category, city, user_id),
+            parse_mode='Markdown',
+        )
+        return
+
+    if not is_shift_active(state):
+        return  # защитный случай - кнопка не должна была показать "Завершить", если смены нет
+    duration_minutes, total_km = finish_shift(user_id)
+    await message.answer(
+        f"⏹ *СМЕНА ЗАВЕРШЕНА*\n\n"
+        f"⏱ Время: {format_shift_duration(duration_minutes)}\n"
+        f"🛣 Пройдено: {total_km:.1f} км\n\n"
+        f"Запись сохранена в статистику (см. «💰 Финансы» → «📈 Статистика смен»).",
+        reply_markup=services_keyboard(category, city, user_id),
         parse_mode='Markdown',
     )
 
@@ -3558,11 +3655,12 @@ async def process_airport_queue_ping(user_id, lat, lon, live_period=None):
 
 def _location_tracking_active(user_id):
     """True, если хоть одна из фич, использующих живую геопозицию (очередь у
-    аэропорта, счётчик км), сейчас включена у этого пользователя - обе
-    читают ОДНУ и ту же трансляцию (Telegram позволяет транслировать только
-    одну геопозицию за раз), см. комментарий у handle_airport_queue_location."""
+    аэропорта, счётчик км текущей смены), сейчас активна у этого
+    пользователя - обе читают ОДНУ и ту же трансляцию (Telegram позволяет
+    транслировать только одну геопозицию за раз), см. комментарий у
+    handle_airport_queue_location."""
     state = user_state.get(user_id, {})
-    return bool(state.get('airport_queue_active') or state.get('km_counter_active'))
+    return bool(state.get('airport_queue_active') or is_shift_active(state))
 
 @router.message(lambda message: getattr(message, 'location', None) is not None and _location_tracking_active(message.from_user.id) and not user_state.get(message.from_user.id, {}).get('nearby_pending'))
 async def handle_airport_queue_location(message: types.Message):
@@ -3597,11 +3695,13 @@ async def handle_airport_queue_location(message: types.Message):
     await process_airport_queue_ping(user_id, lat, lon, live_period=getattr(message.location, 'live_period', None))
     km_counter_ping(user_id, lat, lon)
     state = user_state.get(user_id) or {}
-    if state.get('airport_queue_active'):
+    if state.get('airport_queue_active') and is_shift_active(state):
+        status_text = "📍 Геопозиция получена, слежу за очередью и считаю километраж смены."
+    elif state.get('airport_queue_active'):
         status_text = "📍 Геопозиция получена, слежу за расстоянием до аэропорта."
     else:
-        status_text = "📍 Геопозиция получена, считаю километраж."
-    await message.answer(status_text, reply_markup=courier_module_keyboard(state.get('category')))
+        status_text = "📍 Геопозиция получена, считаю километраж смены."
+    await message.answer(status_text, reply_markup=services_keyboard(state.get('category'), state.get('city'), user_id))
 
 @router.edited_message(lambda message: getattr(message, 'location', None) is not None and _location_tracking_active(message.from_user.id))
 async def handle_airport_queue_location_update(message: types.Message):
@@ -3683,12 +3783,83 @@ async def handle_nearby_location(message: types.Message):
             f"{cfg['emoji']} Не получилось показать список - попробуй ещё раз через минуту.",
         )
 
+@router.callback_query(lambda c: c.data == "show_shift_stats")
+async def show_shift_stats(callback_query: types.CallbackQuery):
+    """"📈 Статистика смен" - инлайн-кнопка под первым шагом "💰 Финансы" (см.
+    start_courier_finance). Показывает итоги за неделю/месяц/6 месяцев плюс
+    последние 14 дней по дням - вся история хранится в БД 6 месяцев (см.
+    get_shift_history/SHIFT_HISTORY_MONTHS), но выводить построчно все ~180
+    дней в одном сообщении Telegram не даст (лимит 4096 символов) и это
+    бесполезно много для водителя - итогов за периоды + недавних дней
+    достаточно, чтобы понимать динамику."""
+    await callback_query.answer()
+    user_id = callback_query.from_user.id
+    rows = get_shift_history(user_id)  # [(shift_date, duration_minutes, km), ...] за 6 месяцев, новые сверху
+
+    if not rows:
+        await callback_query.message.answer(
+            "📈 *Статистика смен*\n\nПока нет ни одной завершённой смены - начни смену кнопкой «▶️ Начать смену» в главном меню.",
+            parse_mode='Markdown',
+        )
+        return
+
+    # Группируем по дню (за один день может быть несколько смен).
+    by_day = {}
+    for shift_date, duration_minutes, km in rows:
+        agg = by_day.setdefault(shift_date, {'minutes': 0, 'km': 0.0})
+        agg['minutes'] += duration_minutes
+        agg['km'] += km
+    days_sorted = sorted(by_day.keys(), reverse=True)
+
+    today_str = datetime.now(timezone.utc).date().isoformat()
+    week_cutoff = (datetime.now(timezone.utc).date() - timedelta(days=7)).isoformat()
+    month_cutoff = (datetime.now(timezone.utc).date() - timedelta(days=30)).isoformat()
+
+    def sum_period(cutoff):
+        minutes = sum(agg['minutes'] for d, agg in by_day.items() if d >= cutoff)
+        km = sum(agg['km'] for d, agg in by_day.items() if d >= cutoff)
+        return minutes, km
+
+    week_minutes, week_km = sum_period(week_cutoff)
+    month_minutes, month_km = sum_period(month_cutoff)
+    total_minutes = sum(agg['minutes'] for agg in by_day.values())
+    total_km = sum(agg['km'] for agg in by_day.values())
+
+    lines = [
+        "📈 *Статистика смен*",
+        "",
+        f"За 7 дней: {format_shift_duration(week_minutes)}, {week_km:.0f} км",
+        f"За 30 дней: {format_shift_duration(month_minutes)}, {month_km:.0f} км",
+        f"За {SHIFT_HISTORY_MONTHS} мес.: {format_shift_duration(total_minutes)}, {total_km:.0f} км",
+        "",
+        "*Последние дни:*",
+    ]
+    for d in days_sorted[:14]:
+        agg = by_day[d]
+        label = "Сегодня" if d == today_str else d
+        lines.append(f"{label}: {format_shift_duration(agg['minutes'])}, {agg['km']:.0f} км")
+
+    text = '\n'.join(lines)
+    if len(text) > 4000:
+        text = text[:4000] + "…"
+    await callback_query.message.answer(text, parse_mode='Markdown')
+
+def today_shifts_km(user_id):
+    """Сумма км по ЗАВЕРШЁННЫМ сегодня сменам (см. save_shift_record) - для
+    подсказки на шаге "Километраж" в "💰 Финансы" (courier_finance_flow).
+    Смена, которая ещё ИДЁТ прямо сейчас, сюда не попадает (она сохраняется
+    в историю только по "⏹ Завершить смену", см. finish_shift) - это
+    осознанно: расчёт финансов подразумевает уже законченную смену."""
+    today_str = datetime.now(timezone.utc).date().isoformat()
+    rows = get_shift_history(user_id, months=1)
+    return sum(km for shift_date, _duration, km in rows if shift_date == today_str)
+
 @router.callback_query(lambda c: c.data == "use_counted_km")
 async def use_counted_km_in_finance(callback_query: types.CallbackQuery):
     """Кнопка "✅ Использовать N км" под шагом "Километраж" в "💰 Финансы"
     (см. комментарий у отправки этой кнопки в courier_finance_flow, шаг
-    'income') - подставляет число со "Счётчика км" вместо ручного ввода и
-    сразу переводит черновик на следующий шаг."""
+    'income') - подставляет сумму км по сегодняшним завершённым сменам
+    вместо ручного ввода и сразу переводит черновик на следующий шаг."""
     await callback_query.answer()
     user_id = callback_query.from_user.id
     state = user_state.get(user_id)
@@ -3698,7 +3869,7 @@ async def use_counted_km_in_finance(callback_query: types.CallbackQuery):
         # успел ввести км вручную до нажатия кнопки) - кнопка неактуальна.
         await callback_query.message.edit_reply_markup(reply_markup=None)
         return
-    today_km = km_counter_today_km(state)
+    today_km = today_shifts_km(user_id)
     draft['data']['km'] = today_km
     draft['step'] = 'consumption'
     state['courier_finance_draft'] = draft
@@ -3731,14 +3902,14 @@ async def courier_finance_flow(message: types.Message):
         draft['step'] = 'km'
         state['courier_finance_draft'] = draft
         await message.answer(COURIER_FINANCE_STEP_PROMPTS['km'], reply_markup=courier_finance_cancel_keyboard())
-        # Если "🛣 Счётчик км" (см. блок выше) уже что-то насчитал за сегодня -
-        # предлагаем подставить готовое число отдельным сообщением с
-        # инлайн-кнопкой (по просьбе пользователя, 20.09.2026), вместо того
-        # чтобы вводить километраж вручную.
-        today_km = km_counter_today_km(state)
+        # Если сегодня уже есть завершённые смены (см. "▶️ Начать смену"/
+        # "⏹ Завершить смену") - предлагаем подставить готовую сумму км
+        # отдельным сообщением с инлайн-кнопкой (по просьбе пользователя,
+        # 20.09.2026), вместо того чтобы вводить километраж вручную.
+        today_km = today_shifts_km(user_id)
         if today_km > 0:
             await message.answer(
-                f"🛣 Счётчик км посчитал сегодня: *{today_km:.1f} км*",
+                f"🛣 По сегодняшним завершённым сменам: *{today_km:.1f} км*",
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
                     InlineKeyboardButton(text=f"✅ Использовать {today_km:.1f} км", callback_data="use_counted_km"),
                 ]]),
@@ -3877,7 +4048,7 @@ async def select_category(message: types.Message):
             break
     cat_label = CATEGORIES.get(selected_category, {}).get('name', '')
     text = f"✅ *{cat_label}*\n━━━━━━━━━━━━━━━━━━\n\n🧰 Выбери, что нужно 👇"
-    await message.answer(text, reply_markup=services_keyboard(selected_category, user_state[user_id].get('city')), parse_mode='Markdown')
+    await message.answer(text, reply_markup=services_keyboard(selected_category, user_state[user_id].get('city'), user_id), parse_mode='Markdown')
 
     # По просьбе пользователя - сразу после выбора категории предлагаем
     # включить "Очередь у аэропорта" (для тех категорий, кому она вообще
@@ -3929,7 +4100,7 @@ async def show_weather_forecast(message: types.Message):
     city_name = CITY_DISPLAY_NAMES.get(city, city)
     forecast = await fetch_rain_forecast(city)
     text = format_weather_forecast_text(city_name, forecast)
-    await message.answer(text, parse_mode='Markdown', reply_markup=services_keyboard(category, city))
+    await message.answer(text, parse_mode='Markdown', reply_markup=services_keyboard(category, city, user_id))
 
 @router.message(lambda message: message.text == "⛽ Где бензин")
 async def show_fuel_bot(message: types.Message):
@@ -4008,14 +4179,15 @@ async def show_road_events(message: types.Message):
     канал нарочно НЕТ нигде в этом хендлере (было раньше - убрано по
     просьбе пользователя: не подсвечивать переход в канал вообще, только
     сами новости). Для городов без канала - текст-заглушка."""
-    state = user_state.get(message.from_user.id, {})
+    user_id = message.from_user.id
+    state = user_state.get(user_id, {})
     city = state.get('city')
     channel = ROAD_EVENTS_CHANNEL_LINKS.get(city)
 
     if not channel:
         await message.answer(
             "⛔ *Дорожные события*\n\nДля этого города канал с ДТП пока не подключен.",
-            reply_markup=services_keyboard(state.get('category'), city),
+            reply_markup=services_keyboard(state.get('category'), city, user_id),
             parse_mode='Markdown',
             disable_web_page_preview=True,
         )
@@ -4106,17 +4278,17 @@ def build_concert_event_message(post, city):
     buttons = []
     if place:
         from urllib.parse import quote
-        # По просьбе пользователя (19.09.2026): кнопка "Подробнее" убрана,
-        # "Поехали" переключена на схему Яндекс.Навигатора (yandexnavi://).
-        # ВАЖНО: у этой схемы нет веб-фолбэка (см. комментарий у
-        # build_event_message выше про ту же развилку для TimePad) - если у
-        # водителя не установлено именно приложение Яндекс.Навигатор, кнопка
-        # ничего не откроет. Пользователь осознанно выбрал этот вариант
-        # (19.09.2026) вместо более надёжной https-ссылки на Яндекс.Карты.
-        buttons.append(InlineKeyboardButton(
-            text="🚗 Поехали",
-            url=f"yandexnavi://build_route_on_map?text_to={quote(place)}",
-        ))
+        # По просьбе пользователя (19.09.2026) кнопка "Подробнее" убрана, а
+        # "Поехали" пытались переключить на схему Яндекс.Навигатора
+        # (yandexnavi://) - ИСПРАВЛЕНО (20.09.2026): Telegram Bot API
+        # отклоняет инлайн-кнопки с нестандартной схемой в url как невалидные
+        # (BUTTON_URL_INVALID) - это уже случалось раньше в этом же проекте с
+        # той же самой схемой (см. комментарий у yandex_navi_url выше) и
+        # ронялось ВСЁ сообщение целиком, включая текст карточки. Возвращено
+        # на обычную https-ссылку на Яндекс.Карты (yandex_navi_url) - она
+        # валидна для Telegram и открывается в приложении Навигатора/Карт,
+        # если оно установлено, иначе в браузере.
+        buttons.append(InlineKeyboardButton(text="🚗 Поехали", url=f"https://yandex.ru/maps/?text={quote(place)}"))
     keyboard = InlineKeyboardMarkup(inline_keyboard=[buttons]) if buttons else None
     return text, keyboard
 
@@ -4156,7 +4328,7 @@ async def show_city_events(message: types.Message):
             "города пока нет источника афиши). Загляни позже - данные "
             "обновляются каждые несколько часов."
         )
-        await message.answer(text, reply_markup=services_keyboard(category, city), parse_mode='Markdown')
+        await message.answer(text, reply_markup=services_keyboard(category, city, user_id), parse_mode='Markdown')
         return
 
     class_label = CATEGORIES.get(category, {}).get('name', '')
@@ -4167,7 +4339,7 @@ async def show_city_events(message: types.Message):
     # "Поехали" (и у концертов, и у TimePad), чтобы кнопка однозначно вела
     # именно к этому месту. Небольшая пауза между отправками - чтобы Telegram
     # не сворачивал быстро идущие подряд сообщения визуально в одну группу.
-    await message.answer(header, reply_markup=services_keyboard(category, city), parse_mode='Markdown')
+    await message.answer(header, reply_markup=services_keyboard(category, city, user_id), parse_mode='Markdown')
 
     for post in concert_events:
         text, keyboard = build_concert_event_message(post, city)
@@ -4200,7 +4372,7 @@ async def show_transport_menu(message: types.Message):
     category = user_state[user_id].get('category')
     city = user_state[user_id].get('city')
     if category in CATEGORIES_WITHOUT_AIRPORTS:
-        await message.answer("Для этой категории транспорт недоступен.", reply_markup=services_keyboard(category, city))
+        await message.answer("Для этой категории транспорт недоступен.", reply_markup=services_keyboard(category, city, user_id))
         return
     buttons = [[InlineKeyboardButton(text="✈️ Аэропорты", callback_data="transport_airports")]]
     if city in TRAIN_CITIES:
@@ -4215,7 +4387,7 @@ async def show_airport_menu(callback_query: types.CallbackQuery):
         await callback_query.message.answer("Сначала выбери город!")
         return
     if user_state[user_id].get('category') in CATEGORIES_WITHOUT_AIRPORTS:
-        await callback_query.message.answer("Для этой категории аэропорты недоступны.", reply_markup=services_keyboard(user_state[user_id].get('category'), user_state[user_id].get('city')))
+        await callback_query.message.answer("Для этой категории аэропорты недоступны.", reply_markup=services_keyboard(user_state[user_id].get('category'), user_state[user_id].get('city'), user_id))
         return
     await callback_query.message.answer("Выбери действие 👇", reply_markup=AIRPORT_MENU_KEYBOARD)
 
@@ -4254,14 +4426,14 @@ async def show_train_stations_menu(callback_query: types.CallbackQuery):
     if city not in TRAIN_CITIES:
         await callback_query.message.answer(
             "🚆 Вокзалы пока недоступны в этом городе.",
-            reply_markup=services_keyboard(category, city),
+            reply_markup=services_keyboard(category, city, user_id),
         )
         return
     keyboard, has_data = build_train_stations_keyboard(category, city)
     if not has_data:
         await callback_query.message.answer(
             "🚆 Данные по вокзалам ещё не загружены - обновляются раз в 12 часов, загляни чуть позже.",
-            reply_markup=services_keyboard(category, city),
+            reply_markup=services_keyboard(category, city, user_id),
         )
         return
     await callback_query.message.answer("Выбери вокзал 👇", reply_markup=keyboard)
