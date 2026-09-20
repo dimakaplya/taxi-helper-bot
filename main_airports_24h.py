@@ -2229,9 +2229,13 @@ def services_keyboard(category=None, city=None, user_id=None):
         items.append("🧰 Инструменты водителя")
     if category not in CATEGORIES_WITHOUT_AIRPORTS:
         items.append("✈️🚆 Авиа/ЖД")
+    # "🎭 События города" и "⛔ Дорожные события" объединены в одну кнопку
+    # "🎭⛔ События и дороги" (по просьбе пользователя, 20.09.2026) - ведёт на
+    # инлайн-подменю из двух вариантов (см. show_events_and_roads_menu).
     if category not in CATEGORIES_WITHOUT_EVENTS:
-        items.append("🎭 События города")
-    items.append("⛔ Дорожные события")
+        items.append("🎭⛔ События и дороги")
+    else:
+        items.append("⛔ Дорожные события")
 
     buttons = []
     buttons.extend(top_rows)
@@ -2239,13 +2243,11 @@ def services_keyboard(category=None, city=None, user_id=None):
         [KeyboardButton(text=t) for t in items[i:i + 2]]
         for i in range(0, len(items), 2)
     )
-    buttons.append([KeyboardButton(text="🔓 Бесплатный VPN TAXI HELPER")])
-    # "⚙️ Настройки" - самый низ меню, отдельной строкой, выше "← Назад"/
-    # "🏙 Выбор города" (по просьбе пользователя, 19.09.2026). Пока внутри
-    # только уведомления (см. notification_settings_keyboard); раньше кнопка
-    # "🔔 Уведомления" была внутри "Инструменты водителя", теперь убрана
-    # оттуда и доступна только отсюда.
+    # По просьбе пользователя (20.09.2026): "Бесплатный VPN" - предпоследняя
+    # строка, "⚙️ Настройки" - на месте, где раньше была "События города"
+    # (сразу после основных разделов, выше VPN).
     buttons.append([KeyboardButton(text="⚙️ Настройки")])
+    buttons.append([KeyboardButton(text="🔓 Бесплатный VPN TAXI HELPER")])
     buttons.append([KeyboardButton(text="← Назад"), KeyboardButton(text="🏙 Выбор города")])
     return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=buttons)
 
@@ -4861,8 +4863,31 @@ def format_road_event_time(iso_time, city):
     except Exception:
         return ''
 
+@router.message(lambda message: message.text == "🎭⛔ События и дороги")
+async def show_events_and_roads_menu(message: types.Message):
+    """"🎭 События города" и "⛔ Дорожные события" объединены в одну кнопку
+    главного меню (по просьбе пользователя, 20.09.2026) - показывает
+    инлайн-подменю из двух вариантов, каждый ведёт на свой существующий
+    экран (см. show_city_events/show_road_events)."""
+    user_id = message.from_user.id
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎭 События города", callback_data="events_and_roads_events")],
+        [InlineKeyboardButton(text="⛔ Дорожные события", callback_data="events_and_roads_road")],
+    ])
+    await message.answer("Выбери, что нужно 👇", reply_markup=keyboard)
+
+@router.callback_query(lambda c: c.data == "events_and_roads_events")
+async def open_city_events_from_menu(callback_query: types.CallbackQuery):
+    await callback_query.answer()
+    await show_city_events(callback_query.message, user_id_override=callback_query.from_user.id)
+
+@router.callback_query(lambda c: c.data == "events_and_roads_road")
+async def open_road_events_from_menu(callback_query: types.CallbackQuery):
+    await callback_query.answer()
+    await show_road_events(callback_query.message, user_id_override=callback_query.from_user.id)
+
 @router.message(lambda message: message.text == "⛔ Дорожные события")
-async def show_road_events(message: types.Message):
+async def show_road_events(message: types.Message, user_id_override=None):
     """ДТП и дорожные происшествия по городам - пересылаем сами тексты
     последних сообщений из публичных Telegram-каналов (Москва -> @dtp777 +
     @DtOperativno слиты в одну ленту, СПб -> @dtp_spb78), а не просто даём
@@ -4876,8 +4901,13 @@ async def show_road_events(message: types.Message):
     по ссылке, которая могла всплыть в тексте поста. Кнопки/ссылки на сам
     канал нарочно НЕТ нигде в этом хендлере (было раньше - убрано по
     просьбе пользователя: не подсвечивать переход в канал вообще, только
-    сами новости). Для городов без канала - текст-заглушка."""
-    user_id = message.from_user.id
+    сами новости). Для городов без канала - текст-заглушка.
+
+    user_id_override - когда вызвана из инлайн-подменю "🎭⛔ События и дороги"
+    (см. open_road_events_from_menu) - message тогда это СООБЩЕНИЕ БОТА
+    (callback_query.message), а не сообщение пользователя, поэтому
+    message.from_user.id указывал бы на самого бота."""
+    user_id = user_id_override if user_id_override is not None else message.from_user.id
     state = user_state.get(user_id, {})
     city = state.get('city')
     channel = ROAD_EVENTS_CHANNEL_LINKS.get(city)
@@ -4997,7 +5027,7 @@ def build_concert_event_message(post, city):
     return text, keyboard
 
 @router.message(lambda message: message.text == "🎭 События города")
-async def show_city_events(message: types.Message):
+async def show_city_events(message: types.Message, user_id_override=None):
     """Афиша - ДВА источника: афиша концертов из Telegram-каналов
     @concerts_moscow/@spb_conc (см. fetch_concert_events.py) - добавлена по
     просьбе пользователя (21.09.2026, структурированный парсинг добавлен
@@ -5014,8 +5044,12 @@ async def show_city_events(message: types.Message):
     IP) - если пользователь давно его не запускал, timepad_data.json может
     быть пустым/устаревшим, поэтому Telegram-афиша (собирается АВТОМАТИЧЕСКИ
     на Railway, всегда свежая) показывается ПЕРВОЙ. "Нет данных" - только
-    если ОБА источника пусты."""
-    user_id = message.from_user.id
+    если ОБА источника пусты.
+
+    user_id_override - см. комментарий у show_road_events (тот же случай:
+    вызов из инлайн-подменю "🎭⛔ События и дороги", message - сообщение
+    бота, не пользователя)."""
+    user_id = user_id_override if user_id_override is not None else message.from_user.id
     if user_id not in user_state or 'city' not in user_state[user_id]:
         await message.answer("Сначала выбери город!")
         return
