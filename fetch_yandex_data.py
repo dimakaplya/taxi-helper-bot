@@ -377,23 +377,16 @@ def fetch_schedule(station_code, event, date_str):
     return all_items
 
 
-_STATUS_DEBUG_LOGGED = False
-
 def parse_flights(schedule_items, event):
-    global _STATUS_DEBUG_LOGGED
-    # ВРЕМЕННАЯ ДИАГНОСТИКА (добавлено 21.09.2026, убрать после проверки) -
-    # пользователь спросил, учитывает ли бот статус рейса (задержан/отменён).
-    # Сейчас НЕ учитывает - берём только плановое время из item.get(event).
-    # Логируем сырой первый item одного (любого) запроса, чтобы увидеть,
-    # какие поля реально отдаёт Yandex Rasp API (есть ли status/except_days
-    # и т.п.) - на этом тарифе/эндпоинте могло не быть live-статусов вовсе.
-    if not _STATUS_DEBUG_LOGGED and schedule_items:
-        try:
-            logger.info(f"🔍 ДИАГНОСТИКА: сырой первый item от Yandex Rasp: {json.dumps(schedule_items[0], ensure_ascii=False)}")
-        except Exception as e:
-            logger.warning(f"⚠️ Не удалось залогировать диагностику: {e}")
-        _STATUS_DEBUG_LOGGED = True
-
+    # ПРОВЕРЕНО 21.09.2026 (пользователь спросил, учитывает ли бот статус
+    # рейса - задержан/отменён/вовремя): диагностика сырого ответа Yandex
+    # Rasp API (эндпоинт /schedule/ по станции) показала, что там ВООБЩЕ НЕТ
+    # поля со статусом рейса - только 'thread' (номер/перевозчик/борт),
+    # 'terminal', 'arrival'/'departure' (плановое время по расписанию),
+    # служебные 'except_days'/'days' (дни недели, по которым рейс вообще
+    # ходит - не статус конкретного дня). Yandex Rasp на этом эндпоинте
+    # отдаёт только статичное расписание, без live-данных - учитывать
+    # задержки/отмены НЕЧЕМ, этих данных здесь просто нет на входе.
     flights = []
     for item in schedule_items:
         thread = item.get('thread', {}) or {}
