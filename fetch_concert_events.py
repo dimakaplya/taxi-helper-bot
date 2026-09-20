@@ -29,6 +29,8 @@ from datetime import datetime, timedelta, timezone
 import requests
 from bs4 import BeautifulSoup
 
+import geocoding_utils
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -363,19 +365,48 @@ def merge_city_messages(per_channel_posts):
     return deduped[:MAX_MESSAGES_PER_CITY]
 
 
+def geocode_posts(posts, bot_city, cache):
+    """Геокодирует поле 'place' (название площадки - "Pravda"/"Арена
+    Балашиха"/"трц ривьера", см. parse_event_fields) через общий
+    geocoding_utils - по просьбе пользователя (22.09.2026): "Афишу тоже
+    выноси" (на карту, следом за дорожными событиями). В отличие от улиц у
+    ДТП, тут ищем не адрес, а название заведения - Nominatim ищет и то, и
+    другое одним и тем же способом, но названия площадок находятся не так
+    надёжно (не все клубы/площадки есть в OpenStreetMap под тем же именем,
+    которым их называет канал) - события без успешного геокодирования
+    остаются без lat/lon, на карту не попадают, но по-прежнему видны в
+    обычном разделе "🎭 События города" в боте."""
+    geocoded_count = 0
+    for p in posts:
+        place = p.get('place')
+        if not place:
+            continue
+        coords = geocoding_utils.geocode_address(place, bot_city, cache, namespace='venue')
+        if coords:
+            p['lat'], p['lon'] = coords
+            geocoded_count += 1
+    return geocoded_count
+
+
 def main():
     result = {
         'generated_at': datetime.now(timezone.utc).isoformat(),
         'lookback_hours': LOOKBACK_HOURS,
         'cities': {},
     }
+    geocode_cache = geocoding_utils.load_geocode_cache()
     for bot_city, channel_usernames in CONCERT_EVENTS_CHANNELS.items():
         channels_label = ', '.join(f'@{c}' for c in channel_usernames)
         logger.info(f"🔄 Обновляю афишу концертов для {bot_city} ({channels_label})...")
         per_channel = [fetch_channel_messages(c) for c in channel_usernames]
         posts = merge_city_messages(per_channel)
+        geocoded_count = geocode_posts(posts, bot_city, geocode_cache)
         result['cities'][bot_city] = posts
-        logger.info(f"✅ {bot_city}: {len(posts)} постов (из {len(channel_usernames)} канал(ов))")
+        logger.info(
+            f"✅ {bot_city}: {len(posts)} постов (из {len(channel_usernames)} канал(ов)), "
+            f"с площадкой на карте: {geocoded_count}"
+        )
+    geocoding_utils.save_geocode_cache(geocode_cache)
 
     with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
         json.dump(result, f, ensure_ascii=False, indent=2)

@@ -58,6 +58,8 @@ from datetime import datetime, timezone
 
 import requests
 
+import geocoding_utils
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -239,22 +241,51 @@ def _parse_tz(iso_str):
     return tz(sign * timedelta(hours=hh, minutes=mm))
 
 
+def geocode_events(events, bot_city, cache):
+    """Заполняет place_lat/place_lon по текстовому place_address (см.
+    комментарий у fetch_city_events выше - у TimePad нет своих координат
+    площадки) через общий geocoding_utils - по просьбе пользователя
+    (22.09.2026): "Афишу тоже выноси" (на карту). ВАЖНО: этот скрипт
+    запускается ЛОКАЛЬНО (не на Railway - см. докстринг файла), поэтому
+    геокодирование TimePad-афиши работает только если пользователь сам
+    периодически запускает fetch_timepad_data.py на своей машине - события
+    без адреса или без успешного геокодирования остаются без lat/lon, на
+    карту не попадают, но по-прежнему видны в обычном разделе "🎭 События
+    города" в боте."""
+    geocoded_count = 0
+    for ev in events:
+        address = ev.get('place_address')
+        if not address:
+            continue
+        coords = geocoding_utils.geocode_address(address, bot_city, cache, namespace='addr')
+        if coords:
+            ev['place_lat'], ev['place_lon'] = coords
+            geocoded_count += 1
+    return geocoded_count
+
+
 def main():
     import json
     result = {
         'generated_at': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'),
         'cities': {},
     }
+    geocode_cache = geocoding_utils.load_geocode_cache()
     for bot_city, timepad_city in TIMEPAD_CITY_MAP.items():
         logger.info(f"🔄 Тяну события TimePad для {bot_city} ({timepad_city})...")
         try:
             events = fetch_city_events(timepad_city)
+            geocoded_count = geocode_events(events, bot_city, geocode_cache)
             result['cities'][bot_city] = events
-            logger.info(f"✅ {bot_city}: {len(events)} событий (TimePad, tickets_total>={TIMEPAD_MIN_TICKETS})")
+            logger.info(
+                f"✅ {bot_city}: {len(events)} событий (TimePad, tickets_total>={TIMEPAD_MIN_TICKETS}), "
+                f"с адресом на карте: {geocoded_count}"
+            )
         except Exception as e:
             logger.error(f"❌ Не удалось получить события TimePad для {bot_city}: {e}")
             result['cities'][bot_city] = []
         time.sleep(0.3)
+    geocoding_utils.save_geocode_cache(geocode_cache)
 
     with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
         json.dump(result, f, ensure_ascii=False, indent=2)

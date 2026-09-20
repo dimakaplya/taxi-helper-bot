@@ -625,6 +625,23 @@ def _resolve_db_file():
     return 'taxi_queue.db'
 
 DB_FILE = _resolve_db_file()
+# По повторной жалобе пользователя (22.09.2026): "при редеплое всё слетает -
+# город, категория, смена" - несмотря на фикс выше (_resolve_db_file), если
+# в Railway НЕ подключён Persistent Volume (Settings -> Volumes -> Add Volume,
+# Mount Path = /data), os.path.isdir('/data') просто вернёт False и БД тихо
+# продолжит жить в обычной рабочей директории контейнера, которая
+# пересоздаётся с нуля при КАЖДОМ редеплое - весь user_state (город/
+# категория/смена) теряется, хотя сам код persistence уже написан правильно.
+# Раньше это никак не логировалось, из-за чего проблему было не увидеть в
+# логах Railway - теперь пишем явно, каким путём реально работает бот.
+if DB_FILE.startswith('/data'):
+    logger.info(f"✅ БД на постоянном Railway Volume: {DB_FILE} - состояние переживёт редеплой")
+else:
+    logger.warning(
+        f"⚠️ БД НЕ на постоянном хранилище (путь: {DB_FILE}) - Railway Volume не подключён или не смонтирован "
+        f"в /data. Город/категория/смена и вся остальная БД будут СБРАСЫВАТЬСЯ при каждом редеплое. "
+        f"Чтобы исправить: в Railway -> сервис бота -> Settings -> Volumes -> Add Volume, Mount Path = /data."
+    )
 # Если водитель встал в очередь и не появлялся дольше этого времени - считаем,
 # что он уже уехал (забрал пассажира) или просто забыл нажать "Покинуть
 # очередь", и убираем его из очереди автоматически.
@@ -5136,6 +5153,16 @@ def map_webapp_html():
   .airport-popup .row {{ font-family: -apple-system, sans-serif; font-size: 12.5px; margin: 2px 0; }}
   .airport-label {{ background: rgba(255,255,255,.95); border: 1px solid rgba(0,0,0,.15); border-radius: 6px; padding: 3px 6px; font-family: -apple-system, sans-serif; font-size: 11px; line-height: 1.35; white-space: nowrap; box-shadow: 0 1px 3px rgba(0,0,0,.25); }}
   .airport-label b {{ font-size: 11.5px; }}
+  .road-icon {{ display: flex; align-items: center; justify-content: center; font-size: 16px; filter: drop-shadow(0 1px 2px rgba(0,0,0,.5)); }}
+  .road-popup {{ font-family: -apple-system, sans-serif; font-size: 12.5px; max-width: 220px; }}
+  .road-popup .time {{ color: #777; font-size: 11px; margin-top: 4px; }}
+  .road-popup a {{ color: #1a73e8; }}
+  .event-icon {{ display: flex; align-items: center; justify-content: center; font-size: 16px; filter: drop-shadow(0 1px 2px rgba(0,0,0,.5)); }}
+  .event-popup {{ font-family: -apple-system, sans-serif; font-size: 12.5px; max-width: 220px; }}
+  .event-popup h4 {{ margin: 0 0 4px; font-size: 13px; }}
+  .event-popup .place {{ color: #555; }}
+  .event-popup .time {{ color: #777; font-size: 11px; margin-top: 4px; }}
+  .event-popup a {{ color: #1a73e8; }}
 </style>
 </head>
 <body>
@@ -5255,10 +5282,78 @@ def map_webapp_html():
       airportsLoaded = true;
     }} catch (e) {{ /* тихо */ }}
   }}
+  // Дорожные события (ДТП/перекрытия) с распознанным адресом - по просьбе
+  // пользователя (22.09.2026): "вынеси на карту дорожные события города где
+  // есть адреса". События без адреса в тексте поста не геокодируются на
+  // сервере и сюда не попадают вовсе (см. handle_map_road_events_api) - на
+  // карте видны только те, для которых удалось определить точку.
+  let roadEventMarkers = [];
+  function roadEventIcon(ev) {{
+    if (ev.is_severe) return '🚑';
+    if (ev.is_closure) return '⛔';
+    return '⚠️';
+  }}
+  async function loadRoadEvents() {{
+    try {{
+      const resp = await fetch(`/map/road_events?city=${{encodeURIComponent(city)}}`);
+      if (!resp.ok) return;
+      const data = await resp.json();
+      roadEventMarkers.forEach(m => map.removeLayer(m));
+      roadEventMarkers = [];
+      data.events.forEach(ev => {{
+        const icon = L.divIcon({{ className: 'road-icon', html: roadEventIcon(ev), iconSize: [22, 22] }});
+        let popup = `<div class="road-popup">`;
+        if (ev.address) popup += `<b>${{ev.address}}</b><br>`;
+        popup += `${{(ev.text || '').replace(/\\n/g, '<br>')}}`;
+        if (ev.link) popup += `<br><a href="${{ev.link}}" target="_blank">Открыть пост</a>`;
+        if (ev.time) {{
+          const t = new Date(ev.time);
+          popup += `<div class="time">${{t.toLocaleTimeString('ru-RU', {{ hour: '2-digit', minute: '2-digit' }})}}</div>`;
+        }}
+        popup += `</div>`;
+        const marker = L.marker([ev.lat, ev.lon], {{ icon }}).bindPopup(popup).addTo(map);
+        roadEventMarkers.push(marker);
+      }});
+    }} catch (e) {{ /* тихо */ }}
+  }}
+  // Афиша (концерты/мероприятия) с геокодированной площадкой - по просьбе
+  // пользователя (22.09.2026): "Афишу тоже выноси". Как и дорожные события,
+  // события без распознанного/геокодированного места сюда не попадают (см.
+  // handle_map_city_events_api) - только те, для которых известна точка.
+  let cityEventMarkers = [];
+  function formatEventStart(ev) {{
+    const d = ev.start_is_ts ? new Date(ev.start * 1000) : new Date(ev.start);
+    if (isNaN(d.getTime())) return '';
+    return d.toLocaleString('ru-RU', {{ day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }});
+  }}
+  async function loadCityEvents() {{
+    try {{
+      const resp = await fetch(`/map/city_events?city=${{encodeURIComponent(city)}}`);
+      if (!resp.ok) return;
+      const data = await resp.json();
+      cityEventMarkers.forEach(m => map.removeLayer(m));
+      cityEventMarkers = [];
+      data.events.forEach(ev => {{
+        const icon = L.divIcon({{ className: 'event-icon', html: '🎭', iconSize: [22, 22] }});
+        let popup = `<div class="event-popup">`;
+        if (ev.title) popup += `<h4>${{ev.title}}</h4>`;
+        if (ev.place) popup += `<div class="place">${{ev.place}}</div>`;
+        if (ev.start) popup += `<div class="time">${{formatEventStart(ev)}}</div>`;
+        if (ev.link) popup += `<br><a href="${{ev.link}}" target="_blank">Подробнее</a>`;
+        popup += `</div>`;
+        const marker = L.marker([ev.lat, ev.lon], {{ icon }}).bindPopup(popup).addTo(map);
+        cityEventMarkers.push(marker);
+      }});
+    }} catch (e) {{ /* тихо */ }}
+  }}
   loadPositions();
   loadAirports();
+  loadRoadEvents();
+  loadCityEvents();
   setInterval(loadPositions, 15000);
+  setInterval(loadRoadEvents, 120000);
   setInterval(loadAirports, 60000);
+  setInterval(loadCityEvents, 300000);
 </script>
 </body>
 </html>"""
@@ -5342,6 +5437,82 @@ async def handle_map_airports_api(request):
         logger.exception("❌ Ошибка при получении аэропортов для карты водителей")
         result = []
     return web.json_response({'airports': result})
+
+MAP_ROAD_EVENTS_API_PATH = '/map/road_events'
+
+async def handle_map_road_events_api(request):
+    """JSON API для меток дорожных событий на карте (по просьбе пользователя,
+    22.09.2026: "вынеси на карту дорожные события города где есть адреса") -
+    отдаёт только те события из get_road_events_for_city, для которых
+    удалось распознать и геокодировать адрес в тексте поста (см.
+    extract_address/geocode_notices в fetch_road_events.py) - у остальных
+    просто нет lat/lon, на карту они и не должны попадать. Полный список (в
+    т.ч. без адреса) по-прежнему доступен в обычной кнопке "⛔ Дорожные
+    события" внутри бота."""
+    city = request.query.get('city', '')
+    result = []
+    try:
+        for event in get_road_events_for_city(city):
+            lat, lon = event.get('lat'), event.get('lon')
+            if lat is None or lon is None:
+                continue
+            result.append({
+                'lat': lat, 'lon': lon, 'address': event.get('address'),
+                'text': event.get('text', ''), 'time': event.get('time'),
+                'link': event.get('link'), 'is_closure': bool(event.get('is_closure')),
+                'is_severe': bool(event.get('is_severe')),
+            })
+    except Exception:
+        logger.exception("❌ Ошибка при получении дорожных событий для карты водителей")
+        result = []
+    return web.json_response({'events': result})
+
+MAP_CITY_EVENTS_API_PATH = '/map/city_events'
+
+async def handle_map_city_events_api(request):
+    """JSON API для меток афиши (концерты/мероприятия) на карте - по просьбе
+    пользователя (22.09.2026, следом за дорожными событиями): "Афишу тоже
+    выноси". Два источника, оба уже читаются в боте (см. get_events_for_user
+    для TimePad и get_concert_events_for_city для Telegram-каналов) -
+    отдаём ТОЛЬКО предстоящие события, для которых при сборе удалось
+    геокодировать площадку/адрес (см. geocode_posts в
+    fetch_concert_events.py и geocode_events в fetch_timepad_data.py) -
+    события без координат на карту не попадают, но остаются в обычном
+    разделе "🎭 События города" внутри бота."""
+    city = request.query.get('city', '')
+    now_ts = datetime.now(ZoneInfo('UTC')).timestamp()
+    result = []
+    try:
+        timepad_data = load_timepad_data()
+        for ev in (timepad_data or {}).get('cities', {}).get(city, []):
+            lat, lon = ev.get('place_lat'), ev.get('place_lon')
+            if lat is None or lon is None or (ev.get('start') or 0) < now_ts:
+                continue
+            result.append({
+                'lat': lat, 'lon': lon, 'title': ev.get('title') or '',
+                'place': ev.get('place_address') or '', 'start': ev.get('start'),
+                'start_is_ts': True, 'link': ev.get('url'),
+            })
+        for post in get_concert_events_for_city(city):
+            lat, lon = post.get('lat'), post.get('lon')
+            if lat is None or lon is None:
+                continue
+            start_iso = post.get('start')
+            if start_iso:
+                try:
+                    if datetime.fromisoformat(start_iso).timestamp() < now_ts:
+                        continue
+                except Exception:
+                    pass
+            result.append({
+                'lat': lat, 'lon': lon, 'title': post.get('title') or '',
+                'place': post.get('place') or '', 'start': start_iso,
+                'start_is_ts': False, 'link': post.get('link'),
+            })
+    except Exception:
+        logger.exception("❌ Ошибка при получении афиши для карты водителей")
+        result = []
+    return web.json_response({'events': result})
 
 @router.message(lambda message: getattr(message, 'location', None) is not None and not _location_tracking_active(message.from_user.id) and not user_state.get(message.from_user.id, {}).get('nearby_pending'))
 async def handle_passive_live_location(message: types.Message):
@@ -8423,6 +8594,8 @@ async def start_subscription_webhook_server():
     app.router.add_get(MAP_WEBAPP_PATH, handle_map_webapp)
     app.router.add_get(MAP_POSITIONS_API_PATH, handle_map_positions_api)
     app.router.add_get(MAP_AIRPORTS_API_PATH, handle_map_airports_api)
+    app.router.add_get(MAP_ROAD_EVENTS_API_PATH, handle_map_road_events_api)
+    app.router.add_get(MAP_CITY_EVENTS_API_PATH, handle_map_city_events_api)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', SUBSCRIPTION_WEBHOOK_PORT)

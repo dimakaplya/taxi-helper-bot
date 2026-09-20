@@ -32,12 +32,83 @@ import re
 import requests
 from bs4 import BeautifulSoup
 
+import geocoding_utils
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 OUTPUT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'road_events_data.json')
 LOOKBACK_HOURS = 6
 MAX_MESSAGES_PER_CITY = 15  # сколько последних сообщений хранить/показывать на город
+
+# По просьбе пользователя (22.09.2026): "вынеси на карту дорожные события
+# города где есть адреса" - часть постов канала содержит адрес прямо в
+# тексте (улица/шоссе/набережная + номер дома, либо "N км МКАД"), из него
+# можно вытащить координаты и показать событие меткой на карте (см.
+# /map/road_events в main.py). У постов БЕЗ узнаваемого адреса координат не
+# будет - на карту они не попадают (ровно как просил пользователь), но
+# продолжают показываться в обычном списке "⛔ Дорожные события" в боте.
+# Сам геокодер (Nominatim/OpenStreetMap, кэш на диске) вынесен в общий
+# geocoding_utils.py - им же пользуется fetch_concert_events.py для афиши
+# (та же просьба пользователя, следом за дорожными событиями).
+
+# Типовые обозначения улиц/дорог в постах о ДТП. Русские адреса встречаются
+# в ДВУХ порядках слов - "ул. Тверская" (обозначение улицы ПЕРЕД названием)
+# и "Кутузовский проспект" (прилагательное+обозначение ПОСЛЕ, обозначение -
+# последнее слово) - нужны оба варианта регулярки (см. ADDRESS_RE_MARKER_FIRST/
+# _LAST ниже). "МКАД"/"ТТК"/"N км" - отдельно, там номер дома не при чём
+# (там километр трассы), см. KM_ROAD_RE.
+#
+# ВАЖНО: паттерн НЕ использует общий флаг re.IGNORECASE - если бы он был
+# общим, классы [А-ЯЁ] (заглавная буква - начало названия улицы) стали бы
+# по флагу IGNORECASE матчить и строчные буквы тоже, из-за чего короткое
+# слово вроде "д." (сокращение "дом") перед номером дома ошибочно
+# засчитывалось бы отдельным "словом названия улицы" и обрубало бы захват
+# перед самим номером (проверено на практике - без этой оговорки "ул.
+# Тверская д.5" превращалось в "ул. Тверская д" без номера). Поэтому
+# регистронезависимость (?i:...) применяется ТОЛЬКО к самим маркерам
+# (ул./шоссе/проспект и т.п.), а не ко всему паттерну.
+_STREET_MARKERS = (
+    r'ул\.', r'улиц\w*',
+    r'просп\.', r'проспект\w*', r'пр-?т\.?',
+    r'ш\.', r'шоссе\w*',
+    r'наб\.', r'набережн\w*',
+    r'пер\.', r'переулок\w*',
+    r'б-р\.?', r'бульвар\w*',
+    r'проезд\w*', r'аллея\w*', r'туп\.', r'тупик\w*', r'мост\w*',
+)
+_MARKER_GROUP = r'(?i:' + '|'.join(_STREET_MARKERS) + r')'
+_HOUSE_NUMBER = r'(?:,?\s*(?:д\.?|дом)?\s*\d{1,4}[а-яА-Я]?)?'
+# "ул. Тверская, 5" / "шоссе Энтузиастов"
+ADDRESS_RE_MARKER_FIRST = re.compile(
+    _MARKER_GROUP + r'\s+[А-ЯЁ][а-яё\-]*(?:\s+[А-ЯЁ][а-яё\-]*){0,3}' + _HOUSE_NUMBER
+)
+# "Кутузовский проспект, 12" / "Ленинградское шоссе"
+ADDRESS_RE_MARKER_LAST = re.compile(
+    r'[А-ЯЁ][а-яё\-]*(?:\s+[А-ЯЁ][а-яё\-]*){0,2}\s+' + _MARKER_GROUP + _HOUSE_NUMBER
+)
+# "41-й км МКАД", "МКАД 12 км", "35 км Ленинградского шоссе" и т.п.
+KM_ROAD_RE = re.compile(
+    r'(?:\d{1,3}[\-\s]?(?:й)?\s*км\s+(?:[А-ЯЁ][а-яё\-]*(?:\s+[А-ЯЁ][а-яё\-]*){0,2}\s*)?(?:МКАД|ТТК|шоссе)?'
+    r'|(?:МКАД|ТТК)\s*,?\s*\d{1,3}[\-\s]?(?:й)?\s*км)',
+    re.IGNORECASE,
+)
+
+
+def extract_address(text):
+    """Первое похожее на адрес вхождение в тексте поста, либо None - пробует
+    оба порядка слов (см. ADDRESS_RE_MARKER_FIRST/_LAST выше), затем
+    "N км ..." (KM_ROAD_RE). Возвращает как есть (с исходным
+    регистром/пунктуацией) - именно эта строка идёт в геокодер. Это
+    эвристика, не полноценный разбор адресов - часть постов без чёткого
+    адреса или с нестандартной формулировкой не распознается, такие посты
+    просто не попадают на карту (см. geocode_notices ниже)."""
+    for pattern in (ADDRESS_RE_MARKER_FIRST, ADDRESS_RE_MARKER_LAST, KM_ROAD_RE):
+        m = pattern.search(text)
+        if m:
+            return m.group(0).strip(' ,')
+    return None
+
 
 # Бот-город -> список username-ов каналов без @ (может быть несколько на
 # город - см. merge_city_messages ниже: результаты всех каналов сливаются в
@@ -268,19 +339,45 @@ def merge_city_messages(per_channel_notices):
     return deduped[:MAX_MESSAGES_PER_CITY]
 
 
+def geocode_notices(notices, bot_city, cache):
+    """Пытается вытащить адрес из текста каждого поста и геокодировать его
+    (см. extract_address/geocode_address выше) - добавляет 'address'/'lat'/
+    'lon' в те, где это получилось. Посты без узнаваемого адреса или с
+    адресом, который не удалось геокодировать, остаются без lat/lon - они
+    по-прежнему видны в обычном списке "Дорожные события" в боте, просто не
+    попадают на карту (см. /map/road_events в main.py)."""
+    geocoded_count = 0
+    for n in notices:
+        address = extract_address(n['text'])
+        if not address:
+            continue
+        coords = geocoding_utils.geocode_address(address, bot_city, cache, namespace='road')
+        if coords:
+            n['address'] = address
+            n['lat'], n['lon'] = coords
+            geocoded_count += 1
+    return geocoded_count
+
+
 def main():
     result = {
         'generated_at': datetime.now(timezone.utc).isoformat(),
         'lookback_hours': LOOKBACK_HOURS,
         'cities': {},
     }
+    geocode_cache = geocoding_utils.load_geocode_cache()
     for bot_city, channel_usernames in ROAD_EVENTS_CHANNELS.items():
         channels_label = ', '.join(f'@{c}' for c in channel_usernames)
         logger.info(f"🔄 Обновляю дорожные события для {bot_city} ({channels_label})...")
         per_channel = [fetch_channel_messages(c) for c in channel_usernames]
         notices = merge_city_messages(per_channel)
+        geocoded_count = geocode_notices(notices, bot_city, geocode_cache)
         result['cities'][bot_city] = notices
-        logger.info(f"✅ {bot_city}: {len(notices)} сообщений за последние {LOOKBACK_HOURS}ч (из {len(channel_usernames)} канал(ов))")
+        logger.info(
+            f"✅ {bot_city}: {len(notices)} сообщений за последние {LOOKBACK_HOURS}ч "
+            f"(из {len(channel_usernames)} канал(ов)), с адресом на карте: {geocoded_count}"
+        )
+    geocoding_utils.save_geocode_cache(geocode_cache)
 
     with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
