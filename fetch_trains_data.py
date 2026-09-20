@@ -35,6 +35,7 @@ import os
 import time
 import logging
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -43,7 +44,7 @@ from fetch_yandex_data import (
     load_usage_log, save_usage_log, get_today_usage,
     DAILY_QUOTA, DAILY_SAFETY_LIMIT,
 )
-from config_loader import get_all_stations
+from config_loader import get_all_stations, get_all_airports
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -56,7 +57,20 @@ OUTPUT_FILE = os.path.join(DATA_DIR, 'trains_data.json')
 # реальному багу с аэропортами (см. коммент выше про общий счётчик квоты -
 # та же логика применима и к вокзалам). Найдены по rasp.yandex.ru/station/<id>/
 # и проверены по прямым ссылкам вида rasp.yandex.ru/station/<id>/?event=arrival.
-STATIONS = [{'name': s['name'], 'code': s['code']} for s in get_all_stations()]
+# ДОБАВЛЕНО 21.09.2026 (та же правка, что для AIRPORTS в fetch_yandex_data.py -
+# дата запроса к Yandex Rasp должна считаться ПО СВОЕМУ часовому поясу
+# станции, а не одним общим московским на все вокзалы сразу). У вокзалов в
+# config.json своего поля 'timezone' нет (только у аэропортов) - берём его
+# от аэропорта того же города (внутри одного города он всегда один), с
+# фоллбэком на Europe/Moscow, если город без аэропорта в config.json.
+_CITY_TIMEZONE = {}
+for _a in get_all_airports():
+    _CITY_TIMEZONE.setdefault(_a['city'], _a.get('timezone', 'Europe/Moscow'))
+
+STATIONS = [
+    {'name': s['name'], 'code': s['code'], 'timezone': _CITY_TIMEZONE.get(s['city'], 'Europe/Moscow')}
+    for s in get_all_stations()
+]
 
 REQUEST_COUNT = 0  # счётчик реальных запросов к API за этот запуск (см. quota-комментарий выше)
 
@@ -328,6 +342,10 @@ def main():
 
     for station in STATIONS:
         name, code = station['name'], station['code']
+        try:
+            station_today = datetime.now(ZoneInfo(station.get('timezone', 'Europe/Moscow'))).strftime('%Y-%m-%d')
+        except Exception:
+            station_today = today
 
         if circuit_broken:
             prev_station = (previous_result or {}).get('stations', {}).get(code)
@@ -339,7 +357,7 @@ def main():
             continue
 
         logger.info(f"🚆 Обрабатываю {name}...")
-        raw_schedule = fetch_station_arrivals(code, today)
+        raw_schedule = fetch_station_arrivals(code, station_today)
 
         if raw_schedule is None:
             # Не удалось получить данные (429/ошибка) даже после ретраев -

@@ -147,7 +147,19 @@ for _a in get_all_airports():
     if _a['icao'] in _seen_icao:
         continue
     _seen_icao.add(_a['icao'])
-    entry = {'iata': _a['iata'], 'icao': _a['icao'], 'name': _a['name'], 'yandex_code': _a['yandex_code']}
+    entry = {
+        'iata': _a['iata'], 'icao': _a['icao'], 'name': _a['name'], 'yandex_code': _a['yandex_code'],
+        # ДОБАВЛЕНО 21.09.2026 (продолжение фикса часового пояса выше) -
+        # дата запроса к Yandex Rasp теперь считается ПО КАЖДОМУ аэропорту
+        # отдельно, его собственным часовым поясом из config.json, а не
+        # одним общим MSK на всех. Иначе для дальних от Москвы городов
+        # (Новосибирск +4ч, Екатеринбург/Челябинск +2ч, Омск +3ч) в вечернем
+        # окне (когда в Москве ещё "сегодня", а там уже "почти завтра" или
+        # наоборот) можно было запросить не тот день - тот же класс бага,
+        # что чинили для MSK-окна, просто в другом временном окне для
+        # каждого города.
+        'timezone': _a.get('timezone', 'Europe/Moscow'),
+    }
     if _a.get('closed'):
         entry['closed'] = True
     AIRPORTS.append(entry)
@@ -480,6 +492,12 @@ def main():
 
     for airport in AIRPORTS:
         iata, icao, name, station_code = airport['iata'], airport['icao'], airport['name'], airport['yandex_code']
+        # Дата - по СВОЕМУ часовому поясу аэропорта (см. комментарий у
+        # AIRPORTS выше), а не по общему московскому "today".
+        try:
+            airport_today = datetime.now(ZoneInfo(airport.get('timezone', 'Europe/Moscow'))).strftime('%Y-%m-%d')
+        except Exception:
+            airport_today = today
 
         if airport.get('closed'):
             logger.info(f"⏭️  {name} ({iata}) закрыт - пропускаю без единого запроса к API")
@@ -503,7 +521,7 @@ def main():
             continue
 
         logger.info(f"✈️  Обрабатываю {name} ({iata}/{icao})...")
-        raw_schedule = fetch_schedule(station_code, 'arrival', today)
+        raw_schedule = fetch_schedule(station_code, 'arrival', airport_today)
 
         if raw_schedule is None:
             # Не удалось получить данные (429/ошибка) даже после ретраев -
