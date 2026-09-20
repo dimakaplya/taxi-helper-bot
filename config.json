@@ -79,7 +79,7 @@
     },
     "nnovgorod": {
       "airports": [
-        {"iata": "GOJ", "icao": "UWGG", "name": "GOJ (Нижний Новгород)", "emoji": "✈️", "yandex_code": "s9623052", "capacity": 400, "timezone": "Europe/Moscow", "coords": [56.2301, 43.7844]}
+        {"iata": "GOJ", "icao": "UWGG", "name": "GOJ (Нижний Новгород)", "emoji": "✈️", "yandex_code": "s9623052", "capacity": 160, "timezone": "Europe/Moscow", "coords": [56.2301, 43.7844]}
       ],
       "stations": [
         {"name": "Московский вокзал (Нижний Новгород)", "code": "s9612089", "capacity": 850}
