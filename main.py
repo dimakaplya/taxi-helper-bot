@@ -5257,7 +5257,15 @@ def map_webapp_html():
 </html>"""
 
 async def handle_map_webapp(request):
-    return web.Response(text=map_webapp_html(), content_type='text/html')
+    # Telegram WebView иногда агрессивно кэширует открытую внутри мини-аппа
+    # страницу - по жалобе пользователя (22.09.2026, "карта не открывается,
+    # белого цвета") добавлены заголовки против кэширования, чтобы после
+    # редеплоя водитель гарантированно получал свежую версию страницы, а не
+    # старую закэшированную (в т.ч. со старым багом в JS).
+    return web.Response(
+        text=map_webapp_html(), content_type='text/html',
+        headers={'Cache-Control': 'no-store, no-cache, must-revalidate', 'Pragma': 'no-cache'},
+    )
 
 async def handle_map_positions_api(request):
     """JSON API для карты - отдаёт только category/lat/lon (без user_id),
