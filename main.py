@@ -2077,6 +2077,27 @@ def queue_latest_report(city, airport_icao, category):
     conn.close()
     return row if row else (None, None)
 
+def queue_latest_report_for_category(city, airport_icao, category):
+    """Как queue_latest_report, но БЕЗ привязки к конкретному тарифу - берёт
+    самую свежую отметку любого водителя данной КАТЕГОРИИ (такси/Ultima/...)
+    на аэропорту, независимо от того, какой именно тариф он указал
+    (queue_class_key пишет tariff как "taxi:Комфорт+" и т.п., либо просто
+    "taxi" без тарифа) - нужно для карты аэропортов (см.
+    handle_map_airports_api), где нет смысла дробить по тарифам."""
+    init_db()
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cutoff = (datetime.now(ZoneInfo('UTC')) - timedelta(minutes=QUEUE_ENTRY_TTL_MINUTES)).strftime('%Y-%m-%d %H:%M:%S')
+    cursor.execute(
+        'SELECT position_range, timestamp FROM queue WHERE city = ? AND airport = ? '
+        'AND (tariff = ? OR tariff LIKE ?) AND timestamp >= ? '
+        'ORDER BY timestamp DESC LIMIT 1',
+        (city, airport_icao, category, f'{category}:%', cutoff)
+    )
+    row = cursor.fetchone()
+    conn.close()
+    return row if row else (None, None)
+
 bot = None
 dp = Dispatcher()
 router = Router()
@@ -4821,6 +4842,14 @@ MAP_CATEGORY_STYLE = {
 
 MAP_WEBAPP_PATH = '/map'
 MAP_POSITIONS_API_PATH = '/map/positions'
+MAP_AIRPORTS_API_PATH = '/map/airports'
+
+# Категории, чья очередь показывается в попапе аэропорта на карте (по
+# просьбе пользователя, 22.09.2026: "названия и очереди какие сейчас там
+# плюс текущая загрузка... открыт он или закрыт") - курьер/грузовое такси
+# у аэропортов не отмечаются (см. CATEGORIES_WITHOUT_AIRPORTS), поэтому
+# для них очередь не считаем.
+MAP_AIRPORT_QUEUE_CATEGORIES = ['taxi', 'ultima']
 
 def update_map_position(user_id, city, category, lat, lon, tariffs=None):
     """Записывает/обновляет последнюю позицию водителя для общей карты.
@@ -5095,6 +5124,11 @@ def map_webapp_html():
   .legend div {{ display: flex; align-items: center; gap: 6px; margin: 3px 0; }}
   .legend .dot {{ width: 11px; height: 11px; border-radius: 50%; border: 1px solid #999; display: inline-block; }}
   .filter-toggle {{ position: absolute; top: 10px; left: 10px; z-index: 1000; background: #fff; border-radius: 8px; padding: 8px 12px; font-family: -apple-system, sans-serif; font-size: 12.5px; font-weight: 600; box-shadow: 0 1px 4px rgba(0,0,0,.25); cursor: pointer; user-select: none; }}
+  .airport-icon {{ display: flex; align-items: center; justify-content: center; font-size: 20px; filter: drop-shadow(0 1px 2px rgba(0,0,0,.5)); }}
+  .airport-popup h4 {{ margin: 0 0 4px; font-family: -apple-system, sans-serif; font-size: 13.5px; }}
+  .airport-popup .row {{ font-family: -apple-system, sans-serif; font-size: 12.5px; margin: 2px 0; }}
+  .airport-label {{ background: rgba(255,255,255,.95); border: 1px solid rgba(0,0,0,.15); border-radius: 6px; padding: 3px 6px; font-family: -apple-system, sans-serif; font-size: 11px; line-height: 1.35; white-space: nowrap; box-shadow: 0 1px 3px rgba(0,0,0,.25); }}
+  .airport-label b {{ font-size: 11.5px; }}
 </style>
 </head>
 <body>
@@ -5103,6 +5137,8 @@ def map_webapp_html():
 <div class="legend" id="legend"></div>
 <script>
   const CATEGORY_STYLE = {style_json};
+  const CATEGORY_LABEL = {{ taxi: 'Такси', ultima: 'Ultima' }};
+  const STATUS_ICON = {{ open: '🟢', coordinated: '🟡', closed: '🔴' }};
   const tg = window.Telegram && window.Telegram.WebApp;
   if (tg) {{ tg.ready(); tg.expand(); }}
   const params = new URLSearchParams(window.location.search);
@@ -5138,6 +5174,8 @@ def map_webapp_html():
     maxZoom: 19,
   }}).addTo(map);
   let markers = [];
+  let airportMarkers = [];
+  let airportsLoaded = false;
   async function loadPositions() {{
     try {{
       const initData = tg ? tg.initData : '';
@@ -5159,11 +5197,62 @@ def map_webapp_html():
         markers.push(marker);
         bounds.push([p.lat, p.lon]);
       }});
-      if (bounds.length) map.fitBounds(bounds, {{ padding: [30, 30], maxZoom: 13 }});
+      if (bounds.length && !airportsLoaded) map.fitBounds(bounds, {{ padding: [30, 30], maxZoom: 13 }});
     }} catch (e) {{ /* тихо - карта просто останется пустой до следующего опроса */ }}
   }}
+  // Метки аэропортов - название, статус (открыт/по согласованию/закрыт),
+  // текущая загрузка % и последняя отмеченная водителями очередь по каждой
+  // категории (см. handle_map_airports_api). Загружаются один раз при
+  // открытии карты и обновляются реже позиций водителей - эти данные не
+  // такие "живые".
+  async function loadAirports() {{
+    try {{
+      const resp = await fetch(`/map/airports?city=${{encodeURIComponent(city)}}`);
+      if (!resp.ok) return;
+      const data = await resp.json();
+      airportMarkers.forEach(m => map.removeLayer(m));
+      airportMarkers = [];
+      data.airports.forEach(a => {{
+        const icon = L.divIcon({{ className: 'airport-icon', html: a.emoji || '✈️', iconSize: [26, 26] }});
+        let popup = `<div class="airport-popup"><h4>${{a.emoji || '✈️'}} ${{a.name}}</h4>`;
+        popup += `<div class="row">${{STATUS_ICON[a.status] || ''}} ${{a.status_text}}</div>`;
+        if (a.load !== null && a.load !== undefined) {{
+          popup += `<div class="row">📊 Загрузка сейчас: ${{a.load}}%</div>`;
+        }}
+        const queueKeys = Object.keys(a.queue || {{}});
+        if (queueKeys.length) {{
+          queueKeys.forEach(key => {{
+            const q = a.queue[key];
+            popup += `<div class="row">🚗 ${{CATEGORY_LABEL[key] || key}}: ${{q.range}} (на ${{q.local_time}})</div>`;
+          }});
+        }} else {{
+          popup += `<div class="row">🚗 Очередь: свежих отметок нет</div>`;
+        }}
+        popup += `</div>`;
+        // Постоянная подпись прямо на карте (без клика) - по просьбе
+        // пользователя (22.09.2026): "так же отметь на карте", т.е. статус/
+        // загрузка/очередь должны быть видны сразу, не только в попапе.
+        let label = `<b>${{a.name}}</b><br>${{STATUS_ICON[a.status] || ''}} ${{a.status_text}}`;
+        if (a.load !== null && a.load !== undefined) {{
+          label += ` · 📊 ${{a.load}}%`;
+        }}
+        const queueKeys = Object.keys(a.queue || {{}});
+        if (queueKeys.length) {{
+          label += '<br>' + queueKeys.map(key => `🚗 ${{CATEGORY_LABEL[key] || key}}: ${{a.queue[key].range}}`).join(' · ');
+        }}
+        const marker = L.marker([a.lat, a.lon], {{ icon }})
+          .bindPopup(popup)
+          .bindTooltip(label, {{ permanent: true, direction: 'right', offset: [10, 0], className: 'airport-label' }})
+          .addTo(map);
+        airportMarkers.push(marker);
+      }});
+      airportsLoaded = true;
+    }} catch (e) {{ /* тихо */ }}
+  }}
   loadPositions();
+  loadAirports();
   setInterval(loadPositions, 15000);
+  setInterval(loadAirports, 60000);
 </script>
 </body>
 </html>"""
@@ -5195,6 +5284,50 @@ async def handle_map_positions_api(request):
         logger.exception("❌ Ошибка при получении позиций для карты водителей")
         positions = []
     return web.json_response({'positions': positions})
+
+async def handle_map_airports_api(request):
+    """JSON API для меток аэропортов на карте (по просьбе пользователя,
+    22.09.2026): название, координаты, статус Росавиации (открыт/по
+    согласованию/закрыт), текущая загрузка % и последняя отмеченная
+    водителями очередь по каждой категории (такси/Ultima). Публичные
+    агрегированные данные, initData не обязателен (как и у /map/positions)."""
+    city = request.query.get('city', '')
+    result = []
+    try:
+        for airport in AIRPORTS_INFO.get(city, []):
+            icao = airport['icao']
+            coords = AIRPORT_COORDS.get(icao)
+            if not coords:
+                continue
+            entry = {
+                'name': airport['name'], 'emoji': airport.get('emoji', '✈️'),
+                'icao': icao, 'lat': coords[0], 'lon': coords[1],
+            }
+            if airport.get('closed'):
+                entry['status'] = 'closed'
+                entry['status_text'] = 'ЗАКРЫТ'
+                entry['load'] = None
+            else:
+                status, _ = get_airport_status(icao)
+                _icon, status_text = AIRPORT_STATUS_DISPLAY[status]
+                entry['status'] = status
+                entry['status_text'] = status_text
+                try:
+                    info = compute_current_availability(icao, 'total', zone_key=airport.get('zone_key'))
+                    entry['load'] = round(info['load'])
+                except Exception:
+                    entry['load'] = None
+            queue = {}
+            for category in MAP_AIRPORT_QUEUE_CATEGORIES:
+                range_str, ts = queue_latest_report_for_category(city, icao, category)
+                if range_str:
+                    queue[category] = {'range': range_str, 'local_time': format_airport_local_time(ts, icao)}
+            entry['queue'] = queue
+            result.append(entry)
+    except Exception:
+        logger.exception("❌ Ошибка при получении аэропортов для карты водителей")
+        result = []
+    return web.json_response({'airports': result})
 
 @router.message(lambda message: getattr(message, 'location', None) is not None and not _location_tracking_active(message.from_user.id) and not user_state.get(message.from_user.id, {}).get('nearby_pending'))
 async def handle_passive_live_location(message: types.Message):
@@ -8247,6 +8380,7 @@ async def start_subscription_webhook_server():
     # JSON-API с позициями, на этом же лёгком aiohttp-сервере.
     app.router.add_get(MAP_WEBAPP_PATH, handle_map_webapp)
     app.router.add_get(MAP_POSITIONS_API_PATH, handle_map_positions_api)
+    app.router.add_get(MAP_AIRPORTS_API_PATH, handle_map_airports_api)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', SUBSCRIPTION_WEBHOOK_PORT)
