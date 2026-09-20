@@ -946,6 +946,27 @@ def _apply_last_good_flights_fallback(data):
                     f"⚠️ {icao}: свежие данные пустые (0 прилётов) - подставляю последний "
                     f"непустой снепшот от {fallback.get('saved_at', '?')} ({len(fallback['arrivals'])} рейсов)"
                 )
+            else:
+                # ДОБАВЛЕНО 21.09.2026 (диагностика бага "весь день 0% по
+                # всем аэропортам, хотя должен был сработать fallback") -
+                # раньше в этом случае просто молчали, из-за чего было
+                # невозможно понять по логам, ПОЧЕМУ fallback не сработал:
+                # то ли last_good_flights.json пуст/отсутствует, то ли в
+                # нём просто нет записи для конкретно этого icao (например,
+                # Yandex ни разу за всё время работы бота не прислал по
+                # нему непустой ответ). Теперь явно логируем оба случая.
+                if not last_good:
+                    logger.warning(
+                        f"⚠️ {icao}: свежие данные пустые (0 прилётов), fallback НЕ применён - "
+                        f"last_good_flights.json пуст или отсутствует на диске ({LAST_GOOD_FLIGHTS_FILE})"
+                    )
+                else:
+                    logger.warning(
+                        f"⚠️ {icao}: свежие данные пустые (0 прилётов), fallback НЕ применён - "
+                        f"для этого аэропорта ещё ни разу не сохранялся непустой снепшот "
+                        f"(в last_good_flights.json сейчас {len(last_good)} других аэропортов: "
+                        f"{sorted(last_good.keys())})"
+                    )
 
     if changed:
         _save_last_good_flights(last_good)
