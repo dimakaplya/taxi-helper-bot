@@ -5420,6 +5420,24 @@ def map_webapp_html():
       airportMarkers.forEach(m => map.removeLayer(m));
       airportMarkers = [];
       data.airports.forEach(a => {{
+        // ИЗМЕНЕНО 21.09.2026 (прямая просьба пользователя): при высоком
+        // спросе (загрузка >100% - тот же порог 🟣, что и в get_load_emoji
+        // на сервере) рисуем вокруг аэропорта круг радиусом 3км, полупрозрачную
+        // фиолетовую заливку - чтобы было видно ИЗДАЛЕКА на карте, не только
+        // при клике на маркер. HIGH_DEMAND_LOAD_THRESHOLD держим в синхроне
+        // с порогом >100 в get_load_emoji(main.py).
+        const HIGH_DEMAND_LOAD_THRESHOLD = 100;
+        const HIGH_DEMAND_RADIUS_METERS = 3000;
+        if (a.load !== null && a.load !== undefined && a.load > HIGH_DEMAND_LOAD_THRESHOLD) {{
+          const circle = L.circle([a.lat, a.lon], {{
+            radius: HIGH_DEMAND_RADIUS_METERS,
+            color: '#9b30ff',
+            weight: 2,
+            fillColor: '#9b30ff',
+            fillOpacity: 0.15,
+          }}).addTo(map);
+          airportMarkers.push(circle);
+        }}
         const icon = L.divIcon({{ className: 'airport-icon', html: a.emoji || '✈️', iconSize: [26, 26] }});
         let popup = `<div class="airport-popup"><h4>${{a.emoji || '✈️'}} ${{a.name}}</h4>`;
         popup += `<div class="row">${{STATUS_ICON[a.status] || ''}} ${{a.status_text}}</div>`;
