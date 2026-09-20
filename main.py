@@ -7496,6 +7496,12 @@ async def show_airport_info(callback_query: types.CallbackQuery):
     # ДОБАВЛЕНО 21.09.2026 (прямая просьба пользователя - легенда цветов
     # загрузки нужна везде, где виден % загрузки, не только на одном экране)
     legend = "🔴0-25% Не ехать | 🟡26-50% Уточни очередь | 🟢51-85% Занимай очередь | 🟣>85% Срочно ехать"
+    # ДОБАВЛЕНО 21.09.2026 (пользователь уточнил - "я про кнопку назад"): у
+    # этого экрана не было инлайн-кнопки "Назад" вообще - единственный путь
+    # назад был через нижнюю reply-клавиатуру "← Назад", что сбрасывает
+    # состояние целиком. Добавлена кнопка на родительский экран (меню
+    # аэропорта, transport_airports), как и у соседних дочерних экранов.
+    keyboard.inline_keyboard.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="transport_airports")])
     await msg.edit_text(f"✅ Аэропорты (прилеты):\n\n{legend}", reply_markup=keyboard)
     await callback_query.answer()
 
@@ -7745,6 +7751,10 @@ async def show_airport_availability(callback_query: types.CallbackQuery):
         # легенда, что уже была в show_airport_details, теперь показывается
         # на каждом экране со списком аэропортов, где видна загрузка %.
         legend = "_🔴0-25% Не ехать | 🟡26-50% Уточни очередь | 🟢51-85% Занимай очередь | 🟣>85% Срочно ехать_"
+        # ДОБАВЛЕНО 21.09.2026 (пользователь уточнил - "я про кнопку назад"):
+        # у этого экрана не было инлайн-кнопки "Назад" - добавлена на
+        # родительский экран (меню аэропорта, transport_airports).
+        keyboard.inline_keyboard.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="transport_airports")])
         await msg.edit_text(f"🔄 *Доступность аэропортов*\nВыбери аэропорт для подробностей 👇\n\n{legend}", reply_markup=keyboard, parse_mode='Markdown')
     except Exception as e:
         logger.error(f"❌ Ошибка в show_airport_availability: {e}")
