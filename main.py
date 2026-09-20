@@ -7794,42 +7794,81 @@ async def airports_data_updater():
     активной разработке) добавлял ЕЩЁ ОДИН внеплановый цикл запросов к
     Yandex Rasp сверх обычного расписания. Именно череда редеплоев в течение
     одного дня внесла свой вклад в блокировку ключа 19.09.2026 (см. письмо
-    Яндекса о превышении лимита)."""
-    MIN_FRESH_AGE_MINUTES = 25  # меньше половины FLIGHTS_DAY_INTERVAL_HOURS (1ч=60мин)
+    Яндекса о превышении лимита).
+
+    ИСПРАВЛЕНО 20.09.2026 (пользователь подтвердил по консоли Яндекса - "ключ
+    обновляется всегда в 00:00", то есть суточная БЛОКИРОВКА ключа (если она
+    случилась) снимается именно в полночь по Москве; пользователь также явно
+    задал желаемое расписание - "00:05, потом ночью каждые 2 часа до 6 утра,
+    далее каждый час"): раньше следующий запуск планировался просто как
+    "текущее время + interval_hours" от момента ПОСЛЕДНЕГО запуска - момент
+    полуночи мог уехать на произвольное время (до целого интервала) в
+    зависимости от того, когда бот стартовал, вместо того чтобы всегда
+    попадать в одни и те же часы суток. Теперь расписание - это
+    ФИКСИРОВАННЫЙ список конкретных часов МСК (FLIGHTS_UPDATE_HOURS_MSK:
+    00:05, 02:00, 04:00, затем 06,07,...,23 - итого 21 запуск/сутки), и цикл
+    каждый раз досыпает ровно до ближайшей следующей точки из этого списка,
+    а не считает интервал от текущего момента - поэтому 00:05 (сразу после
+    снятия суточной блокировки ключа) наступит гарантированно, независимо от
+    рестартов и редеплоев в течение дня."""
+    MIN_FRESH_AGE_MINUTES = 25  # не обновляем повторно, если данные моложе этого - защита от лишних запросов при частых рестартах
+    # (час, минута) каждой плановой точки обновления за сутки, по возрастанию.
+    FLIGHTS_UPDATE_HOURS_MSK = [
+        (0, 5),  # сразу после снятия суточной блокировки ключа Яндексом
+        (2, 0), (4, 0),  # ночь - реже, рейсов мало
+    ] + [(h, 0) for h in range(6, 24)]  # день - каждый час, 06:00-23:00
+
+    def _minutes_until_next_target(now_dt):
+        """Сколько минут осталось до ближайшей точки из FLIGHTS_UPDATE_HOURS_MSK
+        (может быть точка сегодня позже текущего времени, либо первая точка
+        завтра, если все сегодняшние уже прошли)."""
+        now_total = now_dt.hour * 60 + now_dt.minute
+        today_targets = [h * 60 + m for h, m in FLIGHTS_UPDATE_HOURS_MSK]
+        upcoming = [t for t in today_targets if t > now_total]
+        if upcoming:
+            return min(upcoming) - now_total
+        # все точки на сегодня прошли - берём первую точку завтрашнего дня
+        return (24 * 60 - now_total) + today_targets[0]
+
+    def _is_at_or_past_a_target(now_dt, window_min=5):
+        """True, если текущее время попадает в первые window_min минут
+        после одной из точек расписания (т.е. пора выполнять обновление)."""
+        now_total = now_dt.hour * 60 + now_dt.minute
+        for h, m in FLIGHTS_UPDATE_HOURS_MSK:
+            target = h * 60 + m
+            if target <= now_total < target + window_min:
+                return True
+        return False
+
     while True:
-        hour = datetime.now(ZoneInfo('Europe/Moscow')).hour
+        now_msk = datetime.now(ZoneInfo('Europe/Moscow'))
+        hour = now_msk.hour
         is_night = FLIGHTS_NIGHT_START_HOUR <= hour < FLIGHTS_NIGHT_END_HOUR
-        interval_hours = FLIGHTS_NIGHT_INTERVAL_HOURS if is_night else FLIGHTS_DAY_INTERVAL_HOURS
 
         age_min = _data_file_age_minutes(FLIGHTS_DATA_FILE)
-        if age_min is not None and age_min < MIN_FRESH_AGE_MINUTES:
-            # ИСПРАВЛЕНО 20.09.2026 (жалоба пользователя - "расписание опять
-            # нули, а прошло уже 15+ минут"): раньше после пропуска на старте
-            # бота код всё равно засыпал на ПОЛНЫЙ interval_hours*3600
-            # (час днём/два ночью) - а не на оставшееся время до истечения
-            # MIN_FRESH_AGE_MINUTES. Из-за этого если данные оказались
-            # "почти свежими" (например 22 из 25 минут) в момент старта -
-            # реальное обновление откладывалось не на несколько минут (как
-            # ожидалось), а на ЦЕЛЫЙ ЧАС от момента старта, хотя формально
-            # 25-минутный порог свежести давно прошёл. Теперь досыпаем
-            # именно недостающее время (+30с запас), после чего цикл сам
-            # попадает в ветку реального обновления при следующей проверке.
-            remaining_min = MIN_FRESH_AGE_MINUTES - age_min
+        at_scheduled_point = _is_at_or_past_a_target(now_msk)
+        # На плановой точке обновляем, даже если формально "свежо" (< MIN_FRESH_AGE_MINUTES) -
+        # но НЕ повторяем, если уже обновлялись совсем недавно (< 2 мин) внутри этого же окна.
+        should_update = at_scheduled_point and (age_min is None or age_min > 2)
+
+        if not should_update:
+            sleep_min = _minutes_until_next_target(now_msk)
             logger.info(
-                f"⏭️  flights_data.json свежий ({age_min:.0f}мин < {MIN_FRESH_AGE_MINUTES}мин) - "
-                f"пропускаю внеплановое обновление (вероятно, бот только что перезапустился), "
-                f"следующая проверка через {remaining_min:.0f}мин"
+                f"⏭️  flights_data.json - следующее плановое обновление через {sleep_min}мин "
+                f"({'свежее' if (age_min is not None and age_min < MIN_FRESH_AGE_MINUTES) else 'жду плановую точку расписания'})"
             )
-            await asyncio.sleep(remaining_min * 60 + 30)
+            await asyncio.sleep(sleep_min * 60 + 30)
             continue
         try:
-            logger.info(f"🔄 Обновляю flights_data.json из Yandex Rasp API... ({'ночь' if is_night else 'день'})")
+            reason = "полуночное окно снятия блокировки ключа" if (hour == 0) else ('ночь' if is_night else 'день')
+            logger.info(f"🔄 Обновляю flights_data.json из Yandex Rasp API... ({reason})")
             async with _yandex_api_lock:
                 await asyncio.to_thread(fetch_yandex_data.main)
             logger.info("✅ flights_data.json обновлён")
         except Exception as e:
             logger.error(f"❌ Ошибка фонового обновления flights_data.json: {e}")
-        await asyncio.sleep(interval_hours * 3600)
+        # После выполнения - досыпаем до следующей точки расписания (не interval_hours!)
+        await asyncio.sleep(_minutes_until_next_target(datetime.now(ZoneInfo('Europe/Moscow'))) * 60 + 30)
 
 
 async def trains_data_updater():
