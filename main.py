@@ -552,8 +552,14 @@ def compute_zone_capacity_shares(icao):
         return {zk: share for zk in zones}, False
     return {zk: counts[zk] / total_known for zk in zones}, True
 
+# "tariffs" - по прямой просьбе пользователя (21.09.2026): "нет смысла
+# предлагать если человек выбрал ультима предлагай тарифы эконом комфорт...
+# в такси ты пишешь эконом комфорт комфорт + минивэн... ещё детский добавь...
+# Ультиме... бизнес премьер Elite и круиз" - используется как источник
+# правды для выбора тарифов перед стартом смены (см. shift_tariffs_keyboard
+# ниже), свой список под каждую категорию, а не один общий на всех.
 CATEGORIES = {
-    'taxi': {'name': '🚕 ТАКСИ', 'tariffs': ['Эконом', 'Комфорт', 'Комфорт+', 'Минивэн']},
+    'taxi': {'name': '🚕 ТАКСИ', 'tariffs': ['Эконом', 'Комфорт', 'Комфорт+', 'Минивэн', 'Детский']},
     'ultima': {'name': '💎 ТАКСИ ULTIMA', 'tariffs': ['Business', 'Premier', 'Elite', 'Cruise']},
     'courier': {'name': '📦 КУРЬЕР', 'tariffs': ['Пеший', 'Авто']},
     'cargo': {'name': '🚚 ГРУЗОВОЕ ТАКСИ', 'tariffs': []}
@@ -4083,42 +4089,43 @@ SHIFT_MAX_JUMP_KM = 3.0  # скачок между двумя пингами б�
 def is_shift_active(state):
     return bool(state.get('shift'))
 
-# Общий список тарифов/классов для выбора при начале смены (по прямой
-# просьбе пользователя, 21.09.2026: "чтобы в начале смены он указывал в
-# каких тарифах он будет работать" - можно выбрать несколько сразу,
-# например Эконом+Комфорт+Премьер). Один общий набор для всех категорий
-# (по уточнению пользователя) - список ориентирован на реальные тарифы
-# Яндекс.Go, но подходит и для отображения на карте водителей курьеру/
-# грузовому такси (для них это скорее "класс груза/доставки", но
-# технически поле то же самое).
-SHIFT_TARIFF_OPTIONS = [
-    ('econom', 'Эконом'),
-    ('comfort', 'Комфорт'),
-    ('comfort_plus', 'Комфорт+'),
-    ('business', 'Бизнес'),
-    ('elite', 'Элит'),
-    ('premier', 'Премьер'),
-    ('cargo', 'Грузовой'),
-]
-SHIFT_TARIFF_LABELS = dict(SHIFT_TARIFF_OPTIONS)
+# Тарифы для выбора при начале смены (по прямой просьбе пользователя,
+# 21.09.2026: "чтобы в начале смены он указывал в каких тарифах он будет
+# работать" - можно выбрать несколько сразу, например Эконом+Комфорт).
+# СВОЙ список тарифов под каждую категорию (по прямому уточнению
+# пользователя, 21.09.2026: "нет смысла предлагать если человек выбрал
+# ультима предлагай тарифы эконом комфорт... в такси ты пишешь эконом
+# комфорт комфорт + минивэн... детский... Ультиме бизнес премьер Elite и
+# круиз") - источник правды теперь CATEGORIES[category]['tariffs'] (те же
+# тарифы, что и в остальном боте), а не отдельный общий список для всех.
+def shift_tariff_options(category):
+    """Список тарифов для выбора при старте смены КОНКРЕТНОЙ категории - см.
+    CATEGORIES[category]['tariffs']. У cargo он пуст (нет смысла выбирать
+    тариф грузовому такси) - для такой категории тарифный экран вообще не
+    показывается, см. toggle_shift."""
+    return CATEGORIES.get(category, {}).get('tariffs', [])
 
-def shift_tariffs_keyboard(selected):
+def shift_tariffs_keyboard(category, selected):
     """Инлайн-клавиатура выбора тарифов перед стартом смены - несколько
     можно выбрать одновременно (✅/☐, тоглятся на месте), внизу кнопка
-    "▶️ Начать смену" подтверждает выбор. selected - set ключей из
-    SHIFT_TARIFF_OPTIONS."""
+    "▶️ Начать смену" подтверждает выбор. selected - set выбранных строк
+    тарифа (из shift_tariff_options(category)); тариф идентифицируется по
+    своему порядковому индексу в списке (callback_data), т.к. сами названия
+    тарифов могут содержать пробелы/плюсы, неудобные для callback_data."""
+    tariffs = shift_tariff_options(category)
     buttons = []
-    for key, label in SHIFT_TARIFF_OPTIONS:
-        mark = '✅' if key in selected else '☐'
-        buttons.append([InlineKeyboardButton(text=f"{mark} {label}", callback_data=f"shift_tariff_toggle_{key}")])
+    for idx, label in enumerate(tariffs):
+        mark = '✅' if label in selected else '☐'
+        buttons.append([InlineKeyboardButton(text=f"{mark} {label}", callback_data=f"shift_tariff_toggle_{idx}")])
     buttons.append([InlineKeyboardButton(text="▶️ Начать смену", callback_data="shift_tariff_confirm")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-def format_shift_tariffs_label(tariff_keys):
+def format_shift_tariffs_label(tariffs):
     """"Эконом, Комфорт" - для подписи маркера на карте (см.
     map_webapp_html/handle_map_positions_api) и для текста сообщения
-    "СМЕНА НАЧАТА"."""
-    return ", ".join(SHIFT_TARIFF_LABELS.get(k, k) for k in tariff_keys if k in SHIFT_TARIFF_LABELS)
+    "СМЕНА НАЧАТА". Тарифы уже человекочитаемые строки (см.
+    CATEGORIES[category]['tariffs']) - просто склеиваем через запятую."""
+    return ", ".join(tariffs)
 
 def start_shift(user_id, tariffs=None):
     state = user_state[user_id]
@@ -4328,11 +4335,13 @@ async def toggle_shift(message: types.Message):
         # которых вообще есть карта (см. MAP_CATEGORY_STYLE), сначала
         # показываем выбор тарифов; остальным (на будущее, если появятся
         # категории без карты) смена стартует сразу без этого шага.
-        if category in MAP_CATEGORY_STYLE:
+        # Тарифный экран показываем только там, где вообще есть свой список
+        # тарифов (shift_tariff_options) - у cargo он пуст, выбирать нечего.
+        if category in MAP_CATEGORY_STYLE and shift_tariff_options(category):
             state['shift_tariff_pending'] = set()
             await message.answer(
                 "🚕 В каких тарифах работаешь эту смену? Выбери один или несколько, потом нажми «▶️ Начать смену».",
-                reply_markup=shift_tariffs_keyboard(set()),
+                reply_markup=shift_tariffs_keyboard(category, set()),
             )
             return
         await start_shift_and_notify(message.answer, user_id, category, city, tariffs=[])
@@ -4413,16 +4422,20 @@ async def shift_tariff_toggle(callback_query: types.CallbackQuery):
     state = user_state[user_id]
     if 'shift_tariff_pending' not in state:
         return  # смена уже стартовала другим путём/клавиатура устарела
-    key = callback_query.data[len("shift_tariff_toggle_"):]
-    if key not in SHIFT_TARIFF_LABELS:
+    category = state.get('category')
+    tariffs = shift_tariff_options(category)
+    try:
+        idx = int(callback_query.data[len("shift_tariff_toggle_"):])
+        label = tariffs[idx]
+    except (ValueError, IndexError):
         return
     selected = set(state['shift_tariff_pending'])
-    if key in selected:
-        selected.discard(key)
+    if label in selected:
+        selected.discard(label)
     else:
-        selected.add(key)
+        selected.add(label)
     state['shift_tariff_pending'] = selected
-    await callback_query.message.edit_reply_markup(reply_markup=shift_tariffs_keyboard(selected))
+    await callback_query.message.edit_reply_markup(reply_markup=shift_tariffs_keyboard(category, selected))
 
 @router.callback_query(lambda c: c.data == "shift_tariff_confirm")
 async def shift_tariff_confirm(callback_query: types.CallbackQuery):
@@ -5172,11 +5185,9 @@ async def handle_map_positions_api(request):
             logger.warning("⚠️ /map/positions: не прошла проверка initData")
     try:
         positions = get_map_positions(city, category) if city else []
-        # Тарифы отдаём уже человекочитаемыми (см. SHIFT_TARIFF_LABELS) -
-        # WebApp просто склеивает их через запятую в подписи маркера (см.
-        # map_webapp_html), не зная о самих ключах тарифов.
-        for p in positions:
-            p['tariffs'] = [SHIFT_TARIFF_LABELS.get(t, t) for t in p.get('tariffs') or []]
+        # Тарифы уже человекочитаемые строки (см. CATEGORIES[cat]['tariffs'] /
+        # shift_tariff_options) - WebApp просто склеивает их через запятую в
+        # подписи маркера (см. map_webapp_html), переводить не нужно.
     except Exception:
         logger.exception("❌ Ошибка при получении позиций для карты водителей")
         positions = []
