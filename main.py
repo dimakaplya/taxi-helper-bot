@@ -5666,6 +5666,19 @@ async def handle_map_airports_api(request):
 
 MAP_ROAD_EVENTS_API_PATH = '/map/road_events'
 
+# ИЗМЕНЕНО 21.09.2026 (прямая просьба пользователя - "на карте события долго
+# не висели, чтобы её не захламлять"): раньше метка на карте жила ровно
+# столько же, сколько событие оставалось в общих данных (LOOKBACK_HOURS в
+# fetch_road_events.py, тогда 6ч на оба типа сразу). Теперь у карты СВОЙ,
+# более короткий и разный по типу порог - перекрытие (is_closure=True)
+# важнее и актуальнее дольше (объезд нужен, пока не сняли), поэтому висит
+# дольше, а обычная авария (без признака перекрытия) обычно расчищается
+# быстро - снимается с карты уже через 3ч, чтобы не захламлять её старыми
+# метками. Данные при этом собираются (fetch_road_events.py) с окном 24ч -
+# этого достаточно с запасом для более долгого TTL перекрытий.
+MAP_CLOSURE_TTL_HOURS = 24
+MAP_INCIDENT_TTL_HOURS = 3
+
 async def handle_map_road_events_api(request):
     """JSON API для меток дорожных событий на карте (по просьбе пользователя,
     22.09.2026: "вынеси на карту дорожные события города где есть адреса") -
@@ -5674,18 +5687,30 @@ async def handle_map_road_events_api(request):
     extract_address/geocode_notices в fetch_road_events.py) - у остальных
     просто нет lat/lon, на карту они и не должны попадать. Полный список (в
     т.ч. без адреса) по-прежнему доступен в обычной кнопке "⛔ Дорожные
-    события" внутри бота."""
+    события" внутри бота (у него СВОЙ, отдельный порог - см.
+    ROAD_EVENTS_CHAT_LOOKBACK_HOURS - на эту функцию не влияет).
+
+    TTL на карте различается по типу события - см. MAP_CLOSURE_TTL_HOURS/
+    MAP_INCIDENT_TTL_HOURS выше."""
     city = request.query.get('city', '')
+    now = datetime.now(ZoneInfo('UTC'))
+    closure_cutoff = (now - timedelta(hours=MAP_CLOSURE_TTL_HOURS)).isoformat()
+    incident_cutoff = (now - timedelta(hours=MAP_INCIDENT_TTL_HOURS)).isoformat()
     result = []
     try:
         for event in get_road_events_for_city(city):
             lat, lon = event.get('lat'), event.get('lon')
             if lat is None or lon is None:
                 continue
+            is_closure = bool(event.get('is_closure'))
+            event_time = event.get('time', '')
+            cutoff = closure_cutoff if is_closure else incident_cutoff
+            if event_time < cutoff:
+                continue  # событие старше своего TTL для карты - не показываем, чтобы не захламлять
             result.append({
                 'lat': lat, 'lon': lon, 'address': event.get('address'),
                 'text': event.get('text', ''), 'time': event.get('time'),
-                'link': event.get('link'), 'is_closure': bool(event.get('is_closure')),
+                'link': event.get('link'), 'is_closure': is_closure,
                 'is_severe': bool(event.get('is_severe')),
             })
     except Exception:
@@ -5695,24 +5720,37 @@ async def handle_map_road_events_api(request):
 
 MAP_CITY_EVENTS_API_PATH = '/map/city_events'
 
+# ИЗМЕНЕНО 21.09.2026 (та же просьба пользователя, что и у дорожных событий -
+# "на карте события долго не висели, чтобы её не захламлять"): раньше метка
+# афиши появлялась на карте СРАЗУ, как только событие попадало в данные
+# (могло быть за дни/недели до начала) и висела до самого начала. Теперь
+# метка появляется на карте только за MAP_EVENT_ADVANCE_HOURS до начала -
+# не раньше, чтобы не захламлять карту событиями, которые будут ещё очень
+# нескоро. Исчезает по-прежнему ровно в момент начала (now_ts >= start).
+MAP_EVENT_ADVANCE_HOURS = 3
+
 async def handle_map_city_events_api(request):
     """JSON API для меток афиши (концерты/мероприятия) на карте - по просьбе
     пользователя (22.09.2026, следом за дорожными событиями): "Афишу тоже
     выноси". Два источника, оба уже читаются в боте (см. get_events_for_user
     для TimePad и get_concert_events_for_city для Telegram-каналов) -
-    отдаём ТОЛЬКО предстоящие события, для которых при сборе удалось
-    геокодировать площадку/адрес (см. geocode_posts в
-    fetch_concert_events.py и geocode_events в fetch_timepad_data.py) -
-    события без координат на карту не попадают, но остаются в обычном
-    разделе "🎭 События города" внутри бота."""
+    отдаём ТОЛЬКО события, для которых при сборе удалось геокодировать
+    площадку/адрес (см. geocode_posts в fetch_concert_events.py и
+    geocode_events в fetch_timepad_data.py) - события без координат на карту
+    не попадают, но остаются в обычном разделе "🎭 События города" внутри
+    бота. На карте видны только события в окне [сейчас; +MAP_EVENT_ADVANCE_HOURS]
+    (см. MAP_EVENT_ADVANCE_HOURS выше) - не раньше и не позже, чтобы не
+    захламлять карту метками далёких во времени мероприятий."""
     city = request.query.get('city', '')
     now_ts = datetime.now(ZoneInfo('UTC')).timestamp()
+    advance_cutoff_ts = now_ts + MAP_EVENT_ADVANCE_HOURS * 3600
     result = []
     try:
         timepad_data = load_timepad_data()
         for ev in (timepad_data or {}).get('cities', {}).get(city, []):
             lat, lon = ev.get('place_lat'), ev.get('place_lon')
-            if lat is None or lon is None or (ev.get('start') or 0) < now_ts:
+            start = ev.get('start') or 0
+            if lat is None or lon is None or start < now_ts or start > advance_cutoff_ts:
                 continue
             result.append({
                 'lat': lat, 'lon': lon, 'title': ev.get('title') or '',
@@ -5726,7 +5764,8 @@ async def handle_map_city_events_api(request):
             start_iso = post.get('start')
             if start_iso:
                 try:
-                    if datetime.fromisoformat(start_iso).timestamp() < now_ts:
+                    start_ts = datetime.fromisoformat(start_iso).timestamp()
+                    if start_ts < now_ts or start_ts > advance_cutoff_ts:
                         continue
                 except Exception:
                     pass
@@ -6617,7 +6656,14 @@ ROAD_EVENTS_CHANNEL_LINKS = {
     'spb': ('https://t.me/dtp_spb78', 'Санкт-Петербург'),
 }
 ROAD_EVENTS_SHOW_COUNT = 5  # сколько последних сообщений пересылать в чат за раз
-ROAD_EVENTS_LOOKBACK_HOURS_LABEL = "6 часов"  # для текста в чате - см. LOOKBACK_HOURS в fetch_road_events.py
+# ИЗМЕНЕНО 21.09.2026: сбор данных (LOOKBACK_HOURS в fetch_road_events.py)
+# поднят с 6ч до 24ч, чтобы хватало данных для более долгого TTL перекрытий
+# НА КАРТЕ (см. handle_map_road_events_api). Обычный список "⛔ Дорожные
+# события" в чате пользователь попросил оставить как раньше - за последние
+# 6 часов - поэтому здесь СВОЙ отдельный порог (ROAD_EVENTS_CHAT_LOOKBACK_HOURS),
+# применяется в show_road_events поверх уже собранных (более широких) данных.
+ROAD_EVENTS_CHAT_LOOKBACK_HOURS = 6
+ROAD_EVENTS_LOOKBACK_HOURS_LABEL = "6 часов"  # для текста в чате - держать в синхроне с ROAD_EVENTS_CHAT_LOOKBACK_HOURS выше
 
 _URL_RE = re.compile(r'(?:https?://|(?:www\.)?t\.me/|(?:www\.)?telegram\.me/)\S+', re.IGNORECASE)
 
@@ -6681,6 +6727,12 @@ async def show_road_events(message: types.Message, user_id_override=None):
 
     _, city_name = channel
     events = get_road_events_for_city(city)
+    # Список в чате - за последние ROAD_EVENTS_CHAT_LOOKBACK_HOURS (6ч), даже
+    # если сами данные собраны за более широкое окно (24ч, см. комментарий у
+    # ROAD_EVENTS_CHAT_LOOKBACK_HOURS выше - это окно нужно карте для
+    # перекрытий с TTL 24ч, но список в чате пользователь просил не трогать).
+    chat_cutoff = (datetime.now(ZoneInfo('UTC')) - timedelta(hours=ROAD_EVENTS_CHAT_LOOKBACK_HOURS)).isoformat()
+    events = [e for e in events if e.get('time', '') >= chat_cutoff]
 
     if not events:
         await message.answer(
