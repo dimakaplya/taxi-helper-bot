@@ -2426,17 +2426,16 @@ def services_keyboard(category=None, city=None, user_id=None):
     # главного меню (по финальному уточнению пользователя, 20.09.2026:
     # "объедини в главном меню их в одну"; эмодзи кнопки в меню уточнялся
     # пользователем дважды - сначала "⛔События города", затем финально
-    # "🚨 Собитие города") - при нажатии показывает инлайн-подменю с двумя
+    # "🚨 События города") - при нажатии показывает инлайн-подменю с двумя
     # вариантами (там уже свои подписи "🎭 События города"/"⛔ Дорожные
     # события"), см. show_events_and_roads_menu/open_city_events_from_menu/
     # open_road_events_from_menu ниже). Для courier/cargo
     # (CATEGORIES_WITHOUT_EVENTS) афиша не актуальна - им показываем кнопку
-    # "⛔ Дорожные события" отдельно, как раньше (у них нет второго пункта
-    # подменю).
-    if category not in CATEGORIES_WITHOUT_EVENTS:
-        items.append("🚨 События города")
-    else:
-        items.append("⛔ Дорожные события")
+    # "⛔ Дорожные события" отдельно, как раньше. НЕ добавляем эту кнопку в
+    # общий список items (2-колоночная сетка ниже) - по просьбе пользователя
+    # (20.09.2026) она теперь в одном ряду с "⚙️ Настройки" справа от неё
+    # (см. buttons.append ниже), а не где-то в общей сетке.
+    events_button_text = "🚨 События города" if category not in CATEGORIES_WITHOUT_EVENTS else "⛔ Дорожные события"
 
     buttons = []
     buttons.extend(top_rows)
@@ -2444,10 +2443,12 @@ def services_keyboard(category=None, city=None, user_id=None):
         [KeyboardButton(text=t) for t in items[i:i + 2]]
         for i in range(0, len(items), 2)
     )
-    # По просьбе пользователя (20.09.2026): "Бесплатный VPN" - предпоследняя
-    # строка, "⚙️ Настройки" - на месте, где раньше была "События города"
-    # (сразу после основных разделов, выше VPN).
-    buttons.append([KeyboardButton(text="⚙️ Настройки")])
+    # По просьбе пользователя (20.09.2026): "⚙️ Настройки" и "События
+    # города"/"Дорожные события" - один ряд, "Настройки" слева,
+    # "События..." справа (было: "Настройки" отдельной строкой, "События..."
+    # где-то в общей 2-колоночной сетке выше). "Бесплатный VPN" - следующей
+    # строкой, как и раньше.
+    buttons.append([KeyboardButton(text="⚙️ Настройки"), KeyboardButton(text=events_button_text)])
     buttons.append([KeyboardButton(text="🔓 Бесплатный VPN TAXI HELPER")])
     buttons.append([KeyboardButton(text="← Назад"), KeyboardButton(text="🏙 Выбор города")])
     return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=buttons)
