@@ -132,9 +132,10 @@ TRAIN_FORECAST_PERIOD_MINUTES = 60
 
 # Уведомления Росавиации об ограничениях в аэропортах (@favt_info) - публичная
 # веб-страница, лимита запросов нет, поэтому обновляем чаще, чем расписание рейсов.
-# 30 минут - по прямой просьбе пользователя (20.09.2026, было 15).
+# 15 минут - по прямой просьбе пользователя (20.09.2026, возвращено обратно
+# с 30, которые были установлены по его же более ранней просьбе).
 FAVT_NOTICES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'favt_notices.json')
-FAVT_UPDATE_INTERVAL_MINUTES = 30
+FAVT_UPDATE_INTERVAL_MINUTES = 15
 
 # Дорожные события (ДТП) по городам - те же публичные веб-версии Telegram-
 # каналов (@dtp777 Москва, @dtp_spb78 СПб), тот же способ сбора, что и у
@@ -869,6 +870,7 @@ def get_upcoming_concert_events_for_category(city, category, limit=10):
     now_local = datetime.now(tz)
     allowed_dates = {now_local.date(), (now_local + timedelta(days=1)).date()}
     upcoming = []
+    later = []  # события позже "завтра" - запасной вариант, см. ниже
     for post in posts:
         if not post.get('start'):
             continue
@@ -877,19 +879,32 @@ def get_upcoming_concert_events_for_category(city, category, limit=10):
         except Exception:
             continue
         start_local = start_dt.astimezone(tz)
-        if start_local.date() not in allowed_dates:
-            continue
         # Событие без явного времени пропускаем мимо проверки "уже прошло" -
         # заглушка 20:00 UTC не отражает реальное время, отсекать по ней
         # рискованно (можно скрыть ещё не начавшееся вечернее событие).
         if post.get('start_has_explicit_time') and start_local < now_local:
             continue
+        if not post.get('start_has_explicit_time') and start_local.date() < now_local.date():
+            continue
         price_category = post.get('price_category', 'taxi_only')
         if category == 'ultima' and price_category != 'all':
             continue
-        upcoming.append(post)
+        if start_local.date() in allowed_dates:
+            upcoming.append(post)
+        elif start_local.date() > now_local.date():
+            later.append(post)
     upcoming.sort(key=lambda p: p['start'])
-    return upcoming[:limit]
+    if upcoming:
+        return upcoming[:limit]
+
+    # По жалобе пользователя (20.09.2026, "события города опять пустые"):
+    # если на сегодня/завтра в канале ничего нет (канал мог просто не
+    # постить несколько дней - это данные, а не баг), не показываем пустой
+    # экран - лучше честно показать ближайшие события ПОЗЖЕ, чем "завтра",
+    # с явной пометкой в тексте (см. build_concert_event_message -
+    # 'is_fallback_later'), чем оставить раздел без единого события.
+    later.sort(key=lambda p: p['start'])
+    return [dict(p, is_fallback_later=True) for p in later[:limit]]
 
 _mos_road_data_cache = None
 _mos_road_data_mtime = None
@@ -4927,6 +4942,12 @@ def build_concert_event_message(post, city):
     название площадки/адреса); показывается только если место распознано."""
     tz = ZoneInfo(EVENT_CITY_TIMEZONE.get(city, 'Europe/Moscow'))
     lines = [f"🎤 *{post.get('title') or 'Мероприятие'}*"]
+    # По жалобе пользователя (20.09.2026, "события города опять пустые") -
+    # если это запасной вариант (на сегодня/завтра в канале ничего не было,
+    # см. get_upcoming_concert_events_for_category), помечаем явно, чтобы не
+    # выглядело так, будто событие именно на сегодня/завтра.
+    if post.get('is_fallback_later'):
+        lines.append("_На ближайшие дни ничего не нашлось - вот что есть дальше:_")
     place = post.get('place')
     if place:
         lines.append(f"📍 {place.capitalize()}")
