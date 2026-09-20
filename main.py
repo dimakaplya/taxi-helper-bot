@@ -2424,17 +2424,17 @@ def services_keyboard(category=None, city=None, user_id=None):
         items.append("✈️🚆 Авиа/ЖД")
     # "🎭 События города" и "⛔ Дорожные события" объединены в ОДНУ кнопку
     # главного меню (по финальному уточнению пользователя, 20.09.2026:
-    # "объедини в главном меню их в одну"; название кнопки в самом меню
-    # уточнено пользователем ещё раз - "⛔События города", т.е. эмодзи
-    # перекрытия + подпись "События города") - при нажатии показывает
-    # инлайн-подменю с двумя вариантами (там уже свои подписи "🎭 События
-    # города"/"⛔ Дорожные события"), см. show_events_and_roads_menu/
-    # open_city_events_from_menu/open_road_events_from_menu ниже). Для
-    # courier/cargo (CATEGORIES_WITHOUT_EVENTS) афиша не актуальна - им
-    # показываем кнопку "⛔ Дорожные события" отдельно, как раньше (у них
-    # нет второго пункта подменю).
+    # "объедини в главном меню их в одну"; эмодзи кнопки в меню уточнялся
+    # пользователем дважды - сначала "⛔События города", затем финально
+    # "🚨 Собитие города") - при нажатии показывает инлайн-подменю с двумя
+    # вариантами (там уже свои подписи "🎭 События города"/"⛔ Дорожные
+    # события"), см. show_events_and_roads_menu/open_city_events_from_menu/
+    # open_road_events_from_menu ниже). Для courier/cargo
+    # (CATEGORIES_WITHOUT_EVENTS) афиша не актуальна - им показываем кнопку
+    # "⛔ Дорожные события" отдельно, как раньше (у них нет второго пункта
+    # подменю).
     if category not in CATEGORIES_WITHOUT_EVENTS:
-        items.append("⛔ События города")
+        items.append("🚨 События города")
     else:
         items.append("⛔ Дорожные события")
 
@@ -5307,11 +5307,11 @@ def build_concert_event_message(post, city):
     keyboard = InlineKeyboardMarkup(inline_keyboard=[buttons]) if buttons else None
     return text, keyboard
 
-@router.message(lambda message: message.text == "⛔ События города" and user_state.get(message.from_user.id, {}).get('category') not in CATEGORIES_WITHOUT_EVENTS)
+@router.message(lambda message: message.text == "🚨 События города" and user_state.get(message.from_user.id, {}).get('category') not in CATEGORIES_WITHOUT_EVENTS)
 async def show_events_and_roads_menu(message: types.Message):
-    """"⛔ События города" в главном меню теперь открывает инлайн-подменю из
-    двух вариантов (объединение по просьбе пользователя, 20.09.2026; название
-    кнопки в меню уточнено пользователем - "⛔События города") - сама
+    """"🚨 События города" в главном меню теперь открывает инлайн-подменю из
+    двух вариантов (объединение по просьбе пользователя, 20.09.2026; эмодзи
+    кнопки в меню уточнялся дважды - финально "🚨 События города") - сама
     афиша (show_city_events) и дорожные события (show_road_events) вызываются
     из callback-хендлеров ниже (open_city_events_from_menu/
     open_road_events_from_menu), передавая user_id_override, т.к.
