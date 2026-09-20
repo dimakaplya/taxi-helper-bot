@@ -410,9 +410,16 @@ def parse_flights(schedule_items, event):
 
 
 def main():
+    """Возвращает 'daily_limit_reached', если пропустили запуск из-за
+    DAILY_SAFETY_LIMIT (ИСПРАВЛЕНО 20.09.2026 - по просьбе пользователя
+    отличать "лимит запросов на сегодня исчерпан" от временного сбоя: этот
+    случай не имеет смысла ретраить каждые несколько минут, он пройдёт
+    только на следующие сутки - вызывающий код в main.py's
+    airports_data_updater() по этому значению сразу прекращает короткие
+    повторные попытки вместо того чтобы жать их бесполезно ещё ~час)."""
     if API_KEY == 'ВСТАВЬ_СВОЙ_КЛЮЧ_СЮДА':
         logger.error("❌ Не задан YANDEX_RASP_API_KEY! См. инструкцию в шапке файла.")
-        return
+        return None
 
     usage_log = load_usage_log()
     today, used_today = get_today_usage(usage_log)
@@ -422,7 +429,7 @@ def main():
             f"{DAILY_SAFETY_LIMIT}) - пропускаю запуск, чтобы не превысить дневной лимит ключа. "
             f"Попробуй завтра или запускай реже."
         )
-        return
+        return 'daily_limit_reached'
     logger.info(f"📊 Уже потрачено сегодня: {used_today}/{DAILY_QUOTA} запросов")
 
     # Предыдущий результат - на случай, если запрос к какому-то аэропорту
@@ -553,6 +560,8 @@ def main():
         interval_minutes = (24 * 60) // max_runs_per_day if max_runs_per_day else None
         if interval_minutes:
             logger.info(f"📈 При таком расходе на цикл можно запускать максимум {max_runs_per_day} раз/сутки (раз в ~{interval_minutes} мин). Скрипт сам не даст себя запустить, если дневной лимит подходит к концу.")
+
+    return 'ok'
 
 
 if __name__ == '__main__':

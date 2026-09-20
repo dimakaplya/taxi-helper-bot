@@ -7840,6 +7840,21 @@ async def airports_data_updater():
                 return True
         return False
 
+    # ИСПРАВЛЕНО 20.09.2026 (пользователь - "а если падает?" -> "повторять
+    # через 5-10 мин"): если попытка обновления В ПЛАНОВОЙ ТОЧКЕ провалилась
+    # (ключ ещё заблокирован, сетевая ошибка и т.п. - fetch_yandex_data.main()
+    # кинул исключение ИЛИ тихо не обновил данные), не ждём молча до
+    # следующей плановой точки расписания (это может быть до 2 часов) - вместо
+    # этого делаем короткие повторные попытки каждые RETRY_INTERVAL_MINUTES,
+    # пока не получится или не исчерпаем RETRY_MAX_ATTEMPTS попыток (дальше
+    # уже ждём обычную плановую точку - если ключ настолько сломан, что не
+    # ожил за час коротких попыток, продолжать долбить API нет смысла). Пока
+    # идут повторные попытки, бот всё равно продолжает показывать
+    # водителям последний ХОРОШИЙ сохранённый снепшот (last_good_flights.json,
+    # см. _apply_last_good_flights_fallback) - НЕ нули.
+    RETRY_INTERVAL_MINUTES = 7
+    RETRY_MAX_ATTEMPTS = 8  # ~56 минут коротких попыток, потом ждём обычную плановую точку
+
     while True:
         now_msk = datetime.now(ZoneInfo('Europe/Moscow'))
         hour = now_msk.hour
@@ -7859,15 +7874,62 @@ async def airports_data_updater():
             )
             await asyncio.sleep(sleep_min * 60 + 30)
             continue
-        try:
-            reason = "полуночное окно снятия блокировки ключа" if (hour == 0) else ('ночь' if is_night else 'день')
-            logger.info(f"🔄 Обновляю flights_data.json из Yandex Rasp API... ({reason})")
-            async with _yandex_api_lock:
-                await asyncio.to_thread(fetch_yandex_data.main)
-            logger.info("✅ flights_data.json обновлён")
-        except Exception as e:
-            logger.error(f"❌ Ошибка фонового обновления flights_data.json: {e}")
-        # После выполнения - досыпаем до следующей точки расписания (не interval_hours!)
+
+        reason = "полуночное окно снятия блокировки ключа" if (hour == 0) else ('ночь' if is_night else 'день')
+        for attempt in range(1, RETRY_MAX_ATTEMPTS + 1):
+            success = False
+            status = None
+            try:
+                logger.info(f"🔄 Обновляю flights_data.json из Yandex Rasp API... ({reason}, попытка {attempt}/{RETRY_MAX_ATTEMPTS})")
+                async with _yandex_api_lock:
+                    status = await asyncio.to_thread(fetch_yandex_data.main)
+                # fetch_yandex_data.main() сам решает, удалось ли получить хоть
+                # что-то реальное (свежий mtime файла - признак успешного прогона,
+                # даже если для отдельных аэропортов сработал внутренний fallback
+                # на старые данные - это не считается провалом всего цикла).
+                fresh_age = _data_file_age_minutes(FLIGHTS_DATA_FILE)
+                success = fresh_age is not None and fresh_age < 2
+            except Exception as e:
+                logger.error(f"❌ Ошибка фонового обновления flights_data.json (попытка {attempt}/{RETRY_MAX_ATTEMPTS}): {e}")
+
+            if success:
+                logger.info("✅ flights_data.json обновлён")
+                break
+
+            # ИСПРАВЛЕНО 20.09.2026 (пользователь - "а если лимиты падают?"):
+            # исчерпание ДНЕВНОГО лимита запросов - это не временный сбой,
+            # который может пройти через 5-10 минут, а состояние, которое
+            # снимется только на следующие сутки. Ретраить его каждые
+            # RETRY_INTERVAL_MINUTES бессмысленно (fetch_yandex_data.main()
+            # откажется от работы точно так же на 2-й, 3-й и 8-й попытке) -
+            # прекращаем попытки сразу и ждём обычную плановую точку.
+            # Пока ждём (в обоих случаях - и коротких ретраев, и этого) -
+            # водителям всё равно показывается последний сохранённый снепшот
+            # (last_good_flights.json), а не нули - бот не остаётся пустым.
+            if status == 'daily_limit_reached':
+                logger.error(
+                    "🚫 Дневной лимит запросов к Yandex Rasp API исчерпан - повторные попытки "
+                    "сегодня бессмысленны, жду следующую плановую точку расписания (или новые сутки). "
+                    "Водителям по-прежнему показываем последний сохранённый снепшот."
+                )
+                break
+
+            if attempt < RETRY_MAX_ATTEMPTS:
+                logger.warning(
+                    f"⚠️ Обновление не удалось - повторю через {RETRY_INTERVAL_MINUTES}мин "
+                    f"(попытка {attempt}/{RETRY_MAX_ATTEMPTS}). Пока показываем водителям последний "
+                    f"сохранённый снепшот (last_good_flights.json), не нули."
+                )
+                await asyncio.sleep(RETRY_INTERVAL_MINUTES * 60)
+            else:
+                logger.error(
+                    f"🚫 Не удалось обновить flights_data.json за {RETRY_MAX_ATTEMPTS} попыток - "
+                    f"похоже, ключ всё ещё заблокирован или недоступен API. Жду следующую плановую "
+                    f"точку расписания. Водителям по-прежнему показываем последний сохранённый снепшот."
+                )
+
+        # После выполнения (успешного или исчерпавшего попытки) - досыпаем до
+        # следующей точки расписания (не interval_hours!)
         await asyncio.sleep(_minutes_until_next_target(datetime.now(ZoneInfo('Europe/Moscow'))) * 60 + 30)
 
 
