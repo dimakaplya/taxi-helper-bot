@@ -65,6 +65,7 @@ DATA_DIR = _resolve_data_dir()
 FLIGHTS_DATA_FILE = os.path.join(DATA_DIR, 'flights_data.json')
 FLIGHTS_DATA_MAX_AGE_HOURS = 26  # если данные старше - считаем их устаревшими
 TRAINS_DATA_FILE = os.path.join(DATA_DIR, 'trains_data.json')
+WEATHER_DATA_FILE = os.path.join(DATA_DIR, 'weather_data.json')  # снепшот погоды по всем городам - см. weather_data_updater
 # Вокзалы теперь не только в Москве - у каждой станции (см. config.json,
 # читается через config_loader.py) есть свой город бота. Кнопка "🚆 Вокзалы"
 # видна в городе, только если для него есть хотя бы одна станция здесь.
@@ -206,13 +207,24 @@ MOS_ROAD_DATA_UPDATE_INTERVAL_MINUTES = 10
 # покрывает только Москву.
 TIMEPAD_DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'timepad_data.json')
 
-# Погода/осадки - Open-Meteo (open-meteo.com), публичный API без ключа и
-# лимита на наш объём запросов (бесплатный тариф - до 10 000 запросов/сутки,
-# нам хватит 12 городов раз в RAIN_CHECK_INTERVAL_MINUTES с большим запасом).
+# Погода/осадки - Open-Meteo (open-meteo.com), публичный API без ключа.
 # В отличие от Overpass (см. fetch_toilets_data.py и остальные
 # fetch_*_data.py) Open-Meteo НЕ блокирует датацентровые IP - работает
 # напрямую с Railway, как и fetch_favt_notices.py/fetch_road_events.py, без
 # браузерного обхода.
+# ИСПРАВЛЕНО 21.09.2026 (пользователь - "погода не грузит", в логах нашли
+# "Open-Meteo вернул 429"): официальной цифры суточного лимита у Open-Meteo
+# нет, но на практике он ЕСТЬ (короткое окно, судя по тому, что несколько
+# залпов запросов подряд при частых редеплоях его превысили) - предыдущий
+# комментарий про "лимита на наш объём нет" был неверным допущением. По
+# прямой просьбе пользователя ("раз в час собирал инфу... чтобы не
+# нагружать лимиты") погода теперь работает ТОЧНО ПО ТОЙ ЖЕ схеме, что и
+# рейсы/поезда: отдельный фоновый сборщик раз в WEATHER_UPDATE_INTERVAL_MINUTES
+# пишет снепшот по всем 12 городам в weather_data.json на постоянном
+# Railway Volume, а все места, которым нужна погода (кнопка "🌤 Погода",
+# "Куда ехать", утреннее приветствие, автопуш о дожде) читают ГОТОВЫЙ
+# снепшот из файла вместо live-запроса к API на каждое действие
+# пользователя - см. load_weather_data/get_cached_weather_forecast ниже.
 # Координаты - центр bbox каждого города (см. CITY_BBOX в fetch_toilets_data.py
 # и остальных fetch_*_data.py - тот же набор из 12 городов).
 RAIN_CITY_COORDS = {
@@ -230,10 +242,19 @@ RAIN_CITY_COORDS = {
     'sochi': (43.540, 39.800),
 }
 OPEN_METEO_URL = 'https://api.open-meteo.com/v1/forecast'
-# Как часто опрашивать Open-Meteo по каждому городу и пересчитывать
-# упреждающий пуш (см. rain_checker ниже) - тот же интервал, что и у
-# остальных фоновых проверок (favt_notices/road_events).
+# Как часто ПЕРЕСЧИТЫВАЕМ решение "нужен ли пуш" по уже загруженному
+# снепшоту (см. rain_checker/check_rain_transitions ниже) - НЕ то же самое,
+# что частота живых запросов к Open-Meteo (та теперь отдельно, раз в
+# WEATHER_UPDATE_INTERVAL_MINUTES, см. weather_data_updater). Можно
+# перепроверять снепшот чаще, чем он обновляется - почасовой прогноз внутри
+# самого часа не меняется, а вот "сколько минут осталось до начала осадков"
+# нужно пересчитывать почаще, чтобы пуш ушёл вовремя (в нужное окно
+# RAIN_LEAD_MINUTES), а не только раз в час.
 RAIN_CHECK_INTERVAL_MINUTES = 20
+# Как часто ЖИВЬЁМ опрашивать Open-Meteo по всем 12 городам и обновлять
+# weather_data.json (по прямой просьбе пользователя, 21.09.2026 - "раз в
+# час собирал инфу... чтобы не нагружать лимиты", после инцидента с 429).
+WEATHER_UPDATE_INTERVAL_MINUTES = 60
 # За сколько минут до начала (или усиления) осадков слать пуш - по просьбе
 # пользователя: не "уже идёт", а заблаговременное предупреждение.
 RAIN_LEAD_MINUTES = 30
@@ -4157,7 +4178,10 @@ async def score_city_candidate(city, category=None):
     reasons = [PEAK_LEVEL_LABEL[level]]
 
     score = level_score
-    forecast = await fetch_rain_forecast(city)
+    # ИЗМЕНЕНО 21.09.2026 - читаем готовый почасовой снепшот погоды
+    # (weather_data.json, обновляется раз в час) вместо live-запроса к
+    # Open-Meteo на каждый расчёт "Куда ехать" (см. get_cached_weather_forecast).
+    forecast = get_cached_weather_forecast(city)
     if forecast:
         current = forecast.get('current', {})
         code = current.get('weathercode')
@@ -7000,9 +7024,15 @@ async def show_weather_forecast(message: types.Message):
     """Ручной просмотр погоды по своему городу - почасовая разбивка (вид
     осадков + температура) на RAIN_FORECAST_HOURS часов вперёд. Второй режим
     фичи - помимо автопуша на скорое начало/усиление осадков (см.
-    push_rain_alert/rain_checker выше). Тот же источник (Open-Meteo), что и
-    у фоновой проверки, просто без записи состояния в БД - разовый запрос
-    по кнопке."""
+    push_rain_alert/rain_checker выше).
+
+    ИЗМЕНЕНО 21.09.2026 (пользователь - "раз в час собирал инфу... чтобы не
+    нагружать лимиты"): раньше при каждом нажатии кнопки делался живой
+    запрос к Open-Meteo - именно это (вместе с фоновой проверкой) и
+    приводило к 429 при активном использовании. Теперь читаем готовый
+    почасовой снепшот из weather_data.json (см. get_cached_weather_forecast),
+    обновляется раз в WEATHER_UPDATE_INTERVAL_MINUTES фоновой задачей
+    weather_data_updater - кнопка отвечает мгновенно, без сетевого запроса."""
     user_id = message.from_user.id
     state = user_state.get(user_id, {})
     city = state.get('city')
@@ -7011,7 +7041,7 @@ async def show_weather_forecast(message: types.Message):
         await message.answer("Сначала выбери город 🏙")
         return
     city_name = CITY_DISPLAY_NAMES.get(city, city)
-    forecast = await fetch_rain_forecast(city)
+    forecast = get_cached_weather_forecast(city)
     text = format_weather_forecast_text(city_name, forecast)
     await message.answer(text, parse_mode='Markdown', reply_markup=services_keyboard(category, city, user_id))
 
@@ -8587,17 +8617,18 @@ def format_queue_breakdown(city, icao, category, zone_key=None):
 
 async def fetch_rain_forecast(city):
     """Почасовой прогноз (weathercode, температура) на RAIN_FORECAST_HOURS
-    часов вперёд по городу через Open-Meteo. Возвращает None при ошибке
-    сети/API - вызывающий код должен уметь пропустить город в этом прогоне,
-    а не упасть.
+    часов вперёд по городу через Open-Meteo - СЫРОЙ live-запрос к API.
 
-    ИСПРАВЛЕНО 21.09.2026 (пользователь - "погода не грузит", в логах нашли
-    "Open-Meteo вернул 429"): при 429 (Too Many Requests - Open-Meteo не
-    даёт официальной цифры лимита, но на практике укладывает в rate-limit
-    при частых залпах запросов, см. check_rain_transitions) раньше сразу
-    сдавались с общим "попробуй через минуту". Теперь делаем 2 коротких
-    повтора с паузой - для ИНТЕРАКТИВНОГО нажатия "🌤 Погода" пользователем
-    это часто чинит проблему за 1-2 секунды, а не заставляет ждать минуту."""
+    ИЗМЕНЕНО 21.09.2026 (пользователь - "раз в час собирал инфу... чтобы не
+    нагружать лимиты", после инцидента с "Open-Meteo вернул 429"): раньше эта
+    функция вызывалась НАПРЯМУЮ из каждого места, которому нужна погода
+    (кнопка "🌤 Погода", "Куда ехать", утреннее приветствие, проверка на
+    дождь) - то есть живой запрос к API на каждое действие пользователя.
+    Теперь единственный вызывающий - weather_data_updater() (фоновая задача
+    ниже), раз в WEATHER_UPDATE_INTERVAL_MINUTES по всем городам разом.
+    Всё остальное читает уже готовый снепшот через get_cached_weather_forecast()
+    ниже, не дёргая API вообще. Retry на 429 оставлен - полезен, даже когда
+    вызовов раз в час, а не при каждом клике."""
     coords = RAIN_CITY_COORDS.get(city)
     if not coords:
         return None
@@ -8631,6 +8662,97 @@ async def fetch_rain_forecast(city):
             logger.warning(f"⚠️ Не удалось получить прогноз Open-Meteo для {city}: {e}")
             return None
     return None
+
+_weather_data_cache = None
+_weather_data_mtime = None
+
+def load_weather_data():
+    """Загружает weather_data.json (пишет weather_data_updater ниже, раз в
+    WEATHER_UPDATE_INTERVAL_MINUTES). Кэширует в памяти, перечитывает только
+    если файл изменился на диске - тот же паттерн, что load_flights_data."""
+    global _weather_data_cache, _weather_data_mtime
+    try:
+        mtime = os.path.getmtime(WEATHER_DATA_FILE)
+        if _weather_data_cache is not None and mtime == _weather_data_mtime:
+            return _weather_data_cache
+        with open(WEATHER_DATA_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        _weather_data_cache = data
+        _weather_data_mtime = mtime
+        return data
+    except FileNotFoundError:
+        return None
+    except Exception as e:
+        logger.warning(f"⚠️ Не удалось прочитать {WEATHER_DATA_FILE}: {e}")
+        return None
+
+def get_cached_weather_forecast(city):
+    """Прогноз ОДНОГО города из готового снепшота weather_data.json - без
+    единого live-запроса к Open-Meteo. Возвращает тот же формат, что раньше
+    отдавал fetch_rain_forecast(city) напрямую (сырой ответ Open-Meteo:
+    'current'/'hourly' с weathercode+temperature_2m), поэтому весь код,
+    который уже умеет читать этот формат (find_upcoming_precip_event,
+    describe_weathercode и т.п.), продолжает работать без изменений - просто
+    источник данных теперь кэш, а не сеть. Возвращает None, если снепшота
+    ещё нет (первый запуск бота, до первого прогона weather_data_updater)
+    или в нём нет записи для этого города."""
+    data = load_weather_data()
+    if not data:
+        return None
+    return (data.get('cities') or {}).get(city)
+
+async def update_weather_data():
+    """Один прогон по всем RAIN_CITY_COORDS - как и у аэропортов/вокзалов,
+    пауза между городами (WEATHER_REQUEST_DELAY_SECONDS), чтобы не залпом
+    бить по Open-Meteo. Город, для которого запрос не удался, просто не
+    попадает в новый снепшот - ЕСЛИ в файле уже была запись для него с
+    прошлого прогона, оставляем ЕЁ вместо того чтобы стереть (тот же принцип
+    "лучше старые данные, чем ничего", что для рейсов/поездов, см.
+    fetch_yandex_data.py 21.09.2026)."""
+    WEATHER_REQUEST_DELAY_SECONDS = 1.0
+    previous = load_weather_data() or {}
+    previous_cities = previous.get('cities') or {}
+    cities = {}
+    for city in RAIN_CITY_COORDS:
+        forecast = await fetch_rain_forecast(city)
+        if forecast:
+            cities[city] = forecast
+        elif city in previous_cities:
+            cities[city] = previous_cities[city]
+            logger.warning(f"⚠️ {city}: свежий прогноз погоды не получен - оставляю прошлый снепшот")
+        await asyncio.sleep(WEATHER_REQUEST_DELAY_SECONDS)
+    result = {
+        'generated_at': datetime.now().isoformat(),
+        'cities': cities,
+    }
+    with open(WEATHER_DATA_FILE, 'w', encoding='utf-8') as f:
+        json.dump(result, f, ensure_ascii=False)
+    logger.info(f"💾 weather_data.json обновлён ({len(cities)}/{len(RAIN_CITY_COORDS)} городов)")
+
+async def weather_data_updater():
+    """Фоновая задача - собирает погоду по всем городам раз в
+    WEATHER_UPDATE_INTERVAL_MINUTES (по прямой просьбе пользователя,
+    21.09.2026, после инцидента с 429 от Open-Meteo). Запускается сразу при
+    старте бота, НО ТОЛЬКО если снепшот реально устарел - тот же принцип
+    защиты от лишних запросов при частых редеплоях, что у airports_data_updater/
+    trains_data_updater (см. их комментарии, инцидент 19.09.2026)."""
+    MIN_FRESH_AGE_MINUTES = 30  # меньше половины WEATHER_UPDATE_INTERVAL_HOURS (60мин)
+    while True:
+        age_min = _data_file_age_minutes(WEATHER_DATA_FILE)
+        if age_min is not None and age_min < MIN_FRESH_AGE_MINUTES:
+            remaining_min = MIN_FRESH_AGE_MINUTES - age_min
+            logger.info(
+                f"⏭️  weather_data.json свежий ({age_min:.0f}мин < {MIN_FRESH_AGE_MINUTES}мин) - "
+                f"пропускаю внеплановое обновление, следующая проверка через {remaining_min:.0f}мин"
+            )
+            await asyncio.sleep(remaining_min * 60 + 30)
+            continue
+        try:
+            logger.info("🔄 Обновляю weather_data.json из Open-Meteo (все города)...")
+            await update_weather_data()
+        except Exception as e:
+            logger.error(f"❌ Ошибка фонового обновления weather_data.json: {e}")
+        await asyncio.sleep(WEATHER_UPDATE_INTERVAL_MINUTES * 60)
 
 def find_upcoming_precip_event(forecast):
     """Ищет ближайшее почасовое окно с осадками в пределах RAIN_LEAD_MINUTES
@@ -8729,22 +8851,21 @@ async def check_rain_transitions():
     ДО отправки), поэтому реальный риск дублей и не имеет значения, что БД
     "холодная" - худший случай - один лишний пуш сразу после деплоя, если
     событие уже активно, что не является спамом, а вполне уместным пушом."""
-    # ИСПРАВЛЕНО 21.09.2026 (пользователь пожаловался - "погода не грузит",
-    # в логах Railway нашли причину: "⚠️ Open-Meteo вернул 429 для города
-    # moscow"): раньше все 12 городов запрашивались подряд БЕЗ единой паузы
-    # между запросами - при частых редеплоях (rain_checker запускает этот
-    # цикл сразу при каждом старте бота, см. rain_checker) несколько таких
-    # залпов подряд укладывали Open-Meteo в rate-limit. Аэропорты и вокзалы
-    # уже давно делают паузу между запросами по той же причине (см.
-    # fetch_yandex_data.py/fetch_trains_data.py, инцидент 19.09.2026) -
-    # теперь и здесь та же защита.
-    RAIN_REQUEST_DELAY_SECONDS = 1.0
+    # ИЗМЕНЕНО 21.09.2026 (пользователь - "раз в час собирал инфу... чтобы не
+    # нагружать лимиты", после инцидента "Open-Meteo вернул 429"): раньше
+    # этот цикл сам дёргал Open-Meteo по всем 12 городам живьём при каждом
+    # прогоне (каждые RAIN_CHECK_INTERVAL_MINUTES=20 минут, плюс сразу при
+    # каждом рестарте бота) - именно это и было основным источником залпов
+    # запросов. Теперь читаем уже готовый снепшот weather_data.json (его
+    # раз в час обновляет weather_data_updater) - НИ ОДНОГО живого запроса к
+    # API из этого цикла больше нет. Снепшот почасовой (RAIN_FORECAST_HOURS
+    # часов вперёд) - его достаточно, чтобы посчитать "начнётся ли дождь в
+    # ближайшие RAIN_LEAD_MINUTES", не обновляя сам прогноз каждые 20 минут.
     previous = load_all_rain_states()
     for city in RAIN_CITY_COORDS:
-        forecast = await fetch_rain_forecast(city)
-        await asyncio.sleep(RAIN_REQUEST_DELAY_SECONDS)
+        forecast = get_cached_weather_forecast(city)
         if not forecast:
-            continue  # не удалось узнать - не трогаем сохранённое состояние
+            continue  # снепшота для этого города ещё нет - не трогаем сохранённое состояние
         event = find_upcoming_precip_event(forecast)
         prev_start, prev_weight = previous.get(city, (None, None))
 
@@ -8772,7 +8893,10 @@ def format_weather_forecast_text(city_name, forecast):
     (в отличие от find_upcoming_precip_event, который смотрит только на
     RAIN_LEAD_MINUTES вперёд для целей автопуша)."""
     if not forecast:
-        return f"🌤 *{city_name}*\n\nНе удалось получить прогноз погоды - попробуй ещё раз через минуту."
+        # ИЗМЕНЕНО 21.09.2026 - теперь это не live-запрос, а чтение снепшота
+        # (см. get_cached_weather_forecast), поэтому "попробуй через минуту"
+        # больше не подходит - снепшот обновляется раз в час, а не по клику.
+        return f"🌤 *{city_name}*\n\nДанные о погоде пока не собраны (бот недавно перезапустился) - загляни через несколько минут."
 
     current = forecast.get('current', {})
     cur_code = current.get('weathercode')
@@ -8839,7 +8963,7 @@ async def build_morning_greeting_text(city, category=None):
         f"📅 Сегодня {date_label}",
     ]
     cur_temp = None
-    forecast = await fetch_rain_forecast(city)
+    forecast = get_cached_weather_forecast(city)  # берём из часового кэша, не бьём Open-Meteo на каждое приветствие
     if forecast:
         current = forecast.get('current', {})
         cur_code = current.get('weathercode')
@@ -10692,6 +10816,7 @@ async def main():
     # asyncio.create_task(mos_road_data_updater())
     asyncio.create_task(high_demand_alert_checker())
     asyncio.create_task(green_demand_alert_checker())
+    asyncio.create_task(weather_data_updater())  # раз в час собирает погоду по всем городам в weather_data.json
     asyncio.create_task(rain_checker())
     asyncio.create_task(holiday_checker())
     asyncio.create_task(airport_queue_checker())
