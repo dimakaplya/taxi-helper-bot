@@ -5,7 +5,7 @@ import sqlite3
 import json
 import re
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from math import radians, sin, cos, asin, sqrt
 from aiogram import Bot, Dispatcher, Router, types
@@ -132,8 +132,9 @@ TRAIN_FORECAST_PERIOD_MINUTES = 60
 
 # Уведомления Росавиации об ограничениях в аэропортах (@favt_info) - публичная
 # веб-страница, лимита запросов нет, поэтому обновляем чаще, чем расписание рейсов.
+# 30 минут - по прямой просьбе пользователя (20.09.2026, было 15).
 FAVT_NOTICES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'favt_notices.json')
-FAVT_UPDATE_INTERVAL_MINUTES = 15
+FAVT_UPDATE_INTERVAL_MINUTES = 30
 
 # Дорожные события (ДТП) по городам - те же публичные веб-версии Telegram-
 # каналов (@dtp777 Москва, @dtp_spb78 СПб), тот же способ сбора, что и у
@@ -2192,6 +2193,15 @@ def notification_settings_keyboard(state, category=None):
             text=f"{queue_mark} 📍 Очередь у аэропорта",
             callback_data="notif_toggle_airport_queue",
         )])
+    # "🛣 Счётчик км" - отдельный переключатель (по просьбе пользователя,
+    # 20.09.2026): считает пройденные за день км по живой геопозиции,
+    # НЕЗАВИСИМО от "Очередь у аэропорта" - водитель включает его отдельно
+    # на весь день работы. См. km_counter_ping/km_counter_today_km.
+    km_mark = '✅' if state.get('km_counter_active') else '☐'
+    buttons.append([InlineKeyboardButton(
+        text=f"{km_mark} 🛣 Счётчик км",
+        callback_data="notif_toggle_km_counter",
+    )])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 # Кнопка (текст меню) -> ключ в NEARBY_SERVICES. Тексты сокращены под
@@ -3252,7 +3262,7 @@ async def show_notification_settings(message: types.Message):
         parse_mode='Markdown',
     )
 
-@router.callback_query(lambda c: c.data.startswith("notif_toggle_") and c.data != "notif_toggle_airport_queue")
+@router.callback_query(lambda c: c.data.startswith("notif_toggle_") and c.data not in ("notif_toggle_airport_queue", "notif_toggle_km_counter"))
 async def toggle_notification_setting(callback_query: types.CallbackQuery):
     await callback_query.answer()
     user_id = callback_query.from_user.id
@@ -3290,6 +3300,90 @@ async def toggle_airport_queue_inline(callback_query: types.CallbackQuery):
     enable_airport_queue_tracking(user_id)
     await callback_query.message.edit_reply_markup(reply_markup=notification_settings_keyboard(state, category))
     await callback_query.message.answer(airport_queue_enable_text(), parse_mode='Markdown')
+
+# ==================== "СЧЁТЧИК КМ" ====================
+# По просьбе пользователя (20.09.2026): отдельный переключатель (не связанный
+# с "Очередь у аэропорта") - водитель включает в начале дня, бот считает
+# пройденные км по живой геопозиции (та же трансляция, что и для очереди -
+# Telegram шлёт её как edited_message.location, см. handle_km_counter_location*
+# ниже), сумма за день доступна как подсказка в "💰 Финансы" на шаге "км".
+# km_counter в state: {'date': 'YYYY-MM-DD', 'total_km': float,
+# 'last_lat': float, 'last_lon': float}. Дата - календарная по UTC (просто
+# как ключ сброса "новый день начался", секундная точность тут не нужна).
+KM_COUNTER_MAX_JUMP_KM = 3.0  # скачок между двумя пингами больше этого - считаем сбоем GPS/потерей сигнала, км не прибавляем (просто обновляем точку)
+
+def enable_km_counter_tracking(user_id):
+    state = user_state[user_id]
+    state['km_counter_active'] = True
+    # Не затираем total_km, если счётчик уже что-то насчитал сегодня и
+    # водитель просто выключал/включал его в течение дня - см.
+    # km_counter_today_km ниже (сброс идёт по смене даты, не по тоглу).
+    counter = dict(state.get('km_counter') or {})
+    today_str = datetime.now(timezone.utc).date().isoformat()
+    if counter.get('date') != today_str:
+        counter = {'date': today_str, 'total_km': 0.0}
+    counter.pop('last_lat', None)
+    counter.pop('last_lon', None)
+    state['km_counter'] = counter
+
+def km_counter_today_km(state):
+    """Км, накопленные счётчиком за СЕГОДНЯ (сбрасывается сама, если
+    сохранённая дата не совпадает с текущей - не нужен отдельный фоновый
+    сброс в полночь, дата просто проверяется при каждом обращении)."""
+    counter = state.get('km_counter') or {}
+    today_str = datetime.now(timezone.utc).date().isoformat()
+    if counter.get('date') != today_str:
+        return 0.0
+    return counter.get('total_km', 0.0)
+
+def km_counter_ping(user_id, lat, lon):
+    """Обрабатывает один пинг живой геопозиции для счётчика км - вызывается
+    из тех же хендлеров location/edited_message, что и process_airport_queue_ping
+    (независимо от неё - обе функции могут отрабатывать на один и тот же
+    пинг, если у водителя включены обе фичи одновременно)."""
+    state = user_state[user_id]
+    if not state.get('km_counter_active'):
+        return
+    counter = dict(state.get('km_counter') or {})
+    today_str = datetime.now(timezone.utc).date().isoformat()
+    if counter.get('date') != today_str:
+        counter = {'date': today_str, 'total_km': 0.0}
+    last_lat, last_lon = counter.get('last_lat'), counter.get('last_lon')
+    if last_lat is not None and last_lon is not None:
+        jump = haversine_km(last_lat, last_lon, lat, lon)
+        if jump <= KM_COUNTER_MAX_JUMP_KM:
+            counter['total_km'] = counter.get('total_km', 0.0) + jump
+    counter['last_lat'] = lat
+    counter['last_lon'] = lon
+    state['km_counter'] = counter
+
+@router.callback_query(lambda c: c.data == "notif_toggle_km_counter")
+async def toggle_km_counter_inline(callback_query: types.CallbackQuery):
+    """Переключатель "🛣 Счётчик км" внутри "⚙️ Настройки" - см. блок выше.
+    Выключение НЕ обнуляет накопленные за сегодня км (state['km_counter']
+    остаётся) - водитель может включать/выключать в течение дня, итог за
+    день не теряется, обнуляется только с наступлением нового дня (по UTC
+    дате в km_counter_ping/km_counter_today_km)."""
+    await callback_query.answer()
+    user_id = callback_query.from_user.id
+    state = user_state[user_id]
+    category = state.get('category')
+    if state.get('km_counter_active'):
+        state['km_counter_active'] = False
+        await callback_query.message.edit_reply_markup(reply_markup=notification_settings_keyboard(state, category))
+        today_km = km_counter_today_km(state)
+        await callback_query.message.answer(f"⏹ Счётчик км остановлен. Пройдено сегодня: {today_km:.1f} км.")
+        return
+    enable_km_counter_tracking(user_id)
+    await callback_query.message.edit_reply_markup(reply_markup=notification_settings_keyboard(state, category))
+    await callback_query.message.answer(
+        "🛣 *Счётчик км включён*\n\n"
+        "Как и для «Очереди у аэропорта»: скрепка 📎 → Геопозиция → "
+        "*«Транслировать геопозицию»* → выбирай *«Пока не отключу»*. "
+        "Пока трансляция активна, буду считать пройденные км - итог за "
+        "сегодня подставлю в «💰 Финансы» на шаге «Километраж».",
+        parse_mode='Markdown',
+    )
 
 def airport_queue_enable_text():
     """Общий текст-инструкция - используется и в toggle_airport_queue_tracking
@@ -3462,7 +3556,15 @@ async def process_airport_queue_ping(user_id, lat, lon, live_period=None):
 
     state['airport_queue'] = aq
 
-@router.message(lambda message: getattr(message, 'location', None) is not None and user_state.get(message.from_user.id, {}).get('airport_queue_active') and not user_state.get(message.from_user.id, {}).get('nearby_pending'))
+def _location_tracking_active(user_id):
+    """True, если хоть одна из фич, использующих живую геопозицию (очередь у
+    аэропорта, счётчик км), сейчас включена у этого пользователя - обе
+    читают ОДНУ и ту же трансляцию (Telegram позволяет транслировать только
+    одну геопозицию за раз), см. комментарий у handle_airport_queue_location."""
+    state = user_state.get(user_id, {})
+    return bool(state.get('airport_queue_active') or state.get('km_counter_active'))
+
+@router.message(lambda message: getattr(message, 'location', None) is not None and _location_tracking_active(message.from_user.id) and not user_state.get(message.from_user.id, {}).get('nearby_pending'))
 async def handle_airport_queue_location(message: types.Message):
     """Срабатывает только на ПЕРВЫЙ пинг живой геопозиции (сама отправка -
     обычное новое сообщение); все следующие обновления той же трансляции
@@ -3470,6 +3572,10 @@ async def handle_airport_queue_location(message: types.Message):
     ниже - отдельный хендлер их не трогает. Поэтому именно тут (а не там)
     место для разового "геопозиция получена" - по просьбе пользователя,
     чтобы после отправки геопозиции чат не оставался без клавиатуры меню.
+    Обслуживает ОБЕ фичи на живой геопозиции (очередь у аэропорта и счётчик
+    км, см. _location_tracking_active) - они независимы, каждая читает один
+    и тот же пинг своей функцией (process_airport_queue_ping/km_counter_ping)
+    и просто ничего не делает, если сама выключена (см. их код).
 
     БАГФИКС: "and not ...nearby_pending" в фильтре обязателен. Кнопки
     "🚻 Туалеты"/"🚿 Мойки"/и т.п. (см. show_nearby_prompt/handle_nearby_location
@@ -3487,25 +3593,27 @@ async def handle_airport_queue_location(message: types.Message):
     handle_airport_queue_location_update ниже, её этот фильтр не касается)
     обработается как обычно."""
     user_id = message.from_user.id
-    await process_airport_queue_ping(
-        user_id, message.location.latitude, message.location.longitude,
-        live_period=getattr(message.location, 'live_period', None),
-    )
+    lat, lon = message.location.latitude, message.location.longitude
+    await process_airport_queue_ping(user_id, lat, lon, live_period=getattr(message.location, 'live_period', None))
+    km_counter_ping(user_id, lat, lon)
     state = user_state.get(user_id) or {}
-    await message.answer(
-        "📍 Геопозиция получена, слежу за расстоянием до аэропорта.",
-        reply_markup=courier_module_keyboard(state.get('category')),
-    )
+    if state.get('airport_queue_active'):
+        status_text = "📍 Геопозиция получена, слежу за расстоянием до аэропорта."
+    else:
+        status_text = "📍 Геопозиция получена, считаю километраж."
+    await message.answer(status_text, reply_markup=courier_module_keyboard(state.get('category')))
 
-@router.edited_message(lambda message: getattr(message, 'location', None) is not None and user_state.get(message.from_user.id, {}).get('airport_queue_active'))
+@router.edited_message(lambda message: getattr(message, 'location', None) is not None and _location_tracking_active(message.from_user.id))
 async def handle_airport_queue_location_update(message: types.Message):
     """Дальнейшие обновления живой геопозиции приходят в Telegram НЕ новыми
     сообщениями, а правками (edit) первого - отдельный апдейт edited_message,
-    поэтому отдельный хендлер (обычный @router.message его не ловит)."""
-    await process_airport_queue_ping(
-        message.from_user.id, message.location.latitude, message.location.longitude,
-        live_period=getattr(message.location, 'live_period', None),
-    )
+    поэтому отдельный хендлер (обычный @router.message его не ловит).
+    Обслуживает обе фичи на живой геопозиции - см. комментарий у
+    handle_airport_queue_location."""
+    user_id = message.from_user.id
+    lat, lon = message.location.latitude, message.location.longitude
+    await process_airport_queue_ping(user_id, lat, lon, live_period=getattr(message.location, 'live_period', None))
+    km_counter_ping(user_id, lat, lon)
 
 @router.message(lambda message: message.text in NEARBY_BUTTON_TO_KIND and user_state.get(message.from_user.id, {}).get('in_courier_module'))
 async def show_nearby_prompt(message: types.Message):
@@ -3575,6 +3683,28 @@ async def handle_nearby_location(message: types.Message):
             f"{cfg['emoji']} Не получилось показать список - попробуй ещё раз через минуту.",
         )
 
+@router.callback_query(lambda c: c.data == "use_counted_km")
+async def use_counted_km_in_finance(callback_query: types.CallbackQuery):
+    """Кнопка "✅ Использовать N км" под шагом "Километраж" в "💰 Финансы"
+    (см. комментарий у отправки этой кнопки в courier_finance_flow, шаг
+    'income') - подставляет число со "Счётчика км" вместо ручного ввода и
+    сразу переводит черновик на следующий шаг."""
+    await callback_query.answer()
+    user_id = callback_query.from_user.id
+    state = user_state.get(user_id)
+    draft = state.get('courier_finance_draft') if state else None
+    if not draft or draft.get('step') != 'km':
+        # Черновик уже отменён/ушёл дальше другим путём (например, водитель
+        # успел ввести км вручную до нажатия кнопки) - кнопка неактуальна.
+        await callback_query.message.edit_reply_markup(reply_markup=None)
+        return
+    today_km = km_counter_today_km(state)
+    draft['data']['km'] = today_km
+    draft['step'] = 'consumption'
+    state['courier_finance_draft'] = draft
+    await callback_query.message.edit_text(f"✅ Использовано: {today_km:.1f} км")
+    await callback_query.message.answer(COURIER_FINANCE_STEP_PROMPTS['consumption'], reply_markup=courier_finance_cancel_keyboard())
+
 @router.message(lambda message: user_state.get(message.from_user.id, {}).get('courier_finance_draft') is not None)
 async def courier_finance_flow(message: types.Message):
     """Пошаговый сбор данных для финансового калькулятора - та же схема, что
@@ -3601,6 +3731,19 @@ async def courier_finance_flow(message: types.Message):
         draft['step'] = 'km'
         state['courier_finance_draft'] = draft
         await message.answer(COURIER_FINANCE_STEP_PROMPTS['km'], reply_markup=courier_finance_cancel_keyboard())
+        # Если "🛣 Счётчик км" (см. блок выше) уже что-то насчитал за сегодня -
+        # предлагаем подставить готовое число отдельным сообщением с
+        # инлайн-кнопкой (по просьбе пользователя, 20.09.2026), вместо того
+        # чтобы вводить километраж вручную.
+        today_km = km_counter_today_km(state)
+        if today_km > 0:
+            await message.answer(
+                f"🛣 Счётчик км посчитал сегодня: *{today_km:.1f} км*",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(text=f"✅ Использовать {today_km:.1f} км", callback_data="use_counted_km"),
+                ]]),
+                parse_mode='Markdown',
+            )
         return
 
     if step == 'km':
