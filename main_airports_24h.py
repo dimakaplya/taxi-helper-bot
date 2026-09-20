@@ -43,7 +43,24 @@ BOT_TOKEN = os.getenv('TELEGRAM_TOKEN', '8968196261:AAGjxaTy_evirnWDAO124vmkbbDF
 # DATA_DIR - тот же путь, что и в fetch_yandex_data.py (если задан volume на
 # Railway, оба файла - flights_data.json и api_usage_log.json - должны лежать
 # в одном месте, иначе бот и фетчер будут работать с разными копиями).
-DATA_DIR = os.getenv('DATA_DIR') or os.path.dirname(os.path.abspath(__file__))
+#
+# ИСПРАВЛЕНО 20.09.2026 (жалоба "расписание рейсов старое/не обновляется"):
+# раньше требовалась ручная переменная окружения DATA_DIR=/data в Railway -
+# про неё забыли завести, когда подключали Volume только ради БД (см.
+# _resolve_db_file() ниже - та же history). Теперь определяется
+# АВТОМАТИЧЕСКИ той же логикой, что и для БД - см. _resolve_data_dir() в
+# fetch_yandex_data.py, продублировано тут 1:1, чтобы бот и фетчер всегда
+# приходили к одному и тому же пути без ручной настройки.
+def _resolve_data_dir():
+    env_dir = os.getenv('DATA_DIR')
+    if env_dir:
+        return env_dir
+    railway_volume_dir = '/data'
+    if os.path.isdir(railway_volume_dir) and os.access(railway_volume_dir, os.W_OK):
+        return railway_volume_dir
+    return os.path.dirname(os.path.abspath(__file__))
+
+DATA_DIR = _resolve_data_dir()
 FLIGHTS_DATA_FILE = os.path.join(DATA_DIR, 'flights_data.json')
 FLIGHTS_DATA_MAX_AGE_HOURS = 26  # если данные старше - считаем их устаревшими
 TRAINS_DATA_FILE = os.path.join(DATA_DIR, 'trains_data.json')
@@ -390,6 +407,18 @@ HOLIDAY_CHECK_INTERVAL_MINUTES = 60
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+# Видимость в логах Railway: куда реально легли flights_data.json/
+# api_usage_log.json на этом запуске (см. _resolve_data_dir выше) - без
+# такой строки прошлый раз пришлось гадать вслепую, почему расписание рейсов
+# не обновляется (DATA_DIR молча указывал не туда, куда думали).
+if DATA_DIR == '/data':
+    logger.info(f"✅ flights_data.json на постоянном Railway Volume: {DATA_DIR} - переживёт редеплой")
+else:
+    logger.warning(
+        f"⚠️ flights_data.json НЕ на постоянном хранилище (путь: {DATA_DIR}) - Railway Volume не подключён "
+        f"в /data. Расписание рейсов и счётчик квоты Yandex Rasp будут теряться при каждом редеплое."
+    )
 
 # ==================== ПРОПУСКНАЯ СПОСОБНОСТЬ ====================
 # UWUU (Уфа) заменён на UWGG (Стригино, Нижний Новгород) - Уфа убрана из
@@ -7392,10 +7421,27 @@ async def submit_range(callback_query: types.CallbackQuery):
 
     progress = user_state[user_id].get('queue_multi_progress')
     if not progress:
-        # Защитный случай - progress мог не сохраниться (например, старая
-        # сессия/рестарт бота между шагами). Ведём себя как раньше: одна
-        # отметка под текущим queue_class_key().
-        tariffs, idx = [user_state[user_id].get('queue_tariff')], 0
+        # ИСПРАВЛЕНО 20.09.2026 (жалоба пользователя - "водитель должен
+        # выбирать тариф перед тем как отмечать, фатальная ошибка"):
+        # раньше, если progress терялся (бот перезапустился между выбором
+        # тарифа и нажатием диапазона, или водитель нажал старую/устаревшую
+        # инлайн-клавиатуру), код МОЛЧА сохранял отметку под ГОЛОЙ
+        # категорией (например "ultima"), даже если у категории есть
+        # обязательные тарифы (Business/Premier/Elite/Cruise у Ultima,
+        # Эконом/Комфорт/... у Такси) - реальный отчёт водителя (стоит в
+        # очереди именно на Premier) "терялся" в общей куче категории,
+        # искажая очередь по всем тарифам сразу. Теперь для категорий с
+        # тарифами при потере progress НЕ гадаем - просим начать отметку
+        # заново с явным выбором тарифа, вместо того чтобы записать её
+        # неизвестно куда.
+        category_for_check = user_state[user_id].get('category')
+        tariff_options = CATEGORIES.get(category_for_check, {}).get('tariffs', [])
+        fallback_tariff = user_state[user_id].get('queue_tariff')
+        if tariff_options and not fallback_tariff:
+            await callback_query.answer("Сессия сброшена - выбери тариф заново 👇", show_alert=True)
+            await show_queue_menu(callback_query)
+            return
+        tariffs, idx = [fallback_tariff], 0
         progress = {'tariffs': tariffs, 'idx': 0, 'results': {}}
 
     tariffs = progress['tariffs']
@@ -9244,6 +9290,18 @@ async def notify_airport_status_changes():
             logger.error(f"❌ Не удалось получить статус {icao}: {e}")
             continue
 
+        # ДИАГНОСТИКА (добавлено 20.09.2026 по жалобе пользователя: "Внуково
+        # и Шереметьево некорректно ЗАКРЫТЫ, хотя по факту открыты") - логируем
+        # КАЖДЫЙ прогон (не только при смене статуса), чтобы при следующей
+        # жалобе можно было по логам Railway увидеть, на каком именно
+        # уведомлении бот застрял (его текст и время) - раньше такой видимости
+        # не было вообще, приходилось гадать вслепую.
+        if notice:
+            preview = notice['text'][:140].replace('\n', ' ')
+            logger.info(f"🛬 {icao} статус={new_status} (уведомление {notice['time']}: \"{preview}\")")
+        else:
+            logger.info(f"🛬 {icao} статус={new_status} (нет уведомлений за последние 12ч)")
+
         old_status = previous.get(icao)
         if old_status != new_status:
             save_airport_status(icao, new_status)
@@ -9540,7 +9598,12 @@ async def favt_notices_updater():
         try:
             logger.info("🔄 Обновляю favt_notices.json из канала Росавиации...")
             await asyncio.to_thread(fetch_favt_notices.main)
-            logger.info("✅ favt_notices.json обновлён")
+            # ДИАГНОСТИКА (20.09.2026, см. комментарий в notify_airport_status_changes) -
+            # сколько всего уведомлений реально пришло с канала за этот прогон,
+            # чтобы отличить "канал не грузится/отдаёт пусто" от "уведомления
+            # есть, но статус аэропорта из них считается неверно".
+            raw = load_favt_notices() or {}
+            logger.info(f"✅ favt_notices.json обновлён ({len(raw.get('notices', []))} уведомлений за последние {raw.get('lookback_hours', '?')}ч)")
             await notify_airport_status_changes()
         except Exception as e:
             logger.error(f"❌ Ошибка фонового обновления favt_notices.json: {e}")

@@ -60,12 +60,31 @@ BASE_URL = 'https://api.rasp.yandex.net/v3.0'
 # файловой системой, и api_usage_log.json (счётчик запросов за сегодня) обнуляется -
 # именно поэтому дневная квота ключа у Яндекса всё равно превышается, хотя
 # DAILY_SAFETY_LIMIT ниже вроде бы должен это предотвращать (см. flights_data_updater()
-# в main_airports_24h.py - она дёргает main() сразу при каждом старте бота). Если в
-# Railway подключить постоянный volume (Settings -> Volumes, mount path напр. /data) и
-# задать переменную окружения DATA_DIR=/data - счётчик и flights_data.json переживут
-# редеплои, и защита от блокировки ключа реально заработает. Без volume - переменную
-# просто не задавай, всё останется как раньше (файлы рядом со скриптом).
-DATA_DIR = os.getenv('DATA_DIR') or os.path.dirname(os.path.abspath(__file__))
+# в main_airports_24h.py - она дёргает main() сразу при каждом старте бота), и
+# именно поэтому в 19.09.2026 ключ был заблокирован на сутки за превышение лимита
+# (счётчик каждый раз обнулялся раньше, чем успевал реально что-то ограничить).
+#
+# ИСПРАВЛЕНО 20.09.2026 (повторная жалоба - "расписание рейсов снова не
+# обновляется"): раньше для использования постоянного Railway Volume
+# требовалось ВРУЧНУЮ завести переменную окружения DATA_DIR=/data в Railway -
+# отдельным шагом от подключения самого Volume, про который легко забыть (и
+# забыли - Volume подключили только ради БД, см. _resolve_db_file() в
+# main.py, а про DATA_DIR никто не вспомнил). Теперь путь определяется
+# АВТОМАТИЧЕСКИ, той же логикой, что уже проверена и работает для БД: если
+# каталог /data существует и доступен на запись (Volume подключён) - используем
+# его без какой-либо ручной настройки; иначе - как раньше, рядом со скриптом.
+# DATA_DIR (если задан) по-прежнему имеет приоритет - для нестандартных
+# запусков (например, локально на своём компьютере с кастомным путём).
+def _resolve_data_dir():
+    env_dir = os.getenv('DATA_DIR')
+    if env_dir:
+        return env_dir
+    railway_volume_dir = '/data'
+    if os.path.isdir(railway_volume_dir) and os.access(railway_volume_dir, os.W_OK):
+        return railway_volume_dir
+    return os.path.dirname(os.path.abspath(__file__))
+
+DATA_DIR = _resolve_data_dir()
 OUTPUT_FILE = os.path.join(DATA_DIR, 'flights_data.json')
 USAGE_LOG_FILE = os.path.join(DATA_DIR, 'api_usage_log.json')
 
