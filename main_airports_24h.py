@@ -4320,7 +4320,14 @@ def format_airport_queue_push(kind, airport, dist_km, zone_label=None):
     меняется."""
     name = f"{airport['emoji']} {airport['name']}"
     if zone_label:
-        name += f" ({zone_label})"
+        # airport['name'] для Шереметьево УЖЕ содержит зону нейтральной
+        # записи (ICAO_TO_AIRPORT всегда берёт "SVO (Шереметьево B/C)" - см.
+        # комментарий у ICAO_TO_AIRPORT) - без этой обрезки получался бы
+        # видимый дубль "(Шереметьево B/C) (Терминалы B/C)" (баг, отчёт
+        # пользователя 20.09.2026, скриншот). Срезаем хвост в скобках перед
+        # тем как подставить актуальный zone_label.
+        base_name = re.sub(r'\s*\([^)]*\)\s*$', '', airport['name'])
+        name = f"{airport['emoji']} {base_name} ({zone_label})"
     if kind == 'enter_outer':
         return f"📍 Вы примерно в {dist_km:.1f} км от {name}.\n\nОтслеживаю время рядом - напомню на 1.5 км, а дальше через 30 минут и через час, если всё ещё будете рядом."
     if kind == 'enter_inner':
@@ -4335,7 +4342,31 @@ def format_airport_queue_push(kind, airport, dist_km, zone_label=None):
         )
     return ""
 
-async def send_airport_queue_push(user_id, icao, kind, dist_km=None, zone_label=None):
+def find_airport_queue_join_target(icao, zone_key=None):
+    """Находит (city, airport_idx) в AIRPORTS_INFO для кнопки "🚗 Встать в
+    очередь" на гео-пуше об аэропорте - переиспользует ту же самоотчётную
+    очередь (callback_data f"join_queue_{city}_{idx}"), что и кнопка
+    "🚗 Занять очередь" в разделе "✈️🚆 Авиа/ЖД" (см. show_range_picker). По
+    прямой просьбе пользователя (20.09.2026): "каждый пуш от аэропорта
+    должен предлагать чтобы водитель не забывал вставать в очередь". Для
+    аэропортов с зонами (Шереметьево) ищет запись именно с нужным zone_key,
+    чтобы отметка ушла в правильную зону (B/C или D), а не в первую
+    попавшуюся; без совпадения по зоне - берёт первую запись с этим icao."""
+    city = ICAO_TO_CITY.get(icao)
+    if not city:
+        return None
+    airports = AIRPORTS_INFO.get(city, [])
+    if zone_key:
+        for i, airport in enumerate(airports):
+            if airport.get('icao') == icao and airport.get('zone_key') == zone_key:
+                return (city, i)
+    for i, airport in enumerate(airports):
+        if airport.get('icao') == icao:
+            return (city, i)
+    return None
+
+
+async def send_airport_queue_push(user_id, icao, kind, dist_km=None, zone_label=None, zone_key=None):
     if not bot:
         return
     airport = ICAO_TO_AIRPORT.get(icao)
@@ -4343,8 +4374,15 @@ async def send_airport_queue_push(user_id, icao, kind, dist_km=None, zone_label=
         return
     text = format_airport_queue_push(kind, airport, dist_km if dist_km is not None else 0, zone_label)
     text += airport_queue_bonus_line(user_id, icao)
+    reply_markup = None
+    target = find_airport_queue_join_target(icao, zone_key)
+    if target:
+        target_city, airport_idx = target
+        reply_markup = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🚗 Встать в очередь", callback_data=f"join_queue_{target_city}_{airport_idx}")]
+        ])
     try:
-        await bot.send_message(user_id, text, parse_mode='Markdown')
+        await bot.send_message(user_id, text, reply_markup=reply_markup, parse_mode='Markdown')
     except Exception as e:
         logger.warning(f"⚠️ Не удалось отправить пуш об очереди у аэропорта пользователю {user_id}: {e}")
 
@@ -4406,10 +4444,10 @@ async def process_airport_queue_ping(user_id, lat, lon, live_period=None):
             aq['entered_outer_at'] = now.isoformat()
             aq['pushed_30'] = False
             aq['pushed_60'] = False
-            await send_airport_queue_push(user_id, icao, 'enter_outer', dist_km, zone_label)
+            await send_airport_queue_push(user_id, icao, 'enter_outer', dist_km, zone_label, zone_key)
         if dist_km <= AIRPORT_QUEUE_RADIUS_INNER_KM and not aq.get('entered_inner_at'):
             aq['entered_inner_at'] = now.isoformat()
-            await send_airport_queue_push(user_id, icao, 'enter_inner', dist_km, zone_label)
+            await send_airport_queue_push(user_id, icao, 'enter_inner', dist_km, zone_label, zone_key)
     else:
         # Вышел за пределы внешнего радиуса - сбрасываем: при возвращении
         # отсчёт (и пуши на вход/по времени) начнётся заново.
@@ -5261,13 +5299,26 @@ async def select_category(message: types.Message):
         and not _location_tracking_active(user_id)
         and not get_fresh_live_location(user_id)
     ):
+        state = user_state.get(user_id, {})
+        # По прямой просьбе пользователя (20.09.2026, скриншот настроек):
+        # "очередь у аэропорта... по умолчанию выключена, сделай чтобы она
+        # всегда была включённая по умолчанию" - раньше отслеживание
+        # включалось только явным нажатием "Включить сейчас"/тумблера в
+        # Настройках, теперь бот сам "взводит" его сразу при выборе
+        # категории (см. enable_airport_queue_tracking) - в Настройках
+        # чекбокс сразу покажет ✅. 'airport_queue_active' not in state -
+        # если пользователь САМ явно выключал эту функцию раньше (ключ уже
+        # False в state), повторный выбор той же/другой категории её не
+        # реактивирует - уважаем явный отказ.
+        if 'airport_queue_active' not in state:
+            enable_airport_queue_tracking(user_id)
         suggest_text = (
-            "📍 Чтобы бот мог правильно показывать очередь у аэропорта, включи "
-            "трансляцию живой геопозиции - тогда уведомления о подъезде к аэропорту "
+            "📍 Отслеживание очереди у аэропорта уже включено. Осталось только поделиться "
+            "живой геопозицией в Telegram - тогда уведомления о подъезде к аэропорту "
             "и времени ожидания будут приходить автоматически."
         )
         suggest_kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📍 Включить сейчас", callback_data="airport_queue_enable_now")]
+            [InlineKeyboardButton(text="📍 Как включить трансляцию", callback_data="airport_queue_enable_now")]
         ])
         await message.answer(suggest_text, reply_markup=suggest_kb)
 
@@ -7035,11 +7086,11 @@ async def check_airport_queue_timers():
         changed = False
         pushed_30, pushed_60 = AIRPORT_QUEUE_TIME_PUSHES_MIN
         if elapsed_minutes >= pushed_30 and not aq.get('pushed_30'):
-            await send_airport_queue_push(user_id, icao, 30, zone_label=zone_label)
+            await send_airport_queue_push(user_id, icao, 30, zone_label=zone_label, zone_key=zone_key)
             aq_updated['pushed_30'] = True
             changed = True
         if elapsed_minutes >= pushed_60 and not aq.get('pushed_60'):
-            await send_airport_queue_push(user_id, icao, 60, zone_label=zone_label)
+            await send_airport_queue_push(user_id, icao, 60, zone_label=zone_label, zone_key=zone_key)
             aq_updated['pushed_60'] = True
             changed = True
         if changed:
