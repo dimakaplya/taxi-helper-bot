@@ -5338,12 +5338,29 @@ def map_webapp_html():
         if (a.load !== null && a.load !== undefined) {{
           popup += `<div class="row">📊 Загрузка сейчас: ${{a.load}}%</div>`;
         }}
+        // ИСПРАВЛЕНО 20.09.2026 (жалоба пользователя - "надо разбить на
+        // тарифы очереди, а не просто Ultima"): у категорий с тарифами
+        // (Business/Premier/Elite/Cruise у Ultima и т.п.) сервер теперь
+        // отдаёт queue[cat].by_tariff = {{tariff: {{range, local_time}}}}
+        // вместо одной общей цифры на всю категорию - показываем каждый
+        // тариф отдельной строкой. У категорий без тарифов формат остался
+        // прежним (queue[cat] = {{range, local_time}}).
         const queueKeys = Object.keys(a.queue || {{}});
-        if (queueKeys.length) {{
-          queueKeys.forEach(key => {{
-            const q = a.queue[key];
-            popup += `<div class="row">🚗 ${{CATEGORY_LABEL[key] || key}}: ${{q.range}} (на ${{q.local_time}})</div>`;
-          }});
+        let queueLines = [];
+        queueKeys.forEach(key => {{
+          const q = a.queue[key];
+          const label = CATEGORY_LABEL[key] || key;
+          if (q.by_tariff) {{
+            Object.keys(q.by_tariff).forEach(tariff => {{
+              const t = q.by_tariff[tariff];
+              queueLines.push({{ text: `${{label}} ${{tariff}}: ${{t.range}} (на ${{t.local_time}})`, short: `${{tariff}}: ${{t.range}}` }});
+            }});
+          }} else {{
+            queueLines.push({{ text: `${{label}}: ${{q.range}} (на ${{q.local_time}})`, short: `${{label}}: ${{q.range}}` }});
+          }}
+        }});
+        if (queueLines.length) {{
+          queueLines.forEach(q => {{ popup += `<div class="row">🚗 ${{q.text}}</div>`; }});
         }} else {{
           popup += `<div class="row">🚗 Очередь: свежих отметок нет</div>`;
         }}
@@ -5355,8 +5372,8 @@ def map_webapp_html():
         if (a.load !== null && a.load !== undefined) {{
           label += ` · 📊 ${{a.load}}%`;
         }}
-        if (queueKeys.length) {{
-          label += '<br>' + queueKeys.map(key => `🚗 ${{CATEGORY_LABEL[key] || key}}: ${{a.queue[key].range}}`).join(' · ');
+        if (queueLines.length) {{
+          label += '<br>' + queueLines.map(q => `🚗 ${{q.short}}`).join(' · ');
         }}
         const marker = L.marker([a.lat, a.lon], {{ icon }})
           .bindPopup(popup)
@@ -5524,11 +5541,34 @@ async def handle_map_airports_api(request):
                     entry['load'] = round(info['load'])
                 except Exception:
                     entry['load'] = None
+            # ИСПРАВЛЕНО 20.09.2026 (жалоба пользователя - "тут надо разбить
+            # на тарифы очереди, а не просто Ultima"): раньше очередь на
+            # карте показывалась ОДНОЙ общей цифрой на всю категорию
+            # (queue_latest_report_for_category), хотя у категории может
+            # быть несколько тарифов с РАЗНОЙ очередью (Business/Premier/
+            # Elite/Cruise у Ultima) - водитель на Premier видел цифру,
+            # которая на самом деле могла быть от чьей-то отметки на Elite.
+            # Теперь для категорий с тарифами (CATEGORIES[cat]['tariffs'])
+            # берём отметку ПО КАЖДОМУ тарифу отдельно (queue_latest_report с
+            # ключом "категория:тариф", тот же ключ, что пишет
+            # queue_submit_report/submit_range) - на карте будет видно,
+            # например, "Premier: 11-15" и "Business: нет свежих отметок"
+            # раздельно, а не одна усреднённая строка на всю Ultima.
             queue = {}
             for category in MAP_AIRPORT_QUEUE_CATEGORIES:
-                range_str, ts = queue_latest_report_for_category(city, icao, category, zone_key=zone_key)
-                if range_str:
-                    queue[category] = {'range': range_str, 'local_time': format_airport_local_time(ts, icao)}
+                tariffs = CATEGORIES.get(category, {}).get('tariffs') or []
+                if tariffs:
+                    by_tariff = {}
+                    for tariff in tariffs:
+                        range_str, ts = queue_latest_report(city, icao, f"{category}:{tariff}", zone_key=zone_key)
+                        if range_str:
+                            by_tariff[tariff] = {'range': range_str, 'local_time': format_airport_local_time(ts, icao)}
+                    if by_tariff:
+                        queue[category] = {'by_tariff': by_tariff}
+                else:
+                    range_str, ts = queue_latest_report_for_category(city, icao, category, zone_key=zone_key)
+                    if range_str:
+                        queue[category] = {'range': range_str, 'local_time': format_airport_local_time(ts, icao)}
             entry['queue'] = queue
             result.append(entry)
     except Exception:
