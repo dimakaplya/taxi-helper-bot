@@ -797,9 +797,82 @@ user_state = PersistentUserStateStore()
 _flights_data_cache = None
 _flights_data_mtime = None
 
+# ИСПРАВЛЕНО 20.09.2026 (жалоба - "надо чтобы бот давал последние загруженные
+# данные, а не нули, даже если Yandex заблокировал ключ"): fetch_yandex_data.py
+# уже старается не затирать flights_data.json нулями при сбое ОДНОГО запуска
+# (см. previous_result в fetch_yandex_data.py), но это не спасает первый
+# прогон после переезда на новый /data volume (там ещё нет старого файла,
+# затирать нечем) и любой другой случай, когда в файле УЖЕ оказались нули
+# (как случилось 20.09.2026 из-за блокировки ключа Яндексом на 501/500
+# запросов). Поэтому здесь, на стороне бота (а не сборщика данных), держим
+# ОТДЕЛЬНЫЙ файл на постоянном volume с последним НЕПУСТЫМ списком прилётов
+# по каждому аэропорту - и если свежий flights_data.json вдруг говорит "0
+# рейсов" для аэропорта, который не закрыт, подставляем сюда этот последний
+# хороший снепшот вместо нулей (с пометкой stale=True, чтобы при желании
+# можно было показать водителю "данные могут быть не совсем свежие").
+LAST_GOOD_FLIGHTS_FILE = os.path.join(DATA_DIR, 'last_good_flights.json')
+
+
+def _load_last_good_flights():
+    try:
+        with open(LAST_GOOD_FLIGHTS_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _save_last_good_flights(snapshot):
+    try:
+        with open(LAST_GOOD_FLIGHTS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(snapshot, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.error(f"❌ Не удалось сохранить {LAST_GOOD_FLIGHTS_FILE}: {e}")
+
+
+def _apply_last_good_flights_fallback(data):
+    """Мутирует data['airports'][icao]['arrivals'] на месте: если пусто и
+    аэропорт не закрыт - подставляет последний непустой снепшот. Обновляет
+    и сам снепшот на диске, когда встречает свежие непустые данные."""
+    if not data or 'airports' not in data:
+        return data
+
+    last_good = _load_last_good_flights()
+    changed = False
+
+    for icao, airport_info in data.get('airports', {}).items():
+        if airport_info.get('closed'):
+            continue
+        arrivals = airport_info.get('arrivals') or []
+        if arrivals:
+            # Свежие данные реально есть - запоминаем их как новый "последний хороший" снепшот
+            last_good[icao] = {
+                'arrivals': arrivals,
+                'saved_at': data.get('generated_at'),
+            }
+            changed = True
+        else:
+            # Пусто в свежем файле - если есть сохранённый непустой снепшот, подставляем его
+            fallback = last_good.get(icao)
+            if fallback and fallback.get('arrivals'):
+                airport_info['arrivals'] = fallback['arrivals']
+                airport_info['stale'] = True
+                airport_info['stale_since'] = fallback.get('saved_at')
+                logger.warning(
+                    f"⚠️ {icao}: свежие данные пустые (0 прилётов) - подставляю последний "
+                    f"непустой снепшот от {fallback.get('saved_at', '?')} ({len(fallback['arrivals'])} рейсов)"
+                )
+
+    if changed:
+        _save_last_good_flights(last_good)
+
+    return data
+
+
 def load_flights_data():
     """Загружает flights_data.json (генерируется fetch_yandex_data.py локально).
-    Кэширует в памяти, перечитывает только если файл изменился на диске."""
+    Кэширует в памяти, перечитывает только если файл изменился на диске.
+    Подставляет последний непустой снепшот вместо нулей, если свежие данные
+    для какого-то аэропорта пустые (см. _apply_last_good_flights_fallback)."""
     global _flights_data_cache, _flights_data_mtime
     try:
         mtime = os.path.getmtime(FLIGHTS_DATA_FILE)
@@ -813,6 +886,8 @@ def load_flights_data():
         age_hours = (datetime.now() - generated_at).total_seconds() / 3600
         if age_hours > FLIGHTS_DATA_MAX_AGE_HOURS:
             logger.warning(f"⚠️ flights_data.json устарел ({age_hours:.1f}ч), но всё равно используем")
+
+        data = _apply_last_good_flights_fallback(data)
 
         _flights_data_cache = data
         _flights_data_mtime = mtime
@@ -7728,18 +7803,32 @@ async def airports_data_updater():
 
         age_min = _data_file_age_minutes(FLIGHTS_DATA_FILE)
         if age_min is not None and age_min < MIN_FRESH_AGE_MINUTES:
+            # ИСПРАВЛЕНО 20.09.2026 (жалоба пользователя - "расписание опять
+            # нули, а прошло уже 15+ минут"): раньше после пропуска на старте
+            # бота код всё равно засыпал на ПОЛНЫЙ interval_hours*3600
+            # (час днём/два ночью) - а не на оставшееся время до истечения
+            # MIN_FRESH_AGE_MINUTES. Из-за этого если данные оказались
+            # "почти свежими" (например 22 из 25 минут) в момент старта -
+            # реальное обновление откладывалось не на несколько минут (как
+            # ожидалось), а на ЦЕЛЫЙ ЧАС от момента старта, хотя формально
+            # 25-минутный порог свежести давно прошёл. Теперь досыпаем
+            # именно недостающее время (+30с запас), после чего цикл сам
+            # попадает в ветку реального обновления при следующей проверке.
+            remaining_min = MIN_FRESH_AGE_MINUTES - age_min
             logger.info(
                 f"⏭️  flights_data.json свежий ({age_min:.0f}мин < {MIN_FRESH_AGE_MINUTES}мин) - "
-                f"пропускаю внеплановое обновление (вероятно, бот только что перезапустился)"
+                f"пропускаю внеплановое обновление (вероятно, бот только что перезапустился), "
+                f"следующая проверка через {remaining_min:.0f}мин"
             )
-        else:
-            try:
-                logger.info(f"🔄 Обновляю flights_data.json из Yandex Rasp API... ({'ночь' if is_night else 'день'})")
-                async with _yandex_api_lock:
-                    await asyncio.to_thread(fetch_yandex_data.main)
-                logger.info("✅ flights_data.json обновлён")
-            except Exception as e:
-                logger.error(f"❌ Ошибка фонового обновления flights_data.json: {e}")
+            await asyncio.sleep(remaining_min * 60 + 30)
+            continue
+        try:
+            logger.info(f"🔄 Обновляю flights_data.json из Yandex Rasp API... ({'ночь' if is_night else 'день'})")
+            async with _yandex_api_lock:
+                await asyncio.to_thread(fetch_yandex_data.main)
+            logger.info("✅ flights_data.json обновлён")
+        except Exception as e:
+            logger.error(f"❌ Ошибка фонового обновления flights_data.json: {e}")
         await asyncio.sleep(interval_hours * 3600)
 
 
@@ -7754,18 +7843,28 @@ async def trains_data_updater():
     while True:
         age_min = _data_file_age_minutes(TRAINS_DATA_FILE)
         if age_min is not None and age_min < MIN_FRESH_AGE_MINUTES:
+            # ИСПРАВЛЕНО 20.09.2026 - та же ошибка, что была в
+            # airports_data_updater (см. комментарий там): раньше после
+            # пропуска на старте бот всё равно засыпал на ПОЛНЫЙ
+            # TRAINS_UPDATE_INTERVAL_HOURS (6ч), а не на оставшееся время до
+            # истечения MIN_FRESH_AGE_MINUTES - реальное обновление могло
+            # откладываться на часы вместо нескольких минут. Теперь досыпаем
+            # именно недостающее время (+30с запас).
+            remaining_min = MIN_FRESH_AGE_MINUTES - age_min
             logger.info(
                 f"⏭️  trains_data.json свежий ({age_min:.0f}мин < {MIN_FRESH_AGE_MINUTES}мин) - "
-                f"пропускаю внеплановое обновление (вероятно, бот только что перезапустился)"
+                f"пропускаю внеплановое обновление (вероятно, бот только что перезапустился), "
+                f"следующая проверка через {remaining_min:.0f}мин"
             )
-        else:
-            try:
-                logger.info("🔄 Обновляю trains_data.json (Казанский/Ленинградский) из Yandex Rasp API...")
-                async with _yandex_api_lock:
-                    await asyncio.to_thread(fetch_trains_data.main)
-                logger.info("✅ trains_data.json обновлён")
-            except Exception as e:
-                logger.error(f"❌ Ошибка фонового обновления trains_data.json: {e}")
+            await asyncio.sleep(remaining_min * 60 + 30)
+            continue
+        try:
+            logger.info("🔄 Обновляю trains_data.json (Казанский/Ленинградский) из Yandex Rasp API...")
+            async with _yandex_api_lock:
+                await asyncio.to_thread(fetch_trains_data.main)
+            logger.info("✅ trains_data.json обновлён")
+        except Exception as e:
+            logger.error(f"❌ Ошибка фонового обновления trains_data.json: {e}")
         await asyncio.sleep(TRAINS_UPDATE_INTERVAL_HOURS * 3600)
 
 def format_queue_breakdown(city, icao, category, zone_key=None):
