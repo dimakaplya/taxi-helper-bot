@@ -2532,7 +2532,21 @@ def services_keyboard(category=None, city=None, user_id=None):
     # "category not in CATEGORIES_WITHOUT_AIRPORTS" для этой кнопки.
     shift_active = is_shift_active(user_state.get(user_id, {})) if user_id is not None else False
     top_rows = [[KeyboardButton(text="⏹ ЗАВЕРШИТЬ СМЕНУ" if shift_active else "✅ НАЧАТЬ СМЕНУ")]]
-    top_rows.append([KeyboardButton(text="💰 КУДА ЕХАТЬ ➡️")])
+    # "🗺 Карта водителей" (по просьбе пользователя, 21.09.2026) - в одном
+    # ряду с "💰 КУДА ЕХАТЬ ➡️", а не отдельной строкой внизу меню - открывает
+    # интерактивную WebApp-карту через web_app=WebAppInfo (единственный
+    # надёжный способ открыть кастомную веб-страницу внутри Telegram).
+    # Показывается только если PUBLIC_URL задан (Telegram требует HTTPS для
+    # WebApp - на локальном/без Public Networking запуске такой ссылки нет) и
+    # известен город (карта показывает водителей конкретного города). Сама
+    # видимость НА карте включается/выключается сменой (см. "▶️ Начать
+    # смену"/"⏹ Завершить смену" - блок "СМЕНА" ниже), кнопка тут просто
+    # открывает карту.
+    where_to_go_row = [KeyboardButton(text="💰 КУДА ЕХАТЬ ➡️")]
+    if category in MAP_CATEGORY_STYLE and PUBLIC_URL and city:
+        map_url = f"{PUBLIC_URL}{MAP_WEBAPP_PATH}?city={urllib.parse.quote(city)}&category={urllib.parse.quote(category)}"
+        where_to_go_row.append(KeyboardButton(text="🗺 Карта водителей", web_app=WebAppInfo(url=map_url)))
+    top_rows.append(where_to_go_row)
 
     items = []
     if category in SHARED_ORDER_CATEGORIES:
@@ -2574,17 +2588,6 @@ def services_keyboard(category=None, city=None, user_id=None):
     # строкой, под VPN - см. блок "РЕФЕРАЛЬНАЯ ПРОГРАММА" ниже
     # (show_referral_program и остальные хендлеры referral_*).
     buttons.append([KeyboardButton(text="🤝 Реферальная программа")])
-    # "🗺 Карта водителей" (21.09.2026, см. блок "КАРТА ВОДИТЕЛЕЙ") - открывает
-    # интерактивную WebApp-карту через web_app=WebAppInfo (единственный
-    # надёжный способ открыть кастомную веб-страницу внутри Telegram).
-    # Показывается только если PUBLIC_URL задан (Telegram требует HTTPS для
-    # WebApp - на локальном/без Public Networking запуске такой ссылки нет) и
-    # известен город (карта показывает водителей конкретного города). Сама
-    # видимость НА карте регулируется отдельным тумблером в Настройках -
-    # кнопка тут просто открывает карту, не включает показ.
-    if category in MAP_CATEGORY_STYLE and PUBLIC_URL and city:
-        map_url = f"{PUBLIC_URL}{MAP_WEBAPP_PATH}?city={urllib.parse.quote(city)}&category={urllib.parse.quote(category)}"
-        buttons.append([KeyboardButton(text="🗺 Карта водителей", web_app=WebAppInfo(url=map_url))])
     buttons.append([KeyboardButton(text="← Назад"), KeyboardButton(text="🏙 Выбор города")])
     return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=buttons)
 
