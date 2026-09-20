@@ -2055,6 +2055,84 @@ WEEKDAY_HOUR_LOAD = {
 }
 WEEKDAY_NAMES = ['Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота', 'Воскресенье']
 
+# ---- Свои паттерны спроса для Курьера и Грузового такси (по просьбе
+# пользователя, 20.09.2026: "дай расклад для курьеров... и для грузовых
+# такси" - уточнено через AskUserQuestion, что нужны СВОИ правила для
+# каждой категории, не общегородской шаблон такси выше). У этих категорий
+# нет данных по аэропортам/прилётам, так что источник спроса принципиально
+# другой:
+#   - Курьер: пик заказов доставки еды - обед и ужин, семь дней в неделю
+#     (одинаковый паттерн на все дни - в отличие от такси, у доставки еды
+#     нет выраженной разницы будни/выходные по времени, разве что чуть
+#     дольше "хвост" ужина в пятницу/субботу, что и учтено ниже).
+#   - Грузовое такси: рабочие часы бизнеса/складов/ТЦ (9:00-18:00, будни) -
+#     основной спрос на грузоперевозки идёт от компаний в рабочее время,
+#     в выходные спрос низкий (склады и офисы преимущественно закрыты).
+# Обе шкалы используют ту же структуру (start_h, end_h, level, label) и тот
+# же PEAK_LEVEL_EMOJI/LABEL, что и WEEKDAY_HOUR_LOAD - переиспользуются те
+# же функции форматирования/скоринга (см. get_current_peak_level_for,
+# format_peak_hours_text_for ниже).
+_COURIER_PATTERN_DEFAULT = [
+    (0, 8, 'low', 'ночь - заказов еды почти нет'),
+    (8, 11, 'mid', 'утро - редкие заказы завтрака'),
+    (11, 15, 'peak', 'обеденный пик - основной поток заказов'),
+    (15, 18, 'mid', 'после обеда - спрос спадает'),
+    (18, 22, 'peak', 'вечерний пик - ужин, самый загруженный отрезок'),
+    (22, 24, 'high', 'поздний вечер - заказы ещё идут'),
+]
+_COURIER_PATTERN_WEEKEND_TAIL = [  # пятница/суббота - вечерний спрос держится дольше
+    (0, 8, 'low', 'ночь - заказов еды почти нет'),
+    (8, 11, 'mid', 'утро - редкие заказы завтрака'),
+    (11, 15, 'peak', 'обеденный пик - основной поток заказов'),
+    (15, 18, 'mid', 'после обеда - спрос спадает'),
+    (18, 23, 'peak', 'вечерний пик - ужин и поздние заказы, держится дольше'),
+    (23, 24, 'high', 'ночь - ещё есть поздние заказы'),
+]
+COURIER_WEEKDAY_HOUR_LOAD = {
+    0: _COURIER_PATTERN_DEFAULT,
+    1: _COURIER_PATTERN_DEFAULT,
+    2: _COURIER_PATTERN_DEFAULT,
+    3: _COURIER_PATTERN_DEFAULT,
+    4: _COURIER_PATTERN_WEEKEND_TAIL,  # пятница
+    5: _COURIER_PATTERN_WEEKEND_TAIL,  # суббота
+    6: _COURIER_PATTERN_DEFAULT,       # воскресенье
+}
+
+_CARGO_PATTERN_WORKDAY = [
+    (0, 8, 'low', 'ночь - склады и бизнес закрыты'),
+    (8, 9, 'mid', 'начало рабочего дня - первые заявки'),
+    (9, 12, 'peak', 'утренний пик - основной поток заявок от бизнеса'),
+    (12, 14, 'high', 'день - заявки продолжают идти'),
+    (14, 17, 'peak', 'дневной пик - разгрузки/загрузки, доставки по городу'),
+    (17, 18, 'high', 'конец рабочего дня - последние заявки'),
+    (18, 24, 'low', 'вечер/ночь - бизнес закрыт, спроса почти нет'),
+]
+_CARGO_PATTERN_WEEKEND = [
+    (0, 24, 'low', 'выходной - склады и офисы преимущественно закрыты'),
+]
+CARGO_WEEKDAY_HOUR_LOAD = {
+    0: _CARGO_PATTERN_WORKDAY,
+    1: _CARGO_PATTERN_WORKDAY,
+    2: _CARGO_PATTERN_WORKDAY,
+    3: _CARGO_PATTERN_WORKDAY,
+    4: _CARGO_PATTERN_WORKDAY,
+    5: _CARGO_PATTERN_WEEKEND,
+    6: _CARGO_PATTERN_WEEKEND,
+}
+
+# Категория -> своя таблица паттернов (см. комментарий выше). Такси/Ultima
+# и любая не перечисленная категория используют общий WEEKDAY_HOUR_LOAD.
+CATEGORY_WEEKDAY_HOUR_LOAD = {
+    'courier': COURIER_WEEKDAY_HOUR_LOAD,
+    'cargo': CARGO_WEEKDAY_HOUR_LOAD,
+}
+
+def get_weekday_hour_load(category):
+    """Возвращает таблицу паттернов (WEEKDAY_HOUR_LOAD-совместимую) для
+    данной категории - свою для courier/cargo, общую для остальных (такси/
+    Ultima) - см. CATEGORY_WEEKDAY_HOUR_LOAD."""
+    return CATEGORY_WEEKDAY_HOUR_LOAD.get(category, WEEKDAY_HOUR_LOAD)
+
 def get_city_now(city):
     """Текущее время в часовом поясе города - переиспользует AIRPORT_TIMEZONE
     через первый аэропорт города (все города бота однозонные по времени -
@@ -2067,18 +2145,33 @@ def get_city_now(city):
     except Exception:
         return datetime.now()
 
-def format_peak_hours_text(city, target_weekday=None):
+CATEGORY_PEAK_HOURS_SUBTITLE = {
+    # Подзаголовок под заголовком "Часы пика" - поясняет водителю, что для
+    # courier/cargo это НЕ общегородской спрос такси, а расклад именно под
+    # его категорию (см. CATEGORY_WEEKDAY_HOUR_LOAD выше).
+    'courier': '_по времени активных заказов доставки еды (обед/ужин)_\n',
+    'cargo': '_по рабочим часам бизнеса и складов_\n',
+}
+
+def format_peak_hours_text(city, target_weekday=None, category=None):
     """Текст с часами пика для города. target_weekday=None - текущий день
     (по местному времени города); 0-6 - конкретный день недели (для кнопок
-    "смотреть другой день"). Показывает ТОЛЬКО заданные в WEEKDAY_HOUR_LOAD
-    диапазоны - часы вне списка не перечисляются (обычный/средний спрос,
-    отдельная строка не нужна)."""
+    "смотреть другой день"). Показывает ТОЛЬКО заданные в таблице диапазоны -
+    часы вне списка не перечисляются (обычный/средний спрос, отдельная
+    строка не нужна). category - своя таблица для courier/cargo (см.
+    get_weekday_hour_load/CATEGORY_PEAK_HOURS_SUBTITLE), иначе общая
+    таблица такси/Ultima, как раньше."""
     now = get_city_now(city)
     weekday = target_weekday if target_weekday is not None else now.weekday()
     city_name = CITY_DISPLAY_NAMES.get(city, city)
-    pattern = WEEKDAY_HOUR_LOAD[weekday]
+    pattern = get_weekday_hour_load(category)[weekday]
 
-    lines = [f"📅 *Часы пика — {city_name}, {WEEKDAY_NAMES[weekday]}*\n"]
+    lines = [f"📅 *Часы пика — {city_name}, {WEEKDAY_NAMES[weekday]}*"]
+    subtitle = CATEGORY_PEAK_HOURS_SUBTITLE.get(category)
+    if subtitle:
+        lines.append(subtitle)
+    else:
+        lines.append("")
     for start_h, end_h, level, label in pattern:
         emoji = PEAK_LEVEL_EMOJI[level]
         if start_h < end_h:
@@ -2099,20 +2192,33 @@ def format_peak_hours_text(city, target_weekday=None):
         else:
             lines.append(f"\n_Сейчас ({now.strftime('%H:%M')}): {PEAK_LEVEL_EMOJI['mid']} {PEAK_LEVEL_LABEL['mid']}_")
 
-    lines.append(
-        "\n_Общая модель по данным Яндекс.Такси и статистике заказов по России - "
-        "ориентир, не точный прогноз для конкретной минуты. Погода (дождь/снег) "
-        "может резко повысить спрос вне этих часов._"
-    )
+    if category == 'courier':
+        lines.append(
+            "\n_Ориентир по типичным часам заказов доставки еды - реальный "
+            "спрос зависит от сервиса и района, погода может сдвинуть пик._"
+        )
+    elif category == 'cargo':
+        lines.append(
+            "\n_Ориентир по рабочим часам бизнеса и складов - реальный спрос "
+            "зависит от конкретных заказчиков и логистики в городе._"
+        )
+    else:
+        lines.append(
+            "\n_Общая модель по данным Яндекс.Такси и статистике заказов по России - "
+            "ориентир, не точный прогноз для конкретной минуты. Погода (дождь/снег) "
+            "может резко повысить спрос вне этих часов._"
+        )
     return '\n'.join(lines)
 
-def get_current_peak_level(city):
+def get_current_peak_level(city, category=None):
     """Уровень спроса ('low'/'mid'/'high'/'peak') ПРЯМО СЕЙЧАС по местному
-    времени города, по той же модели WEEKDAY_HOUR_LOAD, что и
-    format_peak_hours_text - переиспользуется в компоновке "Куда ехать"
-    (see WHERE_TO_GO_* ниже), чтобы не дублировать поиск текущего диапазона."""
+    времени города, по модели WEEKDAY_HOUR_LOAD (такси/Ultima) или своей
+    таблице для courier/cargo (см. get_weekday_hour_load) - переиспользуется
+    в компоновке "Куда ехать" (see WHERE_TO_GO_* ниже), чтобы не дублировать
+    поиск текущего диапазона. category=None - как раньше, общая таблица
+    такси."""
     now = get_city_now(city)
-    pattern = WEEKDAY_HOUR_LOAD[now.weekday()]
+    pattern = get_weekday_hour_load(category)[now.weekday()]
     for start_h, end_h, level, _label in pattern:
         if start_h <= now.hour < end_h:
             return level
@@ -2152,14 +2258,19 @@ def find_upcoming_peak_start(city, lead_minutes=PEAK_HOUR_PUSH_LEAD_MINUTES):
                 }
     return None
 
-def peak_hours_weekday_keyboard(current_weekday):
+def peak_hours_weekday_keyboard(current_weekday, category=None):
     """Инлайн-кнопки переключения дня недели - 7 кнопок, текущий день
-    отмечен, остальные ведут на peak_day_{0-6}."""
+    отмечен, остальные ведут на peak_day_{0-6}[_{category}]. category
+    добавлен в callback_data только для courier/cargo (у них своя таблица
+    часов пика - см. CATEGORY_WEEKDAY_HOUR_LOAD) - для остальных категорий
+    формат callback_data не меняется, чтобы не задеть уже рабочую логику
+    такси/Ultima."""
+    suffix = f"_{category}" if category in CATEGORY_WEEKDAY_HOUR_LOAD else ""
     buttons = []
     row = []
     for i, name in enumerate(WEEKDAY_NAMES):
         label = f"• {name[:2]} •" if i == current_weekday else name[:2]
-        row.append(InlineKeyboardButton(text=label, callback_data=f"peak_day_{i}"))
+        row.append(InlineKeyboardButton(text=label, callback_data=f"peak_day_{i}{suffix}"))
         if len(row) == 4:
             buttons.append(row)
             row = []
@@ -2216,10 +2327,14 @@ def services_keyboard(category=None, city=None, user_id=None):
     # По просьбе пользователя (20.09.2026): "Начать смену" и "Куда ехать" -
     # каждая на всю ширину, друг под другом (было в одном ряду) - крупнее и
     # заметнее как самые важные кнопки главного меню.
+    # "💰 КУДА ЕХАТЬ ➡️" теперь видна ВСЕМ категориям (20.09.2026) - раньше
+    # была скрыта для courier/cargo (не было данных для расчёта), теперь у
+    # них есть своя версия сводки на своих часах пика (см.
+    # compute_where_to_go/score_city_candidate) - убрано условие
+    # "category not in CATEGORIES_WITHOUT_AIRPORTS" для этой кнопки.
     shift_active = is_shift_active(user_state.get(user_id, {})) if user_id is not None else False
     top_rows = [[KeyboardButton(text="⏹ ЗАВЕРШИТЬ СМЕНУ" if shift_active else "✅ НАЧАТЬ СМЕНУ")]]
-    if category not in CATEGORIES_WITHOUT_AIRPORTS:
-        top_rows.append([KeyboardButton(text="💰 КУДА ЕХАТЬ ➡️")])
+    top_rows.append([KeyboardButton(text="💰 КУДА ЕХАТЬ ➡️")])
 
     items = []
     if category in SHARED_ORDER_CATEGORIES:
@@ -3046,28 +3161,36 @@ async def show_peak_hours(message: types.Message):
     if not city:
         await message.answer("Сначала выбери город 🏙")
         return
+    category = state.get('category')
     now = get_city_now(city)
-    text = format_peak_hours_text(city, target_weekday=None)
-    keyboard = peak_hours_weekday_keyboard(now.weekday())
+    text = format_peak_hours_text(city, target_weekday=None, category=category)
+    keyboard = peak_hours_weekday_keyboard(now.weekday(), category=category)
     await message.answer(text, reply_markup=keyboard, parse_mode='Markdown')
 
 @router.callback_query(lambda c: c.data.startswith('peak_day_'))
 async def switch_peak_hours_day(callback_query: types.CallbackQuery):
     """Переключение дня недели на экране "Часы пика" - перерисовывает то же
     сообщение (edit_text), без "Сейчас: ..." строки (она осмысленна только
-    для текущего реального дня, см. format_peak_hours_text)."""
+    для текущего реального дня, см. format_peak_hours_text). callback_data -
+    "peak_day_{0-6}" (такси/Ultima) или "peak_day_{0-6}_{category}"
+    (courier/cargo - своя таблица часов пика, см.
+    peak_hours_weekday_keyboard) - category берём из callback_data, а не из
+    user_state, чтобы переключение дней недели корректно работало даже если
+    пользователь сменил категорию, не закрывая старое сообщение "Часы пика"."""
     user_id = callback_query.from_user.id
     state = user_state.get(user_id, {})
     city = state.get('city')
     if not city:
         await callback_query.answer("Начни заново с /start", show_alert=True)
         return
-    weekday = int(callback_query.data.split('_')[-1])
+    parts = callback_query.data.split('_')
+    weekday = int(parts[2])
+    category = parts[3] if len(parts) > 3 else None
     if weekday < 0 or weekday > 6:
         await callback_query.answer("Ошибка!", show_alert=True)
         return
-    text = format_peak_hours_text(city, target_weekday=weekday)
-    keyboard = peak_hours_weekday_keyboard(weekday)
+    text = format_peak_hours_text(city, target_weekday=weekday, category=category)
+    keyboard = peak_hours_weekday_keyboard(weekday, category=category)
     await callback_query.message.edit_text(text, reply_markup=keyboard, parse_mode='Markdown')
     await callback_query.answer()
 
@@ -3200,11 +3323,55 @@ _CITY_ADVICE_WORKDAY_PEAK = (
 )
 _CITY_ADVICE_DEFAULT = "держись центра города и оживлённых районов"
 
-def get_city_advice(city, level):
+# Свои советы "куда именно держаться" для Курьера/Грузового такси (по
+# просьбе пользователя, 20.09.2026 - "Куда ехать" для этих категорий
+# строится на своих правилах: обед/ужин для курьера, рабочие часы бизнеса
+# для грузового такси - см. CATEGORY_WEEKDAY_HOUR_LOAD выше). Развёрнутый
+# совет по конкретным местам, не просто "спрос выше/ниже".
+_COURIER_ADVICE_LUNCH = (
+    "обеденный пик - держись у бизнес-центров, офисов и ТЦ с фудкортами, "
+    "много заказов на доставку обеда"
+)
+_COURIER_ADVICE_DINNER = (
+    "вечерний пик - основной поток из жилых районов, держись рядом с "
+    "популярными ресторанами/тёмными кухнями и плотной жилой застройкой"
+)
+_COURIER_ADVICE_DEFAULT = "держись районов с высокой плотностью кафе/ресторанов и жилой застройки"
+
+_CARGO_ADVICE_PEAK = (
+    "рабочий пик - держись рядом с логистическими центрами, складами, "
+    "оптовыми базами и промзонами, много заявок на перевозку грузов"
+)
+_CARGO_ADVICE_WORKDAY = "рабочее время - держись деловых районов и складских зон"
+_CARGO_ADVICE_DEFAULT = "вне рабочих часов бизнеса спрос низкий - заявок будет немного"
+
+def get_cargo_advice(level):
+    if level == 'peak':
+        return _CARGO_ADVICE_PEAK
+    if level in ('mid', 'high'):
+        return _CARGO_ADVICE_WORKDAY
+    return _CARGO_ADVICE_DEFAULT
+
+def get_city_advice(city, level, category=None):
     """Развёрнутый совет ПО ТИПАМ ЗАВЕДЕНИЙ для "Город/центр", в зависимости
     от дня недели (местное время города) и текущего уровня спроса. См.
     комментарий у _CITY_ADVICE_* выше про логику. weekday 4=пятница,
-    5=суббота, 6=воскресенье (как в get_city_now().weekday())."""
+    5=суббота, 6=воскресенье (как в get_city_now().weekday()). category -
+    для courier/cargo использует свои советы (обед/ужин для курьера,
+    get_cargo_advice для грузового) вместо таксишной логики ночь/будни/выходные,
+    т.к. паттерн спроса у них принципиально другой (обед/ужин, рабочие
+    часы бизнеса - не привязан к ночной жизни/офисным часам такси)."""
+    if category == 'courier':
+        now = get_city_now(city)
+        hour = now.hour
+        if level == 'peak' and 11 <= hour < 15:
+            return _COURIER_ADVICE_LUNCH
+        if level == 'peak':
+            return _COURIER_ADVICE_DINNER
+        return _COURIER_ADVICE_DEFAULT
+    if category == 'cargo':
+        return get_cargo_advice(level)
+
     now = get_city_now(city)
     weekday = now.weekday()
     hour = now.hour
@@ -3228,12 +3395,14 @@ def get_city_advice(city, level):
             return _CITY_ADVICE_WORKDAY_EVENING
     return _CITY_ADVICE_DEFAULT
 
-async def score_city_candidate(city):
+async def score_city_candidate(city, category=None):
     """Балл для обобщённого "Город/центр" - на основе часа пика + погоды.
     Единицы условные (не %, как у аэропортов) - подобраны так, чтобы часы
     пика были заметно приоритетнее аэропорта со средней загрузкой, а низкий
-    спрос - явно ниже почти любого аэропорта с прилётами."""
-    level = get_current_peak_level(city)
+    спрос - явно ниже почти любого аэропорта с прилётами. category -
+    courier/cargo используют свою таблицу часов пика (см.
+    get_current_peak_level/CATEGORY_WEEKDAY_HOUR_LOAD)."""
+    level = get_current_peak_level(city, category=category)
     level_score = {'low': 10, 'mid': 40, 'high': 70, 'peak': 100}[level]
     reasons = [PEAK_LEVEL_LABEL[level]]
 
@@ -3248,7 +3417,7 @@ async def score_city_candidate(city):
             score += bonus
             reasons.append(f"{emoji} осадки сейчас - спрос выше обычного")
 
-    advice = get_city_advice(city, level)
+    advice = get_city_advice(city, level, category=category)
     return {'label': 'Город / центр', 'score': score, 'reasons': reasons, 'closed': False, 'advice': advice}
 
 # Концертное событие начинает давать всплеск спроса ЗА CONCERT_EVENT_LEAD_HOURS
@@ -3307,7 +3476,16 @@ async def compute_where_to_go(city, category):
     просьбе пользователя (21.09.2026) - только для городов из TRAIN_CITIES
     (см. STATION_CITY). Афиша концертов добавлена по просьбе пользователя
     (22.09.2026) - только события, актуальные ПРЯМО СЕЙЧАС (см.
-    score_concert_event_candidates), не более 3, чтобы не забивать список."""
+    score_concert_event_candidates), не более 3, чтобы не забивать список.
+
+    Курьер/Грузовое такси (20.09.2026): аэропорты, вокзалы и афиша концертов
+    им не релевантны (это про пассажирские поездки с рейсов/на мероприятия) -
+    для этих категорий единственный кандидат - "Город/центр", но посчитанный
+    по СВОЕЙ таблице часов пика и советам (см. score_city_candidate/
+    get_city_advice, category передаётся туда)."""
+    if category in CATEGORIES_WITHOUT_AIRPORTS:
+        return [await score_city_candidate(city, category=category)]
+
     candidates = []
     seen_icao = set()
     for airport in AIRPORTS_INFO.get(city, []):
@@ -3412,10 +3590,21 @@ def format_where_to_go_text(city, category, candidates, extra_header=None):
         lines.append(f"🚧 Сейчас в городе {closures_count} активных {word} - см. «⛔ Дорожные события».")
 
     lines.append(WHERE_TO_GO_DIVIDER)
-    lines.append(
-        "_Ориентир на основе прилётов, статуса аэропортов, очереди и часов "
-        "пика - не гарантия заработка, реальный спрос может отличаться._"
-    )
+    if category == 'courier':
+        lines.append(
+            "_Ориентир по часам активных заказов доставки еды - не гарантия "
+            "заработка, реальный спрос может отличаться._"
+        )
+    elif category == 'cargo':
+        lines.append(
+            "_Ориентир по рабочим часам бизнеса и складов - не гарантия "
+            "заработка, реальный спрос может отличаться._"
+        )
+    else:
+        lines.append(
+            "_Ориентир на основе прилётов, статуса аэропортов, очереди и часов "
+            "пика - не гарантия заработка, реальный спрос может отличаться._"
+        )
     return '\n'.join(lines)
 
 _where_to_go_in_progress = set()  # user_id-ы, для которых сейчас уже считается сводка
@@ -3473,12 +3662,11 @@ async def show_where_to_go(message: types.Message):
     if not city:
         await message.answer("Сначала выбери город 🏙")
         return
-    if category in CATEGORIES_WITHOUT_AIRPORTS:
-        # Кнопка и так скрыта для этих категорий (courier_module_keyboard),
-        # но хендлер матчится по тексту - на случай, если сообщение пришло
-        # откуда-то ещё (например, старая клавиатура в чате).
-        await message.answer("Этот раздел пока доступен только для Такси и Ultima.")
-        return
+    # Курьер/Грузовое такси (20.09.2026): раньше кнопка была полностью
+    # скрыта для этих категорий (не было аэропортов/прилётов, на которых
+    # строилась сводка) - теперь у них есть своя версия "Куда ехать" (см.
+    # compute_where_to_go/score_city_candidate: единственный кандидат
+    # "Город/центр", посчитанный по своей таблице часов пика).
     await send_where_to_go(message, user_id, city, category)
 
 @router.message(lambda message: message.text == "⚙️ Настройки")
@@ -3714,13 +3902,12 @@ async def toggle_shift(message: types.Message):
         # отдельных) - см. extra_header у send_where_to_go/
         # format_where_to_go_text. Сначала обновляем клавиатуру коротким
         # тех.сообщением (Reply-клавиатуру нельзя приложить к тому же
-        # сообщению, что инлайн-результат "Куда ехать"), доступно только для
-        # категорий с аэропортами (как и сама кнопка "💰 КУДА ЕХАТЬ ➡️").
-        if category not in CATEGORIES_WITHOUT_AIRPORTS:
-            await message.answer("✅ Смена начата", reply_markup=services_keyboard(category, city, user_id))
-            await send_where_to_go(message, user_id, city, category, extra_header=shift_header)
-        else:
-            await message.answer(shift_header, reply_markup=services_keyboard(category, city, user_id), parse_mode='Markdown')
+        # сообщению, что инлайн-результат "Куда ехать"). Раньше это было
+        # только для категорий с аэропортами - теперь доступно всем, включая
+        # courier/cargo (у них теперь тоже есть сводка "Куда ехать" на
+        # своих часах пика, см. compute_where_to_go).
+        await message.answer("✅ Смена начата", reply_markup=services_keyboard(category, city, user_id))
+        await send_where_to_go(message, user_id, city, category, extra_header=shift_header)
         return
 
     if not is_shift_active(state):
