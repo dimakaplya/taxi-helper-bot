@@ -261,6 +261,11 @@ NOTIFICATION_TYPES = {
     'high_demand': {'label': 'Повышенный спрос', 'emoji': '📈'},
     'holidays': {'label': 'Праздники', 'emoji': '🎉'},
     'peak_hours': {'label': 'Часы пика', 'emoji': '📅'},
+    # По просьбе пользователя (20.09.2026): "делай пуши перекрытий... и
+    # крупные ДТП" - общая настройка на весь город (см. AskUserQuestion:
+    # "всем в городе, у кого включены пуши"), не привязана к
+    # активной смене - см. push_road_incident_alerts ниже.
+    'road_events': {'label': 'Перекрытия и крупные ДТП', 'emoji': '⛔'},
 }
 
 def notifications_enabled(state, notif_key):
@@ -1470,6 +1475,22 @@ def init_db():
         cursor.execute('ALTER TABLE shift_history ADD COLUMN airport_wait_minutes INTEGER NOT NULL DEFAULT 0')
     except sqlite3.OperationalError:
         pass
+    # Дедуп пушей о перекрытиях/крупных ДТП (по просьбе пользователя,
+    # 20.09.2026: "делай пуши перекрытий... и крупные ДТП") - event_key
+    # уникален на пост (ссылка на сообщение, если есть, иначе время+текст,
+    # тот же принцип дедупа, что уже используется в merge_city_messages
+    # fetch_road_events.py) - не даёт разослать пуш дважды за один и тот же
+    # пост при каждом прогоне road_events_updater (раз в
+    # ROAD_EVENTS_UPDATE_INTERVAL_MINUTES минут, пост остаётся в свежей
+    # ленте несколько прогонов подряд, пока не истечёт LOOKBACK_HOURS).
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS road_event_alerts_sent (
+            city TEXT,
+            event_key TEXT,
+            sent_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (city, event_key)
+        )
+    ''')
     conn.commit()
     conn.close()
 
@@ -1805,6 +1826,53 @@ def cleanup_old_peak_hour_alerts():
         conn.close()
     except Exception as e:
         logger.error(f"❌ Не удалось почистить peak_hour_alerts_sent: {e}")
+
+def road_event_key(notice):
+    """Стабильный ключ дедупа для одного поста дорожных событий - ссылка на
+    сообщение, если есть (надёжнее всего), иначе (время, текст), тот же
+    принцип, что merge_city_messages в fetch_road_events.py."""
+    if notice.get('link'):
+        return f"link:{notice['link']}"
+    return f"text:{notice.get('time')}:{notice.get('text')}"
+
+def was_road_event_alert_sent(city, event_key):
+    """Дедуп пушей о перекрытиях/крупных ДТП - не слать один и тот же пост
+    повторно на каждом прогоне road_events_updater, пока он остаётся в
+    свежей ленте (см. road_event_alerts_sent в init_db)."""
+    init_db()
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        'SELECT 1 FROM road_event_alerts_sent WHERE city=? AND event_key=?',
+        (city, event_key)
+    )
+    row = cursor.fetchone()
+    conn.close()
+    return row is not None
+
+def mark_road_event_alert_sent(city, event_key):
+    init_db()
+    conn = get_db_connection()
+    conn.execute(
+        'INSERT OR IGNORE INTO road_event_alerts_sent (city, event_key, sent_at) VALUES (?, ?, ?)',
+        (city, event_key, datetime.now(ZoneInfo('UTC')).strftime('%Y-%m-%d %H:%M:%S'))
+    )
+    conn.commit()
+    conn.close()
+
+def cleanup_old_road_event_alerts():
+    """Чистим отметки старше 2 дней - тот же принцип, что
+    cleanup_old_peak_hour_alerts (event_key не несёт дату отдельным полем,
+    поэтому чистим по sent_at, а не по target_date)."""
+    try:
+        init_db()
+        conn = get_db_connection()
+        cutoff = (datetime.now(ZoneInfo('UTC')) - timedelta(days=2)).strftime('%Y-%m-%d %H:%M:%S')
+        conn.execute('DELETE FROM road_event_alerts_sent WHERE sent_at < ?', (cutoff,))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"❌ Не удалось почистить road_event_alerts_sent: {e}")
 
 # Водители сами отмечают, сколько машин видят в очереди на аэропорту - выбором
 # диапазона, а не точного числа (точно посчитать чужие машины в моменте
@@ -2356,15 +2424,17 @@ def services_keyboard(category=None, city=None, user_id=None):
         items.append("✈️🚆 Авиа/ЖД")
     # "🎭 События города" и "⛔ Дорожные события" объединены в ОДНУ кнопку
     # главного меню (по финальному уточнению пользователя, 20.09.2026:
-    # "объедини в главном меню их в одну", кнопка называется "🎭 События
-    # города" - основное название, но при нажатии показывает инлайн-подменю
-    # с двумя вариантами, см. show_events_and_roads_menu/
+    # "объедини в главном меню их в одну"; название кнопки в самом меню
+    # уточнено пользователем ещё раз - "⛔События города", т.е. эмодзи
+    # перекрытия + подпись "События города") - при нажатии показывает
+    # инлайн-подменю с двумя вариантами (там уже свои подписи "🎭 События
+    # города"/"⛔ Дорожные события"), см. show_events_and_roads_menu/
     # open_city_events_from_menu/open_road_events_from_menu ниже). Для
     # courier/cargo (CATEGORIES_WITHOUT_EVENTS) афиша не актуальна - им
     # показываем кнопку "⛔ Дорожные события" отдельно, как раньше (у них
     # нет второго пункта подменю).
     if category not in CATEGORIES_WITHOUT_EVENTS:
-        items.append("🎭 События города")
+        items.append("⛔ События города")
     else:
         items.append("⛔ Дорожные события")
 
@@ -5237,10 +5307,11 @@ def build_concert_event_message(post, city):
     keyboard = InlineKeyboardMarkup(inline_keyboard=[buttons]) if buttons else None
     return text, keyboard
 
-@router.message(lambda message: message.text == "🎭 События города" and user_state.get(message.from_user.id, {}).get('category') not in CATEGORIES_WITHOUT_EVENTS)
+@router.message(lambda message: message.text == "⛔ События города" and user_state.get(message.from_user.id, {}).get('category') not in CATEGORIES_WITHOUT_EVENTS)
 async def show_events_and_roads_menu(message: types.Message):
-    """"🎭 События города" в главном меню теперь открывает инлайн-подменю из
-    двух вариантов (объединение по просьбе пользователя, 20.09.2026) - сама
+    """"⛔ События города" в главном меню теперь открывает инлайн-подменю из
+    двух вариантов (объединение по просьбе пользователя, 20.09.2026; название
+    кнопки в меню уточнено пользователем - "⛔События города") - сама
     афиша (show_city_events) и дорожные события (show_road_events) вызываются
     из callback-хендлеров ниже (open_city_events_from_menu/
     open_road_events_from_menu), передавая user_id_override, т.к.
@@ -6704,6 +6775,81 @@ async def push_airport_status_change(icao, airport, old_status, new_status, noti
         await asyncio.sleep(0.05)
     logger.info(f"📢 Пуш по {icao} разослан: {sent} успешно, {failed} ошибок")
 
+# По просьбе пользователя (20.09.2026): "делай пуши перекрытий... и крупные
+# ДТП" - отдельный пуш-тип, независимый от статусов аэропортов/часов пика.
+# Источник - та же лента road_events_data.json (см. fetch_road_events.py),
+# что уже показывается по кнопке "⛔ Дорожные события" - is_closure/is_severe
+# посчитаны уже там (см. CLOSURE_KEYWORDS/SEVERE_INCIDENT_KEYWORDS), здесь
+# только дедуп (см. was_road_event_alert_sent) и рассылка.
+ROAD_EVENT_ALERT_TEXT_LIMIT = 500  # обрезаем длинный пост в самом пуше - полный текст всё равно доступен по кнопке
+
+async def push_road_incident_alert(city, notice):
+    """Рассылает пуш об ОДНОМ посте (перекрытие или крупное ДТП) всем
+    водителям города, у кого включен пуш-тип 'road_events' (общая настройка
+    на город, не привязана к активной смене/категории - по прямому
+    уточнению пользователя). Заголовок пуша зависит от того, что сработало -
+    is_closure/is_severe могут быть оба True одновременно (крупная авария С
+    перекрытием), тогда показываем оба маркера."""
+    if not bot:
+        return
+    city_name = CITY_DISPLAY_NAMES.get(city, city)
+    tags = []
+    if notice.get('is_closure'):
+        tags.append("⛔ ПЕРЕКРЫТИЕ")
+    if notice.get('is_severe'):
+        tags.append("🚨 КРУПНОЕ ДТП")
+    header = ' · '.join(tags) if tags else "⚠️ ДОРОЖНОЕ СОБЫТИЕ"
+    snippet = notice.get('text') or ''
+    if len(snippet) > ROAD_EVENT_ALERT_TEXT_LIMIT:
+        snippet = snippet[:ROAD_EVENT_ALERT_TEXT_LIMIT] + '…'
+    text = (
+        f"{header}\n"
+        f"🏙 {city_name}\n\n"
+        f"{escape_md(snippet)}\n\n"
+        "_Подробности и остальные новости - «⛔ Дорожные события»._"
+    )
+
+    recipients = [
+        uid for uid, state in list(user_state.items())
+        if isinstance(state, dict) and state.get('city') == city and notifications_enabled(state, 'road_events')
+    ]
+    if not recipients:
+        return
+    logger.info(f"⛔ Пуш о дорожном событии в {city} - рассылаю {len(recipients)} водителям")
+    sent, failed = 0, 0
+    for user_id in recipients:
+        try:
+            await bot.send_message(user_id, text, parse_mode='Markdown', disable_web_page_preview=True)
+            sent += 1
+        except Exception as e:
+            failed += 1
+            logger.warning(f"⚠️ Не удалось отправить пуш о дорожном событии пользователю {user_id}: {e}")
+        await asyncio.sleep(0.05)  # Telegram допускает ~30 сообщений/сек в разные чаты
+    logger.info(f"⛔ Пуш о дорожном событии в {city} разослан: {sent} успешно, {failed} ошибок")
+
+async def check_road_incident_alerts():
+    """Проверяет свежую ленту road_events_data.json по каждому городу на
+    предмет НОВЫХ (ещё не отправленных) постов о перекрытии или крупном ДТП -
+    шлёт пуш по каждому такому посту один раз (см. road_event_key/
+    was_road_event_alert_sent). Вызывается из road_events_updater сразу
+    после обновления данных - максимально быстрый отклик (по просьбе
+    пользователя: "как только появляются новые")."""
+    cleanup_old_road_event_alerts()
+    for city in ROAD_EVENTS_CHANNEL_LINKS:
+        try:
+            notices = get_road_events_for_city(city)
+        except Exception as e:
+            logger.error(f"❌ Не удалось проверить дорожные события для города {city}: {e}")
+            continue
+        for notice in notices:
+            if not (notice.get('is_closure') or notice.get('is_severe')):
+                continue  # обычная мелкая авария без перекрытия/признаков серьёзности - пуш не шлём
+            key = road_event_key(notice)
+            if was_road_event_alert_sent(city, key):
+                continue
+            await push_road_incident_alert(city, notice)
+            mark_road_event_alert_sent(city, key)
+
 async def notify_airport_status_changes():
     """Сравнивает текущий статус каждого аэропорта (по свежим уведомлениям
     Росавиации) с последним сохранённым в БД. Пушит только РЕАЛЬНОЕ изменение,
@@ -7026,12 +7172,16 @@ async def road_events_updater():
     """Фоновая задача: раз в ROAD_EVENTS_UPDATE_INTERVAL_MINUTES минут читает
     публичные веб-версии каналов @dtp777 (Москва) и @dtp_spb78 (СПб) и
     обновляет road_events_data.json (см. fetch_road_events.py - тот же
-    способ сбора, что и у favt_notices_updater выше)."""
+    способ сбора, что и у favt_notices_updater выше). После каждого
+    обновления сразу проверяет новые перекрытия/крупные ДТП и рассылает пуш
+    (по просьбе пользователя, 20.09.2026 - см. check_road_incident_alerts) -
+    тот же паттерн, что favt_notices_updater -> notify_airport_status_changes."""
     while True:
         try:
             logger.info("🔄 Обновляю road_events_data.json (ДТП по городам)...")
             await asyncio.to_thread(fetch_road_events.main)
             logger.info("✅ road_events_data.json обновлён")
+            await check_road_incident_alerts()
         except Exception as e:
             logger.error(f"❌ Ошибка фонового обновления road_events_data.json: {e}")
         await asyncio.sleep(ROAD_EVENTS_UPDATE_INTERVAL_MINUTES * 60)
