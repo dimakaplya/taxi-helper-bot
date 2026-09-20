@@ -1586,13 +1586,15 @@ def init_db():
     ''')
     # Карта водителей (по прямой просьбе пользователя, 21.09.2026: "карта
     # водителей все те кто есть в этом боте чтобы они нажимали и все видели
-    # друг друга") - ТОЛЬКО те, кто явно включил "🗺 Показываться на карте"
-    # в Настройках (отдельное согласие, НЕ автоматически по факту трансляции
-    # геопозиции для других фич - счётчика км/очереди у аэропорта), и только
-    # пока их последний пинг геопозиции не старше MAP_VISIBILITY_STALE_MINUTES
-    # (см. get_map_positions). Одна строка на пользователя (последняя
-    # известная точка), а не история - для карты нужна только текущая
-    # позиция.
+    # друг друга") - строка появляется/пропадает вместе со сменой (по
+    # уточнению пользователя, 21.09.2026: "когда он нажимает начать смену он
+    # автоматически появляется на карте когда завершает смену на карте его
+    # не видно" - см. start_shift_and_notify/finish_shift), и только пока их
+    # последний пинг геопозиции не старше MAP_VISIBILITY_STALE_MINUTES (см.
+    # get_map_positions). Одна строка на пользователя (последняя известная
+    # позиция), а не история - для карты нужна только текущая точка.
+    # tariffs - тарифы, выбранные при старте смены (см.
+    # shift_tariffs_keyboard), JSON-массив строк, для подписи маркера.
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS map_positions (
             user_id INTEGER PRIMARY KEY,
@@ -1600,9 +1602,14 @@ def init_db():
             category TEXT NOT NULL,
             lat REAL NOT NULL,
             lon REAL NOT NULL,
+            tariffs TEXT NOT NULL DEFAULT '[]',
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    cursor.execute('PRAGMA table_info(map_positions)')
+    existing_columns = {row[1] for row in cursor.fetchall()}
+    if 'tariffs' not in existing_columns:
+        cursor.execute("ALTER TABLE map_positions ADD COLUMN tariffs TEXT NOT NULL DEFAULT '[]'")
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_map_positions_city ON map_positions (city, updated_at)')
     conn.commit()
     conn.close()
@@ -2661,16 +2668,12 @@ def notification_settings_keyboard(state, category=None):
     # по уточнению пользователя перепроектирован в "▶️ Начать смену"/
     # "⏹ Завершить смену" в главном меню - см. блок "СМЕНА" ниже
     # (start_shift/finish_shift). Настройка отсюда убрана.
-    # "🗺 Показываться на карте" (21.09.2026, см. блок "КАРТА ВОДИТЕЛЕЙ") -
-    # ОТДЕЛЬНОЕ согласие от остальных пунктов выше (счётчик км/очередь у
-    # аэропорта уже используют живую геопозицию, но НЕ показывают
-    # автоматически на общей карте - по прямому уточнению пользователя).
-    if category in MAP_CATEGORY_STYLE:
-        map_mark = '✅' if state.get('map_visible_active') else '☐'
-        buttons.append([InlineKeyboardButton(
-            text=f"{map_mark} 🗺 Показываться на карте",
-            callback_data="notif_toggle_map_visible",
-        )])
+    # "🗺 Показываться на карте" отдельным тумблером здесь БЫЛА (21.09.2026),
+    # но по прямому уточнению пользователя (21.09.2026) заменена на триггер
+    # "▶️ Начать смену"/"⏹ Завершить смену" - показ на карте включается
+    # автоматически при начале смены (водитель сразу же выбирает тарифы, в
+    # которых работает - см. shift_tariffs_keyboard/toggle_shift) и
+    # выключается при завершении. Отдельной настройки больше нет.
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 # Кнопка (текст меню) -> ключ в NEARBY_SERVICES. Тексты сокращены под
@@ -4034,33 +4037,6 @@ async def toggle_airport_queue_inline(callback_query: types.CallbackQuery):
     await callback_query.message.edit_reply_markup(reply_markup=notification_settings_keyboard(state, category))
     await callback_query.message.answer(airport_queue_enable_text(), parse_mode='Markdown')
 
-@router.callback_query(lambda c: c.data == "notif_toggle_map_visible")
-async def toggle_map_visible_inline(callback_query: types.CallbackQuery):
-    """Переключатель "🗺 Показываться на карте" (21.09.2026, см. блок "КАРТА
-    ВОДИТЕЛЕЙ") - отдельное согласие от остальных настроек на живой
-    геопозиции. При выключении сразу убираем водителя с карты
-    (delete_map_position), не дожидаясь устаревания точки."""
-    await callback_query.answer()
-    user_id = callback_query.from_user.id
-    state = user_state[user_id]
-    category = state.get('category')
-    if category not in MAP_CATEGORY_STYLE:
-        return
-    if state.get('map_visible_active'):
-        state['map_visible_active'] = False
-        try:
-            delete_map_position(user_id)
-        except Exception:
-            logger.exception(f"❌ Не удалось убрать с карты user_id={user_id}")
-        await callback_query.message.edit_reply_markup(reply_markup=notification_settings_keyboard(state, category))
-        await callback_query.message.answer("⏹ Ты больше не отображаешься на карте водителей.")
-        return
-    state['map_visible_active'] = True
-    await callback_query.message.edit_reply_markup(reply_markup=notification_settings_keyboard(state, category))
-    await callback_query.message.answer(
-        "🗺 Готово! Теперь ты виден другим водителям на карте (только категория, без имени) - пока идёт трансляция геопозиции (например, во время смены или очереди у аэропорта). Открыть карту можно кнопкой «🗺 Карта водителей» в главном меню.",
-    )
-
 # ==================== "СМЕНА" ====================
 # По просьбе пользователя (20.09.2026, взамен более раннего варианта с
 # отдельным переключателем "Счётчик км" в Настройках): кнопка "▶️ Начать
@@ -4080,9 +4056,49 @@ SHIFT_MAX_JUMP_KM = 3.0  # скачок между двумя пингами б�
 def is_shift_active(state):
     return bool(state.get('shift'))
 
-def start_shift(user_id):
+# Общий список тарифов/классов для выбора при начале смены (по прямой
+# просьбе пользователя, 21.09.2026: "чтобы в начале смены он указывал в
+# каких тарифах он будет работать" - можно выбрать несколько сразу,
+# например Эконом+Комфорт+Премьер). Один общий набор для всех категорий
+# (по уточнению пользователя) - список ориентирован на реальные тарифы
+# Яндекс.Go, но подходит и для отображения на карте водителей курьеру/
+# грузовому такси (для них это скорее "класс груза/доставки", но
+# технически поле то же самое).
+SHIFT_TARIFF_OPTIONS = [
+    ('econom', 'Эконом'),
+    ('comfort', 'Комфорт'),
+    ('comfort_plus', 'Комфорт+'),
+    ('business', 'Бизнес'),
+    ('elite', 'Элит'),
+    ('premier', 'Премьер'),
+    ('cargo', 'Грузовой'),
+]
+SHIFT_TARIFF_LABELS = dict(SHIFT_TARIFF_OPTIONS)
+
+def shift_tariffs_keyboard(selected):
+    """Инлайн-клавиатура выбора тарифов перед стартом смены - несколько
+    можно выбрать одновременно (✅/☐, тоглятся на месте), внизу кнопка
+    "▶️ Начать смену" подтверждает выбор. selected - set ключей из
+    SHIFT_TARIFF_OPTIONS."""
+    buttons = []
+    for key, label in SHIFT_TARIFF_OPTIONS:
+        mark = '✅' if key in selected else '☐'
+        buttons.append([InlineKeyboardButton(text=f"{mark} {label}", callback_data=f"shift_tariff_toggle_{key}")])
+    buttons.append([InlineKeyboardButton(text="▶️ Начать смену", callback_data="shift_tariff_confirm")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+def format_shift_tariffs_label(tariff_keys):
+    """"Эконом, Комфорт" - для подписи маркера на карте (см.
+    map_webapp_html/handle_map_positions_api) и для текста сообщения
+    "СМЕНА НАЧАТА"."""
+    return ", ".join(SHIFT_TARIFF_LABELS.get(k, k) for k in tariff_keys if k in SHIFT_TARIFF_LABELS)
+
+def start_shift(user_id, tariffs=None):
     state = user_state[user_id]
-    state['shift'] = {'started_at': datetime.now(timezone.utc).isoformat(), 'total_km': 0.0}
+    state['shift'] = {
+        'started_at': datetime.now(timezone.utc).isoformat(), 'total_km': 0.0,
+        'tariffs': list(tariffs or []),
+    }
 
 def km_counter_ping(user_id, lat, lon):
     """Обрабатывает один пинг живой геопозиции для счётчика км текущей смены -
@@ -4234,6 +4250,13 @@ def finish_shift(user_id):
         except Exception:
             pass
     save_shift_record(user_id, started_at, duration_minutes, total_km, airport_wait_minutes)
+    # По прямой просьбе пользователя (21.09.2026): "когда завершает смену на
+    # карте его не видно" - убираем сразу, не дожидаясь устаревания точки
+    # (см. MAP_VISIBILITY_STALE_MINUTES).
+    try:
+        delete_map_position(user_id)
+    except Exception:
+        logger.exception(f"❌ Не удалось убрать с карты водителей user_id={user_id} при завершении смены")
     return duration_minutes, total_km, airport_wait_minutes
 
 def format_shift_duration(minutes):
@@ -4271,33 +4294,127 @@ async def toggle_shift(message: types.Message):
     if message.text == "✅ НАЧАТЬ СМЕНУ":
         if is_shift_active(state):
             return  # защитный случай - кнопка не должна была показать "Начать", если смена уже идёт
-        start_shift(user_id)
-        started_at = datetime.fromisoformat(user_state[user_id]['shift']['started_at'])
-        shift_header = (
-            "🟢 *СМЕНА НАЧАТА*\n"
-            "▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓\n"
-            f"🕐 {format_shift_start_label(started_at)}\n"
-            "▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓\n"
-            "📎 Чтобы считался километраж: Геопозиция → "
-            "*«Транслировать геопозицию»* → *«Пока не отключу»*.\n"
-            "_Без трансляции секундомер идёт как обычно, но км не посчитаются._"
-        )
-        # По просьбе пользователя (20.09.2026): сообщение "СМЕНА НАЧАТА" и
-        # сводка "Куда ехать" - теперь ОДНО сообщение (раньше были два
-        # отдельных) - см. extra_header у send_where_to_go/
-        # format_where_to_go_text. Сначала обновляем клавиатуру коротким
-        # тех.сообщением (Reply-клавиатуру нельзя приложить к тому же
-        # сообщению, что инлайн-результат "Куда ехать"). Раньше это было
-        # только для категорий с аэропортами - теперь доступно всем, включая
-        # courier/cargo (у них теперь тоже есть сводка "Куда ехать" на
-        # своих часах пика, см. compute_where_to_go).
-        await message.answer("✅ Смена начата", reply_markup=services_keyboard(category, city, user_id))
-        await send_where_to_go(message, user_id, city, category, extra_header=shift_header)
+        # По прямой просьбе пользователя (21.09.2026): "когда он нажимает
+        # начать смену он автоматически появляется на карте... чтобы в
+        # начале смены он указывал в каких тарифах он будет работать и это
+        # являлась триггером определении его на карте" - категориям, у
+        # которых вообще есть карта (см. MAP_CATEGORY_STYLE), сначала
+        # показываем выбор тарифов; остальным (на будущее, если появятся
+        # категории без карты) смена стартует сразу без этого шага.
+        if category in MAP_CATEGORY_STYLE:
+            state['shift_tariff_pending'] = set()
+            await message.answer(
+                "🚕 В каких тарифах работаешь эту смену? Выбери один или несколько, потом нажми «▶️ Начать смену».",
+                reply_markup=shift_tariffs_keyboard(set()),
+            )
+            return
+        await start_shift_and_notify(message.answer, user_id, category, city, tariffs=[])
         return
 
     if not is_shift_active(state):
         return  # защитный случай - кнопка не должна была показать "Завершить", если смены нет
     await finish_shift_and_notify(user_id, category, city, message.answer)
+
+class _AnswerFuncAsMessage:
+    """Тонкая обёртка вокруг функции-отправителя (message.answer или
+    callback_query.message.answer) с сигнатурой message.answer - нужна
+    только там, куда функцию уже передали САМУ ПО СЕБЕ (как target в
+    start_shift_and_notify), а не объект message целиком, но код дальше
+    (send_where_to_go) вызывает именно message.answer(...)."""
+    def __init__(self, answer_func):
+        self.answer = answer_func
+
+async def start_shift_and_notify(target, user_id, category, city, tariffs):
+    """Общая логика старта смены: запускает секундомер/счётчик км
+    (start_shift), сразу выводит водителя на карту (update_map_position,
+    только для категорий с картой - см. MAP_CATEGORY_STYLE) и шлёт сообщение
+    "СМЕНА НАЧАТА" + сводку "Куда ехать". target - message.answer (обычный
+    старт) или callback_query.message.answer (после выбора тарифов, см.
+    shift_tariff_confirm)."""
+    start_shift(user_id, tariffs=tariffs)
+    if category in MAP_CATEGORY_STYLE:
+        # На карту водитель попадёт с первым же пингом живой геопозиции
+        # (см. maybe_update_map_position) - тут только помечаем смену
+        # активной с известными тарифами; сама точка появится, как только
+        # придёт геопозиция. Если у бота уже есть свежая точка (водитель
+        # транслировал геопозицию до старта смены) - публикуем сразу, чтобы
+        # не ждать следующего пинга.
+        fresh = get_fresh_live_location(user_id)
+        if fresh:
+            try:
+                update_map_position(user_id, city, category, fresh[0], fresh[1], tariffs=tariffs)
+            except Exception:
+                logger.exception(f"❌ Не удалось сразу вывести на карту user_id={user_id}")
+    started_at = datetime.fromisoformat(user_state[user_id]['shift']['started_at'])
+    tariffs_line = ""
+    if tariffs:
+        tariffs_line = f"🚕 Тарифы: {format_shift_tariffs_label(tariffs)}\n"
+    shift_header = (
+        "🟢 *СМЕНА НАЧАТА*\n"
+        "▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓\n"
+        f"🕐 {format_shift_start_label(started_at)}\n"
+        f"{tariffs_line}"
+        "▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓\n"
+        "📎 Чтобы считался километраж и ты был виден на карте водителей: Геопозиция → "
+        "*«Транслировать геопозицию»* → *«Пока не отключу»*.\n"
+        "_Без трансляции секундомер идёт как обычно, но км и показ на карте не сработают._"
+    )
+    # По просьбе пользователя (20.09.2026): сообщение "СМЕНА НАЧАТА" и
+    # сводка "Куда ехать" - теперь ОДНО сообщение (раньше были два
+    # отдельных) - см. extra_header у send_where_to_go/
+    # format_where_to_go_text. Сначала обновляем клавиатуру коротким
+    # тех.сообщением (Reply-клавиатуру нельзя приложить к тому же
+    # сообщению, что инлайн-результат "Куда ехать"). Раньше это было
+    # только для категорий с аэропортами - теперь доступно всем, включая
+    # courier/cargo (у них теперь тоже есть сводка "Куда ехать" на
+    # своих часах пика, см. compute_where_to_go).
+    await target("✅ Смена начата", reply_markup=services_keyboard(category, city, user_id))
+    # send_where_to_go ожидает объект message (зовёт message.answer(...)
+    # внутри) - target у нас уже сама функция answer (message.answer или
+    # callback_query.message.answer), поэтому оборачиваем в простой объект с
+    # атрибутом .answer вместо неё самой (см. _AnswerFuncAsMessage ниже).
+    await send_where_to_go(_AnswerFuncAsMessage(target), user_id, city, category, extra_header=shift_header)
+
+@router.callback_query(lambda c: c.data.startswith("shift_tariff_toggle_"))
+async def shift_tariff_toggle(callback_query: types.CallbackQuery):
+    """Тоггл одного тарифа в клавиатуре выбора перед стартом смены (см.
+    shift_tariffs_keyboard) - хранится временно в
+    state['shift_tariff_pending'], пока водитель не нажмёт "▶️ Начать
+    смену" (shift_tariff_confirm)."""
+    await callback_query.answer()
+    user_id = callback_query.from_user.id
+    state = user_state[user_id]
+    if 'shift_tariff_pending' not in state:
+        return  # смена уже стартовала другим путём/клавиатура устарела
+    key = callback_query.data[len("shift_tariff_toggle_"):]
+    if key not in SHIFT_TARIFF_LABELS:
+        return
+    selected = set(state['shift_tariff_pending'])
+    if key in selected:
+        selected.discard(key)
+    else:
+        selected.add(key)
+    state['shift_tariff_pending'] = selected
+    await callback_query.message.edit_reply_markup(reply_markup=shift_tariffs_keyboard(selected))
+
+@router.callback_query(lambda c: c.data == "shift_tariff_confirm")
+async def shift_tariff_confirm(callback_query: types.CallbackQuery):
+    """Кнопка "▶️ Начать смену" внутри клавиатуры выбора тарифов - можно
+    подтвердить и без единого выбранного тарифа (просто не будет подписи
+    тарифов на карте, останется только категория)."""
+    await callback_query.answer()
+    user_id = callback_query.from_user.id
+    state = user_state[user_id]
+    if is_shift_active(state):
+        return  # защитный случай - двойное нажатие
+    tariffs = sorted(state.pop('shift_tariff_pending', set()))
+    category = state.get('category')
+    city = state.get('city')
+    if not city:
+        await callback_query.message.answer("Сначала выбери город!")
+        return
+    await callback_query.message.edit_reply_markup(reply_markup=None)
+    await start_shift_and_notify(callback_query.message.answer, user_id, category, city, tariffs)
 
 async def finish_shift_and_notify(user_id, category, city, send_func, header=None):
     """Общая логика завершения смены: считает итоги (finish_shift), шлёт
@@ -4648,26 +4765,31 @@ MAP_CATEGORY_STYLE = {
 MAP_WEBAPP_PATH = '/map'
 MAP_POSITIONS_API_PATH = '/map/positions'
 
-def update_map_position(user_id, city, category, lat, lon):
+def update_map_position(user_id, city, category, lat, lon, tariffs=None):
     """Записывает/обновляет последнюю позицию водителя для общей карты.
-    Вызывается только если водитель явно включил показ на карте (см.
-    maybe_update_map_position) - сюда напрямую лучше не звать."""
+    Вызывается только пока у водителя активна смена (см.
+    maybe_update_map_position/start_shift_and_notify) - сюда напрямую лучше
+    не звать. tariffs - список тарифов, выбранных при старте смены (см.
+    shift_tariffs_keyboard), для подписи маркера."""
     conn = get_db_connection()
     cursor = conn.cursor()
+    tariffs_json = json.dumps(list(tariffs or []), ensure_ascii=False)
     cursor.execute('''
-        INSERT INTO map_positions (user_id, city, category, lat, lon, updated_at)
-        VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        INSERT INTO map_positions (user_id, city, category, lat, lon, tariffs, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
         ON CONFLICT(user_id) DO UPDATE SET
             city = excluded.city, category = excluded.category,
-            lat = excluded.lat, lon = excluded.lon,
+            lat = excluded.lat, lon = excluded.lon, tariffs = excluded.tariffs,
             updated_at = CURRENT_TIMESTAMP
-    ''', (user_id, city, category, lat, lon))
+    ''', (user_id, city, category, lat, lon, tariffs_json))
     conn.commit()
     conn.close()
 
 def delete_map_position(user_id):
-    """Убирает водителя с карты - при выключении "Показываться на карте" или
-    при завершении смены/остановке трансляции геопозиции."""
+    """Убирает водителя с карты - при завершении смены (см. finish_shift) или
+    если пропала живая геопозиция дольше MAP_VISIBILITY_STALE_MINUTES (тогда
+    точка и так больше не отдаётся get_map_positions, это просто явная
+    уборка, чтобы не копить старые строки)."""
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute('DELETE FROM map_positions WHERE user_id = ?', (user_id,))
@@ -4676,45 +4798,56 @@ def delete_map_position(user_id):
 
 def get_map_positions(city, category=None):
     """Отдаёт список позиций для карты конкретного города - только
-    категория/координаты, БЕЗ user_id и имени (приватность, по просьбе
-    пользователя - подпись маркера только "какой тариф"). Отфильтровывает
-    устаревшие точки (см. MAP_VISIBILITY_STALE_MINUTES). По просьбе
-    пользователя (21.09.2026): по умолчанию карта показывает ТОЛЬКО свою
-    категорию (такси видит такси, Ultima - только Ultima и т.д.) - параметр
-    category, если задан, фильтрует запрос; category=None (или "all") -
-    вся карта целиком (переключатель "Показать все" внутри WebApp, см.
-    map_webapp_html)."""
+    категория/тарифы/координаты, БЕЗ user_id и имени (приватность, по
+    просьбе пользователя - подпись маркера только "какой тариф").
+    Отфильтровывает устаревшие точки (см. MAP_VISIBILITY_STALE_MINUTES). По
+    просьбе пользователя (21.09.2026): по умолчанию карта показывает ТОЛЬКО
+    свою категорию (такси видит такси, Ultima - только Ultima и т.д.) -
+    параметр category, если задан, фильтрует запрос; category=None (или
+    "all") - вся карта целиком (переключатель "Показать все" внутри WebApp,
+    см. map_webapp_html)."""
     conn = get_db_connection()
     cursor = conn.cursor()
     if category and category in MAP_CATEGORY_STYLE:
         cursor.execute('''
-            SELECT category, lat, lon FROM map_positions
+            SELECT category, lat, lon, tariffs FROM map_positions
             WHERE city = ? AND category = ? AND updated_at >= datetime('now', ?)
         ''', (city, category, f'-{MAP_VISIBILITY_STALE_MINUTES} minutes'))
     else:
         cursor.execute('''
-            SELECT category, lat, lon FROM map_positions
+            SELECT category, lat, lon, tariffs FROM map_positions
             WHERE city = ? AND updated_at >= datetime('now', ?)
         ''', (city, f'-{MAP_VISIBILITY_STALE_MINUTES} minutes'))
     rows = cursor.fetchall()
     conn.close()
-    return [{'category': r[0], 'lat': r[1], 'lon': r[2]} for r in rows]
+    result = []
+    for r in rows:
+        try:
+            tariffs = json.loads(r[3]) if r[3] else []
+        except Exception:
+            tariffs = []
+        result.append({'category': r[0], 'lat': r[1], 'lon': r[2], 'tariffs': tariffs})
+    return result
 
 def maybe_update_map_position(user_id, lat, lon):
     """Хук из обработчиков живой геопозиции (см. вызовы ниже) - пишет позицию
-    в map_positions, ТОЛЬКО если у пользователя явно включено
-    map_visible_active (отдельная настройка, см. блок "НАСТРОЙКИ ПУШЕЙ" /
-    notif_toggle_map_visible). Если категория не входит в MAP_CATEGORY_STYLE
-    (на всякий случай) - ничего не пишет."""
+    в map_positions, ТОЛЬКО пока у водителя идёт смена (см.
+    is_shift_active/start_shift_and_notify) - по прямому уточнению
+    пользователя (21.09.2026): "когда он нажимает начать смену он
+    автоматически появляется на карте когда завершает смену на карте его не
+    видно". Отдельной настройки-тумблера для показа на карте больше нет.
+    Если категория не входит в MAP_CATEGORY_STYLE (на всякий случай) -
+    ничего не пишет."""
     state = user_state.get(user_id) or {}
-    if not state.get('map_visible_active'):
+    shift = state.get('shift')
+    if not shift:
         return
     category = state.get('category')
     city = state.get('city')
     if not category or not city or category not in MAP_CATEGORY_STYLE:
         return
     try:
-        update_map_position(user_id, city, category, lat, lon)
+        update_map_position(user_id, city, category, lat, lon, tariffs=shift.get('tariffs'))
     except Exception:
         logger.exception(f"❌ Не удалось обновить позицию на карте для user_id={user_id}")
 
@@ -4824,9 +4957,10 @@ def map_webapp_html():
       let bounds = [];
       data.positions.forEach(p => {{
         const style = CATEGORY_STYLE[p.category] || {{ color: '#888', label: p.category }};
+        const popupText = (p.tariffs && p.tariffs.length) ? `${{style.label}} (${{p.tariffs.join(', ')}})` : style.label;
         const marker = L.circleMarker([p.lat, p.lon], {{
           radius: 9, color: '#333', weight: 1.5, fillColor: style.color, fillOpacity: 0.9,
-        }}).bindPopup(style.label).addTo(map);
+        }}).bindPopup(popupText).addTo(map);
         markers.push(marker);
         bounds.push([p.lat, p.lon]);
       }});
@@ -4859,6 +4993,11 @@ async def handle_map_positions_api(request):
             logger.warning("⚠️ /map/positions: не прошла проверка initData")
     try:
         positions = get_map_positions(city, category) if city else []
+        # Тарифы отдаём уже человекочитаемыми (см. SHIFT_TARIFF_LABELS) -
+        # WebApp просто склеивает их через запятую в подписи маркера (см.
+        # map_webapp_html), не зная о самих ключах тарифов.
+        for p in positions:
+            p['tariffs'] = [SHIFT_TARIFF_LABELS.get(t, t) for t in p.get('tariffs') or []]
     except Exception:
         logger.exception("❌ Ошибка при получении позиций для карты водителей")
         positions = []
