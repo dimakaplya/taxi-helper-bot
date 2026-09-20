@@ -3559,6 +3559,17 @@ async def toggle_shift(message: types.Message):
         reply_markup=services_keyboard(category, city, user_id),
         parse_mode='Markdown',
     )
+    # По просьбе пользователя (20.09.2026): сразу после завершения смены
+    # предлагаем указать доход за день - отдельной инлайн-кнопкой (а не
+    # сразу форсируем ввод текста, чтобы не мешать, если человек ещё за
+    # рулём/занят). Km подставляем автоматически из только что завершённой
+    # смены - см. start_finance_after_shift.
+    await message.answer(
+        "Хочешь сразу посчитать доход за эту смену?",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="💰 Указать доход за день", callback_data="start_finance_after_shift"),
+        ]]),
+    )
 
 def airport_queue_enable_text():
     """Общий текст-инструкция - используется и в toggle_airport_queue_tracking
@@ -4023,6 +4034,20 @@ def today_shifts_km(user_id):
     rows = get_shift_history(user_id, months=1)
     return sum(km for shift_date, _duration, km in rows if shift_date == today_str)
 
+@router.callback_query(lambda c: c.data == "start_finance_after_shift")
+async def start_finance_after_shift(callback_query: types.CallbackQuery):
+    """Кнопка "💰 Указать доход за день" под сообщением "СМЕНА ЗАВЕРШЕНА" (по
+    просьбе пользователя, 20.09.2026, см. toggle_shift) - запускает тот же
+    пошаговый расчёт, что и обычная кнопка "💰 Финансы" (start_courier_finance),
+    сразу с шага "Доход". Km за смену уже известен (только что завершилась) -
+    подставится автоматически на шаге "Километраж" кнопкой "✅ Использовать N
+    км", как и при обычном заходе в финансы (см. today_shifts_km)."""
+    await callback_query.answer()
+    user_id = callback_query.from_user.id
+    state = user_state[user_id]
+    state['courier_finance_draft'] = {'step': 'income', 'data': {}}
+    await callback_query.message.answer(COURIER_FINANCE_STEP_PROMPTS['income'], reply_markup=courier_finance_cancel_keyboard())
+
 @router.callback_query(lambda c: c.data == "use_counted_km")
 async def use_counted_km_in_finance(callback_query: types.CallbackQuery):
     """Кнопка "✅ Использовать N км" под шагом "Километраж" в "💰 Финансы"
@@ -4159,8 +4184,19 @@ async def send_courier_finance_result(message: types.Message, data):
     def fmt(n):
         return f"{n:,.0f}".replace(',', ' ')
 
+    # По просьбе пользователя (20.09.2026): показываем, какие именно данные
+    # были учтены в расчёте - все введённые пользователем цифры одним
+    # компактным блоком в начале сообщения, перед разбивкой по статьям.
     lines = [
         "📊 *СМЕНА — ИТОГ*",
+        "",
+        "_Учтено в расчёте:_",
+        f"• Доход: {fmt(income)} ₽",
+        f"• Пробег: {fmt(km)} км",
+        f"• Расход топлива: {consumption:g} л/100км",
+        f"• Цена топлива: {fuel_price:g} ₽/л",
+        f"• Доп. расходы: {fmt(expenses)} ₽",
+        f"• Время за рулём: {hours:g} ч",
         "",
         f"Валовый доход: {fmt(income)} ₽",
         f"⛽ Топливо ({fmt(km)} км × {consumption:g} на 100): −{fmt(fuel_cost)} ₽",
