@@ -3408,6 +3408,34 @@ async def start(message: types.Message):
         await send_welcome_pitch(message)
     await send_start_screen(message)
 
+# ДОБАВЛЕНО 21.09.2026 (прямая просьба пользователя - "ждать нет времени",
+# нужно было прямо сейчас проверить сырой ответ Yandex Rasp API на предмет
+# полей статуса рейса/задержки, не дожидаясь плановой точки расписания или
+# рестарта бота). Скрытая админская команда - форсирует внеплановое
+# обновление flights_data.json НЕМЕДЛЕННО, в обход всех проверок
+# "свежести"/расписания в airports_data_updater(). Доступна ТОЛЬКО
+# ADMIN_USER_ID, чтобы обычные пользователи бота не могли жать её пачками и
+# жечь дневную квоту API (500 запросов/сутки, см. DAILY_SAFETY_LIMIT в
+# fetch_yandex_data.py).
+ADMIN_USER_ID = 147611511
+
+@router.message(Command("forcefetch"))
+async def force_fetch_flights(message: types.Message):
+    if message.from_user.id != ADMIN_USER_ID:
+        return
+    await message.answer("⏳ Форсирую обновление flights_data.json прямо сейчас...")
+    try:
+        async with _yandex_api_lock:
+            status = await asyncio.to_thread(fetch_yandex_data.main)
+        if status == 'daily_limit_reached':
+            await message.answer("🚫 Дневной лимит запросов исчерпан - обновление пропущено.")
+        else:
+            fresh_age = _data_file_age_minutes(FLIGHTS_DATA_FILE)
+            await message.answer(f"✅ Готово. flights_data.json обновлён (возраст файла: {fresh_age:.1f} мин).")
+    except Exception as e:
+        logger.error(f"❌ Ошибка /forcefetch: {e}")
+        await message.answer(f"❌ Ошибка при обновлении: {e}")
+
 @router.message(lambda message: message.text == "🏙 Выбор города")
 async def start_button(message: types.Message):
     await send_start_screen(message)
