@@ -2531,16 +2531,41 @@ COURIER_FINANCE_STEP_PROMPTS = {
     'km': "🚗 Километраж за день, км:",
     'consumption': "⛽ Расход топлива на 100 км (л или кВтч):",
     'fuel_price': "💵 Стоимость топлива за литр/кВтч, ₽:",
-    'rent': "🚘 Аренда ТС или платёж по кредиту/лизингу за день, ₽ (если нет - пришли 0):",
+    'car_ownership': "🚘 Машина:",
+    'rent': "🚘 Аренда ТС за день, ₽:",
     'expenses': "📦 Доп. расходы за день, ₽ (питание, ремонты, доп. покупки - если нет, пришли 0):",
     'tax_rate': f"🧾 Ставка налога, % от дохода (обычно {DEFAULT_TAX_RATE_PERCENT:g}% - можно указать свою):",
     'hours': "🕐 Сколько часов длилась смена (можно дробно, например 5.5):",
 }
 
+# "Машина: своя (в т.ч. кредит/лизинг) / в аренде" - по просьбе пользователя
+# (20.09.2026): резерв на износ/ремонт (10%, см. COURIER_WEAR_RESERVE_RATE)
+# имеет смысл только если машина СВОЯ (или куплена в кредит/лизинг - тогда
+# её ремонт и амортизация оплачивает сам водитель); если машина В АРЕНДЕ -
+# износ/ремонт несёт арендодатель, резерв не учитываем, чтобы не занижать
+# "чистыми" задвоением расхода (аренда и так уже платится отдельной строкой).
+# Спрашивается ОДИН РАЗ и запоминается как профиль (см.
+# FINANCE_REMEMBERED_FIELDS) - у водителя это не меняется день ото дня.
+CAR_OWNERSHIP_OWN = 'own'      # своя / кредит / лизинг - резерв на износ учитываем
+CAR_OWNERSHIP_RENTED = 'rented'  # в аренде - резерв на износ НЕ учитываем
+CAR_OWNERSHIP_LABELS = {
+    CAR_OWNERSHIP_OWN: "своя / кредит / лизинг",
+    CAR_OWNERSHIP_RENTED: "в аренде",
+}
+
+def car_ownership_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="🔧 Своя / кредит / лизинг", callback_data="finance_car_own"),
+        InlineKeyboardButton(text="🔑 В аренде", callback_data="finance_car_rented"),
+    ]])
+
 # Поля, которые обычно не меняются изо дня в день - после первого ввода
 # запоминаем в state['finance_defaults'] и на следующий раз предлагаем
 # кнопкой "Использовать снова" вместо повторного ввода (по просьбе
 # пользователя, 20.09.2026: "чтобы не надо было вводить каждый день").
+# car_ownership - тоже "запоминаемое" поле, но вводится кнопками, а не
+# текстом, поэтому обрабатывается отдельно (см. finance_set_car_ownership),
+# не через общий механизм FINANCE_REMEMBERED_FIELDS/advance_finance_step.
 FINANCE_REMEMBERED_FIELDS = ('consumption', 'fuel_price', 'rent', 'tax_rate')
 
 def finance_defaults(state):
@@ -4185,6 +4210,32 @@ async def advance_finance_step(target, user_id, state, draft):
         )
         return
 
+    if step == 'car_ownership':
+        # Спрашивается один раз и запоминается (см. CAR_OWNERSHIP_OWN/
+        # CAR_OWNERSHIP_RENTED) - если уже известно, сразу подставляем и
+        # переходим дальше без лишнего вопроса; отдельно предлагаем сменить.
+        defaults = finance_defaults(state)
+        remembered = defaults.get('car_ownership')
+        if remembered is not None:
+            draft['data']['car_ownership'] = remembered
+            if remembered == CAR_OWNERSHIP_RENTED:
+                draft['step'] = 'rent'
+            else:
+                draft['data']['rent'] = 0.0
+                draft['step'] = 'expenses'
+            state['courier_finance_draft'] = draft
+            await target(
+                f"🚘 Машина: *{CAR_OWNERSHIP_LABELS[remembered]}* (как в прошлый раз).",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(text="🔄 Сменить", callback_data="finance_car_change"),
+                ]]),
+                parse_mode='Markdown',
+            )
+            await advance_finance_step(target, user_id, state, draft)
+            return
+        await target(COURIER_FINANCE_STEP_PROMPTS['car_ownership'], reply_markup=car_ownership_keyboard())
+        return
+
     if step in FINANCE_REMEMBERED_FIELDS:
         defaults = finance_defaults(state)
         remembered = defaults.get(step)
@@ -4207,7 +4258,7 @@ async def advance_finance_step(target, user_id, state, draft):
 FINANCE_FIELD_LABELS = {
     'consumption': lambda v: f"{v:g} л/100км",
     'fuel_price': lambda v: f"{v:g} ₽/л",
-    'rent': lambda v: f"{v:g} ₽" if v else "нет аренды/лизинга",
+    'rent': lambda v: f"{v:g} ₽" if v else "нет аренды",
     'tax_rate': lambda v: f"{v:g}%",
 }
 
@@ -4215,7 +4266,7 @@ FINANCE_STEP_ORDER = {
     'income': 'km',
     'km': 'consumption',
     'consumption': 'fuel_price',
-    'fuel_price': 'rent',
+    'fuel_price': 'car_ownership',
     'rent': 'expenses',
     'expenses': 'tax_rate',
     'tax_rate': 'hours',
@@ -4243,6 +4294,53 @@ async def use_finance_default(callback_query: types.CallbackQuery):
     state['courier_finance_draft'] = draft
     await callback_query.message.edit_text(f"✅ Использовано: {FINANCE_FIELD_LABELS[field](value)}")
     await advance_finance_step(callback_query.message.answer, user_id, state, draft)
+
+@router.callback_query(lambda c: c.data in ("finance_car_own", "finance_car_rented"))
+async def set_car_ownership(callback_query: types.CallbackQuery):
+    """Кнопки "🔧 Своя / кредит / лизинг" / "🔑 В аренде" на шаге
+    'car_ownership' (по просьбе пользователя, 20.09.2026: "если машина в
+    аренде то 10% не учитывай а если личная или кредит лизинг то учитывай")
+    - запоминает выбор как профиль (см. FINANCE_REMEMBERED_FIELDS) и решает,
+    нужен ли отдельный шаг "Аренда ТС за день" дальше: своя/кредит/лизинг -
+    аренды нет (rent=0), в аренде - спрашиваем сумму."""
+    await callback_query.answer()
+    ownership = CAR_OWNERSHIP_OWN if callback_query.data == "finance_car_own" else CAR_OWNERSHIP_RENTED
+    user_id = callback_query.from_user.id
+    state = user_state.get(user_id)
+    draft = state.get('courier_finance_draft') if state else None
+    if not draft or draft.get('step') != 'car_ownership':
+        await callback_query.message.edit_reply_markup(reply_markup=None)
+        return
+    draft['data']['car_ownership'] = ownership
+    remember_finance_default(state, 'car_ownership', ownership)
+    if ownership == CAR_OWNERSHIP_RENTED:
+        draft['step'] = 'rent'
+    else:
+        draft['data']['rent'] = 0.0
+        draft['step'] = 'expenses'
+    state['courier_finance_draft'] = draft
+    await callback_query.message.edit_text(f"✅ Машина: {CAR_OWNERSHIP_LABELS[ownership]}")
+    await advance_finance_step(callback_query.message.answer, user_id, state, draft)
+
+@router.callback_query(lambda c: c.data == "finance_car_change")
+async def change_car_ownership(callback_query: types.CallbackQuery):
+    """Кнопка "🔄 Сменить" под автоподставленным типом машины (см.
+    advance_finance_step, шаг 'car_ownership') - откатывает черновик назад
+    к явному вопросу, если запомненное значение сейчас неверно (например,
+    водитель пересел с личной машины на арендованную)."""
+    await callback_query.answer()
+    user_id = callback_query.from_user.id
+    state = user_state.get(user_id)
+    draft = state.get('courier_finance_draft') if state else None
+    if not draft:
+        await callback_query.message.edit_reply_markup(reply_markup=None)
+        return
+    draft['step'] = 'car_ownership'
+    draft['data'].pop('car_ownership', None)
+    draft['data'].pop('rent', None)
+    state['courier_finance_draft'] = draft
+    await callback_query.message.edit_reply_markup(reply_markup=None)
+    await callback_query.message.answer(COURIER_FINANCE_STEP_PROMPTS['car_ownership'], reply_markup=car_ownership_keyboard())
 
 @router.message(lambda message: user_state.get(message.from_user.id, {}).get('courier_finance_draft') is not None)
 async def courier_finance_flow(message: types.Message):
@@ -4306,19 +4404,25 @@ async def courier_finance_flow(message: types.Message):
             return
         draft['data']['fuel_price'] = value
         remember_finance_default(state, 'fuel_price', value)
-        draft['step'] = 'rent'
+        draft['step'] = 'car_ownership'
         await advance_finance_step(message.answer, user_id, state, draft)
         return
 
     if step == 'rent':
         value = parse_decimal(text)
         if value is None or value < 0:
-            await message.answer("Не понял сумму - введи число (или 0, если аренды/лизинга нет):")
+            await message.answer("Не понял сумму - введи число (или 0, если по факту не платил сегодня):")
             return
         draft['data']['rent'] = value
         remember_finance_default(state, 'rent', value)
         draft['step'] = 'expenses'
         await advance_finance_step(message.answer, user_id, state, draft)
+        return
+
+    if step == 'car_ownership':
+        # Шаг только на инлайн-кнопках (см. set_car_ownership) - случайный
+        # текст сюда игнорируем, повторяем вопрос кнопками.
+        await message.answer(COURIER_FINANCE_STEP_PROMPTS['car_ownership'], reply_markup=car_ownership_keyboard())
         return
 
     if step == 'expenses':
@@ -4355,9 +4459,10 @@ async def courier_finance_flow(message: types.Message):
 async def send_courier_finance_result(message: types.Message, user_id, data):
     """Считает и показывает итог дня, сохраняет доход/чистыми в отдельную
     таблицу статистики (см. save_finance_result/finance_history) - формула:
-    доход минус топливо минус резерв на износ (10%) минус аренда/лизинг
-    минус доп. расходы минус налог (% от ВАЛОВОГО дохода) = чистыми;
-    отдельной строкой ₽/час."""
+    доход минус топливо минус резерв на износ (10%, только если машина СВОЯ
+    или в кредите/лизинге - см. CAR_OWNERSHIP_OWN/CAR_OWNERSHIP_RENTED)
+    минус аренда минус доп. расходы минус налог (% от ВАЛОВОГО дохода) =
+    чистыми; отдельной строкой ₽/час."""
     income = data['income']
     km = data['km']
     consumption = data['consumption']
@@ -4367,9 +4472,14 @@ async def send_courier_finance_result(message: types.Message, user_id, data):
     tax_rate = data.get('tax_rate', DEFAULT_TAX_RATE_PERCENT)
     hours = data['hours']
     airport_wait_minutes = data.get('airport_wait_minutes', 0)
+    car_ownership = data.get('car_ownership', CAR_OWNERSHIP_OWN)
 
+    # По просьбе пользователя (20.09.2026): "если машина в аренде то 10% не
+    # учитывай а если личная или кредит лизинг то учитывай" - износ/ремонт
+    # арендованной машины несёт арендодатель, а не водитель.
+    is_rented = car_ownership == CAR_OWNERSHIP_RENTED
     fuel_cost = (km / 100) * consumption * fuel_price
-    wear_reserve = income * COURIER_WEAR_RESERVE_RATE
+    wear_reserve = 0.0 if is_rented else income * COURIER_WEAR_RESERVE_RATE
     tax_amount = income * (tax_rate / 100)
     net_profit = income - fuel_cost - wear_reserve - rent - expenses - tax_amount
     per_hour = net_profit / hours
@@ -4388,21 +4498,28 @@ async def send_courier_finance_result(message: types.Message, user_id, data):
         f"• Пробег: {fmt(km)} км",
         f"• Расход топлива: {consumption:g} л/100км",
         f"• Цена топлива: {fuel_price:g} ₽/л",
-        f"• Аренда/лизинг ТС: {fmt(rent)} ₽",
+        f"• Машина: {CAR_OWNERSHIP_LABELS.get(car_ownership, CAR_OWNERSHIP_LABELS[CAR_OWNERSHIP_OWN])}",
+    ]
+    if rent > 0:
+        lines.append(f"• Аренда ТС: {fmt(rent)} ₽")
+    lines.extend([
         f"• Доп. расходы: {fmt(expenses)} ₽",
         f"• Налог: {tax_rate:g}%",
         f"• Время за рулём: {hours:g} ч",
-    ]
+    ])
     if airport_wait_minutes > 0:
         lines.append(f"• Простой у аэропорта: {format_shift_duration(airport_wait_minutes)}")
     lines.append("")
     lines.extend([
         f"Валовый доход: {fmt(income)} ₽",
         f"⛽ Топливо ({fmt(km)} км × {consumption:g} на 100): −{fmt(fuel_cost)} ₽",
-        f"🔧 Резерв на износ/ремонт (10%): −{fmt(wear_reserve)} ₽",
     ])
+    if is_rented:
+        lines.append("🔧 Резерв на износ/ремонт: не учтён (машина в аренде)")
+    else:
+        lines.append(f"🔧 Резерв на износ/ремонт (10%): −{fmt(wear_reserve)} ₽")
     if rent > 0:
-        lines.append(f"🚘 Аренда/лизинг ТС: −{fmt(rent)} ₽")
+        lines.append(f"🚘 Аренда ТС: −{fmt(rent)} ₽")
     if expenses > 0:
         lines.append(f"📦 Доп. расходы: −{fmt(expenses)} ₽")
     lines.append(f"🧾 Налог ({tax_rate:g}%): −{fmt(tax_amount)} ₽")
