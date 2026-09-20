@@ -522,10 +522,20 @@ for _city_key, _airports_list in AIRPORTS_INFO.items():
 # координаты одного из них - по просьбе пользователя ("возьми среднию").
 # Терминал D - отдельная территория южнее, свой подъезд с Международного
 # шоссе, добраться из B/C можно только в объезд или на подземном поезде.
+# ИЗМЕНЕНО 21.09.2026 (прямое указание пользователя): раньше пропускная
+# способность каждой зоны Шереметьево вычислялась ДИНАМИЧЕСКИ - как доля от
+# общей AIRPORT_CAPACITY['UUEE'] (4966/ч), пропорциональная фактическому
+# сегодняшнему распределению рейсов между зонами (см. историю в git -
+# compute_zone_capacity_shares). Пользователь попросил вместо этого считать
+# от ДВУХ НЕЗАВИСИМЫХ фиксированных цифр - B/C = 4966 пасс./ч (столько же,
+# сколько раньше было заявлено на ВЕСЬ аэропорт целиком), D = 2500 пасс./ч -
+# то есть сумма зон (7466) больше общей AIRPORT_CAPACITY['UUEE'], но
+# зональные капасити теперь ни от чего не зависят и не делят одну цифру.
+# 'capacity' ниже - в пассажирах/час, та же единица, что AIRPORT_CAPACITY.
 AIRPORT_TERMINAL_ZONES = {
     'UUEE': {
-        'bc': {'coords': (55.980925, 37.4118815), 'label': 'Терминалы B/C'},
-        'd': {'coords': (55.962927, 37.406064), 'label': 'Терминал D'},
+        'bc': {'coords': (55.980925, 37.4118815), 'label': 'Терминалы B/C', 'capacity': 4966},
+        'd': {'coords': (55.962927, 37.406064), 'label': 'Терминал D', 'capacity': 2500},
     },
 }
 
@@ -7092,24 +7102,29 @@ async def show_airport_details(callback_query: types.CallbackQuery):
     zone_data_missing = False
     if zone_key:
         # Карточка конкретной терминальной зоны (сейчас только Шереметьево:
-        # B/C и D) - фильтруем рейсы ТОЛЬКО этой зоны и делим capacity
-        # пропорционально её доле трафика (см. compute_zone_capacity_shares).
-        # ИСПРАВЛЕНО 19.09.2026: раньше эта функция игнорировала zone_key
-        # полностью - заголовочная загрузка/число рейсов считались по ВСЕМ
-        # рейсам аэропорта, даже когда открыта карточка одной конкретной
-        # зоны (см. отчёт пользователя - "SVO Терминал D" показывал те же
-        # цифры, что и весь аэропорт целиком).
-        # ДОРАБОТАНО тем же вечером: если у Yandex Rasp СЕГОДНЯ вообще нет
-        # поля terminal ни у одного рейса (has_data=False), строгая
-        # фильтрация "рейсов по зоне" даёт ОБЕИМ картам одновременно "0
-        # рейсов", хотя реальные рейсы наверняка есть - просто без
-        # известного терминала. В этом случае НЕ фильтруем и показываем
-        # весь аэропорт с честной пометкой, вместо вводящего в заблуждение
-        # нуля (см. отчёт пользователя - B/C и D ОДНОВРЕМЕННО показали 0%
-        # на все 8 часов подряд).
-        shares, has_zone_data = compute_zone_capacity_shares(airport['icao'])
+        # B/C и D) - фильтруем рейсы ТОЛЬКО этой зоны. ИСПРАВЛЕНО 19.09.2026:
+        # раньше zone_key игнорировался полностью - заголовочная
+        # загрузка/число рейсов считались по ВСЕМ рейсам аэропорта, даже
+        # когда открыта карточка одной конкретной зоны (см. отчёт
+        # пользователя - "SVO Терминал D" показывал те же цифры, что и весь
+        # аэропорт целиком).
+        # ИЗМЕНЕНО 21.09.2026: capacity зоны теперь ФИКСИРОВАННОЕ значение из
+        # AIRPORT_TERMINAL_ZONES[icao][zone_key]['capacity'] (прямая просьба
+        # пользователя - B/C=4966, D=2500 пасс./ч), а не доля от общей
+        # AIRPORT_CAPACITY - не зависит от compute_zone_capacity_shares.
+        zone_capacity = AIRPORT_TERMINAL_ZONES.get(airport['icao'], {}).get(zone_key, {}).get('capacity')
+        if zone_capacity is not None:
+            capacity = zone_capacity
+        # Фильтрация СПИСКА РЕЙСОВ по зоне (независимо от capacity выше) -
+        # если у Yandex Rasp СЕГОДНЯ вообще нет поля terminal ни у одного
+        # рейса (has_data=False), строгая фильтрация дала бы ОБЕИМ картам
+        # одновременно "0 рейсов", хотя реальные рейсы наверняка есть -
+        # просто без известного терминала. В этом случае НЕ фильтруем и
+        # показываем весь аэропорт с честной пометкой, вместо вводящего в
+        # заблуждение нуля (см. отчёт пользователя - B/C и D ОДНОВРЕМЕННО
+        # показали 0% на все 8 часов подряд).
+        _, has_zone_data = compute_zone_capacity_shares(airport['icao'])
         if has_zone_data:
-            capacity = capacity * shares.get(zone_key, 1.0 / max(len(shares), 1))
             flights = [f for f in flights if flight_terminal_zone(airport['icao'], f.get('terminal')) == zone_key]
         else:
             zone_data_missing = True
@@ -7198,24 +7213,31 @@ def compute_current_hour_load(airport_icao, relevant_class, hour_offset=0, zone_
     hour_offset сдвигает "текущий" час вперёд - для заблаговременных пушей.
     zone_key (опционально, см. AIRPORT_TERMINAL_ZONES) - если у аэропорта есть
     деление на терминальные зоны (сейчас только Шереметьево), фильтрует рейсы
-    ТОЛЬКО этой зоны и делит capacity пропорционально её доле трафика (см.
-    compute_zone_capacity_shares). ИСПРАВЛЕНО 19.09.2026: раньше zone_key
-    вообще не принимался и не использовался - обе зоны Шереметьево (B/C и
-    D/E/F) в списке аэропортов показывали ОДИНАКОВУЮ загрузку, посчитанную
-    по всем рейсам аэропорта сразу, что вводило в заблуждение (см. отчёт
-    пользователя "Загрузка неверная Шереметьево...")."""
+    ТОЛЬКО этой зоны. ИСПРАВЛЕНО 19.09.2026: раньше zone_key вообще не
+    принимался и не использовался - обе зоны Шереметьево (B/C и D/E/F) в
+    списке аэропортов показывали ОДИНАКОВУЮ загрузку, посчитанную по всем
+    рейсам аэропорта сразу, что вводило в заблуждение (см. отчёт
+    пользователя "Загрузка неверная Шереметьево...").
+    ИЗМЕНЕНО 21.09.2026: capacity зоны - ФИКСИРОВАННОЕ значение из
+    AIRPORT_TERMINAL_ZONES[icao][zone_key]['capacity'] (B/C=4966, D=2500
+    пасс./ч по прямой просьбе пользователя), не доля от общей
+    AIRPORT_CAPACITY."""
     now = get_airport_now(airport_icao)
     target_hour = (now.hour + hour_offset) % 24
     flights = get_airport_flights(airport_icao)
     capacity = AIRPORT_CAPACITY.get(airport_icao, 1000)
     if zone_key:
-        shares, has_zone_data = compute_zone_capacity_shares(airport_icao)
+        zone_capacity = AIRPORT_TERMINAL_ZONES.get(airport_icao, {}).get(zone_key, {}).get('capacity')
+        if zone_capacity is not None:
+            capacity = zone_capacity
+        _, has_zone_data = compute_zone_capacity_shares(airport_icao)
         if has_zone_data:
-            capacity = capacity * shares.get(zone_key, 1.0 / max(len(shares), 1))
             flights = [f for f in flights if flight_terminal_zone(airport_icao, f.get('terminal')) == zone_key]
         # иначе (has_zone_data=False - см. compute_zone_capacity_shares) не
-        # фильтруем: у Yandex Rasp сегодня нет поля terminal ни у одного
-        # рейса, строгий фильтр дал бы ложный "0" вместо реальных рейсов.
+        # фильтруем список рейсов: у Yandex Rasp сегодня нет поля terminal
+        # ни у одного рейса, строгий фильтр дал бы ложный "0" вместо
+        # реальных рейсов. Capacity зоны при этом всё равно фиксированная -
+        # см. выше, от has_zone_data больше не зависит.
     relevant_cap = {'economy': capacity * ECONOMY_SHARE, 'business': capacity * BUSINESS_SHARE, 'total': capacity}[relevant_class]
     key = {'economy': 'passengers_economy', 'business': 'passengers_business', 'total': 'passengers'}[relevant_class]
     flights_now = [f for f in flights if datetime.fromtimestamp(f.get('firstSeen', 0)).hour == target_hour]
@@ -7229,18 +7251,21 @@ def compute_current_availability(airport_icao, relevant_class, zone_key=None):
     вылеты больше не собираются (убраны ради экономии квоты, см. get_airport_flights).
     Сравнивается с ЧАСОВОЙ пропускной способностью - раньше тут по ошибке складывались
     пассажиры ВСЕХ рейсов за весь день, что давало 1000-2000%+.
-    zone_key - см. compute_current_hour_load выше, тот же принцип фильтрации
-    по терминальной зоне и пропорционального деления capacity (фикс 19.09.2026)."""
+    zone_key - см. compute_current_hour_load выше: тот же принцип фильтрации
+    рейсов по терминальной зоне и та же ФИКСИРОВАННАЯ capacity зоны
+    (AIRPORT_TERMINAL_ZONES[icao][zone_key]['capacity'], изменено 21.09.2026)."""
     now = get_airport_now(airport_icao)
     current_hour = now.hour
     arrivals = get_airport_flights(airport_icao)
     capacity = AIRPORT_CAPACITY.get(airport_icao, 1000)
     if zone_key:
-        shares, has_zone_data = compute_zone_capacity_shares(airport_icao)
+        zone_capacity = AIRPORT_TERMINAL_ZONES.get(airport_icao, {}).get(zone_key, {}).get('capacity')
+        if zone_capacity is not None:
+            capacity = zone_capacity
+        _, has_zone_data = compute_zone_capacity_shares(airport_icao)
         if has_zone_data:
-            capacity = capacity * shares.get(zone_key, 1.0 / max(len(shares), 1))
             arrivals = [f for f in arrivals if flight_terminal_zone(airport_icao, f.get('terminal')) == zone_key]
-        # иначе не фильтруем - см. комментарий в compute_current_hour_load выше.
+        # иначе не фильтруем список рейсов - см. комментарий в compute_current_hour_load выше.
     relevant_cap = {'economy': capacity * ECONOMY_SHARE, 'business': capacity * BUSINESS_SHARE, 'total': capacity}[relevant_class]
     key = {'economy': 'passengers_economy', 'business': 'passengers_business', 'total': 'passengers'}[relevant_class]
 
