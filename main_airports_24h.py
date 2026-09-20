@@ -2576,7 +2576,7 @@ def services_keyboard(category=None, city=None, user_id=None):
     # видимость НА карте регулируется отдельным тумблером в Настройках -
     # кнопка тут просто открывает карту, не включает показ.
     if category in MAP_CATEGORY_STYLE and PUBLIC_URL and city:
-        map_url = f"{PUBLIC_URL}{MAP_WEBAPP_PATH}?city={urllib.parse.quote(city)}"
+        map_url = f"{PUBLIC_URL}{MAP_WEBAPP_PATH}?city={urllib.parse.quote(city)}&category={urllib.parse.quote(category)}"
         buttons.append([KeyboardButton(text="🗺 Карта водителей", web_app=WebAppInfo(url=map_url))])
     buttons.append([KeyboardButton(text="← Назад"), KeyboardButton(text="🏙 Выбор города")])
     return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=buttons)
@@ -4312,10 +4312,25 @@ async def finish_shift_and_notify(user_id, category, city, send_func, header=Non
     "СМЕНА ЗАВЕРШЕНА" (используется для "⏰ Автоматически завершена по
     достижении лимита времени", см. auto_finish_long_shifts)."""
     duration_minutes, total_km, _airport_wait_minutes = finish_shift(user_id)
+    # По просьбе пользователя (21.09.2026): сразу по завершении смены
+    # показать потраченное на топливо/эл-заряд, используя ранее сохранённые
+    # цену топлива и средний расход (см. FINANCE_REMEMBERED_FIELDS/
+    # finance_defaults - тот же профиль, что заполняется в "💰 Финансы"). Если
+    # ни разу не вводились - строку пропускаем (не заставляем вводить
+    # прямо тут, обычный ввод остаётся в "💰 Указать доход за день" ниже).
+    state = user_state.get(user_id) or {}
+    defaults = finance_defaults(state)
+    consumption = defaults.get('consumption')
+    fuel_price = defaults.get('fuel_price')
+    fuel_line = ""
+    if consumption and fuel_price:
+        fuel_cost = (total_km / 100) * consumption * fuel_price
+        fuel_line = f"⛽ Потрачено на топливо: ~{fuel_cost:.0f} ₽ ({consumption:g} л/100км × {fuel_price:g} ₽/л)\n"
     body = (
         "🔴 *СМЕНА ЗАВЕРШЕНА*\n"
         "▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓\n"
         f"⏱ {format_shift_duration(duration_minutes)}   🛣 {total_km:.1f} км\n"
+        f"{fuel_line}"
         "▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓\n"
         "_Запись сохранена в «💰 Финансы» → «📈 Статистика смен»._"
     )
@@ -4659,17 +4674,28 @@ def delete_map_position(user_id):
     conn.commit()
     conn.close()
 
-def get_map_positions(city):
+def get_map_positions(city, category=None):
     """Отдаёт список позиций для карты конкретного города - только
     категория/координаты, БЕЗ user_id и имени (приватность, по просьбе
     пользователя - подпись маркера только "какой тариф"). Отфильтровывает
-    устаревшие точки (см. MAP_VISIBILITY_STALE_MINUTES)."""
+    устаревшие точки (см. MAP_VISIBILITY_STALE_MINUTES). По просьбе
+    пользователя (21.09.2026): по умолчанию карта показывает ТОЛЬКО свою
+    категорию (такси видит такси, Ultima - только Ultima и т.д.) - параметр
+    category, если задан, фильтрует запрос; category=None (или "all") -
+    вся карта целиком (переключатель "Показать все" внутри WebApp, см.
+    map_webapp_html)."""
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute('''
-        SELECT category, lat, lon FROM map_positions
-        WHERE city = ? AND updated_at >= datetime('now', ?)
-    ''', (city, f'-{MAP_VISIBILITY_STALE_MINUTES} minutes'))
+    if category and category in MAP_CATEGORY_STYLE:
+        cursor.execute('''
+            SELECT category, lat, lon FROM map_positions
+            WHERE city = ? AND category = ? AND updated_at >= datetime('now', ?)
+        ''', (city, category, f'-{MAP_VISIBILITY_STALE_MINUTES} minutes'))
+    else:
+        cursor.execute('''
+            SELECT category, lat, lon FROM map_positions
+            WHERE city = ? AND updated_at >= datetime('now', ?)
+        ''', (city, f'-{MAP_VISIBILITY_STALE_MINUTES} minutes'))
     rows = cursor.fetchall()
     conn.close()
     return [{'category': r[0], 'lat': r[1], 'lon': r[2]} for r in rows]
@@ -4716,9 +4742,14 @@ def validate_telegram_webapp_init_data(init_data, bot_token):
 
 def map_webapp_html():
     """HTML-страница WebApp с интерактивной картой (Leaflet.js + OpenStreetMap
-    тайлы, без API-ключей). Город берётся из query-параметра ?city=, который
-    подставляется в URL кнопки при создании клавиатуры (см. services_keyboard).
-    Запрашивает /map/positions?city=... с заголовком, содержащим initData, для
+    тайлы, без API-ключей). Город и категория самого водителя берутся из
+    query-параметров ?city=&category=, которые подставляются в URL кнопки при
+    создании клавиатуры (см. services_keyboard). По просьбе пользователя
+    (21.09.2026): по умолчанию карта показывает ТОЛЬКО свою категорию (такси -
+    только такси, Ultima - только Ultima, курьер - только курьеров, грузовое
+    такси - только грузовые), с переключателем "Показать все" внутри самой
+    карты, чтобы посмотреть остальные категории тоже. Запрашивает
+    /map/positions?city=&category= с заголовком, содержащим initData, для
     проверки подписи на сервере (см. validate_telegram_webapp_init_data)."""
     style_json = json.dumps(MAP_CATEGORY_STYLE, ensure_ascii=False)
     return f"""<!doctype html>
@@ -4735,10 +4766,12 @@ def map_webapp_html():
   .legend {{ position: absolute; top: 10px; right: 10px; z-index: 1000; background: #fff; border-radius: 8px; padding: 8px 10px; font-family: -apple-system, sans-serif; font-size: 12px; box-shadow: 0 1px 4px rgba(0,0,0,.25); }}
   .legend div {{ display: flex; align-items: center; gap: 6px; margin: 3px 0; }}
   .legend .dot {{ width: 11px; height: 11px; border-radius: 50%; border: 1px solid #999; display: inline-block; }}
+  .filter-toggle {{ position: absolute; top: 10px; left: 10px; z-index: 1000; background: #fff; border-radius: 8px; padding: 8px 12px; font-family: -apple-system, sans-serif; font-size: 12.5px; font-weight: 600; box-shadow: 0 1px 4px rgba(0,0,0,.25); cursor: pointer; user-select: none; }}
 </style>
 </head>
 <body>
 <div id="map"></div>
+<div class="filter-toggle" id="filterToggle">Показать все категории</div>
 <div class="legend" id="legend"></div>
 <script>
   const CATEGORY_STYLE = {style_json};
@@ -4746,11 +4779,31 @@ def map_webapp_html():
   if (tg) {{ tg.ready(); tg.expand(); }}
   const params = new URLSearchParams(window.location.search);
   const city = params.get('city') || '';
+  const myCategory = params.get('category') || '';
+  let showAll = !myCategory;
   const legend = document.getElementById('legend');
-  for (const key in CATEGORY_STYLE) {{
-    const s = CATEGORY_STYLE[key];
-    legend.innerHTML += `<div><span class="dot" style="background:${{s.color}}"></span>${{s.label}}</div>`;
+  const toggle = document.getElementById('filterToggle');
+  function renderLegend() {{
+    legend.innerHTML = '';
+    const keys = showAll ? Object.keys(CATEGORY_STYLE) : [myCategory];
+    keys.forEach(key => {{
+      const s = CATEGORY_STYLE[key];
+      if (!s) return;
+      legend.innerHTML += `<div><span class="dot" style="background:${{s.color}}"></span>${{s.label}}</div>`;
+    }});
   }}
+  function renderToggle() {{
+    if (!myCategory) {{ toggle.style.display = 'none'; return; }}
+    toggle.textContent = showAll ? 'Только моя категория' : 'Показать все категории';
+  }}
+  toggle.addEventListener('click', () => {{
+    showAll = !showAll;
+    renderLegend();
+    renderToggle();
+    loadPositions();
+  }});
+  renderLegend();
+  renderToggle();
   const map = L.map('map').setView([55.7558, 37.6173], 11);
   L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
     attribution: '© OpenStreetMap',
@@ -4760,7 +4813,8 @@ def map_webapp_html():
   async function loadPositions() {{
     try {{
       const initData = tg ? tg.initData : '';
-      const resp = await fetch(`/map/positions?city=${{encodeURIComponent(city)}}`, {{
+      const categoryParam = showAll ? '' : myCategory;
+      const resp = await fetch(`/map/positions?city=${{encodeURIComponent(city)}}&category=${{encodeURIComponent(categoryParam)}}`, {{
         headers: {{ 'X-Telegram-Init-Data': initData }},
       }});
       if (!resp.ok) return;
@@ -4793,14 +4847,18 @@ async def handle_map_positions_api(request):
     проверяя подпись initData, если задан BOT_TOKEN. Если initData
     отсутствует/невалиден - всё равно отдаём данные (это не платёжный webhook,
     а публичная агрегированная карта без персональных данных), но логируем,
-    чтобы отследить аномальный трафик."""
+    чтобы отследить аномальный трафик. Параметр category (опциональный) -
+    фильтр по категории (по просьбе пользователя, 21.09.2026 - своя категория
+    по умолчанию, см. get_map_positions/map_webapp_html); пустой или
+    отсутствующий - вся карта."""
     city = request.query.get('city', '')
+    category = request.query.get('category', '') or None
     init_data = request.headers.get('X-Telegram-Init-Data', '')
     if BOT_TOKEN and init_data:
         if validate_telegram_webapp_init_data(init_data, BOT_TOKEN) is None:
             logger.warning("⚠️ /map/positions: не прошла проверка initData")
     try:
-        positions = get_map_positions(city) if city else []
+        positions = get_map_positions(city, category) if city else []
     except Exception:
         logger.exception("❌ Ошибка при получении позиций для карты водителей")
         positions = []
