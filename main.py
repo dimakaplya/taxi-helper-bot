@@ -5,6 +5,7 @@ import sqlite3
 import json
 import re
 import time
+import functools
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from math import radians, sin, cos, asin, sqrt
@@ -266,6 +267,9 @@ NOTIFICATION_TYPES = {
     # "всем в городе, у кого включены пуши"), не привязана к
     # активной смене - см. push_road_incident_alerts ниже.
     'road_events': {'label': 'Перекрытия и крупные ДТП', 'emoji': '⛔'},
+    # По просьбе пользователя (20.09.2026): "сделай приветственное сообщение
+    # утром каждый день в 9.00" - см. morning_greeting_checker ниже.
+    'morning_greeting': {'label': 'Утреннее приветствие 9:00', 'emoji': '☀️'},
 }
 
 def notifications_enabled(state, notif_key):
@@ -1489,6 +1493,18 @@ def init_db():
             event_key TEXT,
             sent_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (city, event_key)
+        )
+    ''')
+    # Простая key-value таблица для служебных отметок бота - сейчас только
+    # 'last_deployed_commit' (по просьбе пользователя, 20.09.2026: "сделай
+    # так чтобы приходило сообщение что бот обновился" - см.
+    # notify_users_about_new_deploy ниже). Отдельная таблица вместо
+    # добавления колонки куда-то в существующие - это не про конкретного
+    # пользователя/город/событие, а глобальное состояние самого бота.
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS bot_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT
         )
     ''')
     conn.commit()
@@ -3888,15 +3904,28 @@ def km_counter_ping(user_id, lat, lon):
 SHIFT_LONG_WARNING_HOURS = 12  # после скольких часов за рулём слать предупреждающий пуш (по просьбе пользователя, 20.09.2026)
 SHIFT_LONG_WARNING_CHECK_MINUTES = 10  # как часто фоновая задача проверяет длительность активных смен
 
+# По просьбе пользователя (20.09.2026): "сделай так чтобы смена автоматически
+# завершалась после 18 часов секундомера ведь юзер может забыть" - за
+# SHIFT_AUTO_FINISH_WARN_MINUTES до лимита шлём предупреждение "смена скоро
+# завершится автоматически" (флаг warned_auto_finish, тот же принцип
+# дедупа, что warned_12h), а по достижении SHIFT_AUTO_FINISH_HOURS -
+# завершаем смену сами (finish_shift_and_notify) и предлагаем указать доход,
+# как при обычном ручном завершении (по прямому уточнению пользователя).
+SHIFT_AUTO_FINISH_HOURS = 18
+SHIFT_AUTO_FINISH_WARN_MINUTES = 30
+
 async def check_long_shifts():
     """Фоновая задача (см. asyncio.create_task в main()) - раз в
     SHIFT_LONG_WARNING_CHECK_MINUTES проверяет всех водителей с активной
-    сменой (is_shift_active) и, если смена идёт дольше
-    SHIFT_LONG_WARNING_HOURS часов, шлёт предупреждающий пуш ОДИН РАЗ за
-    смену (флаг state['shift']['warned_12h'] - сбрасывается сам собой, т.к.
-    finish_shift целиком удаляет state['shift']). Берём срез user_state
-    (list(...)), как и другие фоновые рассылки в файле - список не должен
-    "плыть" по ходу итерации."""
+    сменой (is_shift_active): шлёт предупреждающий пуш о >12 часов за рулём
+    (см. SHIFT_LONG_WARNING_HOURS), предупреждает за
+    SHIFT_AUTO_FINISH_WARN_MINUTES до автозавершения на
+    SHIFT_AUTO_FINISH_HOURS часах, и автоматически завершает смену, если
+    водитель забыл это сделать сам. Оба предупреждения - ОДИН РАЗ за смену
+    (флаги в state['shift'], сбрасываются сами собой, т.к. finish_shift
+    целиком удаляет state['shift']). Берём срез user_state (list(...)), как
+    и другие фоновые рассылки в файле - список не должен "плыть" по ходу
+    итерации."""
     while True:
         try:
             await asyncio.sleep(SHIFT_LONG_WARNING_CHECK_MINUTES * 60)
@@ -3907,14 +3936,51 @@ async def check_long_shifts():
                 if not isinstance(state, dict):
                     continue
                 shift = state.get('shift')
-                if not shift or shift.get('warned_12h'):
+                if not shift:
                     continue
                 try:
                     started_at = datetime.fromisoformat(shift['started_at'])
                 except Exception:
                     continue
                 elapsed_hours = (now - started_at).total_seconds() / 3600
-                if elapsed_hours < SHIFT_LONG_WARNING_HOURS:
+
+                # Автозавершение - проверяем ПЕРВЫМ (если лимит уже
+                # достигнут, смена завершается и остальные пуши для неё уже
+                # не нужны - state['shift'] исчезнет).
+                if elapsed_hours >= SHIFT_AUTO_FINISH_HOURS:
+                    category = state.get('category')
+                    city = state.get('city')
+                    try:
+                        await finish_shift_and_notify(
+                            user_id, category, city,
+                            functools.partial(bot.send_message, user_id),
+                            header=(
+                                f"⏰ *Смена автоматически завершена после {SHIFT_AUTO_FINISH_HOURS} часов "
+                                "секундомера* - мы решили, что ты мог просто забыть её выключить."
+                            ),
+                        )
+                    except Exception as e:
+                        logger.error(f"❌ Не удалось автозавершить смену пользователю {user_id}: {e}")
+                    continue
+
+                if elapsed_hours >= SHIFT_AUTO_FINISH_HOURS - SHIFT_AUTO_FINISH_WARN_MINUTES / 60 and not shift.get('warned_auto_finish'):
+                    try:
+                        await bot.send_message(
+                            user_id,
+                            f"⏰ *Смена скоро завершится автоматически* (через ~{SHIFT_AUTO_FINISH_WARN_MINUTES} мин, "
+                            f"по достижении {SHIFT_AUTO_FINISH_HOURS} часов секундомера) - если ты всё ещё за рулём, "
+                            "ничего делать не нужно, просто учти это. Завершить сейчас можно кнопкой "
+                            "«⏹ ЗАВЕРШИТЬ СМЕНУ» в главном меню.",
+                            parse_mode='Markdown',
+                        )
+                    except Exception as e:
+                        logger.error(f"❌ Не удалось отправить пуш о скором автозавершении смены пользователю {user_id}: {e}")
+                    shift = dict(state.get('shift') or {})
+                    if shift:
+                        shift['warned_auto_finish'] = True
+                        state['shift'] = shift
+
+                if elapsed_hours < SHIFT_LONG_WARNING_HOURS or shift.get('warned_12h'):
                     continue
                 try:
                     await bot.send_message(
@@ -4027,22 +4093,37 @@ async def toggle_shift(message: types.Message):
 
     if not is_shift_active(state):
         return  # защитный случай - кнопка не должна была показать "Завершить", если смены нет
-    duration_minutes, total_km = finish_shift(user_id)
-    await message.answer(
+    await finish_shift_and_notify(user_id, category, city, message.answer)
+
+async def finish_shift_and_notify(user_id, category, city, send_func, header=None):
+    """Общая логика завершения смены: считает итоги (finish_shift), шлёт
+    сообщение "СМЕНА ЗАВЕРШЕНА" и предлагает указать доход за день - вынесена
+    из toggle_shift (по просьбе пользователя, 20.09.2026: "сделай так чтобы
+    смена автоматически завершалась после 18 часов"), чтобы тем же кодом
+    пользовался и хендлер кнопки "⏹ ЗАВЕРШИТЬ СМЕНУ", и фоновая
+    автозавершающая задача (см. check_long_shifts). send_func - функция
+    отправки сообщения с сигнатурой message.answer (kwargs reply_markup/
+    parse_mode) - у ручного завершения это message.answer, у автоматического
+    partial(bot.send_message, user_id). header - опциональный текст ПЕРЕД
+    "СМЕНА ЗАВЕРШЕНА" (используется для "⏰ Автоматически завершена по
+    достижении лимита времени", см. auto_finish_long_shifts)."""
+    duration_minutes, total_km, _airport_wait_minutes = finish_shift(user_id)
+    body = (
         "🔴 *СМЕНА ЗАВЕРШЕНА*\n"
         "▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓\n"
         f"⏱ {format_shift_duration(duration_minutes)}   🛣 {total_km:.1f} км\n"
         "▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓\n"
-        "_Запись сохранена в «💰 Финансы» → «📈 Статистика смен»._",
-        reply_markup=services_keyboard(category, city, user_id),
-        parse_mode='Markdown',
+        "_Запись сохранена в «💰 Финансы» → «📈 Статистика смен»._"
     )
+    if header:
+        body = f"{header}\n{body}"
+    await send_func(body, reply_markup=services_keyboard(category, city, user_id), parse_mode='Markdown')
     # По просьбе пользователя (20.09.2026): сразу после завершения смены
     # предлагаем указать доход за день - отдельной инлайн-кнопкой (а не
     # сразу форсируем ввод текста, чтобы не мешать, если человек ещё за
     # рулём/занят). Km подставляем автоматически из только что завершённой
     # смены - см. start_finance_after_shift.
-    await message.answer(
+    await send_func(
         "Хочешь сразу посчитать доход за эту смену?",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text="💰 Указать доход за день", callback_data="start_finance_after_shift"),
@@ -6540,6 +6621,132 @@ def format_weather_forecast_text(city_name, forecast):
             lines.append(f"{hour_label} — {emoji} {temp_label}")
     return '\n'.join(lines)
 
+# ==================== УТРЕННЕЕ ПРИВЕТСТВИЕ (9:00) ====================
+# По просьбе пользователя (20.09.2026): "сделай приветственное сообщение
+# утром каждый день в 9.00 доброе утро сегодня такое-то число день такой-то
+# погода такая-то хорошего дня и побольше хороших клиентов. Предлагаю
+# ознакомиться с вкладкой куда поехать" - шлётся 9:00 ПО МЕСТНОМУ ВРЕМЕНИ
+# КАЖДОГО ГОРОДА (город уже определяет часовой пояс через get_city_now, как
+# и остальные почасовые фичи бота), с кнопкой "Да" -> сразу показывает
+# сводку "Куда ехать" (тот же расчёт, что и по кнопке "💰 КУДА ЕХАТЬ",
+# работает и для courier/cargo - у них своя версия, см. compute_where_to_go).
+MORNING_GREETING_HOUR = 9
+MORNING_GREETING_CHECK_MINUTES = 5  # как часто проверяем "наступило ли 9:00 в каком-то городе" - с запасом относительно часа
+
+RU_MONTHS_GENITIVE = (
+    'января', 'февраля', 'марта', 'апреля', 'мая', 'июня',
+    'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря',
+)
+
+# По просьбе пользователя (20.09.2026): "пропиши чтобы одевались по погоде и
+# напомни водителям ультима в тарифах что премьер и элит что если +25 то
+# верхняя одежда не требуется" - общая фраза "одевайся по погоде" идёт всем
+# категориям, а конкретное напоминание про дресс-код Премьер/Элит (верхняя
+# одежда не обязательна при +25 и выше) - ТОЛЬКО категории Ultima (у
+# Такси/Курьера/Грузового такси нет тарифов Премьер/Элит с таким дресс-кодом).
+ULTIMA_NO_OUTERWEAR_TEMP_C = 25
+
+async def build_morning_greeting_text(city, category=None):
+    """Текст "Доброе утро" - число/день недели по местному времени города,
+    текущая погода (тот же источник Open-Meteo, что и у "🌤 Погода"/пушей о
+    дожде), пожелание хорошего дня и побольше клиентов - по формулировке
+    пользователя. Погода - best-effort: если Open-Meteo недоступен,
+    сообщение всё равно уходит, просто без строки о погоде (лучше приветствие
+    без погоды, чем не прийти вообще). category='ultima' - добавляет
+    напоминание про дресс-код Премьер/Элит при +25° и выше (см.
+    ULTIMA_NO_OUTERWEAR_TEMP_C)."""
+    now = get_city_now(city)
+    date_label = f"{now.day} {RU_MONTHS_GENITIVE[now.month - 1]}, {WEEKDAY_NAMES[now.weekday()].lower()}"
+    lines = [
+        "☀️ *Доброе утро!*",
+        f"📅 Сегодня {date_label}",
+    ]
+    cur_temp = None
+    forecast = await fetch_rain_forecast(city)
+    if forecast:
+        current = forecast.get('current', {})
+        cur_code = current.get('weathercode')
+        cur_temp = current.get('temperature_2m')
+        if cur_code is not None:
+            cur_name, _, cur_emoji = describe_weathercode(cur_code)
+            temp_str = f", {round(cur_temp)}°C" if cur_temp is not None else ""
+            lines.append(f"{cur_emoji} Погода: {cur_name}{temp_str}")
+    lines.append("👕 Одевайся по погоде.")
+    if category == 'ultima' and cur_temp is not None and cur_temp >= ULTIMA_NO_OUTERWEAR_TEMP_C:
+        lines.append(
+            f"ℹ️ Напоминание по дресс-коду: при +{ULTIMA_NO_OUTERWEAR_TEMP_C}° и выше "
+            "верхняя одежда для тарифов *Премьер* и *Элит* не обязательна."
+        )
+    lines.append("\nХорошего дня и побольше хороших клиентов! 🚕")
+    lines.append("\nПредлагаю ознакомиться с вкладкой «Куда ехать» - подскажет, где сейчас выгоднее всего работать.")
+    return '\n'.join(lines)
+
+def morning_greeting_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ Да, показать", callback_data="morning_greeting_show_where_to_go"),
+    ]])
+
+async def push_morning_greeting(user_id, city, category=None):
+    if not bot:
+        return
+    try:
+        text = await build_morning_greeting_text(city, category=category)
+        await bot.send_message(user_id, text, reply_markup=morning_greeting_keyboard(), parse_mode='Markdown')
+    except Exception as e:
+        logger.error(f"❌ Не удалось отправить утреннее приветствие пользователю {user_id}: {e}")
+
+@router.callback_query(lambda c: c.data == "morning_greeting_show_where_to_go")
+async def morning_greeting_show_where_to_go(callback_query: types.CallbackQuery):
+    """Кнопка "✅ Да, показать" на утреннем приветствии - сразу показывает
+    сводку "Куда ехать" в ответ (по прямому уточнению пользователя), тем же
+    вызовом, что и кнопка "💰 КУДА ЕХАТЬ" в главном меню (см. send_where_to_go)."""
+    await callback_query.answer()
+    user_id = callback_query.from_user.id
+    state = user_state.get(user_id, {})
+    city = state.get('city')
+    category = state.get('category')
+    if not city:
+        await callback_query.message.answer("Сначала выбери город 🏙")
+        return
+    await send_where_to_go(callback_query.message, user_id, city, category)
+
+async def check_morning_greetings():
+    """Проверяет каждого известного пользователя: наступило ли у него в
+    городе MORNING_GREETING_HOUR:00 сегодня, и не отправляли ли мы уже
+    приветствие сегодня (state['last_morning_greeting_date'], сравнение по
+    ЛОКАЛЬНОЙ дате города - дедуп на пользователя, не на город, т.к. у
+    каждого пользователя своё поле в state). Проверяем каждые
+    MORNING_GREETING_CHECK_MINUTES минут окно [9:00, 9:00+CHECK_MINUTES) -
+    один пользователь получит пуш один раз за прогон, в котором окно
+    сработало."""
+    for user_id, state in list(user_state.items()):
+        if not isinstance(state, dict):
+            continue
+        city = state.get('city')
+        if not city:
+            continue
+        if not notifications_enabled(state, 'morning_greeting'):
+            continue
+        now = get_city_now(city)
+        today_str = now.strftime('%Y-%m-%d')
+        if state.get('last_morning_greeting_date') == today_str:
+            continue
+        if now.hour != MORNING_GREETING_HOUR:
+            continue
+        await push_morning_greeting(user_id, city, category=state.get('category'))
+        state['last_morning_greeting_date'] = today_str
+
+async def morning_greeting_checker():
+    """Фоновая задача: раз в MORNING_GREETING_CHECK_MINUTES минут проверяет,
+    не наступило ли 9:00 по местному времени у кого-то из известных
+    пользователей (см. check_morning_greetings)."""
+    while True:
+        try:
+            await check_morning_greetings()
+        except Exception as e:
+            logger.error(f"❌ Ошибка в morning_greeting_checker: {e}")
+        await asyncio.sleep(MORNING_GREETING_CHECK_MINUTES * 60)
+
 async def rain_checker():
     """Фоновая задача: раз в RAIN_CHECK_INTERVAL_MINUTES минут опрашивает
     Open-Meteo по каждому из 12 городов и шлёт упреждающий пуш, если в
@@ -6775,6 +6982,80 @@ async def push_airport_status_change(icao, airport, old_status, new_status, noti
         # Telegram допускает ~30 сообщений/сек в разные чаты - берём с запасом
         await asyncio.sleep(0.05)
     logger.info(f"📢 Пуш по {icao} разослан: {sent} успешно, {failed} ошибок")
+
+# ==================== ПУШ "БОТ ОБНОВИЛСЯ" ПРИ РЕДЕПЛОЕ ====================
+# По просьбе пользователя (20.09.2026): "сделай так чтобы в боте приходило
+# сообщение что бот обновился до новой версии" - шлём всем известным
+# пользователям короткий пуш при каждом РЕАЛЬНОМ редеплое (новый код), но не
+# на каждый обычный рестарт процесса (Railway может перезапускать контейнер
+# без изменений в коде - сон/краш/масштабирование). Отличаем "это новый
+# деплой" от "просто рестарт" по RAILWAY_GIT_COMMIT_SHA - Railway сама
+# прокидывает эту переменную окружения с SHA закоммиченного изменения,
+# который сейчас развёрнут; сравниваем с последним сохранённым в bot_meta
+# (см. init_db) и шлём пуш, только если он изменился. Локально/вне Railway
+# переменной нет - тогда пуш не шлём вообще (иначе слали бы на каждый
+# локальный запуск), см. проверку ниже.
+BOT_UPDATED_MESSAGE = "🔄 *Бот обновился до новой версии.*"
+
+def get_bot_meta(key):
+    init_db()
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT value FROM bot_meta WHERE key=?', (key,))
+    row = cursor.fetchone()
+    conn.close()
+    return row[0] if row else None
+
+def set_bot_meta(key, value):
+    init_db()
+    conn = get_db_connection()
+    conn.execute(
+        'INSERT INTO bot_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
+        (key, value)
+    )
+    conn.commit()
+    conn.close()
+
+async def notify_users_about_new_deploy():
+    """Вызывается один раз при старте бота (см. main()). Сравнивает текущий
+    RAILWAY_GIT_COMMIT_SHA с последним сохранённым в bot_meta - если это
+    ДЕЙСТВИТЕЛЬНО новый деплой (SHA изменился), шлёт короткий пуш "бот
+    обновился" всем известным пользователям (всем user_id из user_state -
+    по прямому уточнению пользователя, "всем известным пользователям бота",
+    без привязки к notif_prefs, это не обычный тип уведомления, а
+    служебное сообщение). На самом первом запуске после появления этой
+    функции (сохранённого SHA ещё нет) пуш НЕ шлём - иначе все
+    существующие пользователи получили бы "обновление" в момент, когда
+    бот на самом деле просто впервые запомнил свою версию."""
+    current_sha = os.getenv('RAILWAY_GIT_COMMIT_SHA')
+    if not current_sha:
+        logger.info("ℹ️ RAILWAY_GIT_COMMIT_SHA не задан (не Railway/локальный запуск) - пуш об обновлении не проверяется")
+        return
+    previous_sha = get_bot_meta('last_deployed_commit')
+    set_bot_meta('last_deployed_commit', current_sha)
+    if previous_sha is None:
+        logger.info(f"ℹ️ Первый запуск с отслеживанием версии - запомнил SHA {current_sha[:8]}, пуш не шлю")
+        return
+    if previous_sha == current_sha:
+        return  # обычный рестарт, код не менялся - пуш не нужен
+
+    if not bot:
+        return
+    recipients = [uid for uid, state in list(user_state.items()) if isinstance(state, dict)]
+    if not recipients:
+        logger.info(f"🔄 Новый деплой ({previous_sha[:8]} -> {current_sha[:8]}), но известных пользователей пока нет")
+        return
+    logger.info(f"🔄 Новый деплой ({previous_sha[:8]} -> {current_sha[:8]}) - рассылаю пуш об обновлении {len(recipients)} пользователям")
+    sent, failed = 0, 0
+    for user_id in recipients:
+        try:
+            await bot.send_message(user_id, BOT_UPDATED_MESSAGE, parse_mode='Markdown')
+            sent += 1
+        except Exception as e:
+            failed += 1
+            logger.warning(f"⚠️ Не удалось отправить пуш об обновлении пользователю {user_id}: {e}")
+        await asyncio.sleep(0.05)  # Telegram допускает ~30 сообщений/сек в разные чаты
+    logger.info(f"🔄 Пуш об обновлении разослан: {sent} успешно, {failed} ошибок")
 
 # По просьбе пользователя (20.09.2026): "делай пуши перекрытий... и крупные
 # ДТП" - отдельный пуш-тип, независимый от статусов аэропортов/часов пика.
@@ -7224,6 +7505,15 @@ async def main():
     if not await initialize_bot():
         return
     load_all_user_states()
+    # Пуш "бот обновился до новой версии" (по просьбе пользователя,
+    # 20.09.2026) - проверяем ОДИН раз при старте, до старта polling, но
+    # ПОСЛЕ load_all_user_states (нужен список известных user_id) - см.
+    # notify_users_about_new_deploy. Не блокирует остальной запуск при
+    # ошибке (например, Telegram недоступен в момент старта).
+    try:
+        await notify_users_about_new_deploy()
+    except Exception as e:
+        logger.error(f"❌ Ошибка при рассылке пуша об обновлении: {e}")
     dp.include_router(router)
     if os.getenv('YANDEX_RASP_API_KEY'):
         asyncio.create_task(airports_data_updater())
@@ -7249,6 +7539,7 @@ async def main():
     asyncio.create_task(airport_queue_checker())
     asyncio.create_task(peak_hour_alert_checker())
     asyncio.create_task(check_long_shifts())
+    asyncio.create_task(morning_greeting_checker())
     # allowed_updates передаём ЯВНО (а не полагаемся на автоматическое
     # dp.resolve_used_update_types()) - похоже, это и была причина, почему
     # пуши "Очередь у аэропорта" не приходили: Telegram Bot API запоминает
