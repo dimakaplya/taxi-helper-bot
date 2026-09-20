@@ -73,11 +73,18 @@ TRAINS_DATA_FILE = os.path.join(DATA_DIR, 'trains_data.json')
 # строятся из ЕДИНОГО источника (config.json) при импорте модуля.
 STATION_CITY = {}
 STATION_CAPACITY = {}
+STATION_COORDS = {}
+STATIONS_INFO = {}
 for _city_key, _city_data in _get_config_cities().items():
+    _city_stations = []
     for _station in _city_data.get('stations', []):
         STATION_CITY[_station['code']] = _city_key
         if 'capacity' in _station:
             STATION_CAPACITY[_station['code']] = _station['capacity']
+        if 'coords' in _station:
+            STATION_COORDS[_station['code']] = tuple(_station['coords'])
+        _city_stations.append({'name': _station['name'], 'code': _station['code']})
+    STATIONS_INFO[_city_key] = _city_stations
 TRAIN_CITIES = set(STATION_CITY.values())
 
 # Ориентировочная "пропускная способность" вокзала (пас/час) - используется
@@ -5750,6 +5757,52 @@ def map_webapp_html():
       airportsLoaded = true;
     }} catch (e) {{ /* тихо */ }}
   }}
+  // Вокзалы на карте (по просьбе пользователя, 21.09.2026 - "выведи на
+  // карту жд вокзалы по типу аэропортов с процентом загрузки прибытия") -
+  // та же идея, что loadAirports() выше, но проще: нет статуса Росавиации и
+  // разбивки очереди по тарифам, только название + текущая загрузка %. У
+  // вокзалов, в отличие от аэропортов, бинарная шкала (см. get_train_load_symbol
+  // на сервере: >50% = 🟢 ехать, иначе 🔴 не ехать), поэтому порог для круга
+  // повышенного спроса тоже 50%, а не 85% как у аэропортов.
+  let stationMarkers = [];
+  async function loadStations() {{
+    try {{
+      const resp = await fetch(`/map/stations?city=${{encodeURIComponent(city)}}`);
+      if (!resp.ok) return;
+      const data = await resp.json();
+      stationMarkers.forEach(m => map.removeLayer(m));
+      stationMarkers = [];
+      data.stations.forEach(s => {{
+        const STATION_HIGH_LOAD_THRESHOLD = 50;
+        if (s.load !== null && s.load !== undefined && s.load > STATION_HIGH_LOAD_THRESHOLD) {{
+          const circle = L.circle([s.lat, s.lon], {{
+            radius: 1500,
+            color: '#2e7d32',
+            weight: 2,
+            fillColor: '#2e7d32',
+            fillOpacity: 0.15,
+          }}).addTo(map);
+          stationMarkers.push(circle);
+        }}
+        const icon = L.divIcon({{ className: 'airport-icon', html: '🚆', iconSize: [26, 26] }});
+        const symbol = (s.load !== null && s.load !== undefined && s.load > STATION_HIGH_LOAD_THRESHOLD) ? '🟢' : '🔴';
+        let popup = `<div class="airport-popup"><h4>🚆 ${{s.name}}</h4>`;
+        if (s.load !== null && s.load !== undefined) {{
+          popup += `<div class="row">📊 Загрузка сейчас: ${{s.load}}% ${{symbol}}</div>`;
+        }}
+        popup += `</div>`;
+        let label = `<b>${{s.name}}</b>`;
+        if (s.load !== null && s.load !== undefined) {{
+          label += `<br>📊 ${{s.load}}% ${{symbol}}`;
+        }}
+        const marker = L.marker([s.lat, s.lon], {{ icon }})
+          .bindPopup(popup)
+          .bindTooltip(label, {{ permanent: true, direction: 'right', offset: [10, 0], className: 'airport-label' }})
+          .addTo(map);
+        stationMarkers.push(marker);
+      }});
+    }} catch (e) {{ /* тихо */ }}
+  }}
   // Дорожные события (ДТП/перекрытия) с распознанным адресом - по просьбе
   // пользователя (22.09.2026): "вынеси на карту дорожные события города где
   // есть адреса". События без адреса в тексте поста не геокодируются на
@@ -5816,6 +5869,7 @@ def map_webapp_html():
   }}
   loadPositions();
   loadAirports();
+  loadStations();
   loadRoadEvents();
   loadCityEvents();
   setInterval(loadPositions, 15000);
@@ -5826,6 +5880,7 @@ def map_webapp_html():
   // событие теперь доходит до карты за секунды-минуты, а не до ~12 минут.
   setInterval(loadRoadEvents, 30000);
   setInterval(loadAirports, 60000);
+  setInterval(loadStations, 60000);
   setInterval(loadCityEvents, 300000);
 </script>
 </body>
@@ -5946,6 +6001,39 @@ async def handle_map_airports_api(request):
         logger.exception("❌ Ошибка при получении аэропортов для карты водителей")
         result = []
     return web.json_response({'airports': result})
+
+MAP_STATIONS_API_PATH = '/map/stations'
+
+async def handle_map_stations_api(request):
+    """JSON API для меток вокзалов на карте (по просьбе пользователя,
+    21.09.2026 - "выведи на карту жд вокзалы по типу аэропортов с процентом
+    загрузки прибытия"): та же идея, что handle_map_airports_api, но проще -
+    у вокзалов нет статуса Росавиации и разбивки очереди по тарифам, только
+    название, координаты и текущая загрузка % (см. get_train_load_symbol -
+    та же бинарная шкала, что в разделе "Вокзалы"). Публичные агрегированные
+    данные, initData не обязателен (как и у /map/airports)."""
+    city = request.query.get('city', '')
+    result = []
+    try:
+        for station in STATIONS_INFO.get(city, []):
+            code = station['code']
+            coords = STATION_COORDS.get(code)
+            if not coords:
+                continue
+            entry = {
+                'name': station['name'], 'code': code,
+                'lat': coords[0], 'lon': coords[1],
+            }
+            try:
+                load, _trains, _ = compute_current_train_period_load(code, 'taxi')
+                entry['load'] = round(load)
+            except Exception:
+                entry['load'] = None
+            result.append(entry)
+    except Exception:
+        logger.exception("❌ Ошибка при получении вокзалов для карты водителей")
+        result = []
+    return web.json_response({'stations': result})
 
 MAP_ROAD_EVENTS_API_PATH = '/map/road_events'
 
@@ -9447,6 +9535,7 @@ async def start_subscription_webhook_server():
     app.router.add_get(MAP_WEBAPP_PATH, handle_map_webapp)
     app.router.add_get(MAP_POSITIONS_API_PATH, handle_map_positions_api)
     app.router.add_get(MAP_AIRPORTS_API_PATH, handle_map_airports_api)
+    app.router.add_get(MAP_STATIONS_API_PATH, handle_map_stations_api)
     app.router.add_get(MAP_ROAD_EVENTS_API_PATH, handle_map_road_events_api)
     app.router.add_get(MAP_CITY_EVENTS_API_PATH, handle_map_city_events_api)
     runner = web.AppRunner(app)
