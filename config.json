@@ -87,7 +87,7 @@
     },
     "krasnodar": {
       "airports": [
-        {"iata": "KRR", "icao": "URKK", "name": "KRR (Краснодар)", "emoji": "✈️", "yandex_code": "s9623123", "capacity": 525, "timezone": "Europe/Moscow", "coords": [45.0347, 39.1708]}
+        {"iata": "KRR", "icao": "URKK", "name": "KRR (Краснодар)", "emoji": "✈️", "yandex_code": "s9623123", "capacity": 360, "timezone": "Europe/Moscow", "coords": [45.0347, 39.1708]}
       ],
       "stations": [
         {"name": "Краснодар-1", "code": "s9613602", "capacity": 700}
