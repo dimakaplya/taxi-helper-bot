@@ -8231,6 +8231,21 @@ async def airports_data_updater():
     RETRY_INTERVAL_MINUTES = 7
     RETRY_MAX_ATTEMPTS = 8  # ~56 минут коротких попыток, потом ждём обычную плановую точку
 
+    # ИСПРАВЛЕНО 21.09.2026 (пользователь - "давай чтобы такого больше не
+    # было" после жалобы на 0% сразу после рестарта): раньше обновление
+    # запускалось ТОЛЬКО в плановую точку расписания - если бот
+    # перезапускался/редеплоился МЕЖДУ точками (ночью разрыв может быть до
+    # 2 часов), водители всё это время видели устаревший или вообще пустой
+    # flights_data.json, а last_good_flights.json на свежем Volume ещё мог
+    # быть пуст, так что даже fallback подставить было нечего. Докстринг
+    # функции ОБЕЩАЛ обновление сразу при старте, если данные устарели, но
+    # в самом коде этой проверки не было - вот и чинили. Теперь на ПЕРВОЙ
+    # итерации цикла (сразу после старта бота) дополнительно проверяем
+    # возраст файла и обновляем внепланово, если он старше MIN_FRESH_AGE_MINUTES
+    # или отсутствует - дальше, на всех следующих итерациях, снова работает
+    # только расписание (чтобы серия редеплоев подряд не жгла лишние запросы).
+    is_first_iteration = True
+
     while True:
         now_msk = datetime.now(ZoneInfo('Europe/Moscow'))
         hour = now_msk.hour
@@ -8238,9 +8253,13 @@ async def airports_data_updater():
 
         age_min = _data_file_age_minutes(FLIGHTS_DATA_FILE)
         at_scheduled_point = _is_at_or_past_a_target(now_msk)
+        is_stale_on_startup = is_first_iteration and (age_min is None or age_min > MIN_FRESH_AGE_MINUTES)
         # На плановой точке обновляем, даже если формально "свежо" (< MIN_FRESH_AGE_MINUTES) -
         # но НЕ повторяем, если уже обновлялись совсем недавно (< 2 мин) внутри этого же окна.
-        should_update = at_scheduled_point and (age_min is None or age_min > 2)
+        # На старте бота ДОПОЛНИТЕЛЬНО обновляем внепланово, если данные устарели -
+        # не ждём следующую плановую точку (см. комментарий выше).
+        should_update = (at_scheduled_point or is_stale_on_startup) and (age_min is None or age_min > 2)
+        is_first_iteration = False
 
         if not should_update:
             sleep_min = _minutes_until_next_target(now_msk)
@@ -8251,7 +8270,7 @@ async def airports_data_updater():
             await asyncio.sleep(sleep_min * 60 + 30)
             continue
 
-        reason = "полуночное окно снятия блокировки ключа" if (hour == 0) else ('ночь' if is_night else 'день')
+        reason = "рестарт бота - данные устарели" if is_stale_on_startup and not at_scheduled_point else ("полуночное окно снятия блокировки ключа" if (hour == 0) else ('ночь' if is_night else 'день'))
         for attempt in range(1, RETRY_MAX_ATTEMPTS + 1):
             success = False
             status = None
