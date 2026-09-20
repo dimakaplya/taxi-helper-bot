@@ -45,8 +45,21 @@ import json
 import time
 import logging
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import requests
+
+# ИСПРАВЛЕНО 21.09.2026 (баг найден пользователем - "0 рейсов по всем
+# аэропортам ночью, хотя дневной лимит запросов чистый"): get_today_usage()
+# ниже считала "сегодня" через datetime.now() БЕЗ часового пояса - на
+# Railway контейнер живёт в UTC, а не в московском времени. С полуночи до
+# 3 часов ночи по Москве (21:00-00:00 UTC) datetime.now() в UTC всё ещё
+# показывает ВЧЕРАШНЮЮ дату - и именно эта "вчерашняя" дата уходила в
+# Yandex Rasp API как параметр 'date' запроса расписания. Yandex честно
+# отвечал "0 рейсов" - не потому что рейсов нет, а потому что запрашивали
+# уже полностью прошедшие сутки. Теперь дата считается явно по московскому
+# времени (аэропорты бота все в РФ, отдельный часовой пояс на аэропорт не нужен).
+MSK_TZ = ZoneInfo('Europe/Moscow')
 
 from config_loader import get_all_airports
 
@@ -117,7 +130,7 @@ def save_usage_log(log):
 
 
 def get_today_usage(log):
-    today = datetime.now().strftime('%Y-%m-%d')
+    today = datetime.now(MSK_TZ).strftime('%Y-%m-%d')
     return today, log.get(today, 0)
 
 # Список 14 аэропортов бота (IATA/ICAO коды + yandex_code станции) теперь
@@ -550,7 +563,7 @@ def main():
     new_total_today = used_today + REQUEST_COUNT
     usage_log[today] = new_total_today
     # чистим записи старше недели, чтобы файл не рос бесконечно
-    cutoff = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
+    cutoff = (datetime.now(MSK_TZ) - timedelta(days=7)).strftime('%Y-%m-%d')
     usage_log = {d: v for d, v in usage_log.items() if d >= cutoff}
     save_usage_log(usage_log)
 
