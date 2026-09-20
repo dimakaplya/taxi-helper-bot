@@ -3271,21 +3271,11 @@ def format_where_to_go_text(city, category, candidates):
 
 _where_to_go_in_progress = set()  # user_id-ы, для которых сейчас уже считается сводка
 
-@router.message(lambda message: message.text == "💰 КУДА ЕХАТЬ ➡️")
-async def show_where_to_go(message: types.Message):
-    user_id = message.from_user.id
-    state = user_state.get(user_id, {})
-    city = state.get('city')
-    category = state.get('category')
-    if not city:
-        await message.answer("Сначала выбери город 🏙")
-        return
-    if category in CATEGORIES_WITHOUT_AIRPORTS:
-        # Кнопка и так скрыта для этих категорий (courier_module_keyboard),
-        # но хендлер матчится по тексту - на случай, если сообщение пришло
-        # откуда-то ещё (например, старая клавиатура в чате).
-        await message.answer("Этот раздел пока доступен только для Такси и Ultima.")
-        return
+async def send_where_to_go(message: types.Message, user_id, city, category):
+    """Общая логика сводки "Куда ехать" - вынесена из show_where_to_go, чтобы
+    её же можно было вызвать программно сразу после начала смены (по просьбе
+    пользователя, 20.09.2026), а не только по нажатию кнопки "💰 КУДА ЕХАТЬ".
+    Не делает проверок города/категории - это ответственность вызывающего."""
     # Защита от повторного нажатия, пока предыдущий запрос ещё считается
     # (баг 19.09.2026: двойной тап запускал два параллельных расчёта -
     # SingleMessageMiddleware удалял статус-сообщение ПЕРВОГО запроса при
@@ -3318,6 +3308,23 @@ async def show_where_to_go(message: types.Message):
             await message.answer(text, parse_mode='Markdown')
     finally:
         _where_to_go_in_progress.discard(user_id)
+
+@router.message(lambda message: message.text == "💰 КУДА ЕХАТЬ ➡️")
+async def show_where_to_go(message: types.Message):
+    user_id = message.from_user.id
+    state = user_state.get(user_id, {})
+    city = state.get('city')
+    category = state.get('category')
+    if not city:
+        await message.answer("Сначала выбери город 🏙")
+        return
+    if category in CATEGORIES_WITHOUT_AIRPORTS:
+        # Кнопка и так скрыта для этих категорий (courier_module_keyboard),
+        # но хендлер матчится по тексту - на случай, если сообщение пришло
+        # откуда-то ещё (например, старая клавиатура в чате).
+        await message.answer("Этот раздел пока доступен только для Такси и Ultima.")
+        return
+    await send_where_to_go(message, user_id, city, category)
 
 @router.message(lambda message: message.text == "⚙️ Настройки")
 async def show_notification_settings(message: types.Message):
@@ -3420,6 +3427,58 @@ def km_counter_ping(user_id, lat, lon):
     shift['last_lon'] = lon
     state['shift'] = shift
 
+SHIFT_LONG_WARNING_HOURS = 12  # после скольких часов за рулём слать предупреждающий пуш (по просьбе пользователя, 20.09.2026)
+SHIFT_LONG_WARNING_CHECK_MINUTES = 10  # как часто фоновая задача проверяет длительность активных смен
+
+async def check_long_shifts():
+    """Фоновая задача (см. asyncio.create_task в main()) - раз в
+    SHIFT_LONG_WARNING_CHECK_MINUTES проверяет всех водителей с активной
+    сменой (is_shift_active) и, если смена идёт дольше
+    SHIFT_LONG_WARNING_HOURS часов, шлёт предупреждающий пуш ОДИН РАЗ за
+    смену (флаг state['shift']['warned_12h'] - сбрасывается сам собой, т.к.
+    finish_shift целиком удаляет state['shift']). Берём срез user_state
+    (list(...)), как и другие фоновые рассылки в файле - список не должен
+    "плыть" по ходу итерации."""
+    while True:
+        try:
+            await asyncio.sleep(SHIFT_LONG_WARNING_CHECK_MINUTES * 60)
+            if not bot:
+                continue
+            now = datetime.now(timezone.utc)
+            for user_id, state in list(user_state.items()):
+                if not isinstance(state, dict):
+                    continue
+                shift = state.get('shift')
+                if not shift or shift.get('warned_12h'):
+                    continue
+                try:
+                    started_at = datetime.fromisoformat(shift['started_at'])
+                except Exception:
+                    continue
+                elapsed_hours = (now - started_at).total_seconds() / 3600
+                if elapsed_hours < SHIFT_LONG_WARNING_HOURS:
+                    continue
+                try:
+                    await bot.send_message(
+                        user_id,
+                        f"⚠️ *Ты за рулём уже больше {SHIFT_LONG_WARNING_HOURS} часов подряд!*\n\n"
+                        "Долгая смена без отдыха повышает риск аварии - сделай перерыв, "
+                        "если получится.\n\n"
+                        "Завершить смену можно кнопкой «⏹ ЗАВЕРШИТЬ СМЕНУ» в главном меню.",
+                        parse_mode='Markdown',
+                    )
+                except Exception as e:
+                    logger.error(f"❌ Не удалось отправить пуш о долгой смене пользователю {user_id}: {e}")
+                # Ставим флаг независимо от успеха отправки - иначе при
+                # временной ошибке Telegram будем долбить пуш каждую
+                # проверку до конца смены.
+                shift = dict(state.get('shift') or {})
+                if shift:
+                    shift['warned_12h'] = True
+                    state['shift'] = shift
+        except Exception as e:
+            logger.error(f"❌ Ошибка в check_long_shifts: {e}")
+
 def finish_shift(user_id):
     """Останавливает смену, возвращает (duration_minutes, total_km) и
     сохраняет запись в БД (save_shift_record) - вызывается из finish_shift_button
@@ -3443,6 +3502,17 @@ def format_shift_duration(minutes):
         return f"{hours} ч"
     return f"{mins} мин"
 
+RU_WEEKDAYS = ('понедельник', 'вторник', 'среда', 'четверг', 'пятница', 'суббота', 'воскресенье')
+
+def format_shift_start_label(started_at):
+    """"20:14, суббота" - для сообщения о начале смены (по просьбе
+    пользователя, 20.09.2026). started_at - datetime в UTC (как хранится в
+    state['shift']['started_at']) - переводим в московское время (UTC+3) для
+    показа, т.к. весь бот ориентирован на российских водителей."""
+    local = started_at + timedelta(hours=3)
+    weekday = RU_WEEKDAYS[local.weekday()]
+    return f"{local.strftime('%H:%M')}, {weekday}"
+
 @router.message(lambda message: message.text in ("✅ НАЧАТЬ СМЕНУ", "⏹ ЗАВЕРШИТЬ СМЕНУ"))
 async def toggle_shift(message: types.Message):
     """Одна кнопка-переключатель наверху главного меню (выше "💰 КУДА ЕХАТЬ",
@@ -3460,14 +3530,22 @@ async def toggle_shift(message: types.Message):
         if is_shift_active(state):
             return  # защитный случай - кнопка не должна была показать "Начать", если смена уже идёт
         start_shift(user_id)
+        started_at = datetime.fromisoformat(user_state[user_id]['shift']['started_at'])
         await message.answer(
             "✅ *СМЕНА НАЧАТА!*\n\n"
+            f"🕐 Начало: {format_shift_start_label(started_at)}\n\n"
             "Чтобы считался километраж: скрепка 📎 → Геопозиция → "
             "*«Транслировать геопозицию»* → выбирай *«Пока не отключу»*.\n\n"
             "Без трансляции секундомер идёт как обычно, но км не посчитаются.",
             reply_markup=services_keyboard(category, city, user_id),
             parse_mode='Markdown',
         )
+        # По просьбе пользователя (20.09.2026): сразу после начала смены
+        # автоматически присылаем сводку "Куда ехать" - не нужно нажимать
+        # кнопку отдельно. Доступно только для категорий с аэропортами (как
+        # и сама кнопка "💰 КУДА ЕХАТЬ ➡️" - см. services_keyboard).
+        if category not in CATEGORIES_WITHOUT_AIRPORTS:
+            await send_where_to_go(message, user_id, city, category)
         return
 
     if not is_shift_active(state):
@@ -3838,6 +3916,97 @@ async def show_shift_stats(callback_query: types.CallbackQuery):
         agg = by_day[d]
         label = "Сегодня" if d == today_str else d
         lines.append(f"{label}: {format_shift_duration(agg['minutes'])}, {agg['km']:.0f} км")
+
+    text = '\n'.join(lines)
+    if len(text) > 4000:
+        text = text[:4000] + "…"
+    await callback_query.message.answer(
+        text,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="📊 По дням недели / неделям / месяцам", callback_data="show_shift_breakdown"),
+        ]]),
+        parse_mode='Markdown',
+    )
+
+@router.callback_query(lambda c: c.data == "show_shift_breakdown")
+async def show_shift_breakdown(callback_query: types.CallbackQuery):
+    """Разбивка статистики смен (по просьбе пользователя, 20.09.2026):
+    - по дням недели (понедельник..воскресенье) - суммарно за все 6 месяцев,
+      чтобы видеть, какие дни недели самые "рабочие"/прибыльные;
+    - по неделям (последние 8 недель, начало недели - понедельник);
+    - по месяцам (последние 6 календарных месяцев).
+    Отдельная кнопка под "📈 Статистика смен", чтобы не перегружать основной
+    экран - он уже показывает итоги за 7/30/180 дней и последние дни."""
+    await callback_query.answer()
+    user_id = callback_query.from_user.id
+    rows = get_shift_history(user_id)  # [(shift_date, duration_minutes, km), ...] за 6 месяцев
+
+    if not rows:
+        await callback_query.message.answer(
+            "📊 Пока нет ни одной завершённой смены - начни смену кнопкой «✅ НАЧАТЬ СМЕНУ» в главном меню.",
+        )
+        return
+
+    by_day = {}
+    for shift_date, duration_minutes, km in rows:
+        agg = by_day.setdefault(shift_date, {'minutes': 0, 'km': 0.0})
+        agg['minutes'] += duration_minutes
+        agg['km'] += km
+
+    # --- По дням недели ---
+    by_weekday = {i: {'minutes': 0, 'km': 0.0, 'days': 0} for i in range(7)}
+    for d, agg in by_day.items():
+        wd = datetime.fromisoformat(d).weekday()
+        by_weekday[wd]['minutes'] += agg['minutes']
+        by_weekday[wd]['km'] += agg['km']
+        by_weekday[wd]['days'] += 1
+
+    lines = ["📊 *Статистика по дням недели, неделям и месяцам*", "", "*По дням недели (за 6 мес.):*"]
+    for wd in range(7):
+        agg = by_weekday[wd]
+        if agg['days'] == 0:
+            continue
+        avg_minutes = round(agg['minutes'] / agg['days'])
+        lines.append(
+            f"{RU_WEEKDAYS[wd].capitalize()}: {format_shift_duration(agg['minutes'])}, {agg['km']:.0f} км "
+            f"({agg['days']} см., в среднем {format_shift_duration(avg_minutes)})"
+        )
+
+    # --- По неделям (последние 8, начиная с текущей) ---
+    def week_start(date_obj):
+        return date_obj - timedelta(days=date_obj.weekday())
+
+    by_week = {}
+    for d, agg in by_day.items():
+        ws = week_start(datetime.fromisoformat(d).date())
+        wk = by_week.setdefault(ws, {'minutes': 0, 'km': 0.0})
+        wk['minutes'] += agg['minutes']
+        wk['km'] += agg['km']
+    weeks_sorted = sorted(by_week.keys(), reverse=True)[:8]
+
+    lines.append("")
+    lines.append("*По неделям (последние 8):*")
+    for ws in weeks_sorted:
+        agg = by_week[ws]
+        we = ws + timedelta(days=6)
+        lines.append(f"{ws.strftime('%d.%m')}–{we.strftime('%d.%m')}: {format_shift_duration(agg['minutes'])}, {agg['km']:.0f} км")
+
+    # --- По месяцам (последние 6 календарных) ---
+    RU_MONTHS = ('января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря')
+    by_month = {}
+    for d, agg in by_day.items():
+        date_obj = datetime.fromisoformat(d).date()
+        mk = (date_obj.year, date_obj.month)
+        m = by_month.setdefault(mk, {'minutes': 0, 'km': 0.0})
+        m['minutes'] += agg['minutes']
+        m['km'] += agg['km']
+    months_sorted = sorted(by_month.keys(), reverse=True)[:6]
+
+    lines.append("")
+    lines.append("*По месяцам:*")
+    for (year, month) in months_sorted:
+        agg = by_month[(year, month)]
+        lines.append(f"{RU_MONTHS[month - 1].capitalize()}: {format_shift_duration(agg['minutes'])}, {agg['km']:.0f} км")
 
     text = '\n'.join(lines)
     if len(text) > 4000:
@@ -6123,6 +6292,7 @@ async def main():
     asyncio.create_task(holiday_checker())
     asyncio.create_task(airport_queue_checker())
     asyncio.create_task(peak_hour_alert_checker())
+    asyncio.create_task(check_long_shifts())
     # allowed_updates передаём ЯВНО (а не полагаемся на автоматическое
     # dp.resolve_used_update_types()) - похоже, это и была причина, почему
     # пуши "Очередь у аэропорта" не приходили: Telegram Bot API запоминает
