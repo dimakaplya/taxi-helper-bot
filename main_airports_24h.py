@@ -4190,6 +4190,17 @@ async def score_city_candidate(city, category=None):
             bonus = weight * 8  # вес 1-8 -> бонус 8-64 баллов
             score += bonus
             reasons.append(f"{emoji} осадки сейчас - спрос выше обычного")
+        else:
+            # ДОБАВЛЕНО 21.09.2026 по просьбе пользователя - если осадков
+            # сейчас нет, но по почасовому прогнозу они начнутся в пределах
+            # RAIN_LEAD_MINUTES (тот же порог, что у упреждающих пушей
+            # push_rain_alert), даём водителю подъехать заранее: бонус
+            # поменьше, чем за уже идущие осадки (вес 1-8 -> 4-32 балла).
+            upcoming = find_upcoming_precip_event(forecast)
+            if upcoming and upcoming['hour_offset'] > 0:
+                bonus = upcoming['weight'] * 4
+                score += bonus
+                reasons.append(f"{upcoming['emoji']} скоро осадки - спрос скоро вырастет")
 
     advice = get_city_advice(city, level, category=category)
     return {'label': 'Город / центр', 'score': score, 'reasons': reasons, 'closed': False, 'advice': advice}
