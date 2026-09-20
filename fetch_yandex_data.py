@@ -555,6 +555,29 @@ def main():
         consecutive_failures = 0
         arrivals_today = parse_flights(raw_schedule, 'arrival')
 
+        # ДОБАВЛЕНО 21.09.2026 (прямая просьба пользователя - "пусть и старые,
+        # но данные, лучше чем ничего"): раньше "прошлые данные вместо нулей"
+        # подставлялись ТОЛЬКО когда запрос к API явно провалился
+        # (raw_schedule is None, см. блок выше). Но бывает и другой случай -
+        # API ответил УСПЕШНО, без ошибки, но с пустым списком рейсов (даже
+        # после починки бага с часовым поясом 20-21.09.2026 такое возможно:
+        # временный сбой на стороне Яндекса, редкий пустой ответ и т.п.). Раньше
+        # это тихо затирало предыдущие хорошие данные нулями. Теперь, если
+        # СВЕЖИЙ ответ пуст, а с прошлого запуска остались непустые данные по
+        # этому же аэропорту - оставляем старые данные (drivers видят цифры,
+        # пусть и не совсем свежие, вместо голого "0 рейсов").
+        if not arrivals_today:
+            prev_airport = (previous_result or {}).get('airports', {}).get(icao)
+            if prev_airport and prev_airport.get('arrivals'):
+                result['airports'][icao] = prev_airport
+                logger.warning(
+                    f"⚠️ {name}: свежий ответ API пуст (0 рейсов) - оставляю предыдущие "
+                    f"{len(prev_airport['arrivals'])} прилётов (устарели с "
+                    f"{previous_result.get('generated_at', '?')}) вместо нулей"
+                )
+                time.sleep(2.0)
+                continue
+
         result['airports'][icao] = {
             'iata': iata,
             'arrivals': arrivals_today,

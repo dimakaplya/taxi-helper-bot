@@ -1559,17 +1559,19 @@ def get_airport_flights(airport_icao):
         return []
 
 def get_load_emoji(load_percent):
-    if load_percent <= 50: return '🔴'
-    elif load_percent <= 70: return '🟡'
-    elif load_percent <= 100: return '🟢'
+    # Пороги ИЗМЕНЕНЫ 21.09.2026 по просьбе пользователя (было 0-50/51-70/71-100/>100)
+    if load_percent <= 25: return '🔴'
+    elif load_percent <= 50: return '🟡'
+    elif load_percent <= 85: return '🟢'
     else: return '🟣'
 
 def get_load_recommendation(load_percent):
     # Формулировки статусов - по просьбе пользователя (было
-    # "НЕ ЕХАТЬ/ЗАНЯТЬ ОЧЕРЕДЬ/ЕХАТЬ/СРОЧНО"), пороги загрузки не менялись.
-    if load_percent <= 50: return 'Не ехать'
-    elif load_percent <= 70: return 'Уточни очередь'
-    elif load_percent <= 100: return 'Занимай очередь'
+    # "НЕ ЕХАТЬ/ЗАНЯТЬ ОЧЕРЕДЬ/ЕХАТЬ/СРОЧНО"). Пороги загрузки ИЗМЕНЕНЫ
+    # 21.09.2026 (было 0-50/51-70/71-100/>100) на 0-25/26-50/51-85/>85.
+    if load_percent <= 25: return 'Не ехать'
+    elif load_percent <= 50: return 'Уточни очередь'
+    elif load_percent <= 85: return 'Занимай очередь'
     else: return 'Срочно ехать'
 
 # Для вокзалов - ПО ПРОСЬБЕ ПОЛЬЗОВАТЕЛЯ упрощённая БИНАРНАЯ индикация вместо
@@ -2143,7 +2145,7 @@ def cleanup_old_high_demand_alerts():
 
 def was_green_demand_alert_sent(icao, relevant_class, target_date, target_hour):
     """Тот же дедуп-паттерн, что was_high_demand_alert_sent, но отдельная
-    таблица для зелёного уровня (71-100%, "Занимай очередь") - чтобы не
+    таблица для зелёного уровня (51-85%, "Занимай очередь") - чтобы не
     конфликтовать с дедупом фиолетового уровня по тому же (icao,
     relevant_class, дата, час): это разные пуши с разными условиями и должны
     дедуплицироваться независимо."""
@@ -5651,12 +5653,12 @@ def map_webapp_html():
       airportMarkers = [];
       data.airports.forEach(a => {{
         // ИЗМЕНЕНО 21.09.2026 (прямая просьба пользователя): при высоком
-        // спросе (загрузка >100% - тот же порог 🟣, что и в get_load_emoji
+        // спросе (загрузка >85% - тот же порог 🟣, что и в get_load_emoji
         // на сервере) рисуем вокруг аэропорта круг радиусом 3км, полупрозрачную
         // фиолетовую заливку - чтобы было видно ИЗДАЛЕКА на карте, не только
         // при клике на маркер. HIGH_DEMAND_LOAD_THRESHOLD держим в синхроне
-        // с порогом >100 в get_load_emoji(main.py).
-        const HIGH_DEMAND_LOAD_THRESHOLD = 100;
+        // с порогом >85 в get_load_emoji(main.py) - изменено 21.09.2026 (было 100).
+        const HIGH_DEMAND_LOAD_THRESHOLD = 85;
         const HIGH_DEMAND_RADIUS_METERS = 3000;
         if (a.load !== null && a.load !== undefined && a.load > HIGH_DEMAND_LOAD_THRESHOLD) {{
           const circle = L.circle([a.lat, a.lon], {{
@@ -7507,7 +7509,7 @@ async def show_airport_details(callback_query: types.CallbackQuery):
             text += f"   🛫 По терминалам: {' | '.join(zone_parts)}\n"
         text += "\n"
 
-    text += "_🔴0-50% Не ехать | 🟡51-70% Уточни очередь | 🟢71-100% Занимай очередь | 🟣>100% Срочно ехать_"
+    text += "_🔴0-25% Не ехать | 🟡26-50% Уточни очередь | 🟢51-85% Занимай очередь | 🟣>85% Срочно ехать_"
     keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="airport_arrivals")]])
     await msg.edit_text(text, reply_markup=keyboard, parse_mode='Markdown')
     await callback_query.answer()
@@ -10086,11 +10088,11 @@ async def notify_airport_status_changes():
                 await push_airport_status_change(icao, airport, old_status, new_status, notice)
 
 HIGH_DEMAND_LEAD_HOURS = 2
-# По просьбе пользователя пуш шлётся не на разовый скачок >100% в один
+# По просьбе пользователя пуш шлётся не на разовый скачок >85% в один
 # конкретный час, а только на УСТОЙЧИВУЮ перегрузку - подряд идущие часы с
 # прогнозом выше порога. HIGH_DEMAND_STREAK_HOURS=2 - именно "2 часа подряд".
 HIGH_DEMAND_STREAK_HOURS = 2
-HIGH_DEMAND_THRESHOLD = 100
+HIGH_DEMAND_THRESHOLD = 85  # ИЗМЕНЕНО 21.09.2026 (было 100, см. get_load_emoji)
 HIGH_DEMAND_CHECK_INTERVAL_MINUTES = 15
 # Обратное к CATEGORY_TO_CLASS, но только категории с доступом к аэропортам -
 # Курьер/Грузовое такси используют relevant_class='total' и в этот пуш не попадают.
@@ -10098,7 +10100,7 @@ RELEVANT_CLASS_TO_CATEGORY = {'economy': 'taxi', 'business': 'ultima'}
 
 async def push_high_demand_alert(icao, airport, relevant_class, hour_from, hour_to, target_date, loads):
     """Рассылает заблаговременный пуш о повышенном спросе: прогноз загрузки
-    прилётов через HIGH_DEMAND_LEAD_HOURS часа даёт фиолетовый уровень (>100%,
+    прилётов через HIGH_DEMAND_LEAD_HOURS часа даёт фиолетовый уровень (>85%,
     "СРОЧНО") НЕ на один час, а на HIGH_DEMAND_STREAK_HOURS часов ПОДРЯД
     (hour_from..hour_to включительно) - устойчивая перегрузка, а не разовый
     скачок. Получают только водители категории, которой соответствует
@@ -10149,7 +10151,7 @@ async def push_high_demand_alert(icao, airport, relevant_class, hour_from, hour_
 async def check_high_demand_alerts():
     """Проверяет прогноз загрузки прилётов для каждого (аэропорт, релевантный
     класс) на предмет УСТОЙЧИВОЙ перегрузки - HIGH_DEMAND_STREAK_HOURS часов
-    ПОДРЯД с прогнозом >100% (фиолетовый уровень), а не разовый скачок в
+    ПОДРЯД с прогнозом >85% (фиолетовый уровень), а не разовый скачок в
     один час. Окно начинается через HIGH_DEMAND_LEAD_HOURS часа от текущего
     момента (т.е. пуш - это предупреждение ЗА HIGH_DEMAND_LEAD_HOURS часа ДО
     начала этих HIGH_DEMAND_STREAK_HOURS часов перегрузки, по просьбе
@@ -10188,7 +10190,7 @@ async def high_demand_alert_checker():
     """Фоновая задача: раз в HIGH_DEMAND_CHECK_INTERVAL_MINUTES минут проверяет
     прогноз спроса на прилёты и заранее (за HIGH_DEMAND_LEAD_HOURS часа) шлёт
     пуш водителям, если ожидается HIGH_DEMAND_STREAK_HOURS часов ПОДРЯД
-    фиолетового уровня (>100%) - устойчивая перегрузка, а не разовый скачок."""
+    фиолетового уровня (>85%) - устойчивая перегрузка, а не разовый скачок."""
     while True:
         try:
             await check_high_demand_alerts()
@@ -10196,20 +10198,20 @@ async def high_demand_alert_checker():
             logger.error(f"❌ Ошибка фоновой проверки повышенного спроса: {e}")
         await asyncio.sleep(HIGH_DEMAND_CHECK_INTERVAL_MINUTES * 60)
 
-# ==================== ПУШ О ЗЕЛЁНОМ УРОВНЕ СПРОСА (71-100%) ====================
-# По просьбе пользователя - отдельный пуш для зелёного уровня (🟢 71-100%,
-# "Занимай очередь"), не только для фиолетового (>100%, "Срочно ехать").
+# ==================== ПУШ О ЗЕЛЁНОМ УРОВНЕ СПРОСА (51-85%) ====================
+# По просьбе пользователя - отдельный пуш для зелёного уровня (🟢 51-85%,
+# "Занимай очередь"), не только для фиолетового (>85%, "Срочно ехать").
 # Текст и тон специально другие - зелёный это НЕ срочность, а "имеет смысл
 # подъехать и встать в очередь заранее", отдельная от фиолетового формулировка.
 GREEN_DEMAND_LEAD_HOURS = 2
 # По условию пользователя - "3 часа подряд" (не 2, как у фиолетового уровня).
 GREEN_DEMAND_STREAK_HOURS = 3
-GREEN_DEMAND_THRESHOLD_LOW = 70   # нижняя граница зелёного (см. get_load_emoji)
-GREEN_DEMAND_THRESHOLD_HIGH = 100  # верхняя граница - выше уже фиолетовый, это отдельный пуш
+GREEN_DEMAND_THRESHOLD_LOW = 50   # нижняя граница зелёного (см. get_load_emoji) - ИЗМЕНЕНО 21.09.2026 (было 70)
+GREEN_DEMAND_THRESHOLD_HIGH = 85  # верхняя граница - выше уже фиолетовый, это отдельный пуш - ИЗМЕНЕНО 21.09.2026 (было 100)
 GREEN_DEMAND_CHECK_INTERVAL_MINUTES = 15
 
 async def push_green_demand_alert(icao, airport, relevant_class, hour_from, hour_to, target_date, loads):
-    """Пуш о зелёном уровне спроса (71-100%, "Занимай очередь") -
+    """Пуш о зелёном уровне спроса (51-85%, "Занимай очередь") -
     GREEN_DEMAND_STREAK_HOURS часов подряд в этом диапазоне. Отдельная от
     push_high_demand_alert формулировка: без "СРОЧНО", тон - "стоит подъехать
     заранее и занять очередь", а не "аврал"."""
@@ -10224,7 +10226,7 @@ async def push_green_demand_alert(icao, airport, relevant_class, hour_from, hour
         f"🟢 *{airport['emoji']} {airport['name']}*\n\n"
         f"Через {GREEN_DEMAND_LEAD_HOURS} часа (~{hour_from:02d}:00-{hour_to_end:02d}:00) ожидается "
         f"*повышенный спрос* на прилёты ({class_name}) - "
-        f"{GREEN_DEMAND_STREAK_HOURS} часа подряд прогноз загрузки 71-100% ({loads_str}). "
+        f"{GREEN_DEMAND_STREAK_HOURS} часа подряд прогноз загрузки 51-85% ({loads_str}). "
         f"*Занимай очередь* заранее - к началу окна освободится место."
     )
 
@@ -10254,7 +10256,7 @@ async def push_green_demand_alert(icao, airport, relevant_class, hour_from, hour
 
 async def check_green_demand_alerts():
     """Тот же принцип, что check_high_demand_alerts, но для зелёного уровня
-    (71-100%, GREEN_DEMAND_STREAK_HOURS=3 часа подряд) с отдельным дедупом,
+    (51-85%, GREEN_DEMAND_STREAK_HOURS=3 часа подряд) с отдельным дедупом,
     чтобы не пересекаться с фиолетовым пушем по тому же слоту."""
     cleanup_old_green_demand_alerts()
     for icao, airport in ICAO_TO_AIRPORT.items():
@@ -10270,7 +10272,7 @@ async def check_green_demand_alerts():
                 logger.error(f"❌ Не удалось посчитать прогноз зелёного спроса {icao}/{relevant_class}: {e}")
                 continue
             loads = [s[0] for s in streak]
-            # Все часы окна должны быть строго в зелёном диапазоне (71-100%) -
+            # Все часы окна должны быть строго в зелёном диапазоне (51-85%) -
             # если хоть один час выходит за пределы (ниже 71% или выше 100%,
             # т.е. уже фиолетовый уровень), это не устойчивый зелёный период.
             if any(load <= GREEN_DEMAND_THRESHOLD_LOW or load > GREEN_DEMAND_THRESHOLD_HIGH for load in loads):
@@ -10285,7 +10287,7 @@ async def check_green_demand_alerts():
 
 async def green_demand_alert_checker():
     """Фоновая задача: раз в GREEN_DEMAND_CHECK_INTERVAL_MINUTES минут проверяет
-    прогноз на зелёный уровень спроса (71-100%, 3 часа подряд) и шлёт пуш
+    прогноз на зелёный уровень спроса (51-85%, 3 часа подряд) и шлёт пуш
     заранее, отдельно от фиолетового high_demand_alert_checker."""
     while True:
         try:

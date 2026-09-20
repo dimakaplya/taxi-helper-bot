@@ -389,6 +389,23 @@ def main():
 
         consecutive_failures = 0
         arrivals = parse_trains(raw_schedule)
+
+        # ДОБАВЛЕНО 21.09.2026 (та же правка, что в fetch_yandex_data.py -
+        # прямая просьба пользователя "пусть и старые, но данные лучше чем
+        # ничего"): если API ответил успешно, но пустым списком - оставляем
+        # прошлые непустые данные вместо того, чтобы затирать их нулями.
+        if not arrivals:
+            prev_station = (previous_result or {}).get('stations', {}).get(code)
+            if prev_station and prev_station.get('arrivals'):
+                result['stations'][code] = prev_station
+                logger.warning(
+                    f"⚠️ {name}: свежий ответ API пуст (0 прибытий) - оставляю предыдущие "
+                    f"{len(prev_station['arrivals'])} прибытий (устарели с "
+                    f"{previous_result.get('generated_at', '?')}) вместо нулей"
+                )
+                time.sleep(2.0)
+                continue
+
         result['stations'][code] = {
             'name': name,
             'arrivals': arrivals,
