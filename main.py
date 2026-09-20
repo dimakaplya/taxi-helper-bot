@@ -2091,7 +2091,22 @@ def format_airport_local_time(utc_timestamp_str, airport_icao):
     except Exception:
         return utc_timestamp_str
 
-def queue_submit_report(user_id, city, airport_icao, category, range_str):
+def _queue_airport_key(airport_icao, zone_key=None):
+    """Ключ аэропорта в таблице queue - обычно просто icao, но для
+    аэропортов с терминальными зонами (сейчас только Шереметьево/UUEE, см.
+    AIRPORT_TERMINAL_ZONES) с суффиксом "#zone_key" - ИСПРАВЛЕНО 20.09.2026
+    (по просьбе пользователя, вслед за разведением B/C и D на разные точки
+    на карте): раньше отметки очереди у обеих терминальных зон писались под
+    одним и тем же icao=UUEE и физически не различались - водитель,
+    стоящий у Терминала D, видел (и портил) общую очередь Терминала B/C, и
+    наоборот. Схема БД не менялась (колонка airport как была TEXT) - просто
+    для зональных аэропортов туда пишется составной ключ. Старые
+    отметки без суффикса (до этого фикса) просто перестают совпадать с
+    новыми зональными запросами и угасают сами по TTL (QUEUE_ENTRY_TTL_MINUTES) -
+    отдельная миграция не нужна."""
+    return f"{airport_icao}#{zone_key}" if zone_key else airport_icao
+
+def queue_submit_report(user_id, city, airport_icao, category, range_str, zone_key=None):
     """Сохраняет отметку водителя о длине очереди. Это не "встать в очередь" -
     просто разовый отчёт "я сейчас вижу вот столько машин", поэтому старые
     отметки не удаляются при новой - копится история, из которой потом берём
@@ -2101,12 +2116,13 @@ def queue_submit_report(user_id, city, airport_icao, category, range_str):
     cursor = conn.cursor()
     cursor.execute(
         'INSERT INTO queue (user_id, city, airport, tariff, position_range, timestamp) VALUES (?, ?, ?, ?, ?, ?)',
-        (user_id, city, airport_icao, category, range_str, datetime.now(ZoneInfo('UTC')).strftime('%Y-%m-%d %H:%M:%S'))
+        (user_id, city, _queue_airport_key(airport_icao, zone_key), category, range_str,
+         datetime.now(ZoneInfo('UTC')).strftime('%Y-%m-%d %H:%M:%S'))
     )
     conn.commit()
     conn.close()
 
-def queue_latest_report(city, airport_icao, category):
+def queue_latest_report(city, airport_icao, category, zone_key=None):
     """Последняя свежая отметка водителя (за QUEUE_ENTRY_TTL_MINUTES) - без
     усреднения, просто тот диапазон, который отметил последний водитель.
     Возвращает (range_str, timestamp) или (None, None), если свежих отметок нет."""
@@ -2117,13 +2133,13 @@ def queue_latest_report(city, airport_icao, category):
     cursor.execute(
         'SELECT position_range, timestamp FROM queue WHERE city = ? AND airport = ? AND tariff = ? AND timestamp >= ? '
         'ORDER BY timestamp DESC LIMIT 1',
-        (city, airport_icao, category, cutoff)
+        (city, _queue_airport_key(airport_icao, zone_key), category, cutoff)
     )
     row = cursor.fetchone()
     conn.close()
     return row if row else (None, None)
 
-def queue_latest_report_for_category(city, airport_icao, category):
+def queue_latest_report_for_category(city, airport_icao, category, zone_key=None):
     """Как queue_latest_report, но БЕЗ привязки к конкретному тарифу - берёт
     самую свежую отметку любого водителя данной КАТЕГОРИИ (такси/Ultima/...)
     на аэропорту, независимо от того, какой именно тариф он указал
@@ -2134,11 +2150,12 @@ def queue_latest_report_for_category(city, airport_icao, category):
     conn = get_db_connection()
     cursor = conn.cursor()
     cutoff = (datetime.now(ZoneInfo('UTC')) - timedelta(minutes=QUEUE_ENTRY_TTL_MINUTES)).strftime('%Y-%m-%d %H:%M:%S')
+    airport_key = _queue_airport_key(airport_icao, zone_key)
     cursor.execute(
         'SELECT position_range, timestamp FROM queue WHERE city = ? AND airport = ? '
         'AND (tariff = ? OR tariff LIKE ?) AND timestamp >= ? '
         'ORDER BY timestamp DESC LIMIT 1',
-        (city, airport_icao, category, f'{category}:%', cutoff)
+        (city, airport_key, category, f'{category}:%', cutoff)
     )
     row = cursor.fetchone()
     conn.close()
@@ -3634,7 +3651,7 @@ async def score_airport_candidate(city, airport, category):
     class_keys = {category} | {f"{category}:{t}" for t in tariffs}
     worst_range = None
     for class_key in class_keys:
-        range_str, _ts = queue_latest_report(city, icao, class_key)
+        range_str, _ts = queue_latest_report(city, icao, class_key, zone_key=zone_key)
         if range_str in WHERE_TO_GO_QUEUE_LONG_RANGES:
             worst_range = range_str
             break
@@ -4632,16 +4649,17 @@ async def toggle_airport_queue_tracking(message: types.Message):
     enable_airport_queue_tracking(user_id)
     await message.answer(airport_queue_enable_text(), reply_markup=courier_module_keyboard(category), parse_mode='Markdown')
 
-def airport_queue_bonus_line(user_id, icao):
+def airport_queue_bonus_line(user_id, icao, zone_key=None):
     """Необязательная строка-бонус в пуше - последняя САМООТЧЁТНАЯ отметка
     длины очереди от других водителей (см. queue_latest_report/"🚗 Занять
     очередь" - уже существующая, отдельная от геолокации фича). Если свежей
     отметки нет или класс не совпал - просто не добавляем строку, ничего не
-    ломается."""
+    ломается. zone_key - см. _queue_airport_key (чтобы бонус у Шереметьево
+    брался именно из очереди своего терминала, а не соседнего)."""
     city = ICAO_TO_CITY.get(icao)
     if not city:
         return ""
-    range_str, ts = queue_latest_report(city, icao, queue_class_key(user_id))
+    range_str, ts = queue_latest_report(city, icao, queue_class_key(user_id), zone_key=zone_key)
     if not range_str:
         return ""
     local_time = format_airport_local_time(ts, icao)
@@ -4707,7 +4725,7 @@ async def send_airport_queue_push(user_id, icao, kind, dist_km=None, zone_label=
     if not airport:
         return
     text = format_airport_queue_push(kind, airport, dist_km if dist_km is not None else 0, zone_label)
-    text += airport_queue_bonus_line(user_id, icao)
+    text += airport_queue_bonus_line(user_id, icao, zone_key)
     reply_markup = None
     target = find_airport_queue_join_target(icao, zone_key)
     if target:
@@ -5434,7 +5452,20 @@ async def handle_map_airports_api(request):
     try:
         for airport in AIRPORTS_INFO.get(city, []):
             icao = airport['icao']
-            coords = AIRPORT_COORDS.get(icao)
+            zone_key = airport.get('zone_key')
+            # ИСПРАВЛЕНО 20.09.2026 (жалоба пользователя - на карте Шереметьево
+            # B/C и D были одной точкой вместо двух): раньше тут всегда брались
+            # координаты AIRPORT_COORDS[icao] - усреднённая точка ВСЕГО
+            # аэропорта, одна и та же для обеих терминальных записей (у
+            # Шереметьево zone_key='bc' и zone_key='d' имеют одинаковый icao
+            # UUEE, см. AIRPORT_TERMINAL_ZONES) - поэтому оба маркера
+            # накладывались друг на друга и выглядели как один. Теперь, если у
+            # записи есть zone_key, берём координаты именно этой зоны (те же,
+            # что уже используются для "Очередь у аэропорта" - см.
+            # nearest_airport_zone) - маркеры расходятся по факту на карте, как
+            # и сами терминалы физически разнесены.
+            zone_coords = AIRPORT_TERMINAL_ZONES.get(icao, {}).get(zone_key, {}).get('coords') if zone_key else None
+            coords = zone_coords or AIRPORT_COORDS.get(icao)
             if not coords:
                 continue
             entry = {
@@ -5457,7 +5488,7 @@ async def handle_map_airports_api(request):
                     entry['load'] = None
             queue = {}
             for category in MAP_AIRPORT_QUEUE_CATEGORIES:
-                range_str, ts = queue_latest_report_for_category(city, icao, category)
+                range_str, ts = queue_latest_report_for_category(city, icao, category, zone_key=zone_key)
                 if range_str:
                     queue[category] = {'range': range_str, 'local_time': format_airport_local_time(ts, icao)}
             entry['queue'] = queue
@@ -6940,7 +6971,7 @@ async def show_airport_details(callback_query: types.CallbackQuery):
     # разделе "📋 Очередь" - см. format_queue_breakdown) - по просьбе
     # пользователя показываем прямо в окне "Прилёты", а не только отдельным
     # пунктом меню.
-    text += format_queue_breakdown(city, airport['icao'], category)
+    text += format_queue_breakdown(city, airport['icao'], category, zone_key=airport.get('zone_key'))
     text += "\n\n*📊 ПРОГНОЗ ЗАГРУЖЕННОСТИ АЭРОПОРТА (текущее время +8 часов):*\n\n"
     current_hour = now.hour
     for hour_offset in range(8):
@@ -7449,7 +7480,7 @@ async def submit_range(callback_query: types.CallbackQuery):
     current_tariff = tariffs[idx]
     category = user_state[user_id]['category']
     class_key = f"{category}:{current_tariff}" if current_tariff else category
-    queue_submit_report(user_id, city, airport['icao'], class_key, range_str)
+    queue_submit_report(user_id, city, airport['icao'], class_key, range_str, zone_key=airport.get('zone_key'))
     progress['results'][current_tariff or category] = range_str
 
     if idx + 1 < len(tariffs):
@@ -7494,7 +7525,7 @@ async def view_queue(callback_query: types.CallbackQuery):
     airport_idx = int(airport_idx_str)
     airport = AIRPORTS_INFO[city][airport_idx]
 
-    range_str, ts = queue_latest_report(city, airport['icao'], queue_class_key(user_id))
+    range_str, ts = queue_latest_report(city, airport['icao'], queue_class_key(user_id), zone_key=airport.get('zone_key'))
 
     text = (
         f"📋 *Очередь*\n\n"
@@ -7624,17 +7655,41 @@ async def trains_data_updater():
                 logger.error(f"❌ Ошибка фонового обновления trains_data.json: {e}")
         await asyncio.sleep(TRAINS_UPDATE_INTERVAL_HOURS * 3600)
 
-def format_queue_breakdown(city, icao, category):
+def format_queue_breakdown(city, icao, category, zone_key=None):
     """Блок с текущей очередью ДЛЯ КОНКРЕТНОЙ категории водителя - только его
     собственные тарифы: Такси видит Эконом/Комфорт/Комфорт+/Минивэн, Ultima -
     свои Business/Premier/Elite/Cruise. Категории без тарифов (Курьер/Грузовое
-    такси) сюда вообще не попадают - у них нет доступа к аэропортам."""
+    такси) сюда вообще не попадают - у них нет доступа к аэропортам.
+
+    zone_key=None у аэропорта БЕЗ терминальных зон - обычная сводка по всему
+    аэропорту, как раньше. zone_key=None у аэропорта С зонами (сейчас только
+    Шереметьево/UUEE, см. AIRPORT_TERMINAL_ZONES) - ИСПРАВЛЕНО 20.09.2026
+    (вслед за разведением очереди по терминалам, см. _queue_airport_key):
+    раньше в этом случае queue_latest_report искал отметку под "голым" icao,
+    который с этого дня уже ничего не находит (отметки пишутся с суффиксом
+    терминала) - сводка молча показывала бы "нет свежих отметок" даже при
+    реальной очереди. Теперь вместо этого показываем очередь ПО КАЖДОЙ зоне
+    отдельно, с подписью терминала - для мест, где неизвестен конкретный
+    терминал водителя (например, общий пуш о смене статуса всего аэропорта)."""
     tariffs = CATEGORIES.get(category, {}).get('tariffs', [])
     if not tariffs:
         return ''
+    zones = AIRPORT_TERMINAL_ZONES.get(icao)
+    if zones and not zone_key:
+        lines = [f"\n\n📋 *Очередь ({CATEGORIES[category]['name']}):*"]
+        for zk, zdata in zones.items():
+            lines.append(f"  *{zdata['label']}:*")
+            for tariff in tariffs:
+                range_str, ts = queue_latest_report(city, icao, f"{category}:{tariff}", zone_key=zk)
+                if range_str:
+                    local_time = format_airport_local_time(ts, icao)
+                    lines.append(f"   • {tariff}: *{range_str}* машин _(отметка {local_time})_")
+                else:
+                    lines.append(f"   • {tariff}: нет свежих отметок")
+        return '\n'.join(lines)
     lines = [f"\n\n📋 *Очередь ({CATEGORIES[category]['name']}):*"]
     for tariff in tariffs:
-        range_str, ts = queue_latest_report(city, icao, f"{category}:{tariff}")
+        range_str, ts = queue_latest_report(city, icao, f"{category}:{tariff}", zone_key=zone_key)
         if range_str:
             local_time = format_airport_local_time(ts, icao)
             lines.append(f"   • {tariff}: *{range_str}* машин _(отметка {local_time})_")
