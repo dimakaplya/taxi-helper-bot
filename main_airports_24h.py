@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 from math import radians, sin, cos, asin, sqrt
 from aiogram import Bot, Dispatcher, Router, types, BaseMiddleware
 from aiogram.filters import Command
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo, FSInputFile
 from aiogram.client.session.middlewares.base import BaseRequestMiddleware
 from aiogram.methods import SendMessage, TelegramMethod
 from aiogram.methods.base import TelegramType
@@ -313,10 +313,13 @@ def notifications_enabled(state, notif_key):
 # ==================== ОЧЕРЕДЬ У АЭРОПОРТА (гео) ====================
 # Идея пользователя: водитель/курьер включает в Telegram трансляцию живой
 # геопозиции, бот сам считает расстояние до ближайшего аэропорта
-# (nearest_airport(), см. haversine_km) и присылает 4 пуша за поездку:
-# вход в AIRPORT_QUEUE_RADIUS_OUTER_KM, вход в AIRPORT_QUEUE_RADIUS_INNER_KM,
-# и дальше "уже N минут рядом" на каждой отметке из AIRPORT_QUEUE_TIME_PUSHES_MIN
-# - помогает не терять счёт времени в очереди на посадку у аэропорта.
+# (nearest_airport(), см. haversine_km) и присылает пуш за каждый уровень
+# расстояния из AIRPORT_QUEUE_RADIUS_LEVELS_KM (по убыванию), а дальше
+# "уже N минут рядом" на каждой отметке из AIRPORT_QUEUE_TIME_PUSHES_MIN
+# - помогает не терять счёт времени в очереди на посадку у аэропорта. Любой
+# из этих пушей можно заглушить на AIRPORT_QUEUE_SNOOZE_MINUTES кнопкой
+# "🙅 Не буду вставать в очередь" (см. handle_airport_queue_snooze) - для
+# водителя, который едет с заказом и не планирует вставать в очередь.
 # Включается/выключается кнопкой "📍 Очередь у аэропорта" в Инструментах
 # водителя (обычный toggle) - НЕ добавлена в NOTIFICATION_TYPES/notif_prefs,
 # потому что сам факт включения трансляции уже и есть согласие на эти пуши;
@@ -326,14 +329,32 @@ def notifications_enabled(state, notif_key):
 # есть персистентность (см. PersistentUserDict выше), дублировать её в SQL
 # нет смысла. См. process_airport_queue_ping/check_airport_queue_timers ниже
 # (рядом с push_airport_status_change).
-AIRPORT_QUEUE_RADIUS_OUTER_KM = 3.0
-AIRPORT_QUEUE_RADIUS_INNER_KM = 1.5
-AIRPORT_QUEUE_TIME_PUSHES_MIN = (30, 60)  # "уже 30 минут рядом" / "уже 1 час рядом"
-# Как часто (минуты) фоновый чекер досылает пуши по времени - основные 2
-# пуша (3км/1.5км) шлются сразу по факту нового пинга геопозиции, а эти два
-# идут по прошедшему времени, поэтому нужен отдельный фоновый прогон (см.
-# airport_queue_checker) - иначе они бы не пришли, если юзер просто стоит на
-# месте и новых пингов долго нет.
+# ИЗМЕНЕНО 21.09.2026 (прямая просьба пользователя, уточнена в тот же день -
+# "убери 3 км, оставь только 2/1/500м"): раньше было всего два уровня по
+# расстоянию (3км/1.5км), затем ТРИ - 2км/1км/500м - чтобы водитель получал
+# более частые и точные ориентиры по мере приближения к аэропорту. Список
+# ОБЯЗАТЕЛЬНО по убыванию - код в process_airport_queue_ping идёт по нему
+# по порядку и шлёт пуш за каждый
+# впервые пройденный уровень.
+AIRPORT_QUEUE_RADIUS_LEVELS_KM = [2.0, 1.0, 0.5]
+# Пользователь также попросил убрать пуш "уже 1 час рядом" и пуш "уже 15
+# минут рядом" (последнего на самом деле и не было - только 30/60), оставив
+# ТОЛЬКО "уже 30 минут рядом" - это финальное ненавязчивое напоминание,
+# после которого новых пушей по времени больше не будет (пока не сменится
+# аэропорт/зона или не начнётся новый заход в радиус).
+AIRPORT_QUEUE_TIME_PUSHES_MIN = (30,)  # "уже 30 минут рядом"
+# ДОБАВЛЕНО 21.09.2026 (прямая просьба пользователя): кнопка "🙅 Не буду
+# вставать в очередь" на пуше очереди - водитель едет с заказом/не
+# планирует вставать в очередь этого аэропорта. Снимает ВСЕ пуши очереди
+# (по расстоянию и по времени) для этого аэропорта/зоны на
+# AIRPORT_QUEUE_SNOOZE_MINUTES минут - см. process_airport_queue_ping/
+# check_airport_queue_timers ('is_snoozed') и handle_airport_queue_snooze.
+AIRPORT_QUEUE_SNOOZE_MINUTES = 30
+# Как часто (минуты) фоновый чекер досылает пуши по времени - пуши по
+# расстоянию (AIRPORT_QUEUE_RADIUS_LEVELS_KM) шлются сразу по факту нового
+# пинга геопозиции, а этот идёт по прошедшему времени, поэтому нужен
+# отдельный фоновый прогон (см. airport_queue_checker) - иначе он бы не
+# пришёл, если юзер просто стоит на месте и новых пингов долго нет.
 AIRPORT_QUEUE_CHECK_INTERVAL_MINUTES = 5
 # Инструкция рекомендует делиться геопозицией «Пока не отключу» (бессрочно) -
 # так трансляция не обрывается сама, водителю не нужно вспоминать её включить
@@ -809,6 +830,52 @@ def load_all_user_states():
         logger.info(f"✅ Восстановлено состояние {restored} пользователей из БД")
     except Exception as e:
         logger.error(f"❌ Не удалось восстановить состояния пользователей: {e}")
+
+# ИСПРАВЛЕНО 21.09.2026 (баг найден пользователем - после каждого редеплоя
+# на Railway бот перезапускается, а очередь "последних 2 сообщений"
+# (_recent_bot_message_ids, см. SingleMessageMiddleware ниже) раньше жила
+# ТОЛЬКО в памяти процесса - после рестарта она обнулялась, и все старые
+# сообщения, отправленные ДО рестарта, переставали быть кому-либо известны
+# и никогда не удалялись, из-за чего в чате копилась куча сообщений вместо
+# 2. Теперь очередь дублируется в БД (recent_bot_messages, см. init_db) при
+# каждом изменении и восстанавливается при старте - аналогично user_states/
+# load_all_user_states выше.
+def save_recent_bot_message(chat_id, message_id):
+    try:
+        init_db()
+        conn = get_db_connection()
+        conn.execute('INSERT INTO recent_bot_messages (chat_id, message_id) VALUES (?, ?)', (chat_id, message_id))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"❌ Не удалось сохранить id сообщения в очередь чата {chat_id}: {e}")
+
+def delete_recent_bot_message_row(chat_id, message_id):
+    try:
+        init_db()
+        conn = get_db_connection()
+        conn.execute('DELETE FROM recent_bot_messages WHERE chat_id = ? AND message_id = ?', (chat_id, message_id))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"❌ Не удалось убрать id сообщения из очереди чата {chat_id}: {e}")
+
+def load_all_recent_bot_messages():
+    """Восстанавливает _recent_bot_message_ids из БД при старте бота - без
+    этого после каждого редеплоя старые сообщения, отправленные в прошлых
+    запусках, навсегда "зависали" бы в чатах (см. комментарий выше)."""
+    try:
+        init_db()
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT chat_id, message_id FROM recent_bot_messages ORDER BY id ASC')
+        rows = cursor.fetchall()
+        conn.close()
+        for chat_id, message_id in rows:
+            _recent_bot_message_ids.setdefault(chat_id, []).append(message_id)
+        logger.info(f"✅ Восстановлена очередь последних сообщений для {len(_recent_bot_message_ids)} чатов из БД")
+    except Exception as e:
+        logger.error(f"❌ Не удалось восстановить очередь последних сообщений: {e}")
 
 user_state = PersistentUserStateStore()
 
@@ -1529,6 +1596,15 @@ def init_db():
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS recent_bot_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER NOT NULL,
+            message_id INTEGER NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_recent_bot_messages_chat ON recent_bot_messages (chat_id, id)')
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS airport_statuses (
             icao TEXT PRIMARY KEY,
@@ -2331,9 +2407,11 @@ class SingleMessageMiddleware(BaseRequestMiddleware):
                 else:
                     queue = _recent_bot_message_ids.setdefault(chat_id, [])
                     queue.append(result.message_id)
+                    save_recent_bot_message(chat_id, result.message_id)
                     # Удаляем всё, что выпало за пределы последних KEEP_LAST_N_MESSAGES
                     while len(queue) > KEEP_LAST_N_MESSAGES:
                         old_id = queue.pop(0)
+                        delete_recent_bot_message_row(chat_id, old_id)
                         try:
                             await bot_instance.delete_message(chat_id=chat_id, message_id=old_id)
                         except Exception:
@@ -3204,6 +3282,62 @@ def parse_decimal(text):
     except ValueError:
         return None
 
+# ПРИВЕТСТВЕННЫЙ ПИТЧ + ЗАПРОС ГЕОЛОКАЦИИ (добавлено 20.09.2026 по просьбе
+# пользователя) - отправляется ОДИН РАЗ самому новому пользователю, сразу
+# после самого первого /start, до экрана выбора города: сначала картинка с
+# "продающим" описанием бота (первое сообщение), затем вторым сообщением -
+# объяснение, зачем нужна геолокация "Всегда" и как её включить на
+# iPhone/Android. Повторные /start и клик по кнопке "🏙 Выбор города" этот
+# питч больше не показывают - см. проверку user_id not in user_state в
+# обработчике start().
+WELCOME_PHOTO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'assets', 'welcome.jpg')
+
+WELCOME_PITCH_TEXT = (
+    "🚀 *TAXI HELPER* — твой личный штурман по городу\n\n"
+    "Мы знаем, где сейчас выгоднее всего работать. Прямо сейчас, в реальном времени.\n\n"
+    "✈️ Загрузка аэропортов и вокзалов — сколько рейсов, сколько пассажиров, где скоро будет очередь из заказов\n"
+    "🚗 Умная очередь у терминалов — встал один раз и забыл, бот сам подскажет момент\n"
+    "⛔ Дорожные события — перекрытия и аварии на карте, чтобы не стоять в пробке зря\n"
+    "🗺️ Живая карта города — вся движуха в одном месте\n\n"
+    "Мы только в *бете* — и уже показываем то, что другим приложениям не под силу. "
+    "Дальше будет больше городов, больше данных и охват на всех водителей и курьеров страны 🔥\n\n"
+    "Присоединяйся сейчас — потом скажешь, что был с нами с самого начала 👇"
+)
+
+WELCOME_GEO_TEXT = (
+    "📍 *Включи геолокацию — и забудь об этом*\n\n"
+    "Чтобы бот подсказывал тебе актуальную загрузку и вовремя присылал пуши про очередь, "
+    "ему нужно знать, где ты находишься.\n\n"
+    "Как это работает:\n"
+    "• Мы передаём геолокацию только для расчёта расстояния до аэропорта/вокзала\n"
+    "• Данные никому не передаются — всё анонимно, третьим лицам не продаём и не показываем\n"
+    "• Настроил один раз на «Всегда» — и больше не вспоминаешь об этом\n\n"
+    "📱 *iPhone:*\n"
+    "Настройки → Конфиденциальность и безопасность → Службы геолокации → Taxi Helper → «Всегда»\n\n"
+    "🤖 *Android:*\n"
+    "Настройки → Приложения → Taxi Helper → Разрешения → Местоположение → «Разрешить всегда»\n\n"
+    "Это займёт 20 секунд, а дальше бот будет работать за тебя ⚡"
+)
+
+async def send_welcome_pitch(message: types.Message):
+    """Отправляет новому пользователю приветственный питч с картинкой, затем
+    отдельным сообщением - объяснение про геолокацию. Если файл картинки не
+    найден (например, ещё не закоммичен на Railway), не роняем /start -
+    просто шлём текст без фото."""
+    try:
+        if os.path.isfile(WELCOME_PHOTO_PATH):
+            await message.answer_photo(
+                FSInputFile(WELCOME_PHOTO_PATH),
+                caption=WELCOME_PITCH_TEXT,
+                parse_mode='Markdown'
+            )
+        else:
+            await message.answer(WELCOME_PITCH_TEXT, parse_mode='Markdown')
+    except Exception as e:
+        logger.error(f"❌ Не удалось отправить приветственную картинку: {e}")
+        await message.answer(WELCOME_PITCH_TEXT, parse_mode='Markdown')
+    await message.answer(WELCOME_GEO_TEXT, parse_mode='Markdown')
+
 async def send_start_screen(message: types.Message):
     """Общий код /start и кнопки "🏙 Выбор города" - сбрасывает весь user_state
     (включая любой незавершённый черновик заказа/расчёта) и возвращает на
@@ -3232,6 +3366,11 @@ async def start(message: types.Message):
     # ТОЛЬКО при первом /start с таким параметром у пользователя, у которого
     # ещё нет реферера - повторные переходы по чужим ссылкам ничего не
     # меняют.
+    # Приветственный питч + просьба включить геолокацию - только самому
+    # первому /start у пользователя (проверяем ДО send_start_screen, которая
+    # чистит user_state - иначе индикатор "новый ли это пользователь" был бы
+    # уже потерян).
+    is_new_user = message.from_user.id not in user_state
     parts = (message.text or '').split(maxsplit=1)
     if len(parts) == 2 and parts[1].startswith('ref_'):
         ref_code = parts[1][len('ref_'):]
@@ -3239,6 +3378,8 @@ async def start(message: types.Message):
             referrer_id = int(ref_code)
             if referrer_id != message.from_user.id:
                 register_referral(message.from_user.id, referrer_id)
+    if is_new_user:
+        await send_welcome_pitch(message)
     await send_start_screen(message)
 
 @router.message(lambda message: message.text == "🏙 Выбор города")
@@ -4743,8 +4884,10 @@ def airport_queue_enable_text():
         "выбирай *«Пока не отключу»* - трансляция не оборвётся сама, и ты не "
         "пропустишь уведомления. Если сама прервётся (например разрядится "
         "телефон) - напомню включить заново.\n\n"
-        "Дальше всё автоматически: как только окажешься в 3 км от аэропорта - пришлю пуш, "
-        "затем на 1.5 км, и потом ещё два - через 30 минут и через 1 час, если всё ещё рядом. "
+        "Дальше всё автоматически: пришлю пуш на 2 км от аэропорта, затем на 1 км и 500 м, "
+        "и ещё один - через 30 минут, если всё ещё рядом. "
+        "Если едешь с заказом и вставать в очередь не планируешь - на любом из этих пушей "
+        "есть кнопка «🙅 Не буду вставать в очередь», она отключит напоминания на 30 минут.\n\n"
         "Помогает не терять счёт времени в очереди на получение заказа.\n\n"
         "Чтобы остановить очередь - зайди в «⚙️ Настройки» и нажми «📍 Очередь у аэропорта» ещё раз."
     )
@@ -4809,18 +4952,21 @@ def format_airport_queue_push(kind, airport, dist_km, zone_label=None):
         # тем как подставить актуальный zone_label.
         base_name = re.sub(r'\s*\([^)]*\)\s*$', '', airport['name'])
         name = f"{airport['emoji']} {base_name} ({zone_label})"
+    # ИЗМЕНЕНО 21.09.2026 (прямая просьба пользователя, уточнена в тот же
+    # день): шкала расстояний теперь 2км/1км/500м (см.
+    # AIRPORT_QUEUE_RADIUS_LEVELS_KM) вместо прежних 3км/1.5км - 'enter_outer'
+    # остаётся первым (самым дальним) уровнем ради обратной совместимости
+    # имени, остальные - 'enter_level_N' по индексу в AIRPORT_QUEUE_RADIUS_LEVELS_KM.
     if kind == 'enter_outer':
-        return f"📍 Вы примерно в {dist_km:.1f} км от {name}.\n\nОтслеживаю время рядом - напомню на 1.5 км, а дальше через 30 минут и через час, если всё ещё будете рядом."
-    if kind == 'enter_inner':
-        return f"📍 Вы уже в {dist_km:.1f} км от {name} - почти на месте."
+        return f"📍 Вы примерно в {dist_km:.1f} км от {name}.\n\nОтслеживаю время рядом - напомню по мере приближения, а дальше через 30 минут, если всё ещё будете рядом."
+    if isinstance(kind, str) and kind.startswith('enter_level_'):
+        if dist_km < 1:
+            dist_label = f"{round(dist_km * 1000)} м"
+        else:
+            dist_label = f"{dist_km:.1f} км"
+        return f"📍 Вы уже в {dist_label} от {name} - почти на месте."
     if kind == 30:
         return f"⏱ Вы уже 30 минут рядом с {name}."
-    if kind == 60:
-        return (
-            f"⏱ Вы уже 1 час рядом с {name}.\n\n"
-            f"Если уже уехали - нажми «📍 Очередь у аэропорта» в Инструментах водителя ещё раз, "
-            f"чтобы остановить отслеживание и не получать лишних пушей."
-        )
     return ""
 
 def find_airport_queue_join_target(icao, zone_key=None):
@@ -4874,6 +5020,13 @@ async def send_airport_queue_push(user_id, icao, kind, dist_km=None, zone_label=
             keep_key = f"qkeep_{target_city}_{icao}_{zone_key or '-'}"
             buttons.append([InlineKeyboardButton(text="✅ Уже в очереди", callback_data=keep_key)])
         buttons.append([InlineKeyboardButton(text="🚗 Встать в очередь" if not own_marks else "🔄 Обновить очередь", callback_data=f"join_queue_{target_city}_{airport_idx}")])
+        # ДОБАВЛЕНО 21.09.2026 (прямая просьба пользователя): водитель может
+        # ехать с заказом/без намерения вставать в очередь этого аэропорта -
+        # кнопка снимает пуши очереди на AIRPORT_QUEUE_SNOOZE_MINUTES минут
+        # для ЭТОГО аэропорта/зоны, "чтобы человека лишний раз не тревожить".
+        # На ВСЕХ пушах очереди (по прямой просьбе пользователя), не только
+        # на первом.
+        buttons.append([InlineKeyboardButton(text="🙅 Не буду вставать в очередь", callback_data=f"aqsnooze_{icao}_{zone_key or '-'}")])
         reply_markup = InlineKeyboardMarkup(inline_keyboard=buttons)
     try:
         await bot.send_message(user_id, text, reply_markup=reply_markup, parse_mode='Markdown')
@@ -4907,9 +5060,9 @@ async def process_airport_queue_ping(user_id, lat, lon, live_period=None):
     последующие edited_message.location трансляции - см. хендлеры ниже) -
     считает расстояние до ближайшего аэропорта (и, для Шереметьево, до
     ближайшей терминальной зоны - см. nearest_airport_zone/
-    AIRPORT_TERMINAL_ZONES), шлёт пуш на вход в 3 км/1.5 км, обновляет
-    user_state[uid]['airport_queue'] для фонового чекера (30 мин/1 час -
-    см. check_airport_queue_timers)."""
+    AIRPORT_TERMINAL_ZONES), шлёт пуши по мере приближения (см.
+    AIRPORT_QUEUE_RADIUS_LEVELS_KM), обновляет user_state[uid]['airport_queue']
+    для фонового чекера (30 мин - см. check_airport_queue_timers)."""
     state = user_state.get(user_id)
     if not state or not state.get('airport_queue_active'):
         return
@@ -4922,6 +5075,21 @@ async def process_airport_queue_ping(user_id, lat, lon, live_period=None):
         return
     now = datetime.now(ZoneInfo('UTC'))
     aq = dict(state.get('airport_queue') or {})
+    # ДОБАВЛЕНО 21.09.2026 (прямая просьба пользователя - кнопка "не буду
+    # вставать в очередь" на пуше, "чтобы человека лишний раз не тревожить"):
+    # если водитель нажал эту кнопку для ТЕКУЩЕГО аэропорта/зоны недавно
+    # (см. AIRPORT_QUEUE_SNOOZE_MINUTES/handle_airport_queue_snooze) - не
+    # шлём никаких пушей вообще, пока snooze не истёк. Координаты/время
+    # последнего пинга (aq['last_update_at']) всё равно обновляются ниже -
+    # snooze не должен путать check_airport_queue_timers's "трансляция
+    # прервалась" со снятой отметкой "не хочу пушей".
+    snoozed_until_str = aq.get('snoozed_until')
+    is_snoozed = False
+    if snoozed_until_str and (aq.get('icao'), aq.get('zone_key')) == (icao, zone_key):
+        try:
+            is_snoozed = now < datetime.fromisoformat(snoozed_until_str)
+        except Exception:
+            is_snoozed = False
     # Смена АЭРОПОРТА или, для Шереметьево, смена ЗОНЫ (B <-> C <-> D,
     # это отдельные подъезды - водитель, переехавший из одной в другую,
     # по факту заново въезжает в радиус) - начинаем отслеживание с чистого
@@ -4929,19 +5097,40 @@ async def process_airport_queue_ping(user_id, lat, lon, live_period=None):
     # (icao, zone_key) для них эквивалентно старому сравнению icao.
     if (aq.get('icao'), aq.get('zone_key')) != (icao, zone_key):
         aq = {'icao': icao, 'zone_key': zone_key}
+        # Аэропорт/зона сменились - is_snoozed уже вычислен выше ДО этого
+        # сброса и относился к СТАРОЙ паре (icao, zone_key), поэтому здесь
+        # больше не действует (новый заход = новый снуз с нуля, если
+        # понадобится). Явно гасим, чтобы не унести устаревшее значение.
+        is_snoozed = False
     aq['last_update_at'] = now.isoformat()
     if live_period:
         aq['live_period'] = live_period
+    if snoozed_until_str:
+        aq['snoozed_until'] = snoozed_until_str  # переносим snooze дальше, пока не истёк (см. is_snoozed выше)
 
-    if dist_km <= AIRPORT_QUEUE_RADIUS_OUTER_KM:
+    if dist_km <= AIRPORT_QUEUE_RADIUS_LEVELS_KM[0]:
         if not aq.get('entered_outer_at'):
+            # Первый вход в САМЫЙ ШИРОКИЙ радиус - как и раньше, начало
+            # отсчёта для таймера "уже 30 минут рядом" (см. check_airport_queue_timers).
             aq['entered_outer_at'] = now.isoformat()
             aq['pushed_30'] = False
-            aq['pushed_60'] = False
-            await send_airport_queue_push(user_id, icao, 'enter_outer', dist_km, zone_label, zone_key)
-        if dist_km <= AIRPORT_QUEUE_RADIUS_INNER_KM and not aq.get('entered_inner_at'):
-            aq['entered_inner_at'] = now.isoformat()
-            await send_airport_queue_push(user_id, icao, 'enter_inner', dist_km, zone_label, zone_key)
+        # ИЗМЕНЕНО 21.09.2026: раньше было только 2 фиксированных уровня
+        # (outer/inner), теперь идём по AIRPORT_QUEUE_RADIUS_LEVELS_KM (3
+        # км/2км/1км/500м) по порядку - шлём пуш за каждый уровень, который
+        # водитель проходит ВПЕРВЫЕ за этот заход (entered_levels - список
+        # уже пройденных индексов уровня, чтобы не дублировать пуш при
+        # повторных пингах на том же расстоянии). Если сейчас snooze
+        # (водитель нажал "не буду вставать в очередь") - уровень всё равно
+        # ЗАПОМИНАЕМ как пройденный (чтобы после истечения snooze не
+        # засыпало пушами за все пропущенные уровни разом), но пуш НЕ шлём.
+        entered_levels = set(aq.get('entered_levels') or [])
+        for level_idx, level_km in enumerate(AIRPORT_QUEUE_RADIUS_LEVELS_KM):
+            if dist_km <= level_km and level_idx not in entered_levels:
+                entered_levels.add(level_idx)
+                if not is_snoozed:
+                    kind = 'enter_outer' if level_idx == 0 else f'enter_level_{level_idx}'
+                    await send_airport_queue_push(user_id, icao, kind, dist_km, zone_label, zone_key)
+        aq['entered_levels'] = sorted(entered_levels)
     else:
         # Вышел за пределы внешнего радиуса - сбрасываем: при возвращении
         # отсчёт (и пуши на вход/по времени) начнётся заново.
@@ -7819,6 +8008,48 @@ async def keep_queue_marks(callback_query: types.CallbackQuery):
     except Exception:
         pass
 
+@router.callback_query(lambda c: c.data.startswith('aqsnooze_'))
+async def handle_airport_queue_snooze(callback_query: types.CallbackQuery):
+    """Кнопка "🙅 Не буду вставать в очередь" на ЛЮБОМ пуше очереди у
+    аэропорта (см. send_airport_queue_push) - ДОБАВЛЕНО 21.09.2026 по
+    прямой просьбе пользователя: "допустим я еду с заказом... надо кнопку,
+    чтобы человека лишний раз не тревожить". Не останавливает само
+    отслеживание геопозиции (airport_queue_active остаётся включённым, счётчик
+    км смены и т.п. продолжают работать) - только ставит snooze на
+    AIRPORT_QUEUE_SNOOZE_MINUTES минут для ТЕКУЩЕГО аэропорта/зоны: пуши по
+    расстоянию (process_airport_queue_ping) и таймерный пуш 30 минут
+    (check_airport_queue_timers) не шлются, пока snooze не истечёт или пока
+    водитель не сменит аэропорт/зону (тогда начнётся новый заход с нуля,
+    без унаследованного snooze - см. process_airport_queue_ping)."""
+    user_id = callback_query.from_user.id
+    data = callback_query.data[len('aqsnooze_'):]
+    parts = data.split('_')
+    if len(parts) < 2:
+        await callback_query.answer("Ошибка!", show_alert=True)
+        return
+    icao, zone_raw = parts[0], '_'.join(parts[1:])
+    zone_key = None if zone_raw == '-' else zone_raw
+    state = user_state.get(user_id)
+    if not state:
+        await callback_query.answer("Начни заново с /start", show_alert=True)
+        return
+    aq = dict(state.get('airport_queue') or {})
+    now = datetime.now(ZoneInfo('UTC'))
+    if (aq.get('icao'), aq.get('zone_key')) == (icao, zone_key):
+        # Всё ещё у того же аэропорта/зоны, для которых пришёл этот пуш -
+        # ставим snooze поверх текущего состояния (entered_levels и т.п. не
+        # трогаем, они не должны сбрасываться этой кнопкой).
+        aq['snoozed_until'] = (now + timedelta(minutes=AIRPORT_QUEUE_SNOOZE_MINUTES)).isoformat()
+        state['airport_queue'] = aq
+    # Если аэропорт/зона УЖЕ сменились с момента отправки этого пуша (водитель
+    # уехал и подъехал к другому терминалу/аэропорту, пока пуш висел
+    # непрочитанным) - snooze ставить некуда и незачем, тихо игнорируем.
+    await callback_query.answer(f"Хорошо, не буду напоминать про очередь этого аэропорта ближайшие {AIRPORT_QUEUE_SNOOZE_MINUTES} минут 🙅")
+    try:
+        await callback_query.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
 @router.callback_query(lambda c: c.data.startswith('view_queue_'))
 async def view_queue(callback_query: types.CallbackQuery):
     user_id = callback_query.from_user.id
@@ -8611,16 +8842,29 @@ async def check_airport_queue_timers():
             if zone_data:
                 zone_label = zone_data['label']
 
+        # ДОБАВЛЕНО 21.09.2026: если водитель нажал "не буду вставать в
+        # очередь" для этого аэропорта/зоны и snooze ещё не истёк - не шлём
+        # и таймерный пуш 30 минут тоже (см. process_airport_queue_ping,
+        # тот же принцип). aq.get('pushed_30') при этом НЕ проставляем -
+        # чтобы пуш 30 минут всё-таки пришёл ПОСЛЕ истечения snooze, если
+        # 30 минут к тому моменту уже прошли.
+        snoozed_until_str = aq.get('snoozed_until')
+        is_snoozed = False
+        if snoozed_until_str:
+            try:
+                is_snoozed = now < datetime.fromisoformat(snoozed_until_str)
+            except Exception:
+                is_snoozed = False
+
         aq_updated = dict(aq)
         changed = False
-        pushed_30, pushed_60 = AIRPORT_QUEUE_TIME_PUSHES_MIN
-        if elapsed_minutes >= pushed_30 and not aq.get('pushed_30'):
+        # ИЗМЕНЕНО 21.09.2026 (прямая просьба пользователя): убран пуш "уже 1
+        # час рядом" - AIRPORT_QUEUE_TIME_PUSHES_MIN теперь содержит только
+        # 30 минут (см. константу выше), пуш 60 больше не шлётся.
+        (pushed_30,) = AIRPORT_QUEUE_TIME_PUSHES_MIN
+        if elapsed_minutes >= pushed_30 and not aq.get('pushed_30') and not is_snoozed:
             await send_airport_queue_push(user_id, icao, 30, zone_label=zone_label, zone_key=zone_key)
             aq_updated['pushed_30'] = True
-            changed = True
-        if elapsed_minutes >= pushed_60 and not aq.get('pushed_60'):
-            await send_airport_queue_push(user_id, icao, 60, zone_label=zone_label, zone_key=zone_key)
-            aq_updated['pushed_60'] = True
             changed = True
         if changed:
             state['airport_queue'] = aq_updated
@@ -8628,8 +8872,9 @@ async def check_airport_queue_timers():
 async def airport_queue_checker():
     """Фоновая задача: раз в AIRPORT_QUEUE_CHECK_INTERVAL_MINUTES минут
     проверяет таймеры "давно рядом с аэропортом" (см. check_airport_queue_timers)
-    - пуши на вход в 3 км/1.5 км шлются сразу по факту пинга геопозиции (см.
-    process_airport_queue_ping), эта задача только за пуши по времени."""
+    - пуши на вход в очередной уровень расстояния (см. AIRPORT_QUEUE_RADIUS_LEVELS_KM)
+    шлются сразу по факту пинга геопозиции (см. process_airport_queue_ping),
+    эта задача только за пуши по времени."""
     while True:
         try:
             await check_airport_queue_timers()
@@ -10148,6 +10393,20 @@ async def main():
     if not await initialize_bot():
         return
     load_all_user_states()
+    load_all_recent_bot_messages()
+    # На случай, если в БД скопилось больше KEEP_LAST_N_MESSAGES на чат
+    # (например, при смене этой константы, или если предыдущий процесс
+    # упал посреди записи) - подчищаем лишнее один раз при старте, теперь
+    # уже полноценно (bot к этому моменту уже инициализирован и может
+    # звать delete_message).
+    for _chat_id, _queue in list(_recent_bot_message_ids.items()):
+        while len(_queue) > KEEP_LAST_N_MESSAGES:
+            _old_id = _queue.pop(0)
+            delete_recent_bot_message_row(_chat_id, _old_id)
+            try:
+                await bot.delete_message(chat_id=_chat_id, message_id=_old_id)
+            except Exception:
+                pass
     # Пуш "бот обновился до новой версии" (по просьбе пользователя,
     # 20.09.2026) - проверяем ОДИН раз при старте, до старта polling, но
     # ПОСЛЕ load_all_user_states (нужен список известных user_id) - см.
