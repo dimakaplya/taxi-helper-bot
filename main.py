@@ -3744,7 +3744,22 @@ async def compute_where_to_go(city, category):
         candidates.extend(score_concert_event_candidates(city, category))
     except Exception:
         logger.exception(f"❌ Не удалось посчитать афишу для 'Куда ехать' ({city})")
-    candidates.append(await score_city_candidate(city))
+    # "Город/центр" тоже обёрнут в try/except (по факту повторной жалобы
+    # пользователя, 21.09.2026: ошибка "Не удалось посчитать варианты"
+    # продолжала стабильно повторяться для Такси Ultima в Москве даже
+    # ПОСЛЕ того как остальные источники выше уже были защищены - то есть
+    # реальная причина была именно здесь, в этом последнем, единственном
+    # НЕзащищённом вызове). Раньше комментарий говорил "последняя надежда,
+    # если и он упадёт - покажем общую ошибку" - но раз он падал каждый
+    # раз, лучше не ронять всю сводку, а просто остаться без карточки
+    # "Город/центр": compute_where_to_go в худшем случае вернёт кандидатов
+    # только из аэропортов/вокзалов/афиши (или вообще пустой список -
+    # format_where_to_go_text уже умеет корректно показать "нет данных" в
+    # этом случае, не падая).
+    try:
+        candidates.append(await score_city_candidate(city, category=category))
+    except Exception:
+        logger.exception(f"❌ Не удалось посчитать кандидата 'Город/центр' для 'Куда ехать' ({city}/{category})")
     candidates.sort(key=lambda c: c['score'], reverse=True)
     return candidates
 
