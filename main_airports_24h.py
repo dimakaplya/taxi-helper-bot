@@ -2198,11 +2198,13 @@ def services_keyboard(category=None, city=None, user_id=None):
     # файле: без него кнопка безопасно показывает "▶️ Начать смену" (тот же
     # эффект, как если бы смена не шла) - минорная неточность на редких
     # экранах, где именно этот вызов не передал user_id, а не падение.
+    # По просьбе пользователя (20.09.2026): "Начать смену" и "Куда ехать" -
+    # каждая на всю ширину, друг под другом (было в одном ряду) - крупнее и
+    # заметнее как самые важные кнопки главного меню.
     shift_active = is_shift_active(user_state.get(user_id, {})) if user_id is not None else False
-    top_row = []
-    top_row.append(KeyboardButton(text="⏹ ЗАВЕРШИТЬ СМЕНУ" if shift_active else "✅ НАЧАТЬ СМЕНУ"))
+    top_rows = [[KeyboardButton(text="⏹ ЗАВЕРШИТЬ СМЕНУ" if shift_active else "✅ НАЧАТЬ СМЕНУ")]]
     if category not in CATEGORIES_WITHOUT_AIRPORTS:
-        top_row.append(KeyboardButton(text="💰 КУДА ЕХАТЬ ➡️"))
+        top_rows.append([KeyboardButton(text="💰 КУДА ЕХАТЬ ➡️")])
 
     items = []
     if category in SHARED_ORDER_CATEGORIES:
@@ -2217,8 +2219,7 @@ def services_keyboard(category=None, city=None, user_id=None):
     items.append("⛔ Дорожные события")
 
     buttons = []
-    if top_row:
-        buttons.append(top_row)
+    buttons.extend(top_rows)
     buttons.extend(
         [KeyboardButton(text=t) for t in items[i:i + 2]]
         for i in range(0, len(items), 2)
@@ -3321,14 +3322,21 @@ def _where_to_go_score_bar(score):
     filled = min(5, max(0, round(score / 20)))
     return '●' * filled + '○' * (5 - filled)
 
-def format_where_to_go_text(city, category, candidates):
+def format_where_to_go_text(city, category, candidates, extra_header=None):
+    """extra_header - по просьбе пользователя (20.09.2026): позволяет
+    встроить сообщение "СМЕНА НАЧАТА" прямо в начало сводки "Куда ехать"
+    (см. toggle_shift), одним сообщением вместо двух отдельных."""
     city_name = CITY_DISPLAY_NAMES.get(city, city)
     now = get_city_now(city)
-    lines = [
+    lines = []
+    if extra_header:
+        lines.append(extra_header)
+        lines.append("━━━━━━━━━━━━━━━━━━")
+    lines.extend([
         f"🧭✨ *КУДА ЕХАТЬ — {city_name.upper()}*",
         f"_{now.strftime('%H:%M')}, {WEEKDAY_NAMES[now.weekday()]}_",
         "━━━━━━━━━━━━━━━━━━",
-    ]
+    ])
 
     open_candidates = [c for c in candidates if not c['closed']]
     if not open_candidates:
@@ -3385,11 +3393,14 @@ def format_where_to_go_text(city, category, candidates):
 
 _where_to_go_in_progress = set()  # user_id-ы, для которых сейчас уже считается сводка
 
-async def send_where_to_go(message: types.Message, user_id, city, category):
+async def send_where_to_go(message: types.Message, user_id, city, category, extra_header=None):
     """Общая логика сводки "Куда ехать" - вынесена из show_where_to_go, чтобы
     её же можно было вызвать программно сразу после начала смены (по просьбе
     пользователя, 20.09.2026), а не только по нажатию кнопки "💰 КУДА ЕХАТЬ".
-    Не делает проверок города/категории - это ответственность вызывающего."""
+    Не делает проверок города/категории - это ответственность вызывающего.
+    extra_header - см. format_where_to_go_text (встраивает "СМЕНА НАЧАТА" в
+    начало этого же сообщения, вместо отдельного - по просьбе пользователя,
+    20.09.2026)."""
     # Защита от повторного нажатия, пока предыдущий запрос ещё считается
     # (баг 19.09.2026: двойной тап запускал два параллельных расчёта -
     # SingleMessageMiddleware удалял статус-сообщение ПЕРВОГО запроса при
@@ -3407,13 +3418,16 @@ async def send_where_to_go(message: types.Message, user_id, city, category):
         except Exception as e:
             anim_task.cancel()
             logger.error(f"❌ Ошибка расчёта 'Куда ехать' для {city}/{category}: {e}")
+            fallback_text = "⚠️ Не удалось посчитать варианты. Попробуй ещё раз через минуту."
+            if extra_header:
+                fallback_text = f"{extra_header}\n━━━━━━━━━━━━━━━━━━\n{fallback_text}"
             try:
-                await status_msg.edit_text("⚠️ Не удалось посчитать варианты. Попробуй ещё раз через минуту.")
+                await status_msg.edit_text(fallback_text, parse_mode='Markdown' if extra_header else None)
             except Exception:
-                await message.answer("⚠️ Не удалось посчитать варианты. Попробуй ещё раз через минуту.")
+                await message.answer(fallback_text, parse_mode='Markdown' if extra_header else None)
             return
         anim_task.cancel()
-        text = format_where_to_go_text(city, category, candidates)
+        text = format_where_to_go_text(city, category, candidates, extra_header=extra_header)
         try:
             await status_msg.edit_text(text, parse_mode='Markdown')
         except Exception:
@@ -3659,21 +3673,25 @@ async def toggle_shift(message: types.Message):
             return  # защитный случай - кнопка не должна была показать "Начать", если смена уже идёт
         start_shift(user_id)
         started_at = datetime.fromisoformat(user_state[user_id]['shift']['started_at'])
-        await message.answer(
+        shift_header = (
             "✅ *СМЕНА НАЧАТА!*\n\n"
             f"🕐 Начало: {format_shift_start_label(started_at)}\n\n"
             "Чтобы считался километраж: скрепка 📎 → Геопозиция → "
             "*«Транслировать геопозицию»* → выбирай *«Пока не отключу»*.\n\n"
-            "Без трансляции секундомер идёт как обычно, но км не посчитаются.",
-            reply_markup=services_keyboard(category, city, user_id),
-            parse_mode='Markdown',
+            "Без трансляции секундомер идёт как обычно, но км не посчитаются."
         )
-        # По просьбе пользователя (20.09.2026): сразу после начала смены
-        # автоматически присылаем сводку "Куда ехать" - не нужно нажимать
-        # кнопку отдельно. Доступно только для категорий с аэропортами (как
-        # и сама кнопка "💰 КУДА ЕХАТЬ ➡️" - см. services_keyboard).
+        # По просьбе пользователя (20.09.2026): сообщение "СМЕНА НАЧАТА" и
+        # сводка "Куда ехать" - теперь ОДНО сообщение (раньше были два
+        # отдельных) - см. extra_header у send_where_to_go/
+        # format_where_to_go_text. Сначала обновляем клавиатуру коротким
+        # тех.сообщением (Reply-клавиатуру нельзя приложить к тому же
+        # сообщению, что инлайн-результат "Куда ехать"), доступно только для
+        # категорий с аэропортами (как и сама кнопка "💰 КУДА ЕХАТЬ ➡️").
         if category not in CATEGORIES_WITHOUT_AIRPORTS:
-            await send_where_to_go(message, user_id, city, category)
+            await message.answer("✅ Смена начата", reply_markup=services_keyboard(category, city, user_id))
+            await send_where_to_go(message, user_id, city, category, extra_header=shift_header)
+        else:
+            await message.answer(shift_header, reply_markup=services_keyboard(category, city, user_id), parse_mode='Markdown')
         return
 
     if not is_shift_active(state):
@@ -3893,6 +3911,65 @@ def _location_tracking_active(user_id):
     state = user_state.get(user_id, {})
     return bool(state.get('airport_queue_active') or is_shift_active(state))
 
+# Сколько минут последняя точка живой трансляции считается ещё актуальной
+# для разовых запросов (Мойки/Шиномонтаж/Туалеты/Парковка и т.п., см.
+# show_nearby_prompt) - если водитель уже транслирует геопозицию (см.
+# _location_tracking_active), не спрашиваем её заново, а берём последнюю
+# известную точку (по жалобе пользователя, 20.09.2026: "локация горит уже а
+# бот опять предлагает"). Если пинга давно не было (например, трансляция
+# зависла) - точка считается устаревшей, и бот всё-таки спросит заново.
+LIVE_LOCATION_FRESH_MINUTES = 10
+
+def remember_live_location(user_id, lat, lon):
+    state = user_state.get(user_id)
+    if state is None:
+        return
+    state['last_live_location'] = {
+        'lat': lat, 'lon': lon,
+        'updated_at': datetime.now(timezone.utc).isoformat(),
+    }
+
+def get_fresh_live_location(user_id):
+    """Возвращает (lat, lon) последней живой геопозиции, если она не старше
+    LIVE_LOCATION_FRESH_MINUTES - иначе None (пусть бот спросит как обычно).
+    Не требует, чтобы _location_tracking_active была True - трансляция могла
+    быть включена водителем самостоятельно, без кнопок бота (см.
+    handle_passive_live_location), и last_live_location всё равно свежая."""
+    state = user_state.get(user_id) or {}
+    loc = state.get('last_live_location')
+    if not loc:
+        return None
+    try:
+        updated_at = datetime.fromisoformat(loc['updated_at'])
+    except Exception:
+        return None
+    age_minutes = (datetime.now(timezone.utc) - updated_at).total_seconds() / 60
+    if age_minutes > LIVE_LOCATION_FRESH_MINUTES:
+        return None
+    return loc['lat'], loc['lon']
+
+@router.message(lambda message: getattr(message, 'location', None) is not None and not _location_tracking_active(message.from_user.id) and not user_state.get(message.from_user.id, {}).get('nearby_pending'))
+async def handle_passive_live_location(message: types.Message):
+    """По жалобе пользователя (20.09.2026): "сверху уже включен сбор
+    локации... а он опять запрашивает" - водитель мог включить трансляцию
+    живой геопозиции в Telegram САМ (не через кнопку бота "Очередь у
+    аэропорта"/"Начать смену"), и тогда ни одна из наших фич не активна
+    (_location_tracking_active=False), а значит наши хендлеры пингов вообще
+    не видят эту трансляцию. Этот пассивный хендлер просто запоминает
+    координаты (см. remember_live_location/get_fresh_live_location) на
+    случай, если дальше бот захочет предложить включить "Очередь у
+    аэропорта" или найти ближайшие точки - чтобы не спрашивать геопозицию
+    повторно, раз она и так уже транслируется. Ничего не отвечает - не хотим
+    присылать лишнее сообщение на каждый пинг трансляции, о которой бот
+    формально не просил."""
+    remember_live_location(message.from_user.id, message.location.latitude, message.location.longitude)
+
+@router.edited_message(lambda message: getattr(message, 'location', None) is not None and not _location_tracking_active(message.from_user.id))
+async def handle_passive_live_location_update(message: types.Message):
+    """Обновления той же самостоятельно включённой трансляции - см.
+    handle_passive_live_location."""
+    remember_live_location(message.from_user.id, message.location.latitude, message.location.longitude)
+
 @router.message(lambda message: getattr(message, 'location', None) is not None and _location_tracking_active(message.from_user.id) and not user_state.get(message.from_user.id, {}).get('nearby_pending'))
 async def handle_airport_queue_location(message: types.Message):
     """Срабатывает только на ПЕРВЫЙ пинг живой геопозиции (сама отправка -
@@ -3925,6 +4002,7 @@ async def handle_airport_queue_location(message: types.Message):
     lat, lon = message.location.latitude, message.location.longitude
     await process_airport_queue_ping(user_id, lat, lon, live_period=getattr(message.location, 'live_period', None))
     km_counter_ping(user_id, lat, lon)
+    remember_live_location(user_id, lat, lon)
     state = user_state.get(user_id) or {}
     if state.get('airport_queue_active') and is_shift_active(state):
         status_text = "📍 Геопозиция получена, слежу за очередью и считаю километраж смены."
@@ -3945,15 +4023,27 @@ async def handle_airport_queue_location_update(message: types.Message):
     lat, lon = message.location.latitude, message.location.longitude
     await process_airport_queue_ping(user_id, lat, lon, live_period=getattr(message.location, 'live_period', None))
     km_counter_ping(user_id, lat, lon)
+    remember_live_location(user_id, lat, lon)
 
 @router.message(lambda message: message.text in NEARBY_BUTTON_TO_KIND and user_state.get(message.from_user.id, {}).get('in_courier_module'))
 async def show_nearby_prompt(message: types.Message):
     """Нажатие на "🚻 Туалеты"/"🅿️ Парковка"/"🔧 Шиномонтаж"/
     "🚿 Мойки" - запрашивает у водителя геолокацию (кнопка request_location в
     nearby_location_keyboard). Сама выдача ближайших точек - в
-    handle_nearby_location ниже, после того как Telegram пришлёт location."""
+    handle_nearby_location ниже, после того как Telegram пришлёт location.
+
+    По просьбе пользователя (20.09.2026: "чтоб он тоже не запрашивал а брал
+    из данных трансляции") - если у водителя уже активна трансляция живой
+    геопозиции (очередь у аэропорта/смена) и последняя точка свежая (см.
+    get_fresh_live_location), сразу показываем результаты по ней, не спрашивая
+    геопозицию заново."""
     user_id = message.from_user.id
     kind = NEARBY_BUTTON_TO_KIND[message.text]
+    fresh = get_fresh_live_location(user_id)
+    if fresh:
+        lat, lon = fresh
+        await send_nearby_results(message, user_id, kind, lat, lon)
+        return
     user_state[user_id]['nearby_pending'] = kind
     cfg = NEARBY_SERVICES[kind]
     await message.answer(
@@ -3968,21 +4058,20 @@ async def cancel_nearby_prompt(message: types.Message):
     user_state[user_id].pop('nearby_pending', None)
     await message.answer("Отменено", reply_markup=courier_module_keyboard(category))
 
-@router.message(lambda message: getattr(message, 'location', None) is not None and user_state.get(message.from_user.id, {}).get('nearby_pending'))
-async def handle_nearby_location(message: types.Message):
-    """Водитель прислал геолокацию (кнопка "📍 Отправить геолокацию") после
-    show_nearby_prompt - считаем ближайшие NEARBY_RESULTS_COUNT точек по
-    прямой (haversine_km) и показываем список с кнопками "Поехали" (маршрут
-    в Яндекс Навигаторе на каждую). Reply-клавиатуру (нижнее меню) и инлайн-
-    кнопки результатов Telegram нельзя отправить одним сообщением - поэтому
-    два отдельных answer(): сначала возвращаем обычное меню инструментов,
-    потом отдельным сообщением - сам список с инлайн-кнопками."""
-    user_id = message.from_user.id
+async def send_nearby_results(message: types.Message, user_id, kind, lat, lon):
+    """Общая логика показа ближайших точек (Туалеты/Парковка/Шиномонтаж/
+    Мойки/...) - вынесена из handle_nearby_location, чтобы её же мог вызвать
+    show_nearby_prompt напрямую, если уже есть свежая живая геопозиция (см.
+    get_fresh_live_location), без запроса геолокации у водителя. Считает
+    ближайшие NEARBY_RESULTS_COUNT точек по прямой (haversine_km) и
+    показывает список с кнопками "Поехали" (маршрут в Яндекс Навигаторе на
+    каждую). Reply-клавиатуру (нижнее меню) и инлайн-кнопки результатов
+    Telegram нельзя отправить одним сообщением - поэтому два отдельных
+    answer(): сначала возвращаем обычное меню инструментов, потом отдельным
+    сообщением - сам список с инлайн-кнопками."""
     state = user_state[user_id]
-    kind = state.pop('nearby_pending')
     city = state.get('city')
     cfg = NEARBY_SERVICES[kind]
-    lat, lon = message.location.latitude, message.location.longitude
 
     scored = nearest_nearby_points(kind, city, lat, lon)
     if scored is None:
@@ -4013,6 +4102,16 @@ async def handle_nearby_location(message: types.Message):
         await message.answer(
             f"{cfg['emoji']} Не получилось показать список - попробуй ещё раз через минуту.",
         )
+
+@router.message(lambda message: getattr(message, 'location', None) is not None and user_state.get(message.from_user.id, {}).get('nearby_pending'))
+async def handle_nearby_location(message: types.Message):
+    """Водитель прислал геолокацию (кнопка "📍 Отправить геолокацию") после
+    show_nearby_prompt - см. send_nearby_results для самой логики показа."""
+    user_id = message.from_user.id
+    state = user_state[user_id]
+    kind = state.pop('nearby_pending')
+    lat, lon = message.location.latitude, message.location.longitude
+    await send_nearby_results(message, user_id, kind, lat, lon)
 
 @router.callback_query(lambda c: c.data == "show_shift_stats")
 async def show_shift_stats(callback_query: types.CallbackQuery):
@@ -4609,16 +4708,18 @@ async def select_category(message: types.Message):
     # сразу активирует отслеживание (enable_airport_queue_tracking) - см.
     # enable_airport_queue_now ниже.
     # Не предлагаем повторно, если трансляция живой геопозиции для этого
-    # пользователя УЖЕ активна (по жалобе пользователя, 20.09.2026: "сверху
-    # уже включен сбор локации... а он опять запрашивает") - Telegram
-    # позволяет транслировать только одну геопозицию за раз (см.
-    # _location_tracking_active), так что если уже включена "Очередь у
-    # аэропорта" или идёт смена (счётчик км тоже слушает ту же трансляцию) -
-    # предлагать "Включить сейчас" незачем, водитель и так уже транслирует.
+    # пользователя УЖЕ идёт (по жалобе пользователя, 20.09.2026: "сверху уже
+    # включен сбор локации... а он опять запрашивает") - проверяем не только
+    # свои флаги (_location_tracking_active), но и просто свежий пинг
+    # геопозиции (get_fresh_live_location), т.к. водитель мог включить
+    # трансляцию сам, ещё до выбора категории, без кнопок бота (см.
+    # handle_passive_live_location) - тогда наши фичи формально не активны,
+    # но Telegram уже шлёт пинги, и просить включить ещё раз незачем.
     if (
         selected_category
         and selected_category not in CATEGORIES_WITHOUT_AIRPORTS
         and not _location_tracking_active(user_id)
+        and not get_fresh_live_location(user_id)
     ):
         suggest_text = (
             "📍 Чтобы бот мог правильно показывать очередь у аэропорта, включи "
