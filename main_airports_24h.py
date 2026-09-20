@@ -6,10 +6,11 @@ import json
 import re
 import time
 import functools
+import hashlib
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from math import radians, sin, cos, asin, sqrt
-from aiogram import Bot, Dispatcher, Router, types
+from aiogram import Bot, Dispatcher, Router, types, BaseMiddleware
 from aiogram.filters import Command
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.client.session.middlewares.base import BaseRequestMiddleware
@@ -17,6 +18,7 @@ from aiogram.methods import SendMessage, TelegramMethod
 from aiogram.methods.base import TelegramType
 import os
 import aiohttp  # прямой запрос к Open-Meteo (публичный API без ключа) - см. блок "ДОЖДЬ" ниже
+from aiohttp import web  # лёгкий HTTP-сервер для приёма webhook об оплате подписки Tinkoff - см. блок "ПЛАТНАЯ ПОДПИСКА"
 
 import fetch_yandex_data  # логика похода в Yandex Rasp API, запускается фоново прямо на Railway
 import fetch_trains_data  # поезда дальнего следования (Казанский, Ленинградский) - тот же ключ и квота
@@ -1507,6 +1509,79 @@ def init_db():
             value TEXT
         )
     ''')
+    # Платная подписка (по просьбе пользователя, 20.09.2026: "сделай так
+    # чтобы бот был платный семь дней подписка будет бесплатно на восьмой
+    # день будет платная подписка в месяц она будет стоить 149 руб.") -
+    # trial_started_at ставится один раз при первом обращении пользователя
+    # к боту (см. ensure_subscription), paid_until - до какого момента
+    # (UTC, тот же формат '%Y-%m-%d %H:%M:%S', что и везде в файле) оплачен
+    # доступ, продлевается на 30 дней при каждом подтверждённом платеже
+    # Tinkoff. last_order_id - последний созданный, но необязательно ещё
+    # оплаченный заказ (для сверки в webhook).
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS subscriptions (
+            user_id INTEGER PRIMARY KEY,
+            trial_started_at DATETIME NOT NULL,
+            paid_until DATETIME,
+            last_order_id TEXT,
+            expired_notified INTEGER DEFAULT 0
+        )
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS subscription_payments (
+            order_id TEXT PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            amount_kopecks INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT 'NEW',
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            confirmed_at DATETIME
+        )
+    ''')
+    # Реферальная программа (по просьбе пользователя, 20.09.2026: "нужно
+    # будет продумать в основном меню реферальная программа кнопка...") -
+    # 2 уровня, привязка при первом /start?ref_<id> у НОВОГО пользователя
+    # (см. register_referral), не переписывается повторно. referred_by_level2
+    # считается ОДИН раз при регистрации (реферер реферера на тот момент) -
+    # не пересчитывается задним числом, если у реферера потом поменяется его
+    # собственный referred_by (в этой реализации referred_by у пользователя
+    # и так не меняется после первой привязки).
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS referrals (
+            user_id INTEGER PRIMARY KEY,
+            referred_by INTEGER,
+            referred_by_level2 INTEGER,
+            joined_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            balance_kopecks INTEGER DEFAULT 0,
+            total_earned_kopecks INTEGER DEFAULT 0,
+            total_withdrawn_kopecks INTEGER DEFAULT 0
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_referrals_by1 ON referrals (referred_by)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_referrals_by2 ON referrals (referred_by_level2)')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS referral_earnings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            earner_user_id INTEGER NOT NULL,
+            source_user_id INTEGER NOT NULL,
+            level INTEGER NOT NULL,
+            amount_kopecks INTEGER NOT NULL,
+            order_id TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS referral_withdrawals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            amount_kopecks INTEGER NOT NULL,
+            fee_kopecks INTEGER NOT NULL,
+            payout_kopecks INTEGER NOT NULL,
+            card_number TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            processed_at DATETIME
+        )
+    ''')
     conn.commit()
     conn.close()
 
@@ -2466,6 +2541,10 @@ def services_keyboard(category=None, city=None, user_id=None):
     # строкой, как и раньше.
     buttons.append([KeyboardButton(text="⚙️ Настройки"), KeyboardButton(text=events_button_text)])
     buttons.append([KeyboardButton(text="🔓 Бесплатный VPN TAXI HELPER")])
+    # "🤝 Реферальная программа" (по просьбе пользователя, 20.09.2026) - своей
+    # строкой, под VPN - см. блок "РЕФЕРАЛЬНАЯ ПРОГРАММА" ниже
+    # (show_referral_program и остальные хендлеры referral_*).
+    buttons.append([KeyboardButton(text="🤝 Реферальная программа")])
     buttons.append([KeyboardButton(text="← Назад"), KeyboardButton(text="🏙 Выбор города")])
     return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=buttons)
 
@@ -2851,6 +2930,18 @@ async def send_start_screen(message: types.Message):
 
 @router.message(Command("start"))
 async def start(message: types.Message):
+    # Реферальная ссылка - t.me/<бот>?start=ref_<id рефера> (см. блок
+    # "РЕФЕРАЛЬНАЯ ПРОГРАММА" ниже, register_referral). Привязка происходит
+    # ТОЛЬКО при первом /start с таким параметром у пользователя, у которого
+    # ещё нет реферера - повторные переходы по чужим ссылкам ничего не
+    # меняют.
+    parts = (message.text or '').split(maxsplit=1)
+    if len(parts) == 2 and parts[1].startswith('ref_'):
+        ref_code = parts[1][len('ref_'):]
+        if ref_code.isdigit():
+            referrer_id = int(ref_code)
+            if referrer_id != message.from_user.id:
+                register_referral(message.from_user.id, referrer_id)
     await send_start_screen(message)
 
 @router.message(lambda message: message.text == "🏙 Выбор города")
@@ -3617,20 +3708,42 @@ async def compute_where_to_go(city, category):
     if category in CATEGORIES_WITHOUT_AIRPORTS:
         return [await score_city_candidate(city, category=category)]
 
+    # Каждый источник кандидатов обёрнут в свой try/except (по факту бага
+    # 21.09.2026: "Не удалось посчитать варианты" стабильно на каждое
+    # нажатие "КУДА ЕХАТЬ" - раньше ЛЮБОЕ исключение в ОДНОМ аэропорту/
+    # вокзале/источнике роняло ВСЮ сводку, хотя остальные кандидаты
+    # считались нормально. Теперь сбойный источник просто пропускается (с
+    # логом полного traceback - см. logger.exception, а не только str(e), -
+    # чтобы при следующей похожей ошибке сразу было видно причину), а не
+    # берёт с собой всю фичу. "Город/центр" в конце - последняя надежда:
+    # если он тоже упадёт, тогда уже показываем пользователю общую ошибку
+    # (см. send_where_to_go), это по-прежнему возможно, но теперь только
+    # когда сломано действительно всё, а не один источник."""
     candidates = []
-    seen_icao = set()
     for airport in AIRPORTS_INFO.get(city, []):
         # Как и в ICAO_TO_AIRPORT - у Шереметьево несколько зональных записей
         # с одним icao (B/C и D), каждая - самостоятельный кандидат (разная
         # загрузка по зоне), дедуп не нужен, в отличие от ICAO_TO_AIRPORT.
-        candidates.append(await score_airport_candidate(city, airport, category))
+        try:
+            candidates.append(await score_airport_candidate(city, airport, category))
+        except Exception:
+            logger.exception(f"❌ Не удалось посчитать кандидата 'Куда ехать' для аэропорта {airport.get('icao')} ({city})")
     if city in TRAIN_CITIES:
-        trains_data = load_trains_data()
-        if trains_data and trains_data.get('stations'):
-            city_stations = {code: st for code, st in trains_data['stations'].items() if STATION_CITY.get(code) == city}
-            for code, station in city_stations.items():
-                candidates.append(score_station_candidate(city, code, station, category))
-    candidates.extend(score_concert_event_candidates(city, category))
+        try:
+            trains_data = load_trains_data()
+            if trains_data and trains_data.get('stations'):
+                city_stations = {code: st for code, st in trains_data['stations'].items() if STATION_CITY.get(code) == city}
+                for code, station in city_stations.items():
+                    try:
+                        candidates.append(score_station_candidate(city, code, station, category))
+                    except Exception:
+                        logger.exception(f"❌ Не удалось посчитать кандидата 'Куда ехать' для вокзала {code} ({city})")
+        except Exception:
+            logger.exception(f"❌ Не удалось загрузить вокзалы для 'Куда ехать' ({city})")
+    try:
+        candidates.extend(score_concert_event_candidates(city, category))
+    except Exception:
+        logger.exception(f"❌ Не удалось посчитать афишу для 'Куда ехать' ({city})")
     candidates.append(await score_city_candidate(city))
     candidates.sort(key=lambda c: c['score'], reverse=True)
     return candidates
@@ -3762,9 +3875,15 @@ async def send_where_to_go(message: types.Message, user_id, city, category, extr
         anim_task = asyncio.create_task(animate_loading(status_msg, "🧭 Считаю варианты"))
         try:
             candidates = await compute_where_to_go(city, category)
-        except Exception as e:
+        except Exception:
             anim_task.cancel()
-            logger.error(f"❌ Ошибка расчёта 'Куда ехать' для {city}/{category}: {e}")
+            # logger.exception (не просто logger.error с str(e)) - пишет
+            # полный traceback в логи Railway, а не только текст исключения -
+            # без этого при повторной похожей ошибке невозможно понять,
+            # ГДЕ именно внутри compute_where_to_go она произошла (баг
+            # 21.09.2026: "Не удалось посчитать варианты" стабильно на
+            # каждое нажатие, но по одному str(e) причину было не найти).
+            logger.exception(f"❌ Ошибка расчёта 'Куда ехать' для {city}/{category}")
             fallback_text = "⚠️ Не удалось посчитать варианты. Попробуй ещё раз через минуту."
             if extra_header:
                 fallback_text = f"{extra_header}\n━━━━━━━━━━━━━━━━━━\n{fallback_text}"
@@ -7057,6 +7176,898 @@ async def notify_users_about_new_deploy():
         await asyncio.sleep(0.05)  # Telegram допускает ~30 сообщений/сек в разные чаты
     logger.info(f"🔄 Пуш об обновлении разослан: {sent} успешно, {failed} ошибок")
 
+# ==================== ПЛАТНАЯ ПОДПИСКА ====================
+# По просьбе пользователя (20.09.2026): "сделай так чтобы бот был платный
+# семь дней подписка будет бесплатно на восьмой день будет платная подписка
+# в месяц она будет стоить 149 руб." Уточнено в диалоге: оплата - внешняя
+# ссылка на оплату (провайдер Tinkoff Kassa), при истечении триала без
+# оплаты - полная блокировка бота (кроме кнопки оплаты), продление -
+# "автоматическое списание каждый месяц". У пользователя пока НЕТ
+# подключённых рекуррентных платежей в Tinkoff (обычный эквайринг), поэтому
+# настоящее автосписание без участия пользователя технически невозможно -
+# реализована ближайшая рабочая схема: бот сам присылает новую ссылку на
+# оплату, как только текущий период заканчивается (сразу при следующем
+# обращении к боту - см. SubscriptionMiddleware - и проактивно, см.
+# subscription_expiry_checker), пользователь оплачивает в 1-2 клика.
+# Когда пользователь подключит рекуррентные платежи в Tinkoff - легко
+# перевести на настоящее автосписание по сохранённому RebillId, добавив его
+# сохранение из ответа Tinkoff и вызов Charge вместо повторного Init.
+#
+# SUBSCRIPTION_ENFORCEMENT_LIVE = False (по прямой просьбе пользователя,
+# 20.09.2026: "загрузим на деплой, но везде поставим заглушки, пока без
+# учёта 7 дней бесплатно и так далее") - весь код подписки задеплоен и
+# рабочий (таблицы, Tinkoff Init/webhook, подсчёт триала), но
+# SubscriptionMiddleware ничего не блокирует, пока флаг False - текущие
+# клиенты пользуются ботом как раньше. Как только Tinkoff будет настроен и
+# пользователь решит включать платную подписку для всех - достаточно
+# поменять этот флаг на True, деплоить ничего больше не нужно.
+SUBSCRIPTION_ENFORCEMENT_LIVE = False
+SUBSCRIPTION_TRIAL_DAYS = 7
+SUBSCRIPTION_PRICE_RUB = 149
+SUBSCRIPTION_PRICE_KOPECKS = SUBSCRIPTION_PRICE_RUB * 100
+SUBSCRIPTION_PERIOD_DAYS = 30
+SUBSCRIPTION_CHECK_INTERVAL_MINUTES = 60
+
+TINKOFF_TERMINAL_KEY = os.getenv('TINKOFF_TERMINAL_KEY')
+TINKOFF_PASSWORD = os.getenv('TINKOFF_PASSWORD')
+TINKOFF_INIT_URL = 'https://securepay.tinkoff.ru/v2/Init'
+# Публичный адрес бота на Railway - нужен, чтобы указать Tinkoff, куда слать
+# webhook об оплате. RAILWAY_PUBLIC_DOMAIN пробрасывается Railway
+# автоматически, когда у сервиса включён Public Networking (Settings ->
+# Networking). PUBLIC_URL можно также задать вручную переменной окружения,
+# если домен не через Railway.
+_railway_domain = os.getenv('RAILWAY_PUBLIC_DOMAIN')
+PUBLIC_URL = os.getenv('PUBLIC_URL') or (f'https://{_railway_domain}' if _railway_domain else None)
+SUBSCRIPTION_WEBHOOK_PORT = int(os.getenv('PORT', '8080'))
+SUBSCRIPTION_WEBHOOK_PATH = '/tinkoff/webhook'
+
+
+def _sub_now():
+    """Наивный UTC datetime (без tzinfo) - тот же формат, что и остальные
+    временные метки в этом файле ('%Y-%m-%d %H:%M:%S'), чтобы не смешивать
+    aware/naive datetime при сравнении."""
+    return datetime.now(ZoneInfo('UTC')).replace(tzinfo=None)
+
+
+def _sub_parse(value):
+    return datetime.strptime(value, '%Y-%m-%d %H:%M:%S')
+
+
+def _sub_format(value):
+    return value.strftime('%Y-%m-%d %H:%M:%S')
+
+
+def ensure_subscription(user_id):
+    """Создаёт запись о подписке при первом обращении пользователя к боту -
+    именно с этого момента отсчитываются SUBSCRIPTION_TRIAL_DAYS бесплатных
+    дней. Если запись уже есть - ничего не делает (триал не продлевается
+    повторно)."""
+    init_db()
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT 1 FROM subscriptions WHERE user_id = ?', (user_id,))
+    if cursor.fetchone() is None:
+        cursor.execute(
+            'INSERT INTO subscriptions (user_id, trial_started_at) VALUES (?, ?)',
+            (user_id, _sub_format(_sub_now()))
+        )
+        conn.commit()
+    conn.close()
+
+
+def get_subscription(user_id):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT trial_started_at, paid_until FROM subscriptions WHERE user_id = ?', (user_id,))
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        return None
+    return {'trial_started_at': row[0], 'paid_until': row[1]}
+
+
+def subscription_active_until(user_id):
+    """Возвращает datetime, до какого момента доступ открыт (конец триала
+    либо paid_until, что позже), или None если записи ещё нет вообще."""
+    sub = get_subscription(user_id)
+    if not sub:
+        return None
+    active_until = _sub_parse(sub['trial_started_at']) + timedelta(days=SUBSCRIPTION_TRIAL_DAYS)
+    if sub['paid_until']:
+        paid_until = _sub_parse(sub['paid_until'])
+        if paid_until > active_until:
+            active_until = paid_until
+    return active_until
+
+
+def is_subscription_active(user_id):
+    active_until = subscription_active_until(user_id)
+    if active_until is None:
+        return True  # запись ещё не создана (не должно происходить, ensure_subscription вызывается раньше) - не блокируем на всякий случай
+    return _sub_now() < active_until
+
+
+def tinkoff_generate_token(params: dict) -> str:
+    """Подпись запроса к Tinkoff Kassa: берутся только плоские (не
+    вложенные) поля запроса + Password из личного кабинета, сортируются по
+    ключу, значения конкатенируются и хешируются SHA-256 - см.
+    https://www.tbank.ru/kassa/dev/payments/#section/Podpis-zaprosa"""
+    values = {k: v for k, v in params.items() if not isinstance(v, (dict, list))}
+    values['Password'] = TINKOFF_PASSWORD
+    concat = ''.join(str(values[k]) for k in sorted(values.keys()))
+    return hashlib.sha256(concat.encode('utf-8')).hexdigest()
+
+
+def save_subscription_order(user_id, order_id, amount_kopecks):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('UPDATE subscriptions SET last_order_id = ? WHERE user_id = ?', (order_id, user_id))
+    cursor.execute(
+        'INSERT OR REPLACE INTO subscription_payments (order_id, user_id, amount_kopecks, status) VALUES (?, ?, ?, ?)',
+        (order_id, user_id, amount_kopecks, 'NEW')
+    )
+    conn.commit()
+    conn.close()
+
+
+async def create_tinkoff_payment(user_id: int):
+    """Создаёт заказ в Tinkoff Kassa (Init) и возвращает ссылку на оплату,
+    либо None при ошибке (нет ключей, сеть недоступна, провайдер отказал)."""
+    if not TINKOFF_TERMINAL_KEY or not TINKOFF_PASSWORD:
+        logger.warning(f"⚠️ TINKOFF_TERMINAL_KEY/TINKOFF_PASSWORD не заданы - не могу создать ссылку на оплату для user_id={user_id}")
+        return None
+    order_id = f"sub_{user_id}_{int(time.time())}"
+    params = {
+        'TerminalKey': TINKOFF_TERMINAL_KEY,
+        'Amount': SUBSCRIPTION_PRICE_KOPECKS,
+        'OrderId': order_id,
+        'Description': 'Подписка Taxi Helper на 1 месяц',
+    }
+    if PUBLIC_URL:
+        params['NotificationURL'] = f'{PUBLIC_URL}{SUBSCRIPTION_WEBHOOK_PATH}'
+    else:
+        logger.warning(f"⚠️ PUBLIC_URL/RAILWAY_PUBLIC_DOMAIN не заданы - Tinkoff не сможет прислать webhook об оплате для user_id={user_id}")
+    payload = dict(params)
+    payload['Token'] = tinkoff_generate_token(params)
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(TINKOFF_INIT_URL, json=payload, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                data = await resp.json()
+    except Exception:
+        logger.exception(f"❌ Ошибка запроса к Tinkoff Init для user_id={user_id}")
+        return None
+    if not data.get('Success'):
+        logger.error(f"❌ Tinkoff Init отказал для user_id={user_id}: {data}")
+        return None
+    save_subscription_order(user_id, order_id, SUBSCRIPTION_PRICE_KOPECKS)
+    return data.get('PaymentURL')
+
+
+def subscription_paywall_keyboard(pay_url):
+    buttons = []
+    if pay_url:
+        buttons.append([InlineKeyboardButton(text=f"💳 Оплатить {SUBSCRIPTION_PRICE_RUB}₽", url=pay_url)])
+    buttons.append([InlineKeyboardButton(text="🔄 Я оплатил(а), проверить", callback_data="sub_pay_check")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+SUBSCRIPTION_PAYWALL_TEXT = (
+    "🔒 *Пробный период закончился*\n\n"
+    f"Бесплатные {SUBSCRIPTION_TRIAL_DAYS} дней использованы. Чтобы продолжать пользоваться ботом, "
+    f"оформи подписку - {SUBSCRIPTION_PRICE_RUB}₽/мес.\n\n"
+    "После оплаты доступ откроется в течение пары минут - или сразу нажми «Я оплатил(а), проверить»."
+)
+
+
+async def send_subscription_paywall(event):
+    """event - types.Message или types.CallbackQuery. Показывает экран
+    оплаты вместо обычного ответа бота (см. SubscriptionMiddleware)."""
+    user_id = event.from_user.id
+    pay_url = await create_tinkoff_payment(user_id)
+    text = SUBSCRIPTION_PAYWALL_TEXT
+    if not pay_url:
+        text += "\n\n⚠️ Не получилось создать ссылку на оплату, попробуй ещё раз чуть позже."
+    markup = subscription_paywall_keyboard(pay_url)
+    if isinstance(event, types.CallbackQuery):
+        try:
+            await event.answer()
+        except Exception:
+            pass
+        await event.message.answer(text, reply_markup=markup, parse_mode='Markdown')
+    else:
+        await event.answer(text, reply_markup=markup, parse_mode='Markdown')
+
+
+class SubscriptionMiddleware(BaseMiddleware):
+    """Внешний (outer) middleware - проверяется РАНЬШЕ любого хендлера в
+    router. Если у пользователя истёк и триал, и оплаченный период -
+    подменяет любой хендлер экраном оплаты (полная блокировка, по прямому
+    выбору пользователя), кроме нажатия кнопки проверки оплаты."""
+    async def __call__(self, handler, event, data):
+        user = getattr(event, 'from_user', None)
+        if user is None:
+            return await handler(event, data)
+        user_id = user.id
+        ensure_subscription(user_id)
+        ensure_referral_row(user_id)
+        if not SUBSCRIPTION_ENFORCEMENT_LIVE:
+            # Заглушка (см. флаг выше) - учёт триала/оплаты уже ведётся в
+            # фоне (ensure_subscription), но никого не блокирует.
+            return await handler(event, data)
+        if is_subscription_active(user_id):
+            return await handler(event, data)
+        if isinstance(event, types.CallbackQuery) and event.data == 'sub_pay_check':
+            return await handler(event, data)
+        await send_subscription_paywall(event)
+        return None
+
+
+@router.callback_query(lambda c: c.data == "sub_pay_check")
+async def subscription_check_payment(callback_query: types.CallbackQuery):
+    user_id = callback_query.from_user.id
+    if is_subscription_active(user_id):
+        try:
+            await callback_query.answer("Оплата подтверждена ✅", show_alert=True)
+        except Exception:
+            pass
+        await callback_query.message.answer("✅ Подписка активна! Нажми /start, чтобы продолжить пользоваться ботом.")
+    else:
+        try:
+            await callback_query.answer("Пока не вижу оплату. Если только что оплатил(а) - подожди минуту и попробуй снова.", show_alert=True)
+        except Exception:
+            pass
+
+
+def confirm_subscription_payment(order_id):
+    """Вызывается из webhook-хендлера Tinkoff при статусе CONFIRMED -
+    продлевает подписку на SUBSCRIPTION_PERIOD_DAYS от текущего paid_until
+    (если он ещё не истёк) или от текущего момента. Идемпотентна - повторный
+    webhook с тем же order_id (Tinkoff может слать статус несколько раз) не
+    продлит подписку дважды, а реферальные проценты (см. блок "РЕФЕРАЛЬНАЯ
+    ПРОГРАММА" ниже) не начислятся повторно. Возвращает dict
+    {'user_id', 'already_processed', 'referral_notifications'} при успехе,
+    иначе None."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT user_id, status, amount_kopecks FROM subscription_payments WHERE order_id = ?', (order_id,))
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        return None
+    user_id, status, amount_kopecks = row
+    if status == 'CONFIRMED':
+        conn.close()
+        return {'user_id': user_id, 'already_processed': True, 'referral_notifications': []}
+    now = _sub_now()
+    cursor.execute(
+        "UPDATE subscription_payments SET status = 'CONFIRMED', confirmed_at = ? WHERE order_id = ?",
+        (_sub_format(now), order_id)
+    )
+    cursor.execute('SELECT paid_until FROM subscriptions WHERE user_id = ?', (user_id,))
+    sub_row = cursor.fetchone()
+    base = now
+    if sub_row and sub_row[0]:
+        current_paid_until = _sub_parse(sub_row[0])
+        if current_paid_until > base:
+            base = current_paid_until
+    new_paid_until = base + timedelta(days=SUBSCRIPTION_PERIOD_DAYS)
+    cursor.execute(
+        'UPDATE subscriptions SET paid_until = ?, expired_notified = 0 WHERE user_id = ?',
+        (_sub_format(new_paid_until), user_id)
+    )
+    conn.commit()
+    conn.close()
+    referral_notifications = distribute_referral_earnings(user_id, amount_kopecks, order_id)
+    return {'user_id': user_id, 'already_processed': False, 'referral_notifications': referral_notifications}
+
+
+async def handle_tinkoff_webhook(request):
+    """POST-эндпоинт, на который Tinkoff Kassa шлёт уведомления о смене
+    статуса платежа (NotificationURL, см. create_tinkoff_payment). Tinkoff
+    ожидает текстовый ответ "OK" при любом успешно принятом запросе - иначе
+    будет повторять доставку по расписанию."""
+    try:
+        data = await request.json()
+    except Exception:
+        logger.warning("⚠️ Tinkoff webhook: не удалось разобрать JSON")
+        return web.Response(text='OK')
+    token = data.get('Token')
+    check_params = {k: v for k, v in data.items() if k != 'Token'}
+    expected_token = tinkoff_generate_token(check_params)
+    if not token or token != expected_token:
+        logger.warning(f"⚠️ Tinkoff webhook: неверный Token, игнорирую. OrderId={data.get('OrderId')}")
+        return web.Response(text='OK')
+    status = data.get('Status')
+    order_id = data.get('OrderId')
+    logger.info(f"🔔 Tinkoff webhook: OrderId={order_id} Status={status}")
+    if status in ('CONFIRMED', 'AUTHORIZED') and order_id:
+        result = confirm_subscription_payment(order_id)
+        if result and not result.get('already_processed') and bot:
+            user_id = result['user_id']
+            try:
+                await bot.send_message(
+                    user_id,
+                    f"✅ Оплата получена! Подписка продлена на {SUBSCRIPTION_PERIOD_DAYS} дней. Спасибо 🙌\n\nНажми /start, чтобы продолжить.",
+                )
+            except Exception:
+                logger.exception(f"❌ Не удалось уведомить user_id={user_id} об успешной оплате")
+            for earner_id, level, amount_kopecks in result.get('referral_notifications', []):
+                try:
+                    await bot.send_message(
+                        earner_id,
+                        f"🤝 Начислено {amount_kopecks / 100:.0f}₽ по реферальной программе ({level}-й уровень) - "
+                        f"оплатил твой реферал. Посмотреть баланс: «🤝 Реферальная программа» в меню.",
+                    )
+                except Exception:
+                    logger.warning(f"⚠️ Не удалось уведомить о реферальном начислении earner_id={earner_id}")
+    return web.Response(text='OK')
+
+
+async def start_subscription_webhook_server():
+    """Лёгкий aiohttp-сервер только для приёма webhook об оплате - основной
+    бот работает через long polling (dp.start_polling), это отдельный,
+    независимый HTTP-эндпоинт на порту PORT (Railway пробрасывает его
+    наружу автоматически, если у сервиса включён Public Networking)."""
+    app = web.Application()
+    app.router.add_post(SUBSCRIPTION_WEBHOOK_PATH, handle_tinkoff_webhook)
+    app.router.add_get('/', lambda request: web.Response(text='taxi-helper-bot OK'))
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', SUBSCRIPTION_WEBHOOK_PORT)
+    await site.start()
+    logger.info(f"🌐 Webhook-сервер подписки запущен на порту {SUBSCRIPTION_WEBHOOK_PORT}, путь {SUBSCRIPTION_WEBHOOK_PATH}")
+
+
+async def check_subscription_expirations():
+    """Проактивно уведомляет пользователей, у которых истёк триал/оплата, но
+    которые с этого момента ещё не заходили в бота (иначе они и так упрутся
+    в SubscriptionMiddleware при следующем обращении) - раз в
+    SUBSCRIPTION_CHECK_INTERVAL_MINUTES минут."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT user_id FROM subscriptions WHERE expired_notified = 0')
+    user_ids = [row[0] for row in cursor.fetchall()]
+    conn.close()
+    now = _sub_now()
+    for user_id in user_ids:
+        active_until = subscription_active_until(user_id)
+        if active_until is None or now < active_until:
+            continue
+        pay_url = await create_tinkoff_payment(user_id)
+        text = SUBSCRIPTION_PAYWALL_TEXT
+        if not pay_url:
+            text += "\n\n⚠️ Не получилось создать ссылку на оплату, попробуй ещё раз чуть позже."
+        try:
+            if bot:
+                await bot.send_message(user_id, text, reply_markup=subscription_paywall_keyboard(pay_url), parse_mode='Markdown')
+        except Exception:
+            logger.warning(f"⚠️ Не удалось отправить пуш об окончании подписки user_id={user_id}")
+        conn2 = get_db_connection()
+        cursor2 = conn2.cursor()
+        cursor2.execute('UPDATE subscriptions SET expired_notified = 1 WHERE user_id = ?', (user_id,))
+        conn2.commit()
+        conn2.close()
+        await asyncio.sleep(0.05)
+
+
+async def subscription_expiry_checker():
+    while True:
+        try:
+            await check_subscription_expirations()
+        except Exception:
+            logger.exception("❌ Ошибка в subscription_expiry_checker")
+        await asyncio.sleep(SUBSCRIPTION_CHECK_INTERVAL_MINUTES * 60)
+
+# ==================== РЕФЕРАЛЬНАЯ ПРОГРАММА ====================
+# По просьбе пользователя (20.09.2026): кнопка "Реферальная программа" в
+# главном меню, 2 уровня начислений - 40% с каждого ЕЖЕМЕСЯЧНОГО платежа
+# приглашённого напрямую (1 уровень), 20% с каждого платежа рефералов этого
+# реферала (2 уровень, "реферал реферала"). Без ограничения на число
+# рефералов. Вывод - только на карту, комиссия сервиса 3%, реальная выплата
+# делается АДМИНОМ ВРУЧНУЮ (бот принимает заявку и уведомляет админа - у
+# бота нет собственного API для переводов на карту; ADMIN_TELEGRAM_ID -
+# id админа в Telegram, задаётся переменной окружения; выплата отмечается
+# командой /referral_paid <id заявки>). Минимальная сумма вывода и проценты
+# - разумные дефолты (пользователь просил "потом посмотрим как выглядит"),
+# легко поменять константы ниже.
+#
+# REFERRAL_PROGRAM_LIVE = False (по прямой просьбе пользователя, 20.09.2026:
+# "загрузим на деплой, но везде заглушки") - кнопка "🤝 Реферальная
+# программа" в меню ЕСТЬ и задеплоена, но при нажатии показывает заглушку
+# "скоро заработает" вместо реальной статистики/ссылки/вывода - см.
+# show_referral_program ниже. Вся логика начислений (distribute_referral_
+# earnings) при этом не срабатывает сама по себе - для неё в принципе нужны
+# подтверждённые платежи подписки, которых пока не бывает, пока
+# SUBSCRIPTION_ENFORCEMENT_LIVE = False. Включать оба флага - отдельное
+# решение пользователя, когда Tinkoff будет настроен.
+REFERRAL_PROGRAM_LIVE = False
+REFERRAL_LEVEL1_PERCENT = 40
+# Уточнение механики (по прямой просьбе пользователя, 20.09.2026): 2 уровень
+# считается НЕ как отдельный процент от платежа, а как доля ОТ НАЧИСЛЕНИЯ
+# 1 уровня - "он с тех 40% получает 50%". Итоговое число то же самое (50% от
+# 40% = 20% от платежа), но так это выглядит как "делится половиной своего
+# дохода с тем, кто его привёл", а не как отдельная выплата от сервиса - см.
+# distribute_referral_earnings ниже (level2_amount считается от
+# level1_amount, а не от amount_kopecks напрямую).
+REFERRAL_LEVEL2_SHARE_OF_LEVEL1_PERCENT = 50
+REFERRAL_WITHDRAWAL_FEE_PERCENT = 3
+REFERRAL_MIN_WITHDRAWAL_RUB = 1000  # по прямой просьбе пользователя, 20.09.2026
+ADMIN_TELEGRAM_ID = os.getenv('ADMIN_TELEGRAM_ID')  # для заявок на вывод и команды /referral_paid
+
+
+def ensure_referral_row(user_id):
+    init_db()
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT 1 FROM referrals WHERE user_id = ?', (user_id,))
+    if cursor.fetchone() is None:
+        cursor.execute('INSERT INTO referrals (user_id) VALUES (?)', (user_id,))
+        conn.commit()
+    conn.close()
+
+
+def register_referral(user_id, referrer_id):
+    """Вызывается один раз - при первом /start?start=ref_<id> у пользователя,
+    у которого ЕЩЁ НЕТ привязанного реферера (не переписывает существующую
+    связь, не даёт указать самого себя рефералом)."""
+    if referrer_id == user_id:
+        return
+    ensure_referral_row(user_id)
+    ensure_referral_row(referrer_id)
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT referred_by FROM referrals WHERE user_id = ?', (user_id,))
+    row = cursor.fetchone()
+    if row and row[0] is not None:
+        conn.close()
+        return
+    cursor.execute('SELECT referred_by FROM referrals WHERE user_id = ?', (referrer_id,))
+    r = cursor.fetchone()
+    level2 = r[0] if r else None
+    cursor.execute(
+        'UPDATE referrals SET referred_by = ?, referred_by_level2 = ? WHERE user_id = ?',
+        (referrer_id, level2, user_id)
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_referral_downline_count(user_id):
+    """Сколько человек ВСЕГО в ветке пользователя, на любую глубину (3+
+    уровня тоже считаются) - ТОЛЬКО для отображения, деньги по-прежнему
+    начисляются лишь на 1 и 2 уровне (см. distribute_referral_earnings). По
+    просьбе пользователя (20.09.2026): "добавить видимость 3+ уровня без
+    денег". SQLite умеет рекурсивные CTE (WITH RECURSIVE) - обходим дерево
+    referred_by вниз от user_id."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        '''
+        WITH RECURSIVE downline(uid) AS (
+            SELECT user_id FROM referrals WHERE referred_by = ?
+            UNION ALL
+            SELECT r.user_id FROM referrals r JOIN downline d ON r.referred_by = d.uid
+        )
+        SELECT COUNT(*) FROM downline
+        ''',
+        (user_id,)
+    )
+    count = cursor.fetchone()[0]
+    conn.close()
+    return count
+
+
+def get_referral_stats(user_id):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        'SELECT balance_kopecks, total_earned_kopecks, total_withdrawn_kopecks FROM referrals WHERE user_id = ?',
+        (user_id,)
+    )
+    row = cursor.fetchone()
+    cursor.execute('SELECT COUNT(*) FROM referrals WHERE referred_by = ?', (user_id,))
+    level1_count = cursor.fetchone()[0]
+    cursor.execute('SELECT COUNT(*) FROM referrals WHERE referred_by_level2 = ?', (user_id,))
+    level2_count = cursor.fetchone()[0]
+    conn.close()
+    downline_total = get_referral_downline_count(user_id)
+    return {
+        'balance': (row[0] or 0) if row else 0,
+        'total_earned': (row[1] or 0) if row else 0,
+        'total_withdrawn': (row[2] or 0) if row else 0,
+        'level1_count': level1_count,
+        'level2_count': level2_count,
+        'downline_total': downline_total,  # видимость на всю глубину, без денег (3+ уровень)
+    }
+
+
+def get_referral_breakdown(user_id, limit=20):
+    """Список прямых (1 уровень) рефералов - для каждого: сколько своих
+    ПРЯМЫХ рефералов он привёл (это оплачиваемый 2 уровень) и сколько
+    человек всего в ЕГО ветке на любую глубину (видимость 3+ уровня без
+    денег - см. get_referral_downline_count)."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        'SELECT user_id FROM referrals WHERE referred_by = ? ORDER BY joined_at DESC LIMIT ?',
+        (user_id, limit)
+    )
+    level1_ids = [r[0] for r in cursor.fetchall()]
+    breakdown = []
+    for uid in level1_ids:
+        cursor.execute('SELECT COUNT(*) FROM referrals WHERE referred_by = ?', (uid,))
+        sub_count = cursor.fetchone()[0]
+        breakdown.append({
+            'user_id': uid,
+            'sub_referrals': sub_count,
+            'branch_total': get_referral_downline_count(uid),
+        })
+    conn.close()
+    return breakdown
+
+
+def _credit_referral_earning(earner_id, source_id, level, amount_kopecks, order_id):
+    if amount_kopecks <= 0:
+        return 0
+    ensure_referral_row(earner_id)
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        'INSERT INTO referral_earnings (earner_user_id, source_user_id, level, amount_kopecks, order_id) VALUES (?, ?, ?, ?, ?)',
+        (earner_id, source_id, level, amount_kopecks, order_id)
+    )
+    cursor.execute(
+        'UPDATE referrals SET balance_kopecks = balance_kopecks + ?, total_earned_kopecks = total_earned_kopecks + ? WHERE user_id = ?',
+        (amount_kopecks, amount_kopecks, earner_id)
+    )
+    conn.commit()
+    conn.close()
+    return amount_kopecks
+
+
+def distribute_referral_earnings(payer_user_id, amount_kopecks, order_id):
+    """Вызывается из confirm_subscription_payment при каждом подтверждённом
+    платеже - начисляет 1 и 2 уровню (если у плательщика есть реферер(ы)).
+    Возвращает список (earner_id, level, начислено_копеек) для рассылки
+    уведомлений вызывающим кодом (сам ничего не шлёт - синхронная функция)."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT referred_by, referred_by_level2 FROM referrals WHERE user_id = ?', (payer_user_id,))
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        return []
+    referrer1, referrer2 = row
+    notifications = []
+    level1_amount = amount_kopecks * REFERRAL_LEVEL1_PERCENT // 100
+    if referrer1:
+        credited = _credit_referral_earning(referrer1, payer_user_id, 1, level1_amount, order_id)
+        if credited:
+            notifications.append((referrer1, 1, credited))
+    if referrer2:
+        # 2 уровень = доля ОТ начисления 1 уровня (не отдельный % от
+        # платежа) - см. комментарий у REFERRAL_LEVEL2_SHARE_OF_LEVEL1_PERCENT.
+        level2_amount = level1_amount * REFERRAL_LEVEL2_SHARE_OF_LEVEL1_PERCENT // 100
+        credited = _credit_referral_earning(referrer2, payer_user_id, 2, level2_amount, order_id)
+        if credited:
+            notifications.append((referrer2, 2, credited))
+    return notifications
+
+
+REFERRAL_SHARE_TEXT_TEMPLATE = (
+    "Пользуюсь Taxi Helper - бот-помощник для водителей такси/курьеров/грузового такси: "
+    "подсказывает, куда ехать и когда самый спрос, следит за очередями в аэропортах, считает доход за смену. "
+    "Заходи по ссылке 👇\n{link}"
+)
+
+
+def referral_menu_keyboard(referral_link):
+    # "🔗 Моя ссылка"/"📤 Поделиться ссылкой" - по прямой просьбе пользователя
+    # (20.09.2026: "нужна кнопка... чтобы люди понимали какую ссылку давать
+    # чтобы делиться"). "Поделиться" - через switch_inline_query: открывает
+    # у пользователя список его чатов Telegram с уже готовым текстом+ссылкой,
+    # остаётся выбрать, кому переслать - самый надёжный способ "поделиться"
+    # для обычной кнопки бота (Telegram не даёт ботам напрямую копировать
+    # текст в буфер обмена). "Моя ссылка" - просто прислать ссылку отдельным
+    # сообщением, чтобы было удобно скопировать долгим нажатием.
+    share_text = REFERRAL_SHARE_TEXT_TEMPLATE.format(link=referral_link)
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔗 Моя ссылка", callback_data="referral_link_show")],
+        [InlineKeyboardButton(text="📤 Поделиться ссылкой", switch_inline_query=share_text)],
+        [InlineKeyboardButton(text="📋 Мои рефералы", callback_data="referral_list")],
+        [InlineKeyboardButton(text="💸 Вывести средства", callback_data="referral_withdraw_start")],
+    ])
+
+
+def get_referral_link(bot_username, user_id):
+    return f"https://t.me/{bot_username}?start=ref_{user_id}"
+
+
+def referral_withdraw_cancel_keyboard():
+    return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[[KeyboardButton(text="❌ Отмена")]])
+
+
+@router.message(lambda message: message.text == "🤝 Реферальная программа")
+async def show_referral_program(message: types.Message):
+    user_id = message.from_user.id
+    ensure_referral_row(user_id)
+    if not REFERRAL_PROGRAM_LIVE:
+        await message.answer(
+            "🤝 *Реферальная программа*\n\n"
+            "Скоро здесь можно будет приглашать друзей по своей ссылке и получать процент с их подписки. "
+            "Раздел в разработке — совсем скоро заработает 🚀",
+            parse_mode='Markdown'
+        )
+        return
+    stats = get_referral_stats(user_id)
+    me = await bot.get_me()
+    link = get_referral_link(me.username, user_id)
+    text = (
+        "🤝 *Реферальная программа*\n\n"
+        f"Твоя ссылка (отправляй друзьям):\n`{link}`\n\n"
+        f"👥 Рефералов 1-го уровня: {stats['level1_count']}\n"
+        f"👥 Рефералов 2-го уровня: {stats['level2_count']}\n"
+        f"🌳 Всего людей в твоей ветке (любая глубина): {stats['downline_total']}\n\n"
+        f"💰 Баланс: {stats['balance'] / 100:.0f}₽\n"
+        f"📈 Всего заработано: {stats['total_earned'] / 100:.0f}₽\n"
+        f"📤 Всего выведено: {stats['total_withdrawn'] / 100:.0f}₽\n\n"
+        f"Как это работает: {REFERRAL_LEVEL1_PERCENT}% с каждого ежемесячного платежа приглашённого "
+        f"тобой напрямую (1 уровень). Если у него самого есть реферер (2 уровень) - тот получает "
+        f"{REFERRAL_LEVEL2_SHARE_OF_LEVEL1_PERCENT}% от дохода реферала 1 уровня с этого платежа. "
+        f"Начисляется каждый месяц, пока реферал платит подписку. Дальше 2 уровня деньги "
+        f"не идут, но всю ветку целиком видно в «📋 Мои рефералы».\n\n"
+        f"Вывод - только на карту, комиссия сервиса {REFERRAL_WITHDRAWAL_FEE_PERCENT}%, "
+        f"минимум {REFERRAL_MIN_WITHDRAWAL_RUB}₽."
+    )
+    await message.answer(text, reply_markup=referral_menu_keyboard(link), parse_mode='Markdown')
+
+
+@router.callback_query(lambda c: c.data == "referral_link_show")
+async def referral_link_show(callback_query: types.CallbackQuery):
+    user_id = callback_query.from_user.id
+    try:
+        await callback_query.answer()
+    except Exception:
+        pass
+    me = await bot.get_me()
+    link = get_referral_link(me.username, user_id)
+    await callback_query.message.answer(f"`{link}`", parse_mode='Markdown')
+
+
+@router.callback_query(lambda c: c.data == "referral_list")
+async def referral_list_handler(callback_query: types.CallbackQuery):
+    user_id = callback_query.from_user.id
+    try:
+        await callback_query.answer()
+    except Exception:
+        pass
+    breakdown = get_referral_breakdown(user_id)
+    if not breakdown:
+        await callback_query.message.answer("Пока нет ни одного реферала 1-го уровня - поделись своей ссылкой из «🤝 Реферальная программа».")
+        return
+    lines = ["📋 *Твои рефералы 1-го уровня:*\n"]
+    for i, item in enumerate(breakdown, 1):
+        lines.append(
+            f"{i}. ID {item['user_id']} - прямых рефералов (твой 2 уровень, оплачивается): {item['sub_referrals']}, "
+            f"всего в его ветке (3+ уровень, без начислений): {item['branch_total']}"
+        )
+    await callback_query.message.answer('\n'.join(lines), parse_mode='Markdown')
+
+
+@router.callback_query(lambda c: c.data == "referral_withdraw_start")
+async def referral_withdraw_start(callback_query: types.CallbackQuery):
+    user_id = callback_query.from_user.id
+    try:
+        await callback_query.answer()
+    except Exception:
+        pass
+    stats = get_referral_stats(user_id)
+    if stats['balance'] < REFERRAL_MIN_WITHDRAWAL_RUB * 100:
+        await callback_query.message.answer(
+            f"Минимальная сумма вывода - {REFERRAL_MIN_WITHDRAWAL_RUB}₽, у тебя на балансе {stats['balance'] / 100:.0f}₽."
+        )
+        return
+    state = user_state.setdefault(user_id, {})
+    state['referral_withdraw'] = {'step': 'card', 'data': {}}
+    await callback_query.message.answer(
+        "Введи номер карты для вывода средств (16 цифр, без пробелов):",
+        reply_markup=referral_withdraw_cancel_keyboard()
+    )
+
+
+@router.message(lambda message: user_state.get(message.from_user.id, {}).get('referral_withdraw') is not None)
+async def referral_withdraw_flow(message: types.Message):
+    """Ловит ЛЮБОЙ текст, пока активна заявка на вывод - должен стоять РАНЬШЕ
+    остальных текстовых хендлеров (тот же приём, что и shared_order_flow для
+    черновика заказа)."""
+    user_id = message.from_user.id
+    state = user_state[user_id]
+    draft = state['referral_withdraw']
+    text = (message.text or '').strip()
+    category = state.get('category')
+    city = state.get('city')
+
+    if text == "❌ Отмена":
+        state.pop('referral_withdraw', None)
+        await message.answer("Заявка на вывод отменена.", reply_markup=services_keyboard(category, city, user_id))
+        return
+
+    step = draft['step']
+
+    if step == 'card':
+        digits = re.sub(r'[^\d]', '', text)
+        if len(digits) not in (16, 18, 19):
+            await message.answer("Похоже на неверный номер карты - введи 16 цифр без пробелов:")
+            return
+        draft['data']['card'] = digits
+        draft['step'] = 'amount'
+        state['referral_withdraw'] = draft
+        stats = get_referral_stats(user_id)
+        await message.answer(
+            f"Сколько вывести? Доступно {stats['balance'] / 100:.0f}₽ "
+            f"(комиссия {REFERRAL_WITHDRAWAL_FEE_PERCENT}% удержится из этой суммы). "
+            f"Введи сумму в рублях или слово «всё»:"
+        )
+        return
+
+    if step == 'amount':
+        stats = get_referral_stats(user_id)
+        if text.lower() in ('всё', 'все', 'весь', 'all'):
+            amount_kopecks = stats['balance']
+        else:
+            digits = re.sub(r'[^\d]', '', text)
+            if not digits:
+                await message.answer("Не понял сумму - введи число, например 500, или слово «всё»:")
+                return
+            amount_kopecks = int(digits) * 100
+        if amount_kopecks < REFERRAL_MIN_WITHDRAWAL_RUB * 100:
+            await message.answer(f"Минимум для вывода - {REFERRAL_MIN_WITHDRAWAL_RUB}₽. Введи сумму ещё раз:")
+            return
+        if amount_kopecks > stats['balance']:
+            await message.answer(f"На балансе только {stats['balance'] / 100:.0f}₽. Введи сумму ещё раз:")
+            return
+        draft['data']['amount_kopecks'] = amount_kopecks
+        fee = amount_kopecks * REFERRAL_WITHDRAWAL_FEE_PERCENT // 100
+        payout = amount_kopecks - fee
+        draft['data']['fee_kopecks'] = fee
+        draft['data']['payout_kopecks'] = payout
+        draft['step'] = 'confirm'
+        state['referral_withdraw'] = draft
+        card = draft['data']['card']
+        masked = f"{card[:4]} •• •• {card[-4:]}"
+        await message.answer(
+            f"Проверь заявку:\n\n"
+            f"💳 Карта: {masked}\n"
+            f"💰 Сумма к выводу: {amount_kopecks / 100:.0f}₽\n"
+            f"➖ Комиссия сервиса ({REFERRAL_WITHDRAWAL_FEE_PERCENT}%): {fee / 100:.0f}₽\n"
+            f"✅ Поступит на карту: {payout / 100:.0f}₽\n\n"
+            f"Обработка обычно занимает до 1-2 рабочих дней.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="✅ Подтвердить", callback_data="referral_withdraw_confirm")],
+                [InlineKeyboardButton(text="❌ Отмена", callback_data="referral_withdraw_cancel")],
+            ])
+        )
+        return
+
+
+def create_referral_withdrawal(user_id, card, amount_kopecks, fee_kopecks, payout_kopecks):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        'INSERT INTO referral_withdrawals (user_id, amount_kopecks, fee_kopecks, payout_kopecks, card_number, status) VALUES (?, ?, ?, ?, ?, ?)',
+        (user_id, amount_kopecks, fee_kopecks, payout_kopecks, card, 'pending')
+    )
+    withdrawal_id = cursor.lastrowid
+    cursor.execute('UPDATE referrals SET balance_kopecks = balance_kopecks - ? WHERE user_id = ?', (amount_kopecks, user_id))
+    conn.commit()
+    conn.close()
+    return withdrawal_id
+
+
+@router.callback_query(lambda c: c.data == "referral_withdraw_confirm")
+async def referral_withdraw_confirm(callback_query: types.CallbackQuery):
+    user_id = callback_query.from_user.id
+    try:
+        await callback_query.answer()
+    except Exception:
+        pass
+    state = user_state.get(user_id, {})
+    draft = state.get('referral_withdraw')
+    if not draft or draft.get('step') != 'confirm':
+        await callback_query.message.answer("Заявка уже неактуальна, попробуй заново через «🤝 Реферальная программа».")
+        return
+    data = draft['data']
+    stats = get_referral_stats(user_id)
+    if data['amount_kopecks'] > stats['balance']:
+        state.pop('referral_withdraw', None)
+        await callback_query.message.answer("На балансе уже недостаточно средств для этой заявки - похоже, баланс изменился. Попробуй заново.")
+        return
+    withdrawal_id = create_referral_withdrawal(
+        user_id, data['card'], data['amount_kopecks'], data['fee_kopecks'], data['payout_kopecks']
+    )
+    state.pop('referral_withdraw', None)
+    await callback_query.message.answer(
+        "✅ Заявка на вывод принята, обработаем в течение 1-2 рабочих дней.",
+        reply_markup=services_keyboard(state.get('category'), state.get('city'), user_id)
+    )
+    if ADMIN_TELEGRAM_ID and bot:
+        try:
+            await bot.send_message(
+                int(ADMIN_TELEGRAM_ID),
+                f"💸 Новая заявка на вывод #{withdrawal_id}\n"
+                f"Пользователь: {user_id}\n"
+                f"Карта: {data['card']}\n"
+                f"К выплате: {data['payout_kopecks'] / 100:.0f}₽ "
+                f"(запрошено {data['amount_kopecks'] / 100:.0f}₽, комиссия {data['fee_kopecks'] / 100:.0f}₽)\n\n"
+                f"Отметить выплаченной: /referral_paid {withdrawal_id}"
+            )
+        except Exception:
+            logger.warning(f"⚠️ Не удалось уведомить админа о заявке на вывод #{withdrawal_id}")
+
+
+@router.callback_query(lambda c: c.data == "referral_withdraw_cancel")
+async def referral_withdraw_cancel(callback_query: types.CallbackQuery):
+    user_id = callback_query.from_user.id
+    try:
+        await callback_query.answer()
+    except Exception:
+        pass
+    state = user_state.get(user_id, {})
+    state.pop('referral_withdraw', None)
+    await callback_query.message.answer(
+        "Заявка отменена.",
+        reply_markup=services_keyboard(state.get('category'), state.get('city'), user_id)
+    )
+
+
+def mark_referral_withdrawal_paid(withdrawal_id):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT user_id, payout_kopecks, status FROM referral_withdrawals WHERE id = ?', (withdrawal_id,))
+    row = cursor.fetchone()
+    if not row or row[2] != 'pending':
+        conn.close()
+        return None
+    user_id, payout_kopecks, _ = row
+    cursor.execute(
+        "UPDATE referral_withdrawals SET status = 'paid', processed_at = ? WHERE id = ?",
+        (_sub_format(_sub_now()), withdrawal_id)
+    )
+    cursor.execute(
+        'UPDATE referrals SET total_withdrawn_kopecks = total_withdrawn_kopecks + ? WHERE user_id = ?',
+        (payout_kopecks, user_id)
+    )
+    conn.commit()
+    conn.close()
+    return {'user_id': user_id, 'payout_kopecks': payout_kopecks}
+
+
+@router.message(Command("referral_paid"))
+async def admin_mark_referral_paid(message: types.Message):
+    """Админская команда - отмечает заявку выплаченной и уведомляет
+    пользователя. Доступна только ADMIN_TELEGRAM_ID (переменная окружения) -
+    без неё команда молчит (ничего не отвечает) для всех, это ожидаемо, пока
+    админ не задаст свой Telegram ID в Railway Variables."""
+    if not ADMIN_TELEGRAM_ID or str(message.from_user.id) != str(ADMIN_TELEGRAM_ID):
+        return
+    parts = (message.text or '').split()
+    if len(parts) != 2 or not parts[1].isdigit():
+        await message.answer("Использование: /referral_paid <id заявки>")
+        return
+    withdrawal_id = int(parts[1])
+    result = mark_referral_withdrawal_paid(withdrawal_id)
+    if not result:
+        await message.answer("Заявка не найдена или уже обработана.")
+        return
+    await message.answer(f"Заявка #{withdrawal_id} отмечена как выплаченная.")
+    try:
+        await bot.send_message(
+            result['user_id'],
+            f"✅ Выплата {result['payout_kopecks'] / 100:.0f}₽ по заявке #{withdrawal_id} отправлена на карту."
+        )
+    except Exception:
+        logger.warning(f"⚠️ Не удалось уведомить user_id={result['user_id']} о выплате #{withdrawal_id}")
+
 # По просьбе пользователя (20.09.2026): "делай пуши перекрытий... и крупные
 # ДТП" - отдельный пуш-тип, независимый от статусов аэропортов/часов пика.
 # Источник - та же лента road_events_data.json (см. fetch_road_events.py),
@@ -7514,6 +8525,14 @@ async def main():
         await notify_users_about_new_deploy()
     except Exception as e:
         logger.error(f"❌ Ошибка при рассылке пуша об обновлении: {e}")
+    # Платная подписка (см. блок "ПЛАТНАЯ ПОДПИСКА" выше) - outer middleware
+    # проверяется раньше любого хендлера в router, поэтому регистрируется до
+    # dp.include_router. Отдельный webhook-сервер Tinkoff поднимается тут же
+    # фоновой задачей, независимо от long polling.
+    dp.message.outer_middleware(SubscriptionMiddleware())
+    dp.callback_query.outer_middleware(SubscriptionMiddleware())
+    asyncio.create_task(start_subscription_webhook_server())
+    asyncio.create_task(subscription_expiry_checker())
     dp.include_router(router)
     if os.getenv('YANDEX_RASP_API_KEY'):
         asyncio.create_task(airports_data_updater())
