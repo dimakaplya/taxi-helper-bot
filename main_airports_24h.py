@@ -2273,6 +2273,10 @@ def courier_module_keyboard(category=None):
         # пользователя, 19.09.2026) - раньше была отдельной кнопкой в
         # services_keyboard.
         [KeyboardButton(text="🛠 ТО транспорта"), KeyboardButton(text="⛽ Где бензин")],
+        # "💳 Получить чаевые" - по просьбе пользователя (20.09.2026) - ссылки
+        # на приложение "Яндекс Чаевые: на карту по QR" (App Store/Google
+        # Play), см. show_tips_app.
+        [KeyboardButton(text="💳 Получить чаевые")],
     ]
     # "💰 КУДА ЕХАТЬ ➡️" отсюда убрана - перенесена в services_keyboard как
     # верхняя строка главного меню (по просьбе пользователя, 19.09.2026).
@@ -2970,6 +2974,28 @@ async def courier_stub_section(message: types.Message):
     # "Спрос сейчас" тоже больше не заглушка - см. show_kef_bot ниже.
     category = user_state.get(message.from_user.id, {}).get('category')
     await message.answer("Этот раздел в разработке 🚧 — скоро будет", reply_markup=courier_module_keyboard(category))
+
+TIPS_APP_URL_IOS = "https://apps.apple.com/us/app/%D1%8F%D0%BD%D0%B4%D0%B5%D0%BA%D1%81-%D1%87%D0%B0%D0%B5%D0%B2%D1%8B%D0%B5-%D0%BD%D0%B0-%D0%BA%D0%B0%D1%80%D1%82%D1%83-%D0%BF%D0%BE-qr/id1513175603?l=ru"
+TIPS_APP_URL_ANDROID = "https://play.google.com/store/apps/details?id=com.chaevieprosto.app"
+
+@router.message(lambda message: message.text == "💳 Получить чаевые" and user_state.get(message.from_user.id, {}).get('in_courier_module'))
+async def show_tips_app(message: types.Message):
+    """"💳 Получить чаевые" - по просьбе пользователя (20.09.2026), ссылки
+    на приложение "Яндекс Чаевые: на карту по QR" (генерирует QR-код для
+    приёма чаевых на карту) - тот же паттерн, что show_fuel_bot/show_vpn_bot:
+    просто ссылки на стороннее приложение, без интеграции."""
+    category = user_state.get(message.from_user.id, {}).get('category')
+    text = (
+        "💳 *Получить чаевые*\n\n"
+        "Приложение «Яндекс Чаевые: на карту по QR» - покажи QR-код пассажиру, "
+        "он сканирует и переводит чаевые тебе на карту."
+    )
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🍎 Скачать в App Store", url=TIPS_APP_URL_IOS)],
+        [InlineKeyboardButton(text="🤖 Скачать в Google Play", url=TIPS_APP_URL_ANDROID)],
+    ])
+    await message.answer(text, reply_markup=keyboard, parse_mode='Markdown')
+    await message.answer("Выбери, что нужно дальше 👇", reply_markup=courier_module_keyboard(category))
 
 @router.message(lambda message: message.text == "📈 Спрос сейчас" and user_state.get(message.from_user.id, {}).get('in_courier_module'))
 async def show_kef_bot(message: types.Message):
