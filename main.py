@@ -4911,7 +4911,7 @@ def airport_queue_enable_text():
         "Дальше всё автоматически: пришлю пуш на 2 км от аэропорта, затем на 1 км и 500 м, "
         "и ещё один - через 30 минут, если всё ещё рядом. "
         "Если едешь с заказом, вставать в очередь не планируешь, или геолокация ошиблась "
-        "(бывает из-за глушения GPS) - на любом из этих пушей есть кнопка «📍 Ошибка GPS», "
+        "(бывает из-за глушения GPS) - на любом из этих пушей есть кнопка «📍❌ Ошибка GPS / Очередь не требуется», "
         "она отключит напоминания на 30 минут.\n\n"
         "Помогает не терять счёт времени в очереди на получение заказа.\n\n"
         "Чтобы остановить очередь - зайди в «⚙️ Настройки» и нажми «📍 Очередь у аэропорта» ещё раз."
@@ -5051,7 +5051,7 @@ async def send_airport_queue_push(user_id, icao, kind, dist_km=None, zone_label=
         # для ЭТОГО аэропорта/зоны, "чтобы человека лишний раз не тревожить".
         # На ВСЕХ пушах очереди (по прямой просьбе пользователя), не только
         # на первом.
-        buttons.append([InlineKeyboardButton(text="📍 Ошибка GPS (не рядом с аэропортом)", callback_data=f"aqsnooze_{icao}_{zone_key or '-'}")])
+        buttons.append([InlineKeyboardButton(text="📍❌ Ошибка GPS / Очередь не требуется", callback_data=f"aqsnooze_{icao}_{zone_key or '-'}")])
         reply_markup = InlineKeyboardMarkup(inline_keyboard=buttons)
     try:
         await bot.send_message(user_id, text, reply_markup=reply_markup, parse_mode='Markdown')
