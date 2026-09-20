@@ -8004,6 +8004,20 @@ def get_bot_meta(key):
     conn.close()
     return row[0] if row else None
 
+def _self_file_hash():
+    """Хэш содержимого текущего файла (main.py) - крайний фолбэк для
+    определения "версии" бота (см. notify_users_about_new_deploy), если ни
+    RAILWAY_GIT_COMMIT_SHA, ни RAILWAY_DEPLOYMENT_ID недоступны в рантайме.
+    Меняется при ЛЮБОМ реальном изменении кода файла - надёжно работает даже
+    без переменных окружения Railway, хоть и не различает "просто рестарт" от
+    деплоя, если файл не менялся (что и не нужно - тогда пуш и не должен
+    слаться)."""
+    try:
+        with open(__file__, 'rb') as f:
+            return 'file:' + hashlib.sha256(f.read()).hexdigest()[:16]
+    except Exception:
+        return None
+
 def set_bot_meta(key, value):
     init_db()
     conn = get_db_connection()
@@ -8025,9 +8039,23 @@ async def notify_users_about_new_deploy():
     функции (сохранённого SHA ещё нет) пуш НЕ шлём - иначе все
     существующие пользователи получили бы "обновление" в момент, когда
     бот на самом деле просто впервые запомнил свою версию."""
-    current_sha = os.getenv('RAILWAY_GIT_COMMIT_SHA')
+    # По повторной жалобе пользователя (22.09.2026): "бот обновился" опять не
+    # приходит - RAILWAY_GIT_COMMIT_SHA, судя по всему, не всегда доступен в
+    # рантайме (зависит от способа деплоя/настроек Railway), из-за чего
+    # проверка выше молча выходила и пуш никогда не проверялся. Теперь
+    # пробуем НЕСКОЛЬКО источников "версии" по приоритету: RAILWAY_GIT_COMMIT_SHA
+    # (самый точный, если доступен) -> RAILWAY_DEPLOYMENT_ID (Railway
+    # присваивает новый ID на КАЖДЫЙ деплой, доступен даже без привязки к
+    # git-триггерам) -> как последний фолбэк - хэш содержимого самого файла
+    # main.py (гарантированно меняется при любом реальном изменении кода,
+    # работает вообще без переменных окружения Railway).
+    current_sha = (
+        os.getenv('RAILWAY_GIT_COMMIT_SHA')
+        or os.getenv('RAILWAY_DEPLOYMENT_ID')
+        or _self_file_hash()
+    )
     if not current_sha:
-        logger.info("ℹ️ RAILWAY_GIT_COMMIT_SHA не задан (не Railway/локальный запуск) - пуш об обновлении не проверяется")
+        logger.info("ℹ️ Не удалось определить версию (нет RAILWAY_* переменных и не удалось хэшировать файл) - пуш об обновлении не проверяется")
         return
     previous_sha = get_bot_meta('last_deployed_commit')
     set_bot_meta('last_deployed_commit', current_sha)
