@@ -1430,12 +1430,37 @@ def init_db():
         )
     ''')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_shift_history_user_date ON shift_history (user_id, shift_date)')
+    # "📊 ДЕНЬ - ИТОГ" (расчёт финансов, см. send_courier_finance_result) -
+    # сохраняем каждый посчитанный итог в отдельную таблицу (по просьбе
+    # пользователя, 20.09.2026: "выдаётся суммарный доход сохраняется в
+    # статистику") - независимо от shift_history, т.к. расчёт можно сделать
+    # и без привязки к конкретной смене (например, за прошлый день задним
+    # числом).
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS finance_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            calc_date TEXT NOT NULL,
+            income REAL NOT NULL,
+            net_profit REAL NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_finance_history_user_date ON finance_history (user_id, calc_date)')
+    # Миграция (20.09.2026): на уже существующей БД таблица shift_history
+    # могла быть создана раньше без этой колонки - CREATE TABLE IF NOT
+    # EXISTS её не добавит, поэтому добавляем отдельно, игнорируя ошибку
+    # "duplicate column", если колонка уже есть (повторный запуск init_db).
+    try:
+        cursor.execute('ALTER TABLE shift_history ADD COLUMN airport_wait_minutes INTEGER NOT NULL DEFAULT 0')
+    except sqlite3.OperationalError:
+        pass
     conn.commit()
     conn.close()
 
 SHIFT_HISTORY_MONTHS = 6  # сколько месяцев хранить/показывать в статистике (по просьбе пользователя)
 
-def save_shift_record(user_id, started_at, duration_minutes, km):
+def save_shift_record(user_id, started_at, duration_minutes, km, airport_wait_minutes=0):
     """Сохраняет одну завершённую смену в историю (см. finish_shift) -
     shift_date берём из started_at по UTC (дата начала смены, не окончания -
     так смена, начатая поздно вечером и законченная за полночь, попадает в
@@ -1444,8 +1469,8 @@ def save_shift_record(user_id, started_at, duration_minutes, km):
         init_db()
         conn = get_db_connection()
         conn.execute(
-            'INSERT INTO shift_history (user_id, shift_date, started_at, duration_minutes, km) VALUES (?, ?, ?, ?, ?)',
-            (user_id, started_at.date().isoformat(), started_at.strftime('%Y-%m-%d %H:%M:%S'), duration_minutes, km)
+            'INSERT INTO shift_history (user_id, shift_date, started_at, duration_minutes, km, airport_wait_minutes) VALUES (?, ?, ?, ?, ?, ?)',
+            (user_id, started_at.date().isoformat(), started_at.strftime('%Y-%m-%d %H:%M:%S'), duration_minutes, km, airport_wait_minutes)
         )
         conn.commit()
         conn.close()
@@ -1455,13 +1480,14 @@ def save_shift_record(user_id, started_at, duration_minutes, km):
 def get_shift_history(user_id, months=SHIFT_HISTORY_MONTHS):
     """Смены пользователя за последние `months` месяцев, по дате начала
     (новые сверху) - используется и для списка по дням (show_shift_stats), и
-    для общих итогов (сумма км/часов за период)."""
+    для общих итогов (сумма км/часов за период). Возвращает кортежи
+    (shift_date, duration_minutes, km, airport_wait_minutes)."""
     try:
         init_db()
         conn = get_db_connection()
         cutoff = (datetime.now(timezone.utc) - timedelta(days=months * 30)).date().isoformat()
         cursor = conn.execute(
-            'SELECT shift_date, duration_minutes, km FROM shift_history '
+            'SELECT shift_date, duration_minutes, km, airport_wait_minutes FROM shift_history '
             'WHERE user_id = ? AND shift_date >= ? ORDER BY shift_date DESC, started_at DESC',
             (user_id, cutoff)
         )
@@ -1471,6 +1497,22 @@ def get_shift_history(user_id, months=SHIFT_HISTORY_MONTHS):
     except Exception as e:
         logger.error(f"❌ Не удалось прочитать историю смен пользователя {user_id}: {e}")
         return []
+
+def save_finance_result(user_id, income, net_profit):
+    """Сохраняет один посчитанный итог "📊 ДЕНЬ - ИТОГ" (см.
+    send_courier_finance_result) в статистику - по просьбе пользователя,
+    20.09.2026 ("выдаётся сумарный доход сохраняется в статистику")."""
+    try:
+        init_db()
+        conn = get_db_connection()
+        conn.execute(
+            'INSERT INTO finance_history (user_id, calc_date, income, net_profit) VALUES (?, ?, ?, ?)',
+            (user_id, datetime.now(timezone.utc).date().isoformat(), income, net_profit)
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"❌ Не удалось сохранить итог дня пользователя {user_id}: {e}")
 
 def save_airport_status(icao, status):
     try:
@@ -2479,14 +2521,35 @@ def courier_finance_cancel_keyboard():
 # дохода, а не от километража.
 COURIER_WEAR_RESERVE_RATE = 0.10
 
+# Налог по умолчанию - 6% (стандартная ставка УСН "доходы"/самозанятость),
+# считается от ВАЛОВОГО дохода (по просьбе пользователя, 20.09.2026) - можно
+# поменять на любую свою ставку на шаге 'tax_rate'.
+DEFAULT_TAX_RATE_PERCENT = 6.0
+
 COURIER_FINANCE_STEP_PROMPTS = {
-    'income': "💰 Валовый доход за смену, ₽ (только число):",
+    'income': "💰 Доход за день, ₽ (только число):",
     'km': "🚗 Километраж за день, км:",
-    'consumption': "⛽ Расход топлива на 100 км (л или кВтч - как в профиле):",
+    'consumption': "⛽ Расход топлива на 100 км (л или кВтч):",
     'fuel_price': "💵 Стоимость топлива за литр/кВтч, ₽:",
-    'expenses': "📦 Доп. расходы за смену, ₽ (шины, штрафы и т.п. - если нет, пришли 0):",
+    'rent': "🚘 Аренда ТС или платёж по кредиту/лизингу за день, ₽ (если нет - пришли 0):",
+    'expenses': "📦 Доп. расходы за день, ₽ (питание, ремонты, доп. покупки - если нет, пришли 0):",
+    'tax_rate': f"🧾 Ставка налога, % от дохода (обычно {DEFAULT_TAX_RATE_PERCENT:g}% - можно указать свою):",
     'hours': "🕐 Сколько часов длилась смена (можно дробно, например 5.5):",
 }
+
+# Поля, которые обычно не меняются изо дня в день - после первого ввода
+# запоминаем в state['finance_defaults'] и на следующий раз предлагаем
+# кнопкой "Использовать снова" вместо повторного ввода (по просьбе
+# пользователя, 20.09.2026: "чтобы не надо было вводить каждый день").
+FINANCE_REMEMBERED_FIELDS = ('consumption', 'fuel_price', 'rent', 'tax_rate')
+
+def finance_defaults(state):
+    return dict(state.get('finance_defaults') or {})
+
+def remember_finance_default(state, key, value):
+    defaults = finance_defaults(state)
+    defaults[key] = value
+    state['finance_defaults'] = defaults
 
 def parse_decimal(text):
     """Число с точкой или запятой из свободного текста пользователя -
@@ -3480,19 +3543,33 @@ async def check_long_shifts():
             logger.error(f"❌ Ошибка в check_long_shifts: {e}")
 
 def finish_shift(user_id):
-    """Останавливает смену, возвращает (duration_minutes, total_km) и
-    сохраняет запись в БД (save_shift_record) - вызывается из finish_shift_button
-    ниже. Не падает, если смены не было (защитный случай - кнопка не должна
-    быть видна в этом состоянии, но на всякий случай)."""
+    """Останавливает смену, возвращает (duration_minutes, total_km,
+    airport_wait_minutes) и сохраняет запись в БД (save_shift_record) -
+    вызывается из toggle_shift. Не падает, если смены не было (защитный
+    случай - кнопка не должна быть видна в этом состоянии, но на всякий
+    случай)."""
     state = user_state[user_id]
     shift = state.pop('shift', None)
     if not shift:
-        return 0, 0.0
+        return 0, 0.0, 0
     started_at = datetime.fromisoformat(shift['started_at'])
-    duration_minutes = max(0, round((datetime.now(timezone.utc) - started_at).total_seconds() / 60))
+    now = datetime.now(timezone.utc)
+    duration_minutes = max(0, round((now - started_at).total_seconds() / 60))
     total_km = shift.get('total_km', 0.0)
-    save_shift_record(user_id, started_at, duration_minutes, total_km)
-    return duration_minutes, total_km
+    airport_wait_minutes = shift.get('airport_wait_minutes', 0)
+    # Если смена завершается, пока водитель ещё в радиусе аэропорта
+    # (state['airport_queue']['entered_outer_at'] не сброшен) - досчитываем
+    # незакрытый интервал простоя, иначе он бы потерялся (см. основной учёт
+    # в process_airport_queue_ping при выходе из радиуса).
+    aq = state.get('airport_queue') or {}
+    if aq.get('entered_outer_at'):
+        try:
+            entered_at = datetime.fromisoformat(aq['entered_outer_at'])
+            airport_wait_minutes += max(0, round((now - entered_at).total_seconds() / 60))
+        except Exception:
+            pass
+    save_shift_record(user_id, started_at, duration_minutes, total_km, airport_wait_minutes)
+    return duration_minutes, total_km, airport_wait_minutes
 
 def format_shift_duration(minutes):
     hours, mins = divmod(minutes, 60)
@@ -3736,6 +3813,20 @@ async def process_airport_queue_ping(user_id, lat, lon, live_period=None):
         # Вышел за пределы внешнего радиуса - сбрасываем: при возвращении
         # отсчёт (и пуши на вход/по времени) начнётся заново.
         if aq.get('entered_outer_at'):
+            # По просьбе пользователя (20.09.2026): если сейчас идёт смена -
+            # копим суммарное время простоя в аэропорту за смену
+            # (state['shift']['airport_wait_minutes']), чтобы учесть его в
+            # итоговом расчёте финансов (см. send_courier_finance_result).
+            shift = state.get('shift')
+            if shift:
+                try:
+                    entered_at = datetime.fromisoformat(aq['entered_outer_at'])
+                    wait_minutes = max(0, round((now - entered_at).total_seconds() / 60))
+                except Exception:
+                    wait_minutes = 0
+                shift = dict(shift)
+                shift['airport_wait_minutes'] = shift.get('airport_wait_minutes', 0) + wait_minutes
+                state['shift'] = shift
             aq = {'icao': icao, 'zone_key': zone_key, 'last_update_at': now.isoformat()}
             if live_period:
                 aq['live_period'] = live_period
@@ -3883,7 +3974,7 @@ async def show_shift_stats(callback_query: types.CallbackQuery):
     достаточно, чтобы понимать динамику."""
     await callback_query.answer()
     user_id = callback_query.from_user.id
-    rows = get_shift_history(user_id)  # [(shift_date, duration_minutes, km), ...] за 6 месяцев, новые сверху
+    rows = get_shift_history(user_id)  # [(shift_date, duration_minutes, km, airport_wait_minutes), ...] за 6 месяцев, новые сверху
 
     if not rows:
         await callback_query.message.answer(
@@ -3894,7 +3985,7 @@ async def show_shift_stats(callback_query: types.CallbackQuery):
 
     # Группируем по дню (за один день может быть несколько смен).
     by_day = {}
-    for shift_date, duration_minutes, km in rows:
+    for shift_date, duration_minutes, km, airport_wait_minutes in rows:
         agg = by_day.setdefault(shift_date, {'minutes': 0, 'km': 0.0})
         agg['minutes'] += duration_minutes
         agg['km'] += km
@@ -3950,7 +4041,7 @@ async def show_shift_breakdown(callback_query: types.CallbackQuery):
     экран - он уже показывает итоги за 7/30/180 дней и последние дни."""
     await callback_query.answer()
     user_id = callback_query.from_user.id
-    rows = get_shift_history(user_id)  # [(shift_date, duration_minutes, km), ...] за 6 месяцев
+    rows = get_shift_history(user_id)  # [(shift_date, duration_minutes, km, airport_wait_minutes), ...] за 6 месяцев
 
     if not rows:
         await callback_query.message.answer(
@@ -3959,7 +4050,7 @@ async def show_shift_breakdown(callback_query: types.CallbackQuery):
         return
 
     by_day = {}
-    for shift_date, duration_minutes, km in rows:
+    for shift_date, duration_minutes, km, airport_wait_minutes in rows:
         agg = by_day.setdefault(shift_date, {'minutes': 0, 'km': 0.0})
         agg['minutes'] += duration_minutes
         agg['km'] += km
@@ -4024,15 +4115,22 @@ async def show_shift_breakdown(callback_query: types.CallbackQuery):
         text = text[:4000] + "…"
     await callback_query.message.answer(text, parse_mode='Markdown')
 
-def today_shifts_km(user_id):
-    """Сумма км по ЗАВЕРШЁННЫМ сегодня сменам (см. save_shift_record) - для
-    подсказки на шаге "Километраж" в "💰 Финансы" (courier_finance_flow).
-    Смена, которая ещё ИДЁТ прямо сейчас, сюда не попадает (она сохраняется
-    в историю только по "⏹ Завершить смену", см. finish_shift) - это
-    осознанно: расчёт финансов подразумевает уже законченную смену."""
+def today_shift_totals(user_id):
+    """Суммарные км/минуты/минуты простоя в аэропорту по ЗАВЕРШЁННЫМ сегодня
+    сменам (см. save_shift_record) - используется, чтобы автоматически
+    подставить километраж и часы смены в расчёт финансов (по просьбе
+    пользователя, 20.09.2026: "время смены и часовой берётся из данных по
+    кнопке начала смены"), не спрашивая их у водителя повторно. Смена,
+    которая ещё ИДЁТ прямо сейчас, сюда не попадает - учитываются только уже
+    завершённые (см. finish_shift)."""
     today_str = datetime.now(timezone.utc).date().isoformat()
     rows = get_shift_history(user_id, months=1)
-    return sum(km for shift_date, _duration, km in rows if shift_date == today_str)
+    today_rows = [r for r in rows if r[0] == today_str]
+    return {
+        'km': sum(r[2] for r in today_rows),
+        'minutes': sum(r[1] for r in today_rows),
+        'airport_wait_minutes': sum(r[3] for r in today_rows),
+    }
 
 @router.callback_query(lambda c: c.data == "start_finance_after_shift")
 async def start_finance_after_shift(callback_query: types.CallbackQuery):
@@ -4048,33 +4146,116 @@ async def start_finance_after_shift(callback_query: types.CallbackQuery):
     state['courier_finance_draft'] = {'step': 'income', 'data': {}}
     await callback_query.message.answer(COURIER_FINANCE_STEP_PROMPTS['income'], reply_markup=courier_finance_cancel_keyboard())
 
-@router.callback_query(lambda c: c.data == "use_counted_km")
-async def use_counted_km_in_finance(callback_query: types.CallbackQuery):
-    """Кнопка "✅ Использовать N км" под шагом "Километраж" в "💰 Финансы"
-    (см. комментарий у отправки этой кнопки в courier_finance_flow, шаг
-    'income') - подставляет сумму км по сегодняшним завершённым сменам
-    вместо ручного ввода и сразу переводит черновик на следующий шаг."""
+async def advance_finance_step(target, user_id, state, draft):
+    """Переводит черновик на следующий шаг и отправляет его промпт - общий
+    код для courier_finance_flow (текстовый ввод) и колбэков "Использовать
+    снова"/"Использовать N км". `target` - message.answer или
+    callback_query.message.answer (у обоих одинаковая сигнатура)."""
+    state['courier_finance_draft'] = draft
+    step = draft['step']
+
+    if step == 'km':
+        # Если сегодня уже есть завершённые смены (см. "✅ НАЧАТЬ СМЕНУ"/
+        # "⏹ ЗАВЕРШИТЬ СМЕНУ") - подставляем км/часы автоматически и сразу
+        # переходим дальше, без лишнего вопроса (по просьбе пользователя,
+        # 20.09.2026: "километраж... берётся из данных по кнопке начала
+        # смены"). Если данных нет - явно предлагаем ввести самостоятельно.
+        totals = today_shift_totals(user_id)
+        if totals['km'] > 0 or totals['minutes'] > 0:
+            draft['data']['km'] = totals['km']
+            draft['data']['hours'] = round(totals['minutes'] / 60, 2)
+            draft['data']['airport_wait_minutes'] = totals['airport_wait_minutes']
+            draft['step'] = 'consumption'
+            state['courier_finance_draft'] = draft
+            wait_note = ""
+            if totals['airport_wait_minutes'] > 0:
+                wait_note = f"\n⏳ Из них простой у аэропорта: {format_shift_duration(totals['airport_wait_minutes'])}"
+            await target(
+                f"🚗 Из сегодняшних смен: *{totals['km']:.1f} км*, "
+                f"*{format_shift_duration(totals['minutes'])}* за рулём.{wait_note}\n\n"
+                "Данные взяты автоматически - если что-то не так, можешь поправить позже.",
+                parse_mode='Markdown',
+            )
+            await advance_finance_step(target, user_id, state, draft)
+            return
+        await target(
+            "🚗 За сегодня нет данных по сменам (кнопка «✅ НАЧАТЬ СМЕНУ» не нажималась) - "
+            + COURIER_FINANCE_STEP_PROMPTS['km'],
+            reply_markup=courier_finance_cancel_keyboard(),
+        )
+        return
+
+    if step in FINANCE_REMEMBERED_FIELDS:
+        defaults = finance_defaults(state)
+        remembered = defaults.get(step)
+        if remembered is not None:
+            label = FINANCE_FIELD_LABELS[step](remembered)
+            await target(
+                f"{COURIER_FINANCE_STEP_PROMPTS[step]}\n\n_Прошлый раз: {label}_",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(text=f"✅ Использовать снова: {label}", callback_data=f"finance_use_default_{step}"),
+                ]]),
+                parse_mode='Markdown',
+            )
+            await target("Или введи новое значение сообщением:", reply_markup=courier_finance_cancel_keyboard())
+            return
+        await target(COURIER_FINANCE_STEP_PROMPTS[step], reply_markup=courier_finance_cancel_keyboard())
+        return
+
+    await target(COURIER_FINANCE_STEP_PROMPTS[step], reply_markup=courier_finance_cancel_keyboard())
+
+FINANCE_FIELD_LABELS = {
+    'consumption': lambda v: f"{v:g} л/100км",
+    'fuel_price': lambda v: f"{v:g} ₽/л",
+    'rent': lambda v: f"{v:g} ₽" if v else "нет аренды/лизинга",
+    'tax_rate': lambda v: f"{v:g}%",
+}
+
+FINANCE_STEP_ORDER = {
+    'income': 'km',
+    'km': 'consumption',
+    'consumption': 'fuel_price',
+    'fuel_price': 'rent',
+    'rent': 'expenses',
+    'expenses': 'tax_rate',
+    'tax_rate': 'hours',
+}
+
+@router.callback_query(lambda c: c.data.startswith("finance_use_default_"))
+async def use_finance_default(callback_query: types.CallbackQuery):
+    """Кнопка "✅ Использовать снова: ..." на шагах расхода топлива/цены
+    топлива/аренды/налога - подставляет запомненное с прошлого раза значение
+    (см. FINANCE_REMEMBERED_FIELDS/remember_finance_default) вместо
+    повторного ввода (по просьбе пользователя, 20.09.2026)."""
     await callback_query.answer()
+    field = callback_query.data[len("finance_use_default_"):]
     user_id = callback_query.from_user.id
     state = user_state.get(user_id)
     draft = state.get('courier_finance_draft') if state else None
-    if not draft or draft.get('step') != 'km':
-        # Черновик уже отменён/ушёл дальше другим путём (например, водитель
-        # успел ввести км вручную до нажатия кнопки) - кнопка неактуальна.
+    if not draft or draft.get('step') != field:
         await callback_query.message.edit_reply_markup(reply_markup=None)
         return
-    today_km = today_shifts_km(user_id)
-    draft['data']['km'] = today_km
-    draft['step'] = 'consumption'
+    value = finance_defaults(state).get(field)
+    if value is None:
+        return
+    draft['data'][field] = value
+    draft['step'] = FINANCE_STEP_ORDER[field]
     state['courier_finance_draft'] = draft
-    await callback_query.message.edit_text(f"✅ Использовано: {today_km:.1f} км")
-    await callback_query.message.answer(COURIER_FINANCE_STEP_PROMPTS['consumption'], reply_markup=courier_finance_cancel_keyboard())
+    await callback_query.message.edit_text(f"✅ Использовано: {FINANCE_FIELD_LABELS[field](value)}")
+    await advance_finance_step(callback_query.message.answer, user_id, state, draft)
 
 @router.message(lambda message: user_state.get(message.from_user.id, {}).get('courier_finance_draft') is not None)
 async def courier_finance_flow(message: types.Message):
     """Пошаговый сбор данных для финансового калькулятора - та же схема, что
     у shared_order_flow (черновик в state, один вопрос за раз). Должен стоять
-    РАНЬШЕ общих текстовых хендлеров по той же причине (см. shared_order_flow)."""
+    РАНЬШЕ общих текстовых хендлеров по той же причине (см. shared_order_flow).
+
+    Порядок шагов (по просьбе пользователя, 20.09.2026): доход -> км (авто из
+    смены, если есть) -> расход топлива -> цена топлива -> аренда/лизинг ТС
+    -> доп. расходы за день -> налог (по умолчанию 6% от дохода) -> часы
+    (авто из смены). Расход топлива/цена топлива/аренда/налог запоминаются
+    и на следующий раз предлагаются кнопкой "Использовать снова" (см.
+    FINANCE_REMEMBERED_FIELDS)."""
     user_id = message.from_user.id
     state = user_state[user_id]
     draft = state['courier_finance_draft']
@@ -4094,21 +4275,7 @@ async def courier_finance_flow(message: types.Message):
             return
         draft['data']['income'] = value
         draft['step'] = 'km'
-        state['courier_finance_draft'] = draft
-        await message.answer(COURIER_FINANCE_STEP_PROMPTS['km'], reply_markup=courier_finance_cancel_keyboard())
-        # Если сегодня уже есть завершённые смены (см. "▶️ Начать смену"/
-        # "⏹ Завершить смену") - предлагаем подставить готовую сумму км
-        # отдельным сообщением с инлайн-кнопкой (по просьбе пользователя,
-        # 20.09.2026), вместо того чтобы вводить километраж вручную.
-        today_km = today_shifts_km(user_id)
-        if today_km > 0:
-            await message.answer(
-                f"🛣 По сегодняшним завершённым сменам: *{today_km:.1f} км*",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-                    InlineKeyboardButton(text=f"✅ Использовать {today_km:.1f} км", callback_data="use_counted_km"),
-                ]]),
-                parse_mode='Markdown',
-            )
+        await advance_finance_step(message.answer, user_id, state, draft)
         return
 
     if step == 'km':
@@ -4118,8 +4285,7 @@ async def courier_finance_flow(message: types.Message):
             return
         draft['data']['km'] = value
         draft['step'] = 'consumption'
-        state['courier_finance_draft'] = draft
-        await message.answer(COURIER_FINANCE_STEP_PROMPTS['consumption'], reply_markup=courier_finance_cancel_keyboard())
+        await advance_finance_step(message.answer, user_id, state, draft)
         return
 
     if step == 'consumption':
@@ -4128,9 +4294,9 @@ async def courier_finance_flow(message: types.Message):
             await message.answer("Не понял расход - введи число, например 6.2:")
             return
         draft['data']['consumption'] = value
+        remember_finance_default(state, 'consumption', value)
         draft['step'] = 'fuel_price'
-        state['courier_finance_draft'] = draft
-        await message.answer(COURIER_FINANCE_STEP_PROMPTS['fuel_price'], reply_markup=courier_finance_cancel_keyboard())
+        await advance_finance_step(message.answer, user_id, state, draft)
         return
 
     if step == 'fuel_price':
@@ -4139,9 +4305,20 @@ async def courier_finance_flow(message: types.Message):
             await message.answer("Не понял цену топлива - введи число, например 61.5:")
             return
         draft['data']['fuel_price'] = value
+        remember_finance_default(state, 'fuel_price', value)
+        draft['step'] = 'rent'
+        await advance_finance_step(message.answer, user_id, state, draft)
+        return
+
+    if step == 'rent':
+        value = parse_decimal(text)
+        if value is None or value < 0:
+            await message.answer("Не понял сумму - введи число (или 0, если аренды/лизинга нет):")
+            return
+        draft['data']['rent'] = value
+        remember_finance_default(state, 'rent', value)
         draft['step'] = 'expenses'
-        state['courier_finance_draft'] = draft
-        await message.answer(COURIER_FINANCE_STEP_PROMPTS['expenses'], reply_markup=courier_finance_cancel_keyboard())
+        await advance_finance_step(message.answer, user_id, state, draft)
         return
 
     if step == 'expenses':
@@ -4150,9 +4327,19 @@ async def courier_finance_flow(message: types.Message):
             await message.answer("Не понял сумму - введи число (или 0, если доп. расходов не было):")
             return
         draft['data']['expenses'] = value
+        draft['step'] = 'tax_rate'
+        await advance_finance_step(message.answer, user_id, state, draft)
+        return
+
+    if step == 'tax_rate':
+        value = parse_decimal(text)
+        if value is None or value < 0:
+            await message.answer(f"Не понял ставку - введи число, например {DEFAULT_TAX_RATE_PERCENT:g}:")
+            return
+        draft['data']['tax_rate'] = value
+        remember_finance_default(state, 'tax_rate', value)
         draft['step'] = 'hours'
-        state['courier_finance_draft'] = draft
-        await message.answer(COURIER_FINANCE_STEP_PROMPTS['hours'], reply_markup=courier_finance_cancel_keyboard())
+        await advance_finance_step(message.answer, user_id, state, draft)
         return
 
     if step == 'hours':
@@ -4162,54 +4349,70 @@ async def courier_finance_flow(message: types.Message):
             return
         draft['data']['hours'] = value
         state.pop('courier_finance_draft', None)
-        await send_courier_finance_result(message, draft['data'])
+        await send_courier_finance_result(message, user_id, draft['data'])
         return
 
-async def send_courier_finance_result(message: types.Message, data):
-    """Считает и показывает итог смены - формула и порядок строк повторяют
-    карточку "📊 СМЕНА - ИТОГ" из прототипа (income - топливо - резерв на
-    износ - доп.расходы = чистыми; отдельной строкой ₽/час)."""
+async def send_courier_finance_result(message: types.Message, user_id, data):
+    """Считает и показывает итог дня, сохраняет доход/чистыми в отдельную
+    таблицу статистики (см. save_finance_result/finance_history) - формула:
+    доход минус топливо минус резерв на износ (10%) минус аренда/лизинг
+    минус доп. расходы минус налог (% от ВАЛОВОГО дохода) = чистыми;
+    отдельной строкой ₽/час."""
     income = data['income']
     km = data['km']
     consumption = data['consumption']
     fuel_price = data['fuel_price']
+    rent = data.get('rent', 0.0)
     expenses = data['expenses']
+    tax_rate = data.get('tax_rate', DEFAULT_TAX_RATE_PERCENT)
     hours = data['hours']
+    airport_wait_minutes = data.get('airport_wait_minutes', 0)
 
     fuel_cost = (km / 100) * consumption * fuel_price
     wear_reserve = income * COURIER_WEAR_RESERVE_RATE
-    net_profit = income - fuel_cost - wear_reserve - expenses
+    tax_amount = income * (tax_rate / 100)
+    net_profit = income - fuel_cost - wear_reserve - rent - expenses - tax_amount
     per_hour = net_profit / hours
 
     def fmt(n):
         return f"{n:,.0f}".replace(',', ' ')
 
     # По просьбе пользователя (20.09.2026): показываем, какие именно данные
-    # были учтены в расчёте - все введённые пользователем цифры одним
+    # были учтены в расчёте - все введённые/подставленные цифры одним
     # компактным блоком в начале сообщения, перед разбивкой по статьям.
     lines = [
-        "📊 *СМЕНА — ИТОГ*",
+        "📊 *ДЕНЬ — ИТОГ*",
         "",
         "_Учтено в расчёте:_",
         f"• Доход: {fmt(income)} ₽",
         f"• Пробег: {fmt(km)} км",
         f"• Расход топлива: {consumption:g} л/100км",
         f"• Цена топлива: {fuel_price:g} ₽/л",
+        f"• Аренда/лизинг ТС: {fmt(rent)} ₽",
         f"• Доп. расходы: {fmt(expenses)} ₽",
+        f"• Налог: {tax_rate:g}%",
         f"• Время за рулём: {hours:g} ч",
-        "",
+    ]
+    if airport_wait_minutes > 0:
+        lines.append(f"• Простой у аэропорта: {format_shift_duration(airport_wait_minutes)}")
+    lines.append("")
+    lines.extend([
         f"Валовый доход: {fmt(income)} ₽",
         f"⛽ Топливо ({fmt(km)} км × {consumption:g} на 100): −{fmt(fuel_cost)} ₽",
         f"🔧 Резерв на износ/ремонт (10%): −{fmt(wear_reserve)} ₽",
-    ]
+    ])
+    if rent > 0:
+        lines.append(f"🚘 Аренда/лизинг ТС: −{fmt(rent)} ₽")
     if expenses > 0:
         lines.append(f"📦 Доп. расходы: −{fmt(expenses)} ₽")
+    lines.append(f"🧾 Налог ({tax_rate:g}%): −{fmt(tax_amount)} ₽")
     lines.append("")
-    lines.append(f"✅ *Чистыми за смену: {fmt(net_profit)} ₽*")
+    lines.append(f"✅ *Чистыми за день: {fmt(net_profit)} ₽*")
     lines.append(f"за {hours:g} ч ≈ {fmt(per_hour)} ₽/ч")
 
-    category = user_state.get(message.from_user.id, {}).get('category')
+    category = user_state.get(user_id, {}).get('category')
     await message.answer('\n'.join(lines), reply_markup=courier_module_keyboard(category), parse_mode='Markdown')
+    save_finance_result(user_id, income, net_profit)
 
 CITY_MAP = {
     "🏛️ Москва": "moscow", "🕯️ СПб": "spb", "🌲 Новосибирск": "novosibirsk",
