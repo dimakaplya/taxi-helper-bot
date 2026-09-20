@@ -7493,7 +7493,10 @@ async def show_airport_info(callback_query: types.CallbackQuery):
             emoji = get_load_emoji(current_load)
             button_text = f"{airport['emoji']} {airport['name']} {emoji} {current_load:.0f}%"
         keyboard.inline_keyboard.append([InlineKeyboardButton(text=button_text, callback_data=f"airport_details_{city}_{i}")])
-    await msg.edit_text("✅ Аэропорты (прилеты):", reply_markup=keyboard)
+    # ДОБАВЛЕНО 21.09.2026 (прямая просьба пользователя - легенда цветов
+    # загрузки нужна везде, где виден % загрузки, не только на одном экране)
+    legend = "🔴0-25% Не ехать | 🟡26-50% Уточни очередь | 🟢51-85% Занимай очередь | 🟣>85% Срочно ехать"
+    await msg.edit_text(f"✅ Аэропорты (прилеты):\n\n{legend}", reply_markup=keyboard)
     await callback_query.answer()
 
 @router.callback_query(lambda c: c.data.startswith('airport_details_'))
@@ -7736,7 +7739,13 @@ async def show_airport_availability(callback_query: types.CallbackQuery):
                 # Если аэропорт закрыт/по согласованию - это важнее, чем % загрузки, ставим первым
                 button_text = f"{status_icon} {airport['emoji']} {airport['name']} {emoji} {info['load']:.0f}%"
             keyboard.inline_keyboard.append([InlineKeyboardButton(text=button_text, callback_data=f"availability_details_{city}_{i}")])
-        await msg.edit_text("🔄 *Доступность аэропортов*\nВыбери аэропорт для подробностей 👇", reply_markup=keyboard, parse_mode='Markdown')
+        # ДОБАВЛЕНО 21.09.2026 (прямая просьба пользователя - "сделай такую
+        # кнопку по всему боту где это будет нужно", имея в виду легенду
+        # цветов/порогов загрузки со скриншота другого экрана): та же
+        # легенда, что уже была в show_airport_details, теперь показывается
+        # на каждом экране со списком аэропортов, где видна загрузка %.
+        legend = "_🔴0-25% Не ехать | 🟡26-50% Уточни очередь | 🟢51-85% Занимай очередь | 🟣>85% Срочно ехать_"
+        await msg.edit_text(f"🔄 *Доступность аэропортов*\nВыбери аэропорт для подробностей 👇\n\n{legend}", reply_markup=keyboard, parse_mode='Markdown')
     except Exception as e:
         logger.error(f"❌ Ошибка в show_airport_availability: {e}")
         try:
