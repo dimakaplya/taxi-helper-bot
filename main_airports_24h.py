@@ -5236,7 +5236,6 @@ def map_webapp_html():
         if (a.load !== null && a.load !== undefined) {{
           label += ` · 📊 ${{a.load}}%`;
         }}
-        const queueKeys = Object.keys(a.queue || {{}});
         if (queueKeys.length) {{
           label += '<br>' + queueKeys.map(key => `🚗 ${{CATEGORY_LABEL[key] || key}}: ${{a.queue[key].range}}`).join(' · ');
         }}
