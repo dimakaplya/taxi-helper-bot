@@ -8589,7 +8589,15 @@ async def fetch_rain_forecast(city):
     """Почасовой прогноз (weathercode, температура) на RAIN_FORECAST_HOURS
     часов вперёд по городу через Open-Meteo. Возвращает None при ошибке
     сети/API - вызывающий код должен уметь пропустить город в этом прогоне,
-    а не упасть."""
+    а не упасть.
+
+    ИСПРАВЛЕНО 21.09.2026 (пользователь - "погода не грузит", в логах нашли
+    "Open-Meteo вернул 429"): при 429 (Too Many Requests - Open-Meteo не
+    даёт официальной цифры лимита, но на практике укладывает в rate-limit
+    при частых залпах запросов, см. check_rain_transitions) раньше сразу
+    сдавались с общим "попробуй через минуту". Теперь делаем 2 коротких
+    повтора с паузой - для ИНТЕРАКТИВНОГО нажатия "🌤 Погода" пользователем
+    это часто чинит проблему за 1-2 секунды, а не заставляет ждать минуту."""
     coords = RAIN_CITY_COORDS.get(city)
     if not coords:
         return None
@@ -8602,16 +8610,27 @@ async def fetch_rain_forecast(city):
         'forecast_hours': RAIN_FORECAST_HOURS,
         'timezone': 'auto',
     }
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(OPEN_METEO_URL, params=params, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                if resp.status != 200:
-                    logger.warning(f"⚠️ Open-Meteo вернул {resp.status} для города {city}")
-                    return None
-                return await resp.json()
-    except Exception as e:
-        logger.warning(f"⚠️ Не удалось получить прогноз Open-Meteo для {city}: {e}")
-        return None
+    RETRY_ATTEMPTS = 3
+    for attempt in range(1, RETRY_ATTEMPTS + 1):
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(OPEN_METEO_URL, params=params, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                    if resp.status == 429:
+                        if attempt < RETRY_ATTEMPTS:
+                            wait_s = 2.0 * attempt
+                            logger.warning(f"⏳ Open-Meteo 429 для {city}, попытка {attempt}/{RETRY_ATTEMPTS} - жду {wait_s}с...")
+                            await asyncio.sleep(wait_s)
+                            continue
+                        logger.warning(f"⚠️ Open-Meteo вернул 429 для города {city} - исчерпаны все {RETRY_ATTEMPTS} попыток")
+                        return None
+                    if resp.status != 200:
+                        logger.warning(f"⚠️ Open-Meteo вернул {resp.status} для города {city}")
+                        return None
+                    return await resp.json()
+        except Exception as e:
+            logger.warning(f"⚠️ Не удалось получить прогноз Open-Meteo для {city}: {e}")
+            return None
+    return None
 
 def find_upcoming_precip_event(forecast):
     """Ищет ближайшее почасовое окно с осадками в пределах RAIN_LEAD_MINUTES
@@ -8710,9 +8729,20 @@ async def check_rain_transitions():
     ДО отправки), поэтому реальный риск дублей и не имеет значения, что БД
     "холодная" - худший случай - один лишний пуш сразу после деплоя, если
     событие уже активно, что не является спамом, а вполне уместным пушом."""
+    # ИСПРАВЛЕНО 21.09.2026 (пользователь пожаловался - "погода не грузит",
+    # в логах Railway нашли причину: "⚠️ Open-Meteo вернул 429 для города
+    # moscow"): раньше все 12 городов запрашивались подряд БЕЗ единой паузы
+    # между запросами - при частых редеплоях (rain_checker запускает этот
+    # цикл сразу при каждом старте бота, см. rain_checker) несколько таких
+    # залпов подряд укладывали Open-Meteo в rate-limit. Аэропорты и вокзалы
+    # уже давно делают паузу между запросами по той же причине (см.
+    # fetch_yandex_data.py/fetch_trains_data.py, инцидент 19.09.2026) -
+    # теперь и здесь та же защита.
+    RAIN_REQUEST_DELAY_SECONDS = 1.0
     previous = load_all_rain_states()
     for city in RAIN_CITY_COORDS:
         forecast = await fetch_rain_forecast(city)
+        await asyncio.sleep(RAIN_REQUEST_DELAY_SECONDS)
         if not forecast:
             continue  # не удалось узнать - не трогаем сохранённое состояние
         event = find_upcoming_precip_event(forecast)
