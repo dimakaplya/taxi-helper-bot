@@ -2291,6 +2291,13 @@ WEEKDAY_HOUR_LOAD = {
     6: _WEEKDAY_PATTERN_SUNDAY,    # воскресенье
 }
 WEEKDAY_NAMES = ['Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота', 'Воскресенье']
+# Стандартные краткие обозначения дней недели (по жалобе пользователя,
+# 22.09.2026 - "По"/"Че"/"Пя"/"Су" на кнопках не соответствуют привычным
+# сокращениям) - раньше кнопки брали первые 2 буквы имени (name[:2]), что
+# для четверга/пятницы/субботы давало нестандартные обрезки. Теперь везде,
+# где нужна краткая подпись дня недели (см. peak_hours_weekday_keyboard),
+# используем этот список вместо name[:2].
+WEEKDAY_SHORT_NAMES = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс']
 
 # ---- Свои паттерны спроса для Курьера и Грузового такси (по просьбе
 # пользователя, 20.09.2026: "дай расклад для курьеров... и для грузовых
@@ -2515,8 +2522,8 @@ def peak_hours_weekday_keyboard(current_weekday, category=None):
     suffix = f"_{category}" if category in CATEGORY_WEEKDAY_HOUR_LOAD else ""
     buttons = []
     row = []
-    for i, name in enumerate(WEEKDAY_NAMES):
-        label = f"• {name[:2]} •" if i == current_weekday else name[:2]
+    for i, short_name in enumerate(WEEKDAY_SHORT_NAMES):
+        label = f"• {short_name} •" if i == current_weekday else short_name
         row.append(InlineKeyboardButton(text=label, callback_data=f"peak_day_{i}{suffix}"))
         if len(row) == 4:
             buttons.append(row)
