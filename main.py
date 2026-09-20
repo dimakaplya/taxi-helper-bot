@@ -3385,9 +3385,14 @@ async def show_tips_app(message: types.Message):
         "Приложение «Яндекс Чаевые: на карту по QR» - покажи QR-код пассажиру, "
         "он сканирует и переводит чаевые тебе на карту."
     )
+    # По просьбе пользователя (21.09.2026): "надо не скачать а получить
+    # чаевые на айфоне получить на андройде" - подписи кнопок меняли с
+    # нейтрального "Скачать в App Store/Google Play" на конкретное действие
+    # применительно к самой задаче (получить чаевые), с явным указанием
+    # платформы, а не общее "скачать".
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🍎 Скачать в App Store", url=TIPS_APP_URL_IOS)],
-        [InlineKeyboardButton(text="🤖 Скачать в Google Play", url=TIPS_APP_URL_ANDROID)],
+        [InlineKeyboardButton(text="🍎 Получить чаевые на iPhone", url=TIPS_APP_URL_IOS)],
+        [InlineKeyboardButton(text="🤖 Получить чаевые на Android", url=TIPS_APP_URL_ANDROID)],
     ])
     await message.answer(text, reply_markup=keyboard, parse_mode='Markdown')
     await message.answer("Выбери, что нужно дальше 👇", reply_markup=courier_module_keyboard(category))
@@ -4722,12 +4727,26 @@ def _location_tracking_active(user_id):
 
 # Сколько минут последняя точка живой трансляции считается ещё актуальной
 # для разовых запросов (Мойки/Шиномонтаж/Туалеты/Парковка и т.п., см.
-# show_nearby_prompt) - если водитель уже транслирует геопозицию (см.
-# _location_tracking_active), не спрашиваем её заново, а берём последнюю
-# известную точку (по жалобе пользователя, 20.09.2026: "локация горит уже а
-# бот опять предлагает"). Если пинга давно не было (например, трансляция
-# зависла) - точка считается устаревшей, и бот всё-таки спросит заново.
-LIVE_LOCATION_FRESH_MINUTES = 10
+# show_nearby_prompt) и для подсказки "включить трансляцию" после выбора
+# категории (см. select_category) - если водитель уже транслирует геопозицию
+# (см. _location_tracking_active), не спрашиваем её заново, а берём
+# последнюю известную точку (по жалобе пользователя, 20.09.2026: "локация
+# горит уже а бот опять предлагает"). Если пинга давно не было (например,
+# трансляция зависла) - точка считается устаревшей, и бот всё-таки спросит
+# заново.
+#
+# БЫЛО 10 минут - недостаточно: Telegram не гарантирует частые edited_message
+# с обновлением координат, если водитель физически стоит на месте (машина
+# на стоянке, ждёт заказ и т.п.) - трансляция при этом продолжает идти, но
+# новых пингов может не быть заметно дольше 10 минут, и бот снова "терял"
+# то, что трансляция активна (повторная жалоба пользователя, 21.09.2026, со
+# скриншотом: "сверху у нас включена трансляция локации а он опять это
+# запрашивает"). Подняли до того же порога, что уже используется для
+# определения "трансляция реально прервалась" у очереди аэропорта (см.
+# AIRPORT_QUEUE_STALE_TIMEOUT_MINUTES выше) - ниже этого порога транслицию
+# нигде в файле не считаем остановившейся, так что логично не считать её
+# остановившейся и здесь.
+LIVE_LOCATION_FRESH_MINUTES = AIRPORT_QUEUE_STALE_TIMEOUT_MINUTES
 
 def remember_live_location(user_id, lat, lon):
     state = user_state.get(user_id)
@@ -4850,6 +4869,144 @@ def get_map_positions(city, category=None):
             tariffs = []
         result.append({'category': r[0], 'lat': r[1], 'lon': r[2], 'tariffs': tariffs})
     return result
+
+def get_all_map_positions_with_user_id():
+    """Как get_map_positions, но ВКЛЮЧАЕТ user_id и без фильтра по городу -
+    только для служебного использования внутри бота (см.
+    check_nearby_drivers ниже), НИКОГДА не отдаётся во внешний JSON API
+    (там всегда get_map_positions без user_id, ради приватности)."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT user_id, city, category, lat, lon, tariffs FROM map_positions
+        WHERE updated_at >= datetime('now', ?)
+    ''', (f'-{MAP_VISIBILITY_STALE_MINUTES} minutes',))
+    rows = cursor.fetchall()
+    conn.close()
+    result = []
+    for r in rows:
+        try:
+            tariffs = json.loads(r[5]) if r[5] else []
+        except Exception:
+            tariffs = []
+        result.append({'user_id': r[0], 'city': r[1], 'category': r[2], 'lat': r[3], 'lon': r[4], 'tariffs': tariffs})
+    return result
+
+# ==================== ПУШ "РЯДОМ ЕСТЬ ВОДИТЕЛЬ" ====================
+# По прямой просьбе пользователя (21.09.2026): "если водителя находятся друг
+# с дружкой рядом на расстоянии меньше 300 м и находятся больше [5 минут] в
+# таком состоянии чтоб присылал Push что с вами есть рядом водитель такой-то
+# категории... если курьер то курьер если Ультима то Ультима... только
+# премьер премьера элит элита" - пара водителей должна быть ОДНОЙ категории
+# (такси видит только такси и т.д., как и вся карта - см. MAP_CATEGORY_STYLE)
+# и, если у обоих указаны тарифы при старте смены (см. shift_tariffs_keyboard),
+# у них должен быть хотя бы один ОБЩИЙ тариф (Премьер видит Премьера, Эконом -
+# Эконома, а не любого таксиста без разбора). Пуш шлётся ОДИН РАЗ на пару, пока
+# они не разъедутся дальше NEARBY_DRIVERS_RADIUS_KM - потом, если снова
+# окажутся рядом, отсчёт и пуш начинаются заново (по прямому уточнению
+# пользователя - "один раз", а не периодически).
+NEARBY_DRIVERS_RADIUS_KM = 0.3
+NEARBY_DRIVERS_MINUTES = 5
+NEARBY_DRIVERS_CHECK_INTERVAL_MINUTES = 1
+
+# In-memory (не в БД - это лёгкий эфемерный трекер, переживать перезапуск
+# бота ему не нужно: после рестарта пары просто отсчитаются заново).
+# Ключ - frozenset({user_id_1, user_id_2}).
+_nearby_pairs_since = {}   # ключ -> datetime, когда пара впервые оказалась рядом
+_nearby_pairs_notified = set()  # ключи пар, которым уже отправлен пуш (пока не разъедутся)
+
+def _tariffs_overlap_or_unset(tariffs_a, tariffs_b):
+    """True, если у пары есть общий тариф, либо тарифы не указаны хотя бы у
+    одного из них (тогда сверяем только по категории - см. вызов ниже)."""
+    if not tariffs_a or not tariffs_b:
+        return True
+    return bool(set(tariffs_a) & set(tariffs_b))
+
+async def check_nearby_drivers():
+    """Раз в NEARBY_DRIVERS_CHECK_INTERVAL_MINUTES проверяет все активные
+    позиции на карте (см. get_all_map_positions_with_user_id), находит пары
+    водителей одной категории (и с пересекающимися тарифами, если тарифы
+    указаны у обоих) ближе NEARBY_DRIVERS_RADIUS_KM друг к другу, и если они
+    остаются рядом дольше NEARBY_DRIVERS_MINUTES - шлёт пуш обоим (один раз,
+    пока не разъедутся). O(n²) по водителям внутри одного города и категории -
+    при реалистичных масштабах (десятки-сотни одновременно активных смен на
+    город) это тривиально дёшево, специальная пространственная индексация не
+    нужна."""
+    if not bot:
+        return
+    positions = get_all_map_positions_with_user_id()
+    # Группируем по (город, категория) - пары имеют смысл только внутри
+    # одного города и одной категории (см. комментарий к блоку выше).
+    groups = {}
+    for p in positions:
+        key = (p['city'], p['category'])
+        groups.setdefault(key, []).append(p)
+
+    now = datetime.now(timezone.utc)
+    currently_close = set()
+
+    for (_city, _category), drivers in groups.items():
+        for i in range(len(drivers)):
+            for j in range(i + 1, len(drivers)):
+                a, b = drivers[i], drivers[j]
+                if a['user_id'] == b['user_id']:
+                    continue
+                if not _tariffs_overlap_or_unset(a['tariffs'], b['tariffs']):
+                    continue
+                dist_km = haversine_km(a['lat'], a['lon'], b['lat'], b['lon'])
+                if dist_km > NEARBY_DRIVERS_RADIUS_KM:
+                    continue
+                pair_key = frozenset((a['user_id'], b['user_id']))
+                currently_close.add(pair_key)
+                since = _nearby_pairs_since.get(pair_key)
+                if since is None:
+                    _nearby_pairs_since[pair_key] = now
+                    continue
+                elapsed_minutes = (now - since).total_seconds() / 60
+                if elapsed_minutes < NEARBY_DRIVERS_MINUTES or pair_key in _nearby_pairs_notified:
+                    continue
+                _nearby_pairs_notified.add(pair_key)
+                await _send_nearby_driver_pushes(a, b)
+
+    # Пары, которые больше не рядом (разъехались дальше радиуса, или один из
+    # водителей завершил смену/пропал с карты) - сбрасываем таймер и флаг
+    # "уже уведомлены", чтобы при новой встрече отсчёт начался заново.
+    stale_keys = [k for k in _nearby_pairs_since if k not in currently_close]
+    for k in stale_keys:
+        _nearby_pairs_since.pop(k, None)
+        _nearby_pairs_notified.discard(k)
+
+def _nearby_driver_label(driver):
+    """"Премьер, Комфорт" или просто название категории (Такси/Ultima/...),
+    если тарифы не указаны - для текста пуша (см. _send_nearby_driver_pushes)."""
+    if driver['tariffs']:
+        return format_shift_tariffs_label(driver['tariffs'])
+    return MAP_CATEGORY_STYLE.get(driver['category'], {}).get('label', driver['category'])
+
+async def _send_nearby_driver_pushes(a, b):
+    """Шлёт обоим водителям пары пуш о том, что рядом коллега - каждому про
+    категорию/тариф ДРУГОГО (без user_id/имени - та же приватность, что и на
+    самой карте, см. get_map_positions)."""
+    dist_m = round(haversine_km(a['lat'], a['lon'], b['lat'], b['lon']) * 1000)
+    for me, other in ((a, b), (b, a)):
+        label = _nearby_driver_label(other)
+        text = (
+            f"📍 Рядом с тобой (~{dist_m} м) уже больше {NEARBY_DRIVERS_MINUTES} минут "
+            f"есть ещё один водитель: *{label}*."
+        )
+        try:
+            await bot.send_message(me['user_id'], text, parse_mode='Markdown')
+        except Exception:
+            logger.warning(f"⚠️ Не удалось отправить пуш о соседнем водителе user_id={me['user_id']}")
+        await asyncio.sleep(0.05)
+
+async def nearby_drivers_checker():
+    while True:
+        try:
+            await check_nearby_drivers()
+        except Exception:
+            logger.exception("❌ Ошибка фоновой проверки соседних водителей")
+        await asyncio.sleep(NEARBY_DRIVERS_CHECK_INTERVAL_MINUTES * 60)
 
 def maybe_update_map_position(user_id, lat, lon):
     """Хук из обработчиков живой геопозиции (см. вызовы ниже) - пишет позицию
@@ -9123,6 +9280,7 @@ async def main():
     asyncio.create_task(airport_queue_checker())
     asyncio.create_task(peak_hour_alert_checker())
     asyncio.create_task(check_long_shifts())
+    asyncio.create_task(nearby_drivers_checker())
     asyncio.create_task(morning_greeting_checker())
     # allowed_updates передаём ЯВНО (а не полагаемся на автоматическое
     # dp.resolve_used_update_types()) - похоже, это и была причина, почему
