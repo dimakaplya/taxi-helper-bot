@@ -2122,6 +2122,31 @@ def queue_submit_report(user_id, city, airport_icao, category, range_str, zone_k
     conn.commit()
     conn.close()
 
+def user_recent_queue_marks(user_id, city, airport_icao, zone_key=None):
+    """Собственные СВЕЖИЕ (за QUEUE_ENTRY_TTL_MINUTES) отметки ЭТОГО водителя
+    для этого аэропорта/терминала - {tariff: range_str}, самая свежая по
+    каждому tariff. Добавлено 20.09.2026 по просьбе пользователя: "если он
+    отметился в зоне аэропорта раз, второй раз можно уже не спрашивать" - на
+    повторном пуше "давно рядом с аэропортом" (см. send_airport_queue_push)
+    так можно предложить водителю просто подтвердить "я всё ещё тут" одной
+    кнопкой (переотправить те же тарифы/диапазоны с новым временем), не
+    заставляя заново проходить весь выбор тарифа и диапазона машин."""
+    init_db()
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cutoff = (datetime.now(ZoneInfo('UTC')) - timedelta(minutes=QUEUE_ENTRY_TTL_MINUTES)).strftime('%Y-%m-%d %H:%M:%S')
+    cursor.execute(
+        'SELECT tariff, position_range, timestamp FROM queue WHERE user_id = ? AND city = ? AND airport = ? '
+        'AND timestamp >= ? ORDER BY timestamp ASC',
+        (user_id, city, _queue_airport_key(airport_icao, zone_key), cutoff)
+    )
+    rows = cursor.fetchall()
+    conn.close()
+    marks = {}
+    for tariff, range_str, ts in rows:
+        marks[tariff] = range_str  # ASC порядок - последняя запись по каждому tariff перезапишет более раннюю
+    return marks
+
 def queue_latest_report(city, airport_icao, category, zone_key=None):
     """Последняя свежая отметка водителя (за QUEUE_ENTRY_TTL_MINUTES) - без
     усреднения, просто тот диапазон, который отметил последний водитель.
@@ -4730,9 +4755,22 @@ async def send_airport_queue_push(user_id, icao, kind, dist_km=None, zone_label=
     target = find_airport_queue_join_target(icao, zone_key)
     if target:
         target_city, airport_idx = target
-        reply_markup = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🚗 Встать в очередь", callback_data=f"join_queue_{target_city}_{airport_idx}")]
-        ])
+        buttons = []
+        # ДОБАВЛЕНО 20.09.2026 (по просьбе пользователя - "если он отметился
+        # в зоне аэропорта раз, второй раз можно уже не спрашивать"): если у
+        # водителя уже есть СВОЯ свежая отметка по этому аэропорту/терминалу
+        # (он уже проходил выбор тарифа и диапазона недавно) - добавляем
+        # кнопку-подтверждение "✅ Уже в очереди", которая одним нажатием
+        # просто освежает время той же самой отметки (тот же диапазон машин),
+        # без повторного выбора тарифа/диапазона. "🚗 Встать в очередь"
+        # остаётся рядом - на случай, если число машин в очереди изменилось
+        # и нужно отметить заново.
+        own_marks = user_recent_queue_marks(user_id, target_city, icao, zone_key)
+        if own_marks:
+            keep_key = f"qkeep_{target_city}_{icao}_{zone_key or '-'}"
+            buttons.append([InlineKeyboardButton(text="✅ Уже в очереди", callback_data=keep_key)])
+        buttons.append([InlineKeyboardButton(text="🚗 Встать в очередь" if not own_marks else "🔄 Обновить очередь", callback_data=f"join_queue_{target_city}_{airport_idx}")])
+        reply_markup = InlineKeyboardMarkup(inline_keyboard=buttons)
     try:
         await bot.send_message(user_id, text, reply_markup=reply_markup, parse_mode='Markdown')
     except Exception as e:
@@ -7514,6 +7552,38 @@ async def submit_range(callback_query: types.CallbackQuery):
     ])
     await callback_query.message.edit_text(text, reply_markup=keyboard, parse_mode='Markdown')
     await callback_query.answer("Отметка сохранена")
+
+@router.callback_query(lambda c: c.data.startswith('qkeep_'))
+async def keep_queue_marks(callback_query: types.CallbackQuery):
+    """Кнопка "✅ Уже в очереди" на повторном пуше "давно рядом с
+    аэропортом" (см. send_airport_queue_push) - ДОБАВЛЕНО 20.09.2026 по
+    просьбе пользователя: "если он отметился в зоне аэропорта раз, второй
+    раз можно уже не спрашивать". Не открывает заново выбор тарифа/диапазона -
+    просто переотправляет те же тарифы с теми же диапазонами, что водитель
+    уже отмечал недавно (user_recent_queue_marks), но с СВЕЖИМ временем,
+    чтобы отметка не истекла по QUEUE_ENTRY_TTL_MINUTES, пока он реально
+    всё ещё стоит в очереди."""
+    user_id = callback_query.from_user.id
+    data = callback_query.data[len('qkeep_'):]
+    parts = data.split('_')
+    if len(parts) < 3:
+        await callback_query.answer("Ошибка!", show_alert=True)
+        return
+    city, icao, zone_raw = parts[0], parts[1], '_'.join(parts[2:])
+    zone_key = None if zone_raw == '-' else zone_raw
+    marks = user_recent_queue_marks(user_id, city, icao, zone_key)
+    if not marks:
+        # Отметки успели истечь (TTL) между показом пуша и нажатием кнопки -
+        # нет смысла "освежать" то, чего уже нет, просим отметиться заново.
+        await callback_query.answer("Старая отметка уже истекла - отметься заново 👇", show_alert=True)
+        return
+    for tariff, range_str in marks.items():
+        queue_submit_report(user_id, city, icao, tariff, range_str, zone_key=zone_key)
+    await callback_query.answer("Спасибо! Отметка обновлена ✅")
+    try:
+        await callback_query.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
 
 @router.callback_query(lambda c: c.data.startswith('view_queue_'))
 async def view_queue(callback_query: types.CallbackQuery):
