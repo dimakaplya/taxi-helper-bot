@@ -8000,7 +8000,12 @@ MAP_CHROME_CSS = """
      top:10px, left:56px), чтобы не наезжать друг на друга. */
   .layer-toggle { position: absolute; top: 52px; left: 56px; z-index: 1000; background: #1c1c1c; color: #fff; border: 1px solid rgba(255,196,0,.4); border-radius: 8px; padding: 6px 10px; font-family: -apple-system, sans-serif; font-size: 12px; box-shadow: 0 1px 4px rgba(0,0,0,.35); }
   .layer-toggle label { display: flex; align-items: center; gap: 6px; margin: 3px 0; cursor: pointer; user-select: none; white-space: nowrap; }
-  .fuel-icon, .charging-icon, .parking-icon { display: flex; align-items: center; justify-content: center; font-size: 18px; filter: drop-shadow(0 1px 2px rgba(0,0,0,.5)); }
+  /* ИЗМЕНЕНО 23.09.2026 (жалоба пользователя, скриншот - "плохо видно"
+     значки заправок/зарядок на карте): раньше это были голые эмодзи с
+     drop-shadow - на пёстрой тайловой подложке почти не различить.
+     Теперь квадратик на полупрозрачном белом фоне - как отдельный
+     UI-элемент, а не часть карты, читается на любом фоне. */
+  .fuel-icon, .charging-icon, .parking-icon { box-sizing: border-box; display: flex; align-items: center; justify-content: center; font-size: 16px; background: rgba(255,255,255,.92); border: 1px solid rgba(0,0,0,.2); border-radius: 6px; box-shadow: 0 1px 3px rgba(0,0,0,.5); }
   .fuel-popup, .charging-popup { font-family: -apple-system, sans-serif; font-size: 12.5px; max-width: 230px; color: #000; }
   .fuel-popup h4, .charging-popup h4 { margin: 0 0 6px; font-size: 13.5px; }
   .fuel-popup .sub, .charging-popup .sub { color: #666; font-size: 11.5px; margin-bottom: 6px; }
@@ -8012,6 +8017,7 @@ MAP_CHROME_CSS = """
   .status-btn.on-busy { background: #f9a825; color: #000; border-color: #f9a825; }
   .status-btn.on-queue { background: #c62828; color: #fff; border-color: #c62828; }
   .status-note { color: #888; font-size: 10.5px; margin-top: 6px; }
+  .pc-go { display: inline-block; margin-top: 8px; background: #FFC400; color: #000; text-decoration: none; font-weight: 600; font-size: 12.5px; padding: 6px 10px; border-radius: 6px; }
 """
 
 def map_webapp_html():
@@ -8366,6 +8372,19 @@ def map_webapp_html():
   let chargingCluster = L.markerClusterGroup({{ maxClusterRadius: 60, disableClusteringAtZoom: 16, spiderfyOnMaxZoom: false }});
   let chargingLoaded = false;
 
+  // Кнопка "🚕 Поехали" на попапах заправок/зарядок/парковок - по просьбе
+  // пользователя, тот же URL-формат, что и везде в боте (yandex_navi_url
+  // на сервере/pc-go в кабинете) - обычный https://yandex.ru/maps
+  // с rtext/rtt, Yandex зарегистрировал universal links на этот домен,
+  // так что на телефоне с установленным Яндекс Навигатором/Картами
+  // открывается сразу в приложении.
+  function navUrl(lat, lon) {{
+    return `https://yandex.ru/maps/?rtext=~${{lat}},${{lon}}&rtt=auto`;
+  }}
+  function goButtonHtml(lat, lon) {{
+    return `<a class="pc-go" href="${{navUrl(lat, lon)}}" target="_blank">🚕 Поехали</a>`;
+  }}
+
   function buildFuelPopup(p) {{
     let html = `<div class="fuel-popup"><h4>⛽ ${{p.name || 'Заправка'}}</h4>`;
     html += `<div class="sub">Отметь, что есть на заправке:</div><div class="status-btn-row">`;
@@ -8377,7 +8396,9 @@ def map_webapp_html():
       html += `<button class="${{cls}}" onclick="window.reportFuel('${{p.id}}','${{ft}}',true)">${{FUEL_TYPE_LABELS[ft]}} есть</button>`;
       html += `<button class="${{cls}}" onclick="window.reportFuel('${{p.id}}','${{ft}}',false)">${{FUEL_TYPE_LABELS[ft]}} нет</button>`;
     }});
-    html += `</div><div class="status-note">Отметки водителей, могут устаревать</div></div>`;
+    html += `</div><div class="status-note">Отметки водителей, могут устаревать</div>`;
+    html += goButtonHtml(p.lat, p.lon);
+    html += `</div>`;
     return html;
   }}
 
@@ -8439,7 +8460,9 @@ def map_webapp_html():
       if (curStatus === st) cls += ' on-' + st;
       html += `<button class="${{cls}}" onclick="window.reportCharging('${{p.id}}','${{st}}')">${{CHARGING_STATUS_LABELS[st]}}</button>`;
     }});
-    html += `</div><div class="status-note">Отметки водителей, могут устаревать</div></div>`;
+    html += `</div><div class="status-note">Отметки водителей, могут устаревать</div>`;
+    html += goButtonHtml(p.lat, p.lon);
+    html += `</div>`;
     return html;
   }}
 
@@ -8501,7 +8524,7 @@ def map_webapp_html():
       parkingCluster.clearLayers();
       const icon = L.divIcon({{ className: 'parking-icon', html: '🅿️', iconSize: [20, 20] }});
       (data.stations || []).forEach(p => {{
-        const popup = `<div class="fuel-popup"><h4>🅿️ ${{p.name || 'Бесплатная парковка'}}</h4></div>`;
+        const popup = `<div class="fuel-popup"><h4>🅿️ ${{p.name || 'Бесплатная парковка'}}</h4>${{goButtonHtml(p.lat, p.lon)}}</div>`;
         const marker = L.marker([p.lat, p.lon], {{ icon }}).bindPopup(popup);
         parkingCluster.addLayer(marker);
       }});
