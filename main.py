@@ -6844,6 +6844,48 @@ async def send_airport_queue_push(user_id, icao, kind, dist_km=None, zone_label=
     except Exception as e:
         logger.warning(f"⚠️ Не удалось отправить пуш об очереди у аэропорта пользователю {user_id}: {e}")
 
+# ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "когда выезжаешь за
+# пределы зоны аэропорта он присылает пуш и там отмечаешься что ты покинул
+# очередь"): пуш при ВЫХОДЕ из внешнего радиуса зоны аэропорта (см.
+# process_airport_queue_ping, ветка "Вышел за пределы внешнего радиуса") -
+# с инлайн-кнопкой "🚪 Я ПОКИНУЛ ОЧЕРЕДЬ". Пока кнопка просто подтверждает
+# нажатие ("Отмечено") - специально без сохранения данных, по прямой
+# просьбе пользователя ("пока просто кнопка потом будем с нее данные
+# собирать") - реальный сбор статистики (сколько водитель реально простоял
+# в очереди и т.п.) будет отдельной задачей позже.
+async def send_airport_queue_left_push(user_id, icao, zone_label=None):
+    if not bot:
+        return
+    airport = ICAO_TO_AIRPORT.get(icao)
+    if not airport:
+        return
+    name = f"{airport['emoji']} {airport['name']}"
+    if zone_label:
+        base_name = re.sub(r'\s*\([^)]*\)\s*$', '', airport['name'])
+        name = f"{airport['emoji']} {base_name} ({zone_label})"
+    text = f"🚪 Ты выехал(а) из зоны {name}."
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🚪 Я ПОКИНУЛ ОЧЕРЕДЬ", callback_data=f"aqleft_{icao}")]
+    ])
+    try:
+        await bot.send_message(user_id, text, reply_markup=keyboard)
+    except Exception as e:
+        logger.warning(f"⚠️ Не удалось отправить пуш о выходе из зоны аэропорта пользователю {user_id}: {e}")
+
+@router.callback_query(lambda c: c.data.startswith("aqleft_"))
+async def airport_queue_left_confirm(callback_query: types.CallbackQuery):
+    """Кнопка "🚪 Я ПОКИНУЛ ОЧЕРЕДЬ" на пуше о выходе из зоны аэропорта - пока
+    просто подтверждение нажатия, без сохранения данных (см. комментарий у
+    send_airport_queue_left_push выше)."""
+    try:
+        await callback_query.answer("Отмечено ✅")
+    except Exception:
+        pass
+    try:
+        await callback_query.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
 async def send_airport_queue_expired_push(user_id, icao):
     """Пуш-напоминание на случай, когда трансляция геопозиции, судя по
     всему, закончилась (см. check_airport_queue_timers) - по просьбе
@@ -6962,6 +7004,15 @@ async def process_airport_queue_ping(user_id, lat, lon, live_period=None):
         # Вышел за пределы внешнего радиуса - сбрасываем: при возвращении
         # отсчёт (и пуши на вход/по времени) начнётся заново.
         if aq.get('entered_outer_at'):
+            # ДОБАВЛЕНО 22.09.2026 (см. комментарий у send_airport_queue_left_push
+            # выше) - пуш о выходе из зоны, только если водитель реально
+            # заходил в неё (entered_outer_at) в ЭТОТ заход, а не на каждый
+            # пинг далеко от аэропорта.
+            # zone_label не передаём - он вычислен для ТЕКУЩЕЙ (уже дальней)
+            # точки и может не соответствовать зоне, в которой водитель
+            # реально стоял (aq['zone_key']) - обходимся названием аэропорта
+            # без уточнения терминала.
+            await send_airport_queue_left_push(user_id, aq.get('icao') or icao)
             # По просьбе пользователя (20.09.2026): если сейчас идёт смена -
             # копим суммарное время простоя в аэропорту за смену
             # (state['shift']['airport_wait_minutes']), чтобы учесть его в
