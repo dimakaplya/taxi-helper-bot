@@ -5878,7 +5878,7 @@ def map_webapp_html():
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Карта водителей</title>
-<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<script src="{TG_WEBAPP_JS_PROXY_PATH}"></script>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <style>
@@ -6846,7 +6846,7 @@ def cabinet_webapp_html():
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Личный кабинет</title>
-<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<script src=\"""" + TG_WEBAPP_JS_PROXY_PATH + """\"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <style>
   :root { color-scheme: light dark; }
@@ -10793,6 +10793,55 @@ PUBLIC_URL = os.getenv('PUBLIC_URL') or (f'https://{_railway_domain}' if _railwa
 SUBSCRIPTION_WEBHOOK_PORT = int(os.getenv('PORT', '8080'))
 SUBSCRIPTION_WEBHOOK_PATH = '/tinkoff/webhook'
 
+# ==================== ЛОКАЛЬНАЯ РАЗДАЧА telegram-web-app.js ====================
+# По факту (21.09.2026): в "Личном кабинете" tg.initData приходил ПУСТЫМ
+# (X-Telegram-Init-Data len=0 в логах) - у части российских мобильных
+# операторов домен telegram.org (в отличие от самого Telegram, который
+# ходит через MTProto, а не HTTPS на этот домен) бывает недоступен/
+# нестабилен, из-за чего <script src="https://telegram.org/js/telegram-web-
+# app.js"> в вебвью просто не загружается, window.Telegram остаётся
+# undefined, и initData/tg.ready() соответственно не работают. Решение -
+# раздавать этот скрипт со своего же домена (Railway точно достанет
+# telegram.org - он не в России), кэшируя содержимое в памяти процесса.
+TG_WEBAPP_JS_PROXY_PATH = '/static/tg-webapp.js'
+_tg_webapp_js_cache = {'content': None, 'fetched_at': None}
+
+async def get_tg_webapp_js():
+    """Возвращает содержимое telegram-web-app.js, скачивая и кэша его в
+    памяти при первом обращении (дальше отдаём из кэша, без похода наружу на
+    каждый запрос страницы). Раз в час обновляем в фоне (на случай, если
+    Telegram обновит SDK), но если сеть недоступна - отдаём последнюю
+    рабочую версию из кэша, а не падаем."""
+    cache = _tg_webapp_js_cache
+    is_stale = cache['fetched_at'] is None or (time.time() - cache['fetched_at']) > 3600
+    if cache['content'] is not None and not is_stale:
+        return cache['content']
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get('https://telegram.org/js/telegram-web-app.js', timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                resp.raise_for_status()
+                text = await resp.text()
+        cache['content'] = text
+        cache['fetched_at'] = time.time()
+    except Exception as e:
+        if cache['content'] is None:
+            logger.error(f"❌ Не удалось скачать telegram-web-app.js и в кэше пусто: {e}")
+        else:
+            logger.warning(f"⚠️ Не удалось обновить telegram-web-app.js (использую версию из кэша): {e}")
+    return cache['content']
+
+async def handle_tg_webapp_js_proxy(request):
+    content = await get_tg_webapp_js()
+    if content is None:
+        # Совсем нет ни свежей, ни кэшированной версии (первый запуск и сеть
+        # недоступна) - редиректим на оригинал как последний шанс, лучше
+        # так, чем совсем без SDK.
+        raise web.HTTPFound('https://telegram.org/js/telegram-web-app.js')
+    return web.Response(
+        text=content, content_type='application/javascript',
+        headers={'Cache-Control': 'public, max-age=3600'},
+    )
+
 
 def _sub_now():
     """Наивный UTC datetime (без tzinfo) - тот же формат, что и остальные
@@ -11091,6 +11140,9 @@ async def start_subscription_webhook_server():
     app.router.add_get(MAP_STATIONS_API_PATH, handle_map_stations_api)
     app.router.add_get(MAP_ROAD_EVENTS_API_PATH, handle_map_road_events_api)
     app.router.add_get(MAP_CITY_EVENTS_API_PATH, handle_map_city_events_api)
+    # Локальная раздача telegram-web-app.js (21.09.2026, см. блок "ЛОКАЛЬНАЯ
+    # РАЗДАЧА telegram-web-app.js" выше) - используется и картой, и кабинетом.
+    app.router.add_get(TG_WEBAPP_JS_PROXY_PATH, handle_tg_webapp_js_proxy)
     # Личный кабинет (см. блок "ЛИЧНЫЙ КАБИНЕТ (WebApp)" выше)
     app.router.add_get(CABINET_WEBAPP_PATH, handle_cabinet_webapp)
     app.router.add_get(CABINET_DATA_API_PATH, handle_cabinet_data_api)
@@ -12187,6 +12239,11 @@ async def main():
     asyncio.create_task(nearby_drivers_checker())
     asyncio.create_task(morning_greeting_checker())
     asyncio.create_task(user_state_flusher())  # write-behind для user_state - см. комментарий у PersistentUserDict
+    # Прогрев кэша telegram-web-app.js (21.09.2026, см. "ЛОКАЛЬНАЯ РАЗДАЧА
+    # telegram-web-app.js" выше) - скачиваем сразу при старте, а не ждём
+    # первого запроса от водителя (иначе первое открытие карты/кабинета
+    # после рестарта ждало бы лишние секунды на поход за скриптом).
+    asyncio.create_task(get_tg_webapp_js())
     # allowed_updates передаём ЯВНО (а не полагаемся на автоматическое
     # dp.resolve_used_update_types()) - похоже, это и была причина, почему
     # пуши "Очередь у аэропорта" не приходили: Telegram Bot API запоминает
