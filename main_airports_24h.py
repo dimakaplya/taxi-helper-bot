@@ -13471,6 +13471,28 @@ def find_precip_event_end(forecast, start_offset):
             return i - start_offset
     return None
 
+# ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "с 23.30 до 6.30 утра
+# не присылать пуш о дожде и спросе в дождь"): ночная тишина для пуша о
+# дожде/усилении спроса из-за дождя (push_rain_alert) - по МЕСТНОМУ времени
+# КАЖДОГО города (тот же принцип, что у утреннего приветствия 9:00 -
+# см. get_city_now), а не единому московскому. Другие типы пушей (очередь
+# у аэропорта, статус аэропортов и т.п.) не затрагиваются - только этот.
+RAIN_PUSH_QUIET_START_HOUR, RAIN_PUSH_QUIET_START_MINUTE = 23, 30
+RAIN_PUSH_QUIET_END_HOUR, RAIN_PUSH_QUIET_END_MINUTE = 6, 30
+
+def is_rain_push_quiet_hours(city):
+    """True, если сейчас в промежутке [23:30, 6:30) по местному времени
+    города - окно переходит через полночь, поэтому сравниваем через минуты
+    от начала суток, а не напрямую time()."""
+    now = get_city_now(city)
+    minutes_now = now.hour * 60 + now.minute
+    start = RAIN_PUSH_QUIET_START_HOUR * 60 + RAIN_PUSH_QUIET_START_MINUTE
+    end = RAIN_PUSH_QUIET_END_HOUR * 60 + RAIN_PUSH_QUIET_END_MINUTE
+    if start > end:
+        # Окно через полночь (23:30..23:59 ИЛИ 00:00..6:29).
+        return minutes_now >= start or minutes_now < end
+    return start <= minutes_now < end
+
 async def push_rain_alert(city, event):
     """Рассылает упреждающий пуш водителям и курьерам выбранного города о
     скором начале (или усилении) осадков - в отличие от
@@ -13570,6 +13592,13 @@ async def check_rain_transitions():
         is_stronger = (prev_weight is not None and event['weight'] > prev_weight)
 
         if is_new_event or is_stronger:
+            if is_rain_push_quiet_hours(city):
+                # Ночная тишина (23:30-6:30 по местному времени города) -
+                # НЕ сохраняем состояние (специально), чтобы то же событие
+                # снова посчиталось "новым" на первом прогоне после 6:30 и
+                # пуш всё-таки ушёл, просто позже, а не потерялся молча.
+                logger.info(f"{event['emoji']} В городе {city} ожидаются осадки ({event['name']}), но сейчас ночная тишина (23:30-6:30) - пуш отложен")
+                continue
             save_rain_state(city, event_start, event['weight'])
             await push_rain_alert(city, event)
 
