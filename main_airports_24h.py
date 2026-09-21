@@ -7693,9 +7693,11 @@ def transport_webapp_html():
   .item .load { font-variant-numeric: tabular-nums; color: #FFC400; font-weight: 700; }
   .detail { display: none; margin-top: 10px; padding-top: 10px; border-top: 1px dashed rgba(255,255,255,.12); }
   .detail.open { display: block; }
-  .hour-row { display: flex; justify-content: space-between; font-size: 12.5px; padding: 5px 0; border-bottom: 1px solid rgba(255,255,255,.05); }
+  .hour-row { padding: 7px 0; border-bottom: 1px solid rgba(255,255,255,.05); }
+  .hour-row .top { display: flex; justify-content: space-between; font-size: 12.5px; }
   .hour-row .t { color: #ccc; }
   .hour-row .pct { font-variant-numeric: tabular-nums; font-weight: 700; }
+  .hour-row .pax { font-variant-numeric: tabular-nums; font-size: 11px; color: #9a9a9a; margin-top: 2px; }
   .notice { font-size: 12px; margin-top: 8px; padding: 8px 10px; background: rgba(255,255,255,.05); border-radius: 10px; }
   .notice .nt { color: #FFC400; font-weight: 700; margin-right: 4px; }
   .queue-box { font-size: 12px; margin-top: 8px; padding: 8px 10px; background: rgba(255,196,0,.08); border-radius: 10px; white-space: pre-wrap; }
@@ -7732,6 +7734,16 @@ def transport_webapp_html():
     if (load <= 85) return '🟢';
     return '🟣';
   }
+  // ru-плюрализация для "рейс/рейса/рейсов" - тот же принцип, что
+  // pluralize_ru на бэкенде (main.py), но JS-версия для WebApp.
+  function ruPlural(n, one, few, many) {
+    n = Math.abs(n) % 100;
+    const n1 = n % 10;
+    if (n > 10 && n < 20) return many;
+    if (n1 > 1 && n1 < 5) return few;
+    if (n1 === 1) return one;
+    return many;
+  }
 
   function showTab(name) {
     document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
@@ -7758,8 +7770,19 @@ def transport_webapp_html():
       }
       let detail = '';
       if (!a.closed) {
+        // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "количество
+        // пассажиров и по классам эконом бизнес сюда тоже надо давать
+        // инфу") - под строкой времени/загрузки добавлена строка с числом
+        // рейсов (внутр./межд.) и пассажирами (эконом/бизнес), те же цифры,
+        // что в текстовой версии show_airport_details, просто перенесены в
+        // мини-апп.
         detail += (a.hourly || []).map(h =>
-          '<div class="hour-row"><span class="t">' + esc(h.label) + '</span><span class="pct">' + loadEmoji(h.load) + ' ' + h.load.toFixed(0) + '%</span></div>'
+          '<div class="hour-row">' +
+            '<div class="top"><span class="t">' + esc(h.label) + '</span><span class="pct">' + loadEmoji(h.load) + ' ' + h.load.toFixed(0) + '%</span></div>' +
+            '<div class="pax">🛬 ' + h.flights + ' ' + ruPlural(h.flights, 'рейс', 'рейса', 'рейсов') +
+              ' (🇷🇺 ' + h.domestic + ' / 🌍 ' + h.international + ')' +
+              '  •  ✈️ ' + h.passengers_total + ' пас. (эконом ' + h.passengers_economy + ' / бизнес ' + h.passengers_business + ')</div>' +
+          '</div>'
         ).join('');
         (a.notices || []).forEach(n => {
           detail += '<div class="notice"><span class="nt">📢 ' + esc(n.time) + '</span>' + esc(n.text) + '</div>';
@@ -7871,12 +7894,23 @@ async def handle_transport_data_api(request):
             hourly = []
             now = get_airport_now(icao)
             for hour_offset in range(8):
-                load, _, target_hour = compute_current_hour_load(icao, relevant_class, hour_offset=hour_offset, zone_key=zone_key)
+                # ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "количество
+                # пассажиров и по классам эконом бизнес сюда тоже надо давать
+                # инфу") - compute_hour_flight_breakdown вместо голого
+                # compute_current_hour_load, чтобы в каждый час прогноза попадали
+                # ещё и число рейсов + разбивка пассажиров эконом/бизнес, как в
+                # текстовой версии (show_airport_details).
+                breakdown = compute_hour_flight_breakdown(icao, relevant_class, hour_offset=hour_offset, zone_key=zone_key)
                 hour_time = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=hour_offset)
                 label = hour_time.strftime('%H:00')
-                if target_hour < now.hour:
+                if breakdown['target_hour'] < now.hour:
                     label += ' (+1д)'
-                hourly.append({'label': label, 'load': round(load, 1)})
+                hourly.append({
+                    'label': label, 'load': round(breakdown['load'], 1),
+                    'flights': breakdown['flights'], 'domestic': breakdown['domestic'], 'international': breakdown['international'],
+                    'passengers_total': breakdown['passengers_total'],
+                    'passengers_economy': breakdown['passengers_economy'], 'passengers_business': breakdown['passengers_business'],
+                })
 
             notices_out = []
             for n in get_notices_for_airport(icao)[:5]:
@@ -10634,6 +10668,51 @@ def compute_current_hour_load(airport_icao, relevant_class, hour_offset=0, zone_
     total_passengers = sum(f.get(key, 0) for f in flights_now)
     load = (total_passengers / relevant_cap) * 100 if total_passengers > 0 else 0
     return load, len(flights_now), target_hour
+
+def compute_hour_flight_breakdown(airport_icao, relevant_class, hour_offset=0, zone_key=None):
+    """ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - в WebApp "Авиа/ЖД"
+    в почасовом прогнозе тоже нужны число рейсов и разбивка по классам
+    эконом/бизнес, как в текстовой версии show_airport_details). Та же
+    формула загрузки, что у compute_current_hour_load (её не трогаем - она
+    используется в других местах), но дополнительно возвращает разбивку
+    пассажиров по эконом/бизнес и рейсов по внутренним/международным - тот
+    же расчёт, что раньше был только ВСТРОЕН в цикл show_airport_details, тут
+    вынесен в отдельную функцию, чтобы не дублировать его текстом ещё раз
+    внутри /transport/data."""
+    now = get_airport_now(airport_icao)
+    target_hour = (now.hour + hour_offset) % 24
+    flights = get_airport_flights(airport_icao)
+    capacity = AIRPORT_CAPACITY.get(airport_icao, 1000)
+    if zone_key:
+        zone_capacity = AIRPORT_TERMINAL_ZONES.get(airport_icao, {}).get(zone_key, {}).get('capacity')
+        if zone_capacity is not None:
+            capacity = zone_capacity
+        _, has_zone_data = compute_zone_capacity_shares(airport_icao)
+        if has_zone_data:
+            flights = [f for f in flights if flight_terminal_zone(airport_icao, f.get('terminal')) == zone_key]
+    economy_capacity = capacity * ECONOMY_SHARE
+    business_capacity = capacity * BUSINESS_SHARE
+    flights_in_hour = economy_in_hour = business_in_hour = domestic_in_hour = international_in_hour = 0
+    for flight in flights:
+        flight_time = datetime.fromtimestamp(flight.get('firstSeen', 0))
+        if flight_time.hour != target_hour:
+            continue
+        flights_in_hour += 1
+        economy_in_hour += flight.get('passengers_economy', 0)
+        business_in_hour += flight.get('passengers_business', 0)
+        if flight.get('domestic', True):
+            domestic_in_hour += 1
+        else:
+            international_in_hour += 1
+    total_in_hour = economy_in_hour + business_in_hour
+    relevant_pax = {'economy': economy_in_hour, 'business': business_in_hour, 'total': total_in_hour}[relevant_class]
+    relevant_cap = {'economy': economy_capacity, 'business': business_capacity, 'total': capacity}[relevant_class]
+    load = (relevant_pax / relevant_cap) * 100 if relevant_pax > 0 else 0
+    return {
+        'load': load, 'target_hour': target_hour,
+        'flights': flights_in_hour, 'domestic': domestic_in_hour, 'international': international_in_hour,
+        'passengers_total': total_in_hour, 'passengers_economy': economy_in_hour, 'passengers_business': business_in_hour,
+    }
 
 def compute_current_availability(airport_icao, relevant_class, zone_key=None):
     """Загруженность аэропорта ПРЯМО СЕЙЧАС для конкретного класса (эконом/бизнес/все):
