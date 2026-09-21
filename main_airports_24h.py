@@ -7931,7 +7931,7 @@ def transport_webapp_html():
       }
       const keys = TARIFFS.length ? queueMain.tariffs : ['_'];
       html += '<div id="qmRanges">' + keys.map(key => {
-        const title = key === '_' ? 'Сколько машин видишь в очереди?' : key + ' - сколько машин видишь?';
+        const title = key === '_' ? 'Сколько машин видишь в очереди в приложении Яндекс Про?' : key + ' - сколько машин видишь в очереди в приложении Яндекс Про?';
         return '<div class="range-block"><div class="rt">' + esc(title) + '</div><div class="pills">' + QUEUE_RANGES.map(r =>
           '<div class="pill' + (queueMain.ranges[key] === r ? ' sel' : '') + '" data-range-for="' + esc(key) + '" data-range="' + esc(r) + '">' + esc(r) + '</div>'
         ).join('') + '</div></div>';
@@ -11403,7 +11403,7 @@ async def render_range_picker(message, user_id, city, airport_idx, airport, tari
     current_tariff = tariffs[idx]
     step_line = f" ({idx + 1}/{len(tariffs)})" if len(tariffs) > 1 else ""
     tariff_line = f"{current_tariff}{step_line}" if current_tariff else queue_class_display(user_id)
-    text = f"*{airport['emoji']} {airport['name']}*\nКласс: {tariff_line}\n\nСколько машин сейчас в очереди? Выбери диапазон 👇"
+    text = f"*{airport['emoji']} {airport['name']}*\nКласс: {tariff_line}\n\nСколько машин сейчас видишь в очереди в приложении Яндекс Про? Выбери диапазон 👇"
     await message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode='Markdown')
 
 @router.callback_query(lambda c: c.data.startswith('qsub_'))
@@ -11588,7 +11588,7 @@ async def view_queue(callback_query: types.CallbackQuery):
         local_time = format_airport_local_time(ts, airport['icao'])
         text += f"🚗 В очереди: *{range_str}* машин\n_Последняя отметка: {local_time} (местное время аэропорта)_"
     else:
-        text += f"Пока нет свежих отметок от водителей за последние {QUEUE_ENTRY_TTL_MINUTES // 60}ч.\nОтметь сам, сколько видишь машин 👇"
+        text += f"Пока нет свежих отметок от водителей за последние {QUEUE_ENTRY_TTL_MINUTES // 60}ч.\nОтметь сам, сколько видишь машин в очереди в приложении Яндекс Про 👇"
 
     buttons = [
         [InlineKeyboardButton(text="🚗 ОТМЕТИТЬ ОЧЕРЕДЬ", callback_data=f"join_queue_{city}_{airport_idx}")],
