@@ -3884,15 +3884,18 @@ def services_keyboard(category=None, city=None, user_id=None):
     # клавиатуры (убрана по просьбе пользователя, 21.09.2026 - "удали тогда
     # её из меню") - открывается через Menu Button (см. комментарий выше,
     # set_cabinet_menu_button), кнопка слева от поля ввода сообщения.
+    # "⛽ ГДЕ БЕНЗИН" + "💳 ЧАЕВЫЕ" - один ряд, прямо над "🔓 БЕСПЛАТНЫЙ VPN"
+    # (по прямой просьбе пользователя, 22.09.2026 - "сделай кнопки где
+    # бензин и чаевые в одну строку выше бесплатного впн"). "⛽ ГДЕ БЕНЗИН"
+    # раньше была только внутри courier_module_keyboard - тот же текстовый
+    # хендлер show_fuel_bot ниже по файлу срабатывает и здесь, отдельно
+    # добавлять не нужно.
+    buttons.append([KeyboardButton(text="⛽ ГДЕ БЕНЗИН"), KeyboardButton(text="💳 ЧАЕВЫЕ")])
     buttons.append([KeyboardButton(text="🔓 БЕСПЛАТНЫЙ VPN TAXI HELPER")])
     # "🤝 РЕФЕРАЛЬНАЯ ПРОГРАММА" (по просьбе пользователя, 20.09.2026) - своей
     # строкой, под VPN - см. блок "РЕФЕРАЛЬНАЯ ПРОГРАММА" ниже
     # (show_referral_program и остальные хендлеры referral_*).
     buttons.append([KeyboardButton(text="🤝 РЕФЕРАЛЬНАЯ ПРОГРАММА")])
-    # "💳 ЧАЕВЫЕ" - самая нижняя строка перед "← НАЗАД"/"🏙 ВЫБОР ГОРОДА" (по
-    # прямой просьбе пользователя, 21.09.2026 - см. комментарий у items
-    # выше про то, почему кнопка убрана из общей сетки).
-    buttons.append([KeyboardButton(text="💳 ЧАЕВЫЕ")])
     buttons.append([KeyboardButton(text="← НАЗАД"), KeyboardButton(text="🏙 ВЫБОР ГОРОДА")])
     return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=buttons)
 
