@@ -4486,10 +4486,15 @@ async def send_start_screen(message: types.Message):
     # 22.09.2026 - "поработать над визуалом бота на всех страницах", начиная с
     # главного меню) - тот же стиль оформления, что уже прижился в "Куда
     # ехать": крупный заголовок, разделитель, короткая подпись назначения.
+    # ИЗМЕНЕНО 22.09.2026 (продолжение той же правки, "пробегись по боту
+    # поработай над визуальной частью ... в наших цветах стилистике") -
+    # разделитель "━━━" заменён на общий WHERE_TO_GO_DIVIDER ("┄┄┄"), чтобы
+    # по всему боту был ОДИН стиль разделителя, а не три разных (были ещё
+    # "▓▓▓" и голый "━━━" в разных экранах - см. остальные правки этого дня).
     text = (
         "🚕✨ *TAXI HELPER*\n"
         "_Помощник водителя такси и курьера_\n"
-        "━━━━━━━━━━━━━━━━━━\n\n"
+        f"{WHERE_TO_GO_DIVIDER}\n\n"
         "🏙 Выбери свой город 👇"
     )
     await message.answer(text, reply_markup=city_keyboard(), parse_mode='Markdown')
@@ -6220,7 +6225,7 @@ async def send_where_to_go(message: types.Message, user_id, city, category, extr
             logger.exception(f"❌ Ошибка расчёта 'Куда ехать' для {city}/{category}")
             fallback_text = "⚠️ Не удалось посчитать варианты. Попробуй ещё раз через минуту."
             if extra_header:
-                fallback_text = f"{extra_header}\n━━━━━━━━━━━━━━━━━━\n{fallback_text}"
+                fallback_text = f"{extra_header}\n{WHERE_TO_GO_DIVIDER}\n{fallback_text}"
             try:
                 await status_msg.edit_text(fallback_text, parse_mode='Markdown' if extra_header else None)
             except Exception:
@@ -11669,7 +11674,7 @@ async def select_city(message: types.Message):
     маскировал бы реальную ошибку, если бы вдруг не нашёл."""
     city = CITY_MAP[message.text]
     user_state[message.from_user.id] = {'city': city}
-    text = f"✅ *{message.text}*\n━━━━━━━━━━━━━━━━━━\n\n🚕 Выбери свою категорию 👇"
+    text = f"✅ *{message.text}*\n{WHERE_TO_GO_DIVIDER}\n\n🚕 Выбери свою категорию 👇"
     await message.answer(text, reply_markup=category_keyboard(), parse_mode='Markdown')
 
 @router.message(lambda message: any(cat_data['name'] in message.text for cat_data in CATEGORIES.values()))
@@ -11687,7 +11692,7 @@ async def select_category(message: types.Message):
             selected_category = cat_key
             break
     cat_label = CATEGORIES.get(selected_category, {}).get('name', '')
-    text = f"✅ *{cat_label}*\n━━━━━━━━━━━━━━━━━━\n\n🧰 Выбери, что нужно 👇"
+    text = f"✅ *{cat_label}*\n{WHERE_TO_GO_DIVIDER}\n\n🧰 Выбери, что нужно 👇"
     await message.answer(text, reply_markup=services_keyboard(selected_category, user_state[user_id].get('city'), user_id), parse_mode='Markdown')
 
     # По просьбе пользователя - сразу после выбора категории предлагаем
@@ -13781,7 +13786,13 @@ def format_weather_forecast_text(city_name, forecast):
     cur_temp = current.get('temperature_2m')
     cur_name, _, cur_emoji = describe_weathercode(cur_code) if cur_code is not None else ('нет данных', 0, '🌤')
     temp_str = f"{round(cur_temp)}°C" if cur_temp is not None else "н/д"
-    lines = [f"🌤 *{city_name}*", f"\nСейчас: {cur_emoji} {cur_name}, {temp_str}", "\n*Прогноз на 12 часов:*"]
+    # Разделитель WHERE_TO_GO_DIVIDER - тот же общий стиль, что и в остальных
+    # карточках бота (по просьбе пользователя, 22.09.2026 - визуальный
+    # проход по не-миниапп экранам), раньше здесь просто пустая строка.
+    lines = [
+        f"🌤 *{city_name}*", f"_Сейчас: {cur_emoji} {cur_name}, {temp_str}_",
+        WHERE_TO_GO_DIVIDER, "*Прогноз на 12 часов:*",
+    ]
 
     hourly = forecast.get('hourly', {})
     times = hourly.get('time', [])
@@ -15077,16 +15088,25 @@ async def show_referral_program(message: types.Message):
     stats = get_referral_stats(user_id)
     me = await bot.get_me()
     link = get_referral_link(me.username, user_id)
+    # ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя - "поработай над
+    # визуальной частью ... по тому что не в миниапе") - раньше это был
+    # сплошной абзац без деления на смысловые блоки. Разбито на секции тем
+    # же общим разделителем WHERE_TO_GO_DIVIDER, что уже используется в
+    # "Куда ехать"/"ДЕНЬ - ИТОГ" - ссылка / статистика рефералов / баланс /
+    # как это работает, читается быстрее одним взглядом.
     text = (
-        "🤝 *Реферальная программа*\n\n"
-        f"Твоя ссылка (отправляй друзьям):\n`{link}`\n\n"
+        "🤝 *Реферальная программа*\n"
+        f"{WHERE_TO_GO_DIVIDER}\n\n"
+        f"🔗 Твоя ссылка (отправляй друзьям):\n`{link}`\n\n"
         f"👥 Рефералов 1-го уровня: {stats['level1_count']}\n"
         f"👥 Рефералов 2-го уровня: {stats['level2_count']}\n"
-        f"🌳 Всего людей в твоей ветке (любая глубина): {stats['downline_total']}\n\n"
+        f"🌳 Всего людей в твоей ветке (любая глубина): {stats['downline_total']}\n"
+        f"{WHERE_TO_GO_DIVIDER}\n\n"
         f"💰 Баланс: {stats['balance'] / 100:.0f}₽\n"
         f"📈 Всего заработано: {stats['total_earned'] / 100:.0f}₽\n"
-        f"📤 Всего выведено: {stats['total_withdrawn'] / 100:.0f}₽\n\n"
-        f"Как это работает: {REFERRAL_LEVEL1_PERCENT}% с каждого ежемесячного платежа приглашённого "
+        f"📤 Всего выведено: {stats['total_withdrawn'] / 100:.0f}₽\n"
+        f"{WHERE_TO_GO_DIVIDER}\n\n"
+        f"_Как это работает:_ {REFERRAL_LEVEL1_PERCENT}% с каждого ежемесячного платежа приглашённого "
         f"тобой напрямую (1 уровень). Если у него самого есть реферер (2 уровень) - тот получает "
         f"{REFERRAL_LEVEL2_SHARE_OF_LEVEL1_PERCENT}% от дохода реферала 1 уровня с этого платежа. "
         f"Начисляется каждый месяц, пока реферал платит подписку. Дальше 2 уровня деньги "
