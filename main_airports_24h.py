@@ -5316,23 +5316,39 @@ async def score_airport_candidate(city, airport, category):
         score *= 0.7
         reasons.append("работает по согласованию")
 
-    # Очередь - берём самую свежую отметку СРЕДИ ВСЕХ тарифов этой категории
-    # на этом аэропорту (а не только тарифа, который сейчас выбран у
-    # пользователя) - для сводки "куда ехать" важна общая картина, не
-    # конкретный класс. Ключ в БД - НЕ просто название тарифа, а
-    # "{category}:{tariff}" (см. queue_class_key) - без category без
-    # тарифа тоже проверяем (вдруг отмечали без выбора конкретного тарифа).
+    # Очередь - раньше показывали ТОЛЬКО когда она "длинная" (>=21 машины,
+    # WHERE_TO_GO_QUEUE_LONG_RANGES), а меньшие отметки молча пропадали из
+    # сводки "куда ехать" - водитель не видел никакой очереди, даже если её
+    # только что кто-то отметил в мини-аппе/по пушу. ИЗМЕНЕНО 22.09.2026
+    # (прямая просьба пользователя - "и в сводки куда поехать аэропортов
+    # тоже должно показывать какая очередь сейчас по какому тарифу"):
+    # теперь показываем отметку по КАЖДОМУ тарифу отдельно, если она есть,
+    # тем же форматом, что уже используется на карте водителей (см.
+    # handle_map_airports_api) - штраф к score по-прежнему только за
+    # действительно длинную очередь, но видимость в тексте больше не
+    # зависит от длины. Ключ в БД - "{category}:{tariff}" (см.
+    # queue_class_key) - без category без тарифа тоже проверяем (вдруг
+    # отмечали без выбора конкретного тарифа).
     tariffs = CATEGORIES.get(category, {}).get('tariffs') or []
-    class_keys = {category} | {f"{category}:{t}" for t in tariffs}
     worst_range = None
-    for class_key in class_keys:
-        range_str, _ts = queue_latest_report(city, icao, class_key, zone_key=zone_key)
-        if range_str in WHERE_TO_GO_QUEUE_LONG_RANGES:
-            worst_range = range_str
-            break
+    if tariffs:
+        queue_parts = []
+        for tariff in tariffs:
+            range_str, _ts = queue_latest_report(city, icao, f"{category}:{tariff}", zone_key=zone_key)
+            if range_str:
+                queue_parts.append(f"{tariff}: {range_str}")
+                if range_str in WHERE_TO_GO_QUEUE_LONG_RANGES:
+                    worst_range = range_str
+        if queue_parts:
+            reasons.append("очередь - " + ", ".join(queue_parts))
+    else:
+        range_str, _ts = queue_latest_report(city, icao, category, zone_key=zone_key)
+        if range_str:
+            reasons.append(f"очередь - {range_str}")
+            if range_str in WHERE_TO_GO_QUEUE_LONG_RANGES:
+                worst_range = range_str
     if worst_range:
         score *= 0.6
-        reasons.append(f"уже большая очередь ({worst_range} машин)")
 
     return {'label': airport['name'], 'score': score, 'reasons': reasons, 'closed': False, 'advice': None}
 
