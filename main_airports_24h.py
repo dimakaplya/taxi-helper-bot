@@ -7152,6 +7152,16 @@ def cabinet_webapp_html():
   const tg = window.Telegram && window.Telegram.WebApp;
   if (tg) { tg.ready(); tg.expand(); }
   const initData = tg ? tg.initData : '';
+  // Временная диагностика (21.09.2026) - у пользователя initData приходит
+  // пустой уже после переноса telegram-web-app.js на свой домен, непонятно,
+  // грузится ли вообще SDK на телефоне. Собираем что видно ИЗ БРАУЗЕРА (без
+  // консоли к телефону доступа нет) - покажем это в самом экране ошибки.
+  const _debugInfo = 'tg=' + (tg ? 'ok' : 'null') +
+    ', platform=' + (tg ? tg.platform : '-') +
+    ', version=' + (tg ? tg.version : '-') +
+    ', initData.len=' + initData.length +
+    ', initDataUnsafe.user=' + (tg && tg.initDataUnsafe && tg.initDataUnsafe.user ? 'present' : 'absent') +
+    ', hash=' + (window.location.hash ? window.location.hash.length + 'chars' : 'empty');
   const isDark = tg ? tg.colorScheme === 'dark' : (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
   const gridColor = isDark ? 'rgba(255,255,255,.08)' : 'rgba(0,0,0,.06)';
   const textColor = isDark ? 'rgba(255,255,255,.65)' : 'rgba(0,0,0,.55)';
@@ -7303,7 +7313,13 @@ def cabinet_webapp_html():
       document.getElementById('cabinetApp').style.display = 'block';
       document.getElementById('content').style.display = 'block';
     } catch (e) {
-      document.getElementById('state').textContent = 'Не удалось загрузить данные - попробуй закрыть и открыть кабинет ещё раз.';
+      // Временно показываем _debugInfo/e.message прямо на экране (21.09.2026,
+      // см. комментарий у _debugInfo выше) - без доступа к консоли телефона
+      // это единственный способ понять, что именно пошло не так.
+      document.getElementById('state').innerHTML =
+        'Не удалось загрузить данные - попробуй закрыть и открыть кабинет ещё раз.' +
+        '<br><br><span style="font-size:11px;opacity:.5;word-break:break-all;">' +
+        'debug: ' + _debugInfo + ' | error: ' + (e && e.message ? e.message : String(e)) + '</span>';
     }
   }
   load();
