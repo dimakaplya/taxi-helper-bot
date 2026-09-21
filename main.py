@@ -451,6 +451,11 @@ PARKING_STATIONARY_MINUTES = 2.5
 # нет. 30 км - с запасом покрывает сам город и ближайшие пригороды, где ещё
 # действуют городские платные парковки.
 PARKING_CITY_RADIUS_KM = 30
+# После "🅿️ Стою на бесплатной парковке" пуш не глушится навсегда - через
+# столько минут (если водитель так и не поехал дальше) спрашиваем снова
+# (вдруг парковка на самом деле стала платной/сменилась зона и т.п.), по
+# просьбе пользователя.
+PARKING_FREE_ACK_RECHECK_MINUTES = 15
 # Ссылки на приложения для оплаты городских парковок, по городам и
 # платформам (iOS/Android). Если для города+платформы своей ссылки нет -
 # используется общий фолбэк PARKING_APP_LINK_FALLBACK ниже (одно
@@ -6051,7 +6056,24 @@ async def process_parking_ping(user_id, lat, lon):
         return
     parking['anchor_lat'], parking['anchor_lon'] = anchor_lat, anchor_lon
     state['parking'] = parking
-    if parking.get('pushed') or parking.get('free_ack'):
+    if parking.get('free_ack'):
+        # Отметил "стою на бесплатной" - не спрашиваем повторно, пока не
+        # пройдёт PARKING_FREE_ACK_RECHECK_MINUTES с момента этой отметки
+        # (см. handle_parking_free_ack, который пишет free_ack_time).
+        try:
+            free_ack_time = datetime.fromisoformat(parking['free_ack_time'])
+        except Exception:
+            return
+        recheck_minutes = (now - free_ack_time).total_seconds() / 60
+        if recheck_minutes < PARKING_FREE_ACK_RECHECK_MINUTES:
+            return
+        # Прошло 15 минут, а водитель всё ещё не поехал - снимаем
+        # глушение и спрашиваем ещё раз, как будто новый заход стоянки.
+        parking['free_ack'] = False
+        parking.pop('free_ack_time', None)
+        parking['pushed'] = False
+        state['parking'] = parking
+    if parking.get('pushed'):
         return
     try:
         anchor_time = datetime.fromisoformat(parking['anchor_time'])
@@ -11813,9 +11835,11 @@ async def handle_parking_free_ack(callback_query: types.CallbackQuery):
     """Кнопка "🅿️ Стою на бесплатной парковке" на пуше send_parking_push -
     не останавливает саму фичу (process_parking_ping продолжает следить за
     якорем), просто глушит дальнейшие пуши для ТЕКУЩЕГО захода стоянки
-    (free_ack=True), пока водитель не отъедет дальше
-    PARKING_MOVEMENT_THRESHOLD_METERS от якоря - тогда process_parking_ping
-    заведёт новый якорь с free_ack=False заново (см. process_parking_ping)."""
+    (free_ack=True) до первого из двух событий: водитель отъехал дальше
+    PARKING_MOVEMENT_THRESHOLD_METERS от якоря (новый заход стоянки,
+    free_ack сбрасывается) ИЛИ прошло PARKING_FREE_ACK_RECHECK_MINUTES (15
+    минут) без движения - тогда process_parking_ping спросит ещё раз, по
+    просьбе пользователя."""
     user_id = callback_query.from_user.id
     state = user_state.get(user_id)
     if not state:
@@ -11823,6 +11847,7 @@ async def handle_parking_free_ack(callback_query: types.CallbackQuery):
         return
     parking = dict(state.get('parking') or {})
     parking['free_ack'] = True
+    parking['free_ack_time'] = datetime.now(ZoneInfo('UTC')).isoformat()
     state['parking'] = parking
     await callback_query.answer("Окей, больше не буду напоминать, пока не поедешь 🅿️")
     try:
