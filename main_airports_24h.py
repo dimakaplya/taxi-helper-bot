@@ -7091,13 +7091,17 @@ async def maybe_start_pending_shift(message, user_id):
 # /map/positions (водитель мог закрыть бота/остановить трансляцию).
 MAP_VISIBILITY_STALE_MINUTES = 15
 
-# Цвет и подпись маркера на карте по категории - см. просьбу пользователя
-# выше (такси-жёлтый/Ultima-чёрный/курьер-белый/грузовой-красный).
+# Цвет, подпись и иконка маркера на карте по категории - см. просьбу
+# пользователя выше (такси-жёлтый/Ultima-чёрный/курьер-белый/
+# грузовой-красный) и ИЗМЕНЕНО 22.09.2026 (своя иконка на категорию, не
+# только цвет): такси/Ultima - машинка 🚗 (цвет фона разный), курьер -
+# человек 🚶 (это пеший/на авто курьер, но иконка человека понятнее для
+# категории "Курьер" в целом), грузовое такси - грузовик 🚚.
 MAP_CATEGORY_STYLE = {
-    'taxi': {'color': '#FFD400', 'label': 'Такси'},
-    'ultima': {'color': '#111111', 'label': 'Ultima'},
-    'courier': {'color': '#FFFFFF', 'label': 'Курьер'},
-    'cargo': {'color': '#E53935', 'label': 'Грузовое такси'},
+    'taxi': {'color': '#FFD400', 'label': 'Такси', 'icon': '🚗'},
+    'ultima': {'color': '#111111', 'label': 'Ultima', 'icon': '🚗'},
+    'courier': {'color': '#FFFFFF', 'label': 'Курьер', 'icon': '🚶'},
+    'cargo': {'color': '#E53935', 'label': 'Грузовое такси', 'icon': '🚚'},
 }
 
 MAP_WEBAPP_PATH = '/map'
@@ -7472,15 +7476,17 @@ def map_webapp_html():
       markers = [];
       let bounds = [];
       data.positions.forEach(p => {{
-        const style = CATEGORY_STYLE[p.category] || {{ color: '#888', label: p.category }};
+        const style = CATEGORY_STYLE[p.category] || {{ color: '#888', label: p.category, icon: '🚗' }};
         const popupText = (p.tariffs && p.tariffs.length) ? `${{style.label}} (${{p.tariffs.join(', ')}})` : style.label;
         // ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя): вместо кружка -
-        // иконка машинки 🚗, залитая цветом категории (тем же, что раньше
-        // был у кружка, см. CATEGORY_STYLE) - чтобы на карте сразу было
-        // видно, что это водитель, а не просто цветная точка.
+        // иконка по категории (машинка 🚗 у такси/Ultima, человек 🚶 у
+        // курьера, грузовик 🚚 у грузового такси - см. MAP_CATEGORY_STYLE),
+        // залитая цветом категории (тем же, что раньше был у кружка) -
+        // чтобы на карте сразу было видно, что это за водитель, а не просто
+        // цветная точка.
         const icon = L.divIcon({{
           className: 'car-icon',
-          html: `<div class="car-icon-inner" style="background:${{style.color}}">🚗</div>`,
+          html: `<div class="car-icon-inner" style="background:${{style.color}}">${{style.icon || '🚗'}}</div>`,
           iconSize: [24, 24],
           iconAnchor: [12, 12],
         }});
