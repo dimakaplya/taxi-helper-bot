@@ -3015,6 +3015,30 @@ def _fire_and_forget(coro):
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
 
+# ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "сделаем чтобы он всё
+# это делал только с 1 минутным таймером удаления чтобы успели прочитать"):
+# везде, где общая чистка чата (SingleMessageMiddleware,
+# ChatCleanupIncomingMiddleware, track_bot_update_message, startup-пасс в
+# main()) раньше удаляла "выпавшие" сообщения СРАЗУ, теперь ставим удаление
+# через задержку DELETE_MESSAGE_DELAY_SECONDS, чтобы у человека было время
+# прочитать сообщение, прежде чем оно исчезнет. Сама постановка в очередь
+# (кого в итоге удалить) не меняется - меняется только момент физического
+# bot.delete_message. fire-and-forget (через _fire_and_forget) - ждать
+# результат не нужно, это фоновая уборка.
+DELETE_MESSAGE_DELAY_SECONDS = 60
+
+async def _delayed_delete_message(chat_id, message_id, delay=DELETE_MESSAGE_DELAY_SECONDS):
+    await asyncio.sleep(delay)
+    try:
+        await bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except Exception:
+        pass  # сообщение уже удалено/недоступно для удаления - не критично
+
+def _schedule_delete_message(chat_id, message_id, delay=DELETE_MESSAGE_DELAY_SECONDS):
+    if not bot:
+        return
+    _fire_and_forget(_delayed_delete_message(chat_id, message_id, delay))
+
 # ==================== MENU BUTTON ЛИЧНОГО КАБИНЕТА (21.09.2026) ====================
 # По просьбе пользователя - открывать "Личный кабинет" в один тап, а не
 # через промежуточное сообщение с инлайн-кнопкой (см. open_cabinet_from_menu
@@ -3058,10 +3082,7 @@ class SingleMessageMiddleware(BaseRequestMiddleware):
                     prev_id = _last_reply_keyboard_msg_id.get(chat_id)
                     _last_reply_keyboard_msg_id[chat_id] = result.message_id
                     if prev_id is not None and prev_id != result.message_id:
-                        try:
-                            await bot_instance.delete_message(chat_id=chat_id, message_id=prev_id)
-                        except Exception:
-                            pass
+                        _schedule_delete_message(chat_id, prev_id)
                 elif skip_trim:
                     # Карточки событий (_skip_message_trim) - как и раньше,
                     # не участвуют в чистке вообще, остаются все.
@@ -3071,13 +3092,12 @@ class SingleMessageMiddleware(BaseRequestMiddleware):
                     queue.append(result.message_id)
                     _fire_and_forget(asyncio.to_thread(save_recent_bot_message, chat_id, result.message_id))
                     # Удаляем всё, что выпало за пределы последних KEEP_LAST_N_MESSAGES
+                    # (с задержкой DELETE_MESSAGE_DELAY_SECONDS - см. комментарий
+                    # у _schedule_delete_message выше, "чтобы успели прочитать").
                     while len(queue) > KEEP_LAST_N_MESSAGES:
                         old_id = queue.pop(0)
                         _fire_and_forget(asyncio.to_thread(delete_recent_bot_message_row, chat_id, old_id))
-                        try:
-                            await bot_instance.delete_message(chat_id=chat_id, message_id=old_id)
-                        except Exception:
-                            pass  # сообщение уже удалено/недоступно для удаления - не критично
+                        _schedule_delete_message(chat_id, old_id)
             except Exception:
                 pass
             return result
@@ -3124,10 +3144,7 @@ class ChatCleanupIncomingMiddleware(BaseMiddleware):
                     # ещё должен на него отреагировать. Просто пропускаем
                     # удаление в этом единственном случае.
                     continue
-                try:
-                    await bot.delete_message(chat_id=chat_id, message_id=old_id)
-                except Exception:
-                    pass
+                _schedule_delete_message(chat_id, old_id)
         except Exception:
             pass
         return await handler(event, data)
@@ -14032,10 +14049,7 @@ async def track_bot_update_message(user_id, message_id):
     if not bot:
         return
     for old_id in to_delete:
-        try:
-            await bot.delete_message(user_id, old_id)
-        except Exception:
-            pass  # старше 48ч / уже удалено пользователем / и т.п. - не критично
+        _schedule_delete_message(user_id, old_id)
 
 def get_bot_meta(key):
     init_db()
@@ -15613,10 +15627,7 @@ async def main():
         while len(_queue) > KEEP_LAST_N_MESSAGES:
             _old_id = _queue.pop(0)
             delete_recent_bot_message_row(_chat_id, _old_id)
-            try:
-                await bot.delete_message(chat_id=_chat_id, message_id=_old_id)
-            except Exception:
-                pass
+            _schedule_delete_message(_chat_id, _old_id)
     # Пуш "бот обновился до новой версии" (по просьбе пользователя,
     # 20.09.2026) - проверяем ОДИН раз при старте, до старта polling, но
     # ПОСЛЕ load_all_user_states (нужен список известных user_id) - см.
