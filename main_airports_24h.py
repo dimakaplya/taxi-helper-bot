@@ -690,7 +690,7 @@ FALLBACK_ARRIVALS_SVO = [
     {'time': '13:30', 'origin': 'Рим', 'airline': 'Alitalia', 'flight': '1402', 'passengers': 210},
     {'time': '14:00', 'origin': 'Лондон', 'airline': 'British Airways', 'flight': '2502', 'passengers': 235},
     {'time': '14:45', 'origin': 'Вена', 'airline': 'Austrian', 'flight': '602', 'passengers': 200},
-    {'time': '15:15', 'origin': 'Праг', 'airline': 'Czech Airlines', 'flight': '1302', 'passengers': 195},
+    {'time': '15:15', 'origin': 'Прага', 'airline': 'Czech Airlines', 'flight': '1302', 'passengers': 195},
     {'time': '15:50', 'origin': 'Амстердам', 'airline': 'KLM', 'flight': '803', 'passengers': 230},
     {'time': '16:20', 'origin': 'Женева', 'airline': 'SWISS', 'flight': '502', 'passengers': 210},
     {'time': '17:00', 'origin': 'Стокгольм', 'airline': 'SAS', 'flight': '1402', 'passengers': 205},
@@ -780,49 +780,99 @@ CITY_DISPLAY_NAMES = {
 # остальной код бота работает с user_state как с обычным dict, ничего в нём
 # менять не пришлось - персистентность спрятана внутри этих двух классов.
 
+# ИЗМЕНЕНО 21.09.2026 (готовим бота к нагрузке ~1000 пользователей) -
+# раньше PersistentUserDict.__setitem__ синхронно открывал соединение к
+# SQLite и коммитил на КАЖДОЕ изменение ключа состояния (а это происходит
+# буквально на каждый клик/переход по меню у каждого пользователя). Бот
+# однопроцессный (один event loop на всех), и эта синхронная запись
+# блокировала обработку ВСЕХ остальных пользователей на время своего
+# выполнения - при малом числе водителей незаметно, но при сотнях
+# одновременных стало бы узким местом. Теперь запись "write-behind":
+# __setitem__/__delitem__/pop только помечают пользователя "грязным"
+# (быстрая операция в памяти, без I/O), а фоновая задача
+# user_state_flusher() ниже раз в USER_STATE_FLUSH_INTERVAL_SECONDS
+# сбрасывает изменившихся пользователей в БД через asyncio.to_thread (не
+# блокирует event loop). in-memory user_state остаётся источником правды
+# для ЧТЕНИЯ - поведение бота не меняется, меняется только момент записи
+# в БД. Цена - при аварийном падении процесса (не при штатном
+# рестарте/редеплое, там флаш вызывается явно в finally у main(), см.
+# ниже) можно потерять последние доли секунды изменений состояния
+# (курсор в меню, а не заказы/данные) - приемлемый компромисс.
+USER_STATE_FLUSH_INTERVAL_SECONDS = 1.0
+_dirty_user_ids = set()
+
+def _mark_user_state_dirty(user_id):
+    _dirty_user_ids.add(user_id)
+
 class PersistentUserDict(dict):
     """Состояние ОДНОГО пользователя. Любое изменение ключа (set/del/pop)
-    сразу сохраняет весь словарь целиком в БД."""
+    помечает пользователя "грязным" для фонового флаша (см. комментарий
+    выше про write-behind) - раньше сразу писало в БД синхронно."""
     def __init__(self, user_id, *args, **kwargs):
         self._user_id = user_id
         super().__init__(*args, **kwargs)
 
     def __setitem__(self, key, value):
         super().__setitem__(key, value)
-        save_user_state(self._user_id, dict(self))
+        _mark_user_state_dirty(self._user_id)
 
     def __delitem__(self, key):
         super().__delitem__(key)
-        save_user_state(self._user_id, dict(self))
+        _mark_user_state_dirty(self._user_id)
 
     def pop(self, key, *default):
         result = super().pop(key, *default)
-        save_user_state(self._user_id, dict(self))
+        _mark_user_state_dirty(self._user_id)
         return result
 
 class PersistentUserStateStore(dict):
     """user_state целиком. user_state[user_id] = {...} оборачивает значение в
-    PersistentUserDict и сохраняет его; user_state.pop(user_id) удаляет
-    запись и из БД тоже."""
+    PersistentUserDict и помечает пользователя "грязным" (новый пользователь
+    появляется редко по сравнению с изменением полей, но ради единообразия
+    тоже идёт через write-behind - задержка в ~1с на первую запись
+    некритична); user_state.pop(user_id) удаляет запись из БД сразу (это
+    редкая операция, не хот-пас, синхронность тут не мешает)."""
     def __setitem__(self, user_id, value):
         if not isinstance(value, PersistentUserDict):
             value = PersistentUserDict(user_id, value)
         super().__setitem__(user_id, value)
-        save_user_state(user_id, dict(value))
+        _mark_user_state_dirty(user_id)
 
     def pop(self, user_id, *default):
         result = super().pop(user_id, *default)
+        _dirty_user_ids.discard(user_id)
         delete_user_state(user_id)
         return result
 
 def save_user_state(user_id, state_dict):
+    """Синхронная версия (принимает dict, сама делает json.dumps) - используй
+    только когда сериализация точно происходит на основном потоке (сейчас
+    нигде в горячем пути не вызывается напрямую). Для write-behind флаша
+    см. save_user_state_json ниже - там сериализация сделана ДО ухода в
+    отдельный поток, а не внутри него."""
+    save_user_state_json(user_id, json.dumps(state_dict, ensure_ascii=False))
+
+def save_user_state_json(user_id, state_json):
+    """Пишет уже готовую JSON-строку в БД. Используется
+    flush_dirty_user_states() - json.dumps() там делается СИНХРОННО на
+    основном потоке (быстрая операция для словаря одного пользователя, не
+    блокирует event loop ощутимо), а не здесь в фоновом потоке
+    asyncio.to_thread. Причина: некоторые места кода мутируют вложенные
+    структуры user_state НА МЕСТЕ (например queue_multi_progress -
+    progress['results'][key] = ... без пересоздания словаря) - если бы
+    json.dumps() выполнялся в отдельном потоке параллельно с основным event
+    loop, такая мутация ровно в момент сериализации теоретически могла бы
+    поймать "dictionary changed size during iteration" в json-энкодере.
+    Сериализация на основном потоке (где no other coroutine не может
+    вклиниться между строк без await) убирает этот риск полностью - в
+    отдельном потоке остаётся только собственно диск-bound запись в SQLite."""
     try:
         init_db()
         conn = get_db_connection()
         conn.execute(
             'INSERT INTO user_states (user_id, state_json, updated_at) VALUES (?, ?, ?) '
             'ON CONFLICT(user_id) DO UPDATE SET state_json = excluded.state_json, updated_at = excluded.updated_at',
-            (user_id, json.dumps(state_dict, ensure_ascii=False), datetime.now(ZoneInfo('UTC')).strftime('%Y-%m-%d %H:%M:%S'))
+            (user_id, state_json, datetime.now(ZoneInfo('UTC')).strftime('%Y-%m-%d %H:%M:%S'))
         )
         conn.commit()
         conn.close()
@@ -838,6 +888,43 @@ def delete_user_state(user_id):
         conn.close()
     except Exception as e:
         logger.error(f"❌ Не удалось удалить состояние пользователя {user_id}: {e}")
+
+async def flush_dirty_user_states():
+    """Сбрасывает в БД всех пользователей, помеченных "грязными" с прошлого
+    флаша (см. write-behind комментарий у PersistentUserDict выше). Берём
+    АКТУАЛЬНОЕ in-memory состояние на момент флаша (а не то, что было в
+    момент пометки) - если после пометки пришли ещё изменения, они попадут
+    в эту же запись, лишний флаш не нужен. Если что-то поменяется уже ПОКА
+    идёт asyncio.to_thread ниже - пользователь просто останется/попадёт
+    обратно в _dirty_user_ids и будет сохранён на следующем цикле.
+    json.dumps() делаем ЗДЕСЬ, на основном потоке (см. docstring
+    save_user_state_json про причину) - в отдельный поток уходит только
+    сама запись в SQLite."""
+    if not _dirty_user_ids:
+        return
+    to_flush = list(_dirty_user_ids)
+    _dirty_user_ids.difference_update(to_flush)
+    for user_id in to_flush:
+        state = user_state.get(user_id)
+        if state is None:
+            continue
+        try:
+            state_json = json.dumps(dict(state), ensure_ascii=False)
+            await asyncio.to_thread(save_user_state_json, user_id, state_json)
+        except Exception as e:
+            logger.error(f"❌ Не удалось сохранить состояние пользователя {user_id} (фоновый флаш): {e}")
+            _dirty_user_ids.add(user_id)  # попробуем ещё раз на следующем цикле
+
+async def user_state_flusher():
+    """Фоновая задача - раз в USER_STATE_FLUSH_INTERVAL_SECONDS сбрасывает
+    накопившихся "грязных" пользователей в БД (см. write-behind комментарий
+    у PersistentUserDict выше)."""
+    while True:
+        await asyncio.sleep(USER_STATE_FLUSH_INTERVAL_SECONDS)
+        try:
+            await flush_dirty_user_states()
+        except Exception as e:
+            logger.error(f"❌ Ошибка фонового флаша user_state: {e}")
 
 def load_all_user_states():
     """Восстанавливает user_state из БД при старте бота - без этого все
@@ -1629,7 +1716,24 @@ def get_db_connection():
     conn.execute('PRAGMA busy_timeout=10000')
     return conn
 
+_db_initialized = False
+
 def init_db():
+    """ИЗМЕНЕНО 21.09.2026 (готовим бота к нагрузке ~1000 пользователей) -
+    init_db() вызывается перед ПОЧТИ КАЖДЫМ обращением к БД по всему файлу
+    (save_shift_record, save_user_state_json, save_recent_bot_message и
+    т.д. - десятки мест), а внутри - ~30 CREATE TABLE/INDEX IF NOT EXISTS.
+    Хотя они идемпотентны по результату, SQLite всё равно разбирает и
+    проверяет схему на каждый такой вызов - то есть при активной работе
+    бота это лишняя синхронная нагрузка на КАЖДЫЙ клик КАЖДОГО пользователя
+    поверх и без того синхронного sqlite3-вызова. Таблицы/индексы создаются
+    ровно один раз за жизнь процесса (на старте) - дальше они уже есть, и
+    все последующие вызовы init_db() ничего не делают, кроме прогона всех
+    CREATE IF NOT EXISTS вхолостую. Флаг ниже делает init_db() no-op после
+    первого успешного вызова."""
+    global _db_initialized
+    if _db_initialized:
+        return
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute('''
@@ -1914,6 +2018,7 @@ def init_db():
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_map_positions_city ON map_positions (city, updated_at)')
     conn.commit()
     conn.close()
+    _db_initialized = True
 
 SHIFT_HISTORY_MONTHS = 6  # сколько месяцев хранить/показывать в статистике (по просьбе пользователя)
 
@@ -2462,6 +2567,27 @@ _recent_bot_message_ids = {}  # chat_id -> список последних messa
 # удаление вообще (та же ветка, что уже была у сообщений с ReplyKeyboardMarkup).
 _skip_message_trim = contextvars.ContextVar('skip_message_trim', default=False)
 
+# ИЗМЕНЕНО 21.09.2026 (готовим бота к нагрузке ~1000 пользователей) -
+# save_recent_bot_message/delete_recent_bot_message_row (см. ниже) делают
+# синхронный sqlite3.connect+execute+commit+close. SingleMessageMiddleware
+# вызывает их на КАЖДОЕ исходящее сообщение бота - это самый горячий путь
+# во всём файле (буквально любой ответ любому пользователю). Раньше это
+# было await'ом прямо в middleware, блокируя единственный event loop для
+# ВСЕХ пользователей на время диска. Теперь уходит в фоновый поток и не
+# ожидается (fire-and-forget) - middleware возвращает результат отправки
+# сообщения сразу, не дожидаясь записи в БД; сама запись - только
+# бухгалтерия для восстановления после рестарта (см. load_all_recent_bot_
+# messages), не влияет на корректность работы бота в моменте, так что
+# ждать её незачем. _background_tasks хранит сильную ссылку на task, пока
+# он не завершится - без этого asyncio может (в редких случаях) собрать
+# task сборщиком мусора до его выполнения.
+_background_tasks = set()
+
+def _fire_and_forget(coro):
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
 class SingleMessageMiddleware(BaseRequestMiddleware):
     async def __call__(self, make_request, bot_instance: Bot, method: TelegramMethod[TelegramType]):
         if isinstance(method, SendMessage):
@@ -2478,11 +2604,11 @@ class SingleMessageMiddleware(BaseRequestMiddleware):
                 else:
                     queue = _recent_bot_message_ids.setdefault(chat_id, [])
                     queue.append(result.message_id)
-                    save_recent_bot_message(chat_id, result.message_id)
+                    _fire_and_forget(asyncio.to_thread(save_recent_bot_message, chat_id, result.message_id))
                     # Удаляем всё, что выпало за пределы последних KEEP_LAST_N_MESSAGES
                     while len(queue) > KEEP_LAST_N_MESSAGES:
                         old_id = queue.pop(0)
-                        delete_recent_bot_message_row(chat_id, old_id)
+                        _fire_and_forget(asyncio.to_thread(delete_recent_bot_message_row, chat_id, old_id))
                         try:
                             await bot_instance.delete_message(chat_id=chat_id, message_id=old_id)
                         except Exception:
@@ -10835,6 +10961,7 @@ async def main():
     asyncio.create_task(check_long_shifts())
     asyncio.create_task(nearby_drivers_checker())
     asyncio.create_task(morning_greeting_checker())
+    asyncio.create_task(user_state_flusher())  # write-behind для user_state - см. комментарий у PersistentUserDict
     # allowed_updates передаём ЯВНО (а не полагаемся на автоматическое
     # dp.resolve_used_update_types()) - похоже, это и была причина, почему
     # пуши "Очередь у аэропорта" не приходили: Telegram Bot API запоминает
@@ -10848,7 +10975,18 @@ async def main():
     # обрабатываемом виде. message/edited_message/callback_query - все типы
     # апдейтов, которые реально используются хендлерами в этом файле (см.
     # @router.message/@router.edited_message/@router.callback_query).
-    await dp.start_polling(bot, allowed_updates=['message', 'edited_message', 'callback_query'])
+    try:
+        await dp.start_polling(bot, allowed_updates=['message', 'edited_message', 'callback_query'])
+    finally:
+        # На штатном рестарте/редеплое (SIGTERM, aiogram корректно
+        # завершает start_polling) досбрасываем всё, что ещё не успел
+        # забрать фоновый user_state_flusher() - без этого при частых
+        # редеплоях (а они бывают часто) можно было бы систематически
+        # терять до ~1с изменений состояния на каждом рестарте.
+        try:
+            await flush_dirty_user_states()
+        except Exception as e:
+            logger.error(f"❌ Ошибка финального флаша user_state при завершении: {e}")
 
 if __name__ == '__main__':
     asyncio.run(main())

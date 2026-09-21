@@ -301,6 +301,12 @@ def parse_trains(schedule_items):
 
 
 def main():
+    global REQUEST_COUNT
+    # ИСПРАВЛЕНО 21.09.2026 - тот же баг, что и в fetch_yandex_data.py: main()
+    # вызывается многократно за время жизни одного процесса бота, а
+    # REQUEST_COUNT без явного сброса здесь копился от запуска к запуску и
+    # задваивал уже учтённый в общем usage_log.json расход.
+    REQUEST_COUNT = 0
     if API_KEY == 'ВСТАВЬ_СВОЙ_КЛЮЧ_СЮДА':
         logger.error("❌ Не задан YANDEX_RASP_API_KEY! См. инструкцию в шапке fetch_yandex_data.py.")
         return
