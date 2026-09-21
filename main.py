@@ -8005,7 +8005,7 @@ MAP_CHROME_CSS = """
      drop-shadow - на пёстрой тайловой подложке почти не различить.
      Теперь квадратик на полупрозрачном белом фоне - как отдельный
      UI-элемент, а не часть карты, читается на любом фоне. */
-  .fuel-icon, .charging-icon, .parking-icon { box-sizing: border-box; display: flex; align-items: center; justify-content: center; font-size: 16px; background: rgba(255,255,255,.92); border: 1px solid rgba(0,0,0,.2); border-radius: 6px; box-shadow: 0 1px 3px rgba(0,0,0,.5); }
+  .fuel-icon, .charging-icon, .parking-icon { box-sizing: border-box; display: flex; align-items: center; justify-content: center; font-size: 16px; background: rgba(255,255,255,.8); border: 1px solid rgba(0,0,0,.2); border-radius: 50%; box-shadow: 0 1px 3px rgba(0,0,0,.5); }
   .fuel-popup, .charging-popup { font-family: -apple-system, sans-serif; font-size: 12.5px; max-width: 230px; color: #000; }
   .fuel-popup h4, .charging-popup h4 { margin: 0 0 6px; font-size: 13.5px; }
   .fuel-popup .sub, .charging-popup .sub { color: #666; font-size: 11.5px; margin-bottom: 6px; }
