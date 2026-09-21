@@ -2060,6 +2060,27 @@ def get_shift_history(user_id, months=SHIFT_HISTORY_MONTHS):
         logger.error(f"❌ Не удалось прочитать историю смен пользователя {user_id}: {e}")
         return []
 
+def get_finance_history(user_id, months=SHIFT_HISTORY_MONTHS):
+    """Посчитанные итоги "📊 ДЕНЬ - ИТОГ" пользователя за последние `months`
+    месяцев (см. save_finance_result/finance_history) - используется для
+    графика заработка в личном кабинете (см. handle_cabinet_data_api).
+    Возвращает кортежи (calc_date, income, net_profit), новые сверху."""
+    try:
+        init_db()
+        conn = get_db_connection()
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=months * 30)).date().isoformat()
+        cursor = conn.execute(
+            'SELECT calc_date, income, net_profit FROM finance_history '
+            'WHERE user_id = ? AND calc_date >= ? ORDER BY calc_date DESC, id DESC',
+            (user_id, cutoff)
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        return rows
+    except Exception as e:
+        logger.error(f"❌ Не удалось прочитать историю финансов пользователя {user_id}: {e}")
+        return []
+
 def save_finance_result(user_id, income, net_profit):
     """Сохраняет один посчитанный итог "📊 ДЕНЬ - ИТОГ" (см.
     send_courier_finance_result) в статистику - по просьбе пользователя,
@@ -3954,12 +3975,17 @@ async def start_courier_finance(message: types.Message):
     # "📈 Статистика смен" - по просьбе пользователя (20.09.2026) доступна
     # прямо отсюда, отдельной инлайн-кнопкой под первым шагом расчёта (см.
     # show_shift_stats) - не отдельный пункт меню, чтобы не плодить кнопки в
-    # courier_module_keyboard.
+    # courier_module_keyboard. "👤 Личный кабинет" (21.09.2026) - та же
+    # статистика, но графиками в WebApp (см. CABINET_WEBAPP_PATH) вместо
+    # текстового списка по дням; показывается только если PUBLIC_URL задан
+    # (тот же guard, что у "🗺 Карта водителей" в services_keyboard - Telegram
+    # требует HTTPS для WebApp).
+    stats_row = [InlineKeyboardButton(text="📈 Статистика смен", callback_data="show_shift_stats")]
+    if PUBLIC_URL:
+        stats_row.append(InlineKeyboardButton(text="👤 Личный кабинет", web_app=WebAppInfo(url=f"{PUBLIC_URL}{CABINET_WEBAPP_PATH}")))
     await message.answer(
         "Или посмотри статистику своих смен за последние 6 месяцев:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="📈 Статистика смен", callback_data="show_shift_stats"),
-        ]]),
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[stats_row]),
     )
 
 @router.message(lambda message: message.text in COURIER_STUB_SECTIONS and user_state.get(message.from_user.id, {}).get('in_courier_module'))
@@ -6334,6 +6360,248 @@ async def handle_map_city_events_api(request):
         logger.exception("❌ Ошибка при получении афиши для карты водителей")
         result = []
     return web.json_response({'events': result})
+
+# ==================== ЛИЧНЫЙ КАБИНЕТ (WebApp) ====================
+# По просьбе пользователя (21.09.2026, "давай личный кабинет водителя") -
+# первая версия: статистика смен и заработка в виде графиков вместо
+# текстовых сообщений (см. show_shift_stats выше - тот же источник данных,
+# get_shift_history/get_finance_history, но в WebApp это графики за период,
+# а не сплошной список по дням). Тот же паттерн, что и карта водителей
+# (aiohttp-роут + HTML-страница + JSON-API с проверкой initData) - см.
+# MAP_WEBAPP_PATH/handle_map_webapp выше. В ОТЛИЧИЕ от карты, здесь initData
+# ОБЯЗАТЕЛЕН и строго проверяется (не "отдаём данные всё равно, если подписи
+# нет" как у карты) - карта отдаёт публичные агрегированные данные без
+# привязки к конкретному человеку, а личный кабинет отдаёт ЧУЖИЕ ЛИЧНЫЕ
+# данные (доход, чистыми) по user_id из подписи - без валидной подписи
+# невозможно даже узнать, чьи данные показывать, так что невалидный/
+# отсутствующий initData - это просто отказ (401), а не публичный дефолт.
+CABINET_WEBAPP_PATH = '/cabinet'
+CABINET_DATA_API_PATH = '/cabinet/data'
+
+async def handle_cabinet_webapp(request):
+    # Та же защита от кэширования WebView, что и у карты (см.
+    # handle_map_webapp) - иначе после редеплоя водитель может увидеть
+    # старую закэшированную версию страницы.
+    return web.Response(
+        text=cabinet_webapp_html(), content_type='text/html',
+        headers={'Cache-Control': 'no-store, no-cache, must-revalidate', 'Pragma': 'no-cache'},
+    )
+
+async def handle_cabinet_data_api(request):
+    """JSON API личного кабинета - в отличие от /map/positions initData
+    здесь ОБЯЗАТЕЛЕН (см. комментарий у CABINET_WEBAPP_PATH выше): без
+    валидной подписи user_id неизвестен и непроверяем, поэтому отдавать
+    что-либо просто некому/нельзя - 401."""
+    init_data = request.headers.get('X-Telegram-Init-Data', '')
+    parsed = validate_telegram_webapp_init_data(init_data, BOT_TOKEN) if BOT_TOKEN else None
+    if not parsed:
+        return web.json_response({'error': 'invalid_init_data'}, status=401)
+    try:
+        tg_user = json.loads(parsed.get('user', '{}'))
+        user_id = tg_user.get('id')
+    except Exception:
+        user_id = None
+    if not user_id:
+        return web.json_response({'error': 'invalid_init_data'}, status=401)
+
+    try:
+        shift_rows = get_shift_history(user_id)  # [(shift_date, duration_minutes, km, airport_wait_minutes), ...]
+        finance_rows = get_finance_history(user_id)  # [(calc_date, income, net_profit), ...]
+
+        shifts_by_day = {}
+        for shift_date, duration_minutes, km, _airport_wait_minutes in shift_rows:
+            agg = shifts_by_day.setdefault(shift_date, {'minutes': 0, 'km': 0.0})
+            agg['minutes'] += duration_minutes
+            agg['km'] += km
+
+        # Несколько расчётов "ДЕНЬ - ИТОГ" за один день - берём сумму (по
+        # аналогии со сменами выше), это ближе к реальности, чем "только
+        # последний" (человек мог посчитать доход дважды за смену).
+        finance_by_day = {}
+        for calc_date, income, net_profit in finance_rows:
+            agg = finance_by_day.setdefault(calc_date, {'income': 0.0, 'net_profit': 0.0})
+            agg['income'] += income
+            agg['net_profit'] += net_profit
+
+        today = datetime.now(timezone.utc).date()
+        week_cutoff = (today - timedelta(days=7)).isoformat()
+        month_cutoff = (today - timedelta(days=30)).isoformat()
+
+        def sum_shifts(cutoff):
+            minutes = sum(a['minutes'] for d, a in shifts_by_day.items() if d >= cutoff)
+            km = sum(a['km'] for d, a in shifts_by_day.items() if d >= cutoff)
+            return minutes, km
+
+        def sum_finance(cutoff):
+            net = sum(a['net_profit'] for d, a in finance_by_day.items() if d >= cutoff)
+            return net
+
+        week_minutes, week_km = sum_shifts(week_cutoff)
+        month_minutes, month_km = sum_shifts(month_cutoff)
+        total_minutes = sum(a['minutes'] for a in shifts_by_day.values())
+        total_km = sum(a['km'] for a in shifts_by_day.values())
+
+        # Графики - последние 30 дней, по возрастанию даты (слева направо на
+        # графике = раньше -> позже), включая дни без данных (нули), чтобы
+        # ось X была ровной шкалой дат, а не "прыгала" только по дням с
+        # активностью.
+        days_axis = [(today - timedelta(days=i)).isoformat() for i in range(29, -1, -1)]
+        earnings_series = [round(finance_by_day.get(d, {}).get('net_profit', 0.0)) for d in days_axis]
+        hours_series = [round(shifts_by_day.get(d, {}).get('minutes', 0) / 60, 1) for d in days_axis]
+
+        result = {
+            'totals': {
+                'week_hours': round(week_minutes / 60, 1), 'week_km': round(week_km),
+                'month_hours': round(month_minutes / 60, 1), 'month_km': round(month_km),
+                'period_hours': round(total_minutes / 60, 1), 'period_km': round(total_km),
+                'period_months': SHIFT_HISTORY_MONTHS,
+                'week_net_profit': round(sum_finance(week_cutoff)),
+                'month_net_profit': round(sum_finance(month_cutoff)),
+            },
+            'chart': {'days': days_axis, 'earnings': earnings_series, 'hours': hours_series},
+        }
+    except Exception:
+        logger.exception(f"❌ Ошибка при сборе данных личного кабинета user_id={user_id}")
+        return web.json_response({'error': 'internal_error'}, status=500)
+    return web.json_response(result)
+
+def cabinet_webapp_html():
+    """HTML-страница личного кабинета (Chart.js, без API-ключей - тот же
+    источник CDN, что уже используется для Leaflet на карте водителей, см.
+    map_webapp_html). Данные запрашиваются с initData в заголовке (см.
+    handle_cabinet_data_api) - без city/category в URL, в отличие от карты,
+    так как кабинет всегда про ОДНОГО конкретного человека, определяемого
+    по подписи, а не по query-параметрам."""
+    return """<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Личный кабинет</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 16px; padding-bottom: max(16px, env(safe-area-inset-bottom, 0px));
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--tg-theme-bg-color, #f2f2f7); color: var(--tg-theme-text-color, #000);
+  }
+  h1 { font-size: 19px; margin: 4px 0 16px; }
+  .tiles { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-bottom: 18px; }
+  .tile {
+    background: var(--tg-theme-secondary-bg-color, #fff); border-radius: 14px; padding: 12px 14px;
+  }
+  .tile .label { font-size: 12px; opacity: .6; margin-bottom: 4px; }
+  .tile .value { font-size: 19px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .tile .sub { font-size: 12px; opacity: .55; margin-top: 2px; }
+  .section-title { font-size: 14px; font-weight: 600; opacity: .8; margin: 20px 0 8px; }
+  .chart-card {
+    background: var(--tg-theme-secondary-bg-color, #fff); border-radius: 14px; padding: 12px 10px 6px;
+  }
+  #state { text-align: center; padding: 60px 16px; opacity: .6; font-size: 14px; }
+  canvas { max-width: 100%; }
+</style>
+</head>
+<body>
+<h1>👤 Личный кабинет</h1>
+<div id="state">Загружаю данные…</div>
+<div id="content" style="display:none">
+  <div class="tiles">
+    <div class="tile"><div class="label">За 7 дней</div><div class="value" id="weekHours">—</div><div class="sub" id="weekKm"></div></div>
+    <div class="tile"><div class="label">Заработано за 7 дней</div><div class="value" id="weekNet">—</div></div>
+    <div class="tile"><div class="label">За 30 дней</div><div class="value" id="monthHours">—</div><div class="sub" id="monthKm"></div></div>
+    <div class="tile"><div class="label">Заработано за 30 дней</div><div class="value" id="monthNet">—</div></div>
+  </div>
+  <div class="section-title" id="periodTitle">За всё время</div>
+  <div class="tiles" style="grid-template-columns: 1fr 1fr;">
+    <div class="tile"><div class="label">Часов за рулём</div><div class="value" id="periodHours">—</div></div>
+    <div class="tile"><div class="label">Пробег</div><div class="value" id="periodKm">—</div></div>
+  </div>
+  <div class="section-title">Заработок по дням (30 дней)</div>
+  <div class="chart-card"><canvas id="earningsChart" height="180"></canvas></div>
+  <div class="section-title">Часы за рулём по дням (30 дней)</div>
+  <div class="chart-card"><canvas id="hoursChart" height="180"></canvas></div>
+</div>
+<script>
+  const tg = window.Telegram && window.Telegram.WebApp;
+  if (tg) { tg.ready(); tg.expand(); }
+  const initData = tg ? tg.initData : '';
+  const isDark = tg ? tg.colorScheme === 'dark' : (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+  const gridColor = isDark ? 'rgba(255,255,255,.08)' : 'rgba(0,0,0,.06)';
+  const textColor = isDark ? 'rgba(255,255,255,.65)' : 'rgba(0,0,0,.55)';
+  const accent = '#34A853';
+  const accentSoft = isDark ? 'rgba(52,168,83,.25)' : 'rgba(52,168,83,.15)';
+
+  function fmtMoney(n) { return Math.round(n).toLocaleString('ru-RU') + ' ₽'; }
+  function fmtHours(h) { return h.toLocaleString('ru-RU', {maximumFractionDigits: 1}) + ' ч'; }
+  function fmtKm(km) { return Math.round(km).toLocaleString('ru-RU') + ' км'; }
+  function shortDate(iso) {
+    const d = new Date(iso + 'T00:00:00');
+    return d.toLocaleDateString('ru-RU', {day: 'numeric', month: 'short'});
+  }
+
+  function baseChartOptions(yTickFormatter) {
+    return {
+      responsive: true,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { grid: { display: false }, ticks: { color: textColor, maxRotation: 0, autoSkip: true, font: {size: 10} } },
+        y: {
+          beginAtZero: true, grid: { color: gridColor },
+          ticks: { color: textColor, font: {size: 10}, callback: yTickFormatter },
+        },
+      },
+    };
+  }
+
+  async function load() {
+    try {
+      const resp = await fetch('""" + CABINET_DATA_API_PATH + """', { headers: { 'X-Telegram-Init-Data': initData } });
+      if (!resp.ok) throw new Error('http_' + resp.status);
+      const data = await resp.json();
+      const t = data.totals;
+
+      document.getElementById('weekHours').textContent = fmtHours(t.week_hours);
+      document.getElementById('weekKm').textContent = fmtKm(t.week_km);
+      document.getElementById('weekNet').textContent = fmtMoney(t.week_net_profit);
+      document.getElementById('monthHours').textContent = fmtHours(t.month_hours);
+      document.getElementById('monthKm').textContent = fmtKm(t.month_km);
+      document.getElementById('monthNet').textContent = fmtMoney(t.month_net_profit);
+      document.getElementById('periodTitle').textContent = 'За ' + t.period_months + ' мес.';
+      document.getElementById('periodHours').textContent = fmtHours(t.period_hours);
+      document.getElementById('periodKm').textContent = fmtKm(t.period_km);
+
+      const labels = data.chart.days.map(shortDate);
+
+      new Chart(document.getElementById('earningsChart'), {
+        type: 'bar',
+        data: { labels, datasets: [{ data: data.chart.earnings, backgroundColor: accent, borderRadius: 4, maxBarThickness: 14 }] },
+        options: baseChartOptions(v => v >= 1000 ? (v / 1000) + 'к' : v),
+      });
+      new Chart(document.getElementById('hoursChart'), {
+        type: 'line',
+        data: {
+          labels,
+          datasets: [{
+            data: data.chart.hours, borderColor: accent, backgroundColor: accentSoft,
+            fill: true, tension: .3, pointRadius: 0, borderWidth: 2,
+          }],
+        },
+        options: baseChartOptions(v => v + 'ч'),
+      });
+
+      document.getElementById('state').style.display = 'none';
+      document.getElementById('content').style.display = 'block';
+    } catch (e) {
+      document.getElementById('state').textContent = 'Не удалось загрузить данные - попробуй закрыть и открыть кабинет ещё раз.';
+    }
+  }
+  load();
+</script>
+</body>
+</html>"""
 
 @router.message(lambda message: getattr(message, 'location', None) is not None and not _location_tracking_active(message.from_user.id) and not user_state.get(message.from_user.id, {}).get('nearby_pending'))
 async def handle_passive_live_location(message: types.Message):
@@ -9880,6 +10148,9 @@ async def start_subscription_webhook_server():
     app.router.add_get(MAP_STATIONS_API_PATH, handle_map_stations_api)
     app.router.add_get(MAP_ROAD_EVENTS_API_PATH, handle_map_road_events_api)
     app.router.add_get(MAP_CITY_EVENTS_API_PATH, handle_map_city_events_api)
+    # Личный кабинет (см. блок "ЛИЧНЫЙ КАБИНЕТ (WebApp)" выше)
+    app.router.add_get(CABINET_WEBAPP_PATH, handle_cabinet_webapp)
+    app.router.add_get(CABINET_DATA_API_PATH, handle_cabinet_data_api)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', SUBSCRIPTION_WEBHOOK_PORT)
