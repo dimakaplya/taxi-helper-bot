@@ -420,6 +420,51 @@ AIRPORT_QUEUE_CHECK_INTERVAL_MINUTES = 5
 # шлём напоминание включить её заново (см. send_airport_queue_expired_push).
 AIRPORT_QUEUE_STALE_TIMEOUT_MINUTES = 30
 
+# ==================== ПАРКОВКА (гео, "стоишь на месте?") ====================
+# Идея пользователя: пока у водителя активна смена (is_shift_active) и идёт
+# трансляция живой геопозиции (та же трансляция, что и у "Очередь у
+# аэропорта" - см. process_airport_queue_ping/_location_tracking_active
+# выше), если он не двигается достаточно долго - скорее всего встал на
+# парковку в ожидании заказа - предложить оплатить платную парковку (кнопка
+# со ссылкой на приложение оплаты, см. PARKING_APP_LINKS) или отметить, что
+# парковка бесплатная (кнопка "🅿️ Стою на бесплатной парковке" глушит
+# напоминание, пока водитель не поедет дальше). Состояние - НЕ отдельная
+# таблица в БД, а user_state[uid]['parking'] (dict), по аналогии с
+# user_state[uid]['airport_queue']. См. process_parking_ping/
+# send_parking_push/handle_parking_free_ack ниже (рядом с
+# process_airport_queue_ping).
+#
+# На сколько метров нужно СМЕСТИТЬСЯ от "якорной" точки, чтобы считать
+# водителя снова двигающимся (и сбросить отсчёт времени стоянки) - разумная
+# середина между шумом GPS в городе (обычно единицы-десятки метров) и
+# реальным перемещением на соседнее парковочное место/через дорогу.
+PARKING_MOVEMENT_THRESHOLD_METERS = 40
+# Сколько минут подряд без смещения больше PARKING_MOVEMENT_THRESHOLD_METERS
+# считаем "стоит на месте, похоже, припарковался" - после этого шлём пуш
+# (один раз за этот заход стоянки, см. process_parking_ping).
+PARKING_STATIONARY_MINUTES = 2.5
+# Радиус "в черте города" вокруг центра города (см. RAIN_CITY_COORDS) для
+# фичи парковки - НЕ переиспользуем никакой из радиусов "Очереди у
+# аэропорта" (AIRPORT_QUEUE_*), это независимая зона: город целиком, а не
+# конкретная точка аэропорта. За пределами города (кроме зон аэропортов, см.
+# nearest_airport_zone) напоминание не шлём - там платных городских парковок
+# нет. 30 км - с запасом покрывает сам город и ближайшие пригороды, где ещё
+# действуют городские платные парковки.
+PARKING_CITY_RADIUS_KM = 30
+# Ссылки на приложения для оплаты городских парковок, по городам и
+# платформам (iOS/Android). Если для города+платформы своей ссылки нет -
+# используется общий фолбэк PARKING_APP_LINK_FALLBACK ниже (одно
+# приложение "Парковки России" покрывает все города, поэтому по
+# умолчанию везде одна и та же ссылка на iOS; Android-ссылку пользователь
+# пришлёт позже).
+PARKING_APP_LINKS = {
+    # 'moscow': {'ios': 'https://...', 'android': 'https://...'},
+}
+PARKING_APP_LINK_FALLBACK = {
+    'ios': 'https://apps.apple.com/us/app/%D0%BF%D0%B0%D1%80%D0%BA%D0%BE%D0%B2%D0%BA%D0%B8-%D1%80%D0%BE%D1%81%D1%81%D0%B8%D0%B8/id1434426876?l=ru',
+    # 'android': 'https://...',  # пришлёшь позже
+}
+
 # ==================== ПРАЗДНИКИ ====================
 # Идея пользователя: праздники (особенно Новый год, 8 марта, 9 мая, День
 # города) заметно поднимают спрос на такси/курьеров - люди едут в гости,
@@ -5953,6 +5998,100 @@ async def process_airport_queue_ping(user_id, lat, lon, live_period=None):
 
     state['airport_queue'] = aq
 
+def _in_parking_zone(lat, lon, city):
+    """True, если точка (lat, lon) в зоне действия фичи "Парковка" - либо в
+    пределах PARKING_CITY_RADIUS_KM от центра города (RAIN_CITY_COORDS),
+    либо в зоне любого аэропорта (nearest_airport_zone) - см. комментарий у
+    PARKING_CITY_RADIUS_KM выше (аэропорт может быть за пределами города,
+    например Внуково). Зоны ж/д вокзалов отдельно не проверяем - они и так
+    покрыты городским радиусом."""
+    city_coords = RAIN_CITY_COORDS.get(city) if city else None
+    if city_coords:
+        c_lat, c_lon = city_coords
+        if haversine_km(lat, lon, c_lat, c_lon) <= PARKING_CITY_RADIUS_KM:
+            return True
+    icao, dist_km, zone_key, zone_label = nearest_airport_zone(lat, lon)
+    if icao is not None and dist_km is not None and dist_km <= airport_queue_outer_radius_km(icao):
+        return True
+    return False
+
+async def process_parking_ping(user_id, lat, lon):
+    """Обрабатывает один пинг живой геопозиции для фичи "Парковка" (см.
+    блок ПАРКОВКА выше) - НЕЗАВИСИМО от process_airport_queue_ping (обе
+    читают одну и ту же трансляцию, см. _location_tracking_active), только
+    пока активна смена (is_shift_active). Хранит "якорную" точку
+    (anchor_lat/anchor_lon/anchor_time) в user_state[uid]['parking'] - если
+    новая точка ушла от якоря дальше PARKING_MOVEMENT_THRESHOLD_METERS,
+    водитель едет - переставляем якорь и снимаем прежний пуш/глушение
+    (новый заход стоянки). Если якорь "состарился" на PARKING_STATIONARY_
+    MINUTES без движения, пуш для этого захода ещё не отправлялся и водитель
+    не отметил "стою на бесплатной парковке" (free_ack) - шлём пуш."""
+    state = user_state.get(user_id)
+    if not state or not is_shift_active(state):
+        return
+    if not _in_parking_zone(lat, lon, state.get('city')):
+        return
+    now = datetime.now(ZoneInfo('UTC'))
+    parking = dict(state.get('parking') or {})
+    anchor_lat, anchor_lon = parking.get('anchor_lat'), parking.get('anchor_lon')
+    moved = True
+    if anchor_lat is not None and anchor_lon is not None:
+        dist_m = haversine_km(lat, lon, anchor_lat, anchor_lon) * 1000
+        moved = dist_m > PARKING_MOVEMENT_THRESHOLD_METERS
+    if moved:
+        # Новая якорная точка - новый заход "стоянки", сбрасываем пуш и
+        # глушение по free_ack (снятое водителем "стою на бесплатной
+        # парковке" относилось к ПРЕЖНЕМУ месту стоянки).
+        parking = {
+            'anchor_lat': lat, 'anchor_lon': lon,
+            'anchor_time': now.isoformat(),
+            'pushed': False, 'free_ack': False,
+        }
+        state['parking'] = parking
+        return
+    parking['anchor_lat'], parking['anchor_lon'] = anchor_lat, anchor_lon
+    state['parking'] = parking
+    if parking.get('pushed') or parking.get('free_ack'):
+        return
+    try:
+        anchor_time = datetime.fromisoformat(parking['anchor_time'])
+    except Exception:
+        return
+    stationary_minutes = (now - anchor_time).total_seconds() / 60
+    if stationary_minutes >= PARKING_STATIONARY_MINUTES:
+        parking['pushed'] = True
+        state['parking'] = parking
+        await send_parking_push(user_id, state.get('city'))
+
+async def send_parking_push(user_id, city):
+    """Пуш "похоже, ты припарковался" - кнопки оплаты платной парковки
+    (по городу/платформе, см. PARKING_APP_LINKS - пока пусто, ссылки
+    добавит пользователь позже, до этого кнопок оплаты просто нет) и
+    кнопка "🅿️ Стою на бесплатной парковке" (глушит пуш до следующей
+    поездки, см. handle_parking_free_ack)."""
+    if not bot:
+        return
+    text = (
+        "🅿️ Похоже, ты припарковался и стоишь на месте уже несколько минут.\n\n"
+        "Если парковка платная - не забудь оплатить, чтобы не словить штраф."
+    )
+    buttons = []
+    # Сначала ссылка конкретно для города (если пользователь её пришлёт),
+    # иначе - общий фолбэк PARKING_APP_LINK_FALLBACK ("Парковки России",
+    # покрывает все города).
+    city_links = PARKING_APP_LINKS.get(city) or {}
+    links = {**PARKING_APP_LINK_FALLBACK, **city_links}
+    if links.get('ios'):
+        buttons.append([InlineKeyboardButton(text="💳 Оплатить парковку (iOS)", url=links['ios'])])
+    if links.get('android'):
+        buttons.append([InlineKeyboardButton(text="💳 Оплатить парковку (Android)", url=links['android'])])
+    buttons.append([InlineKeyboardButton(text="🅿️ Стою на бесплатной парковке", callback_data="parking_free_ack")])
+    reply_markup = InlineKeyboardMarkup(inline_keyboard=buttons)
+    try:
+        await bot.send_message(user_id, text, reply_markup=reply_markup)
+    except Exception as e:
+        logger.warning(f"⚠️ Не удалось отправить пуш о парковке пользователю {user_id}: {e}")
+
 def _location_tracking_active(user_id):
     """True, если хоть одна из фич, использующих живую геопозицию (очередь у
     аэропорта, счётчик км текущей смены), сейчас активна у этого
@@ -9554,6 +9693,7 @@ async def handle_airport_queue_location(message: types.Message):
     user_id = message.from_user.id
     lat, lon = message.location.latitude, message.location.longitude
     await process_airport_queue_ping(user_id, lat, lon, live_period=getattr(message.location, 'live_period', None))
+    await process_parking_ping(user_id, lat, lon)
     km_counter_ping(user_id, lat, lon)
     remember_live_location(user_id, lat, lon)
     maybe_update_map_position(user_id, lat, lon)
@@ -9577,6 +9717,7 @@ async def handle_airport_queue_location_update(message: types.Message):
     user_id = message.from_user.id
     lat, lon = message.location.latitude, message.location.longitude
     await process_airport_queue_ping(user_id, lat, lon, live_period=getattr(message.location, 'live_period', None))
+    await process_parking_ping(user_id, lat, lon)
     km_counter_ping(user_id, lat, lon)
     remember_live_location(user_id, lat, lon)
     maybe_update_map_position(user_id, lat, lon)
@@ -11666,6 +11807,31 @@ async def keep_queue_marks(callback_query: types.CallbackQuery):
         await callback_query.message.edit_reply_markup(reply_markup=None)
     except Exception:
         pass
+
+@router.callback_query(lambda c: c.data == "parking_free_ack")
+async def handle_parking_free_ack(callback_query: types.CallbackQuery):
+    """Кнопка "🅿️ Стою на бесплатной парковке" на пуше send_parking_push -
+    не останавливает саму фичу (process_parking_ping продолжает следить за
+    якорем), просто глушит дальнейшие пуши для ТЕКУЩЕГО захода стоянки
+    (free_ack=True), пока водитель не отъедет дальше
+    PARKING_MOVEMENT_THRESHOLD_METERS от якоря - тогда process_parking_ping
+    заведёт новый якорь с free_ack=False заново (см. process_parking_ping)."""
+    user_id = callback_query.from_user.id
+    state = user_state.get(user_id)
+    if not state:
+        await callback_query.answer("Начни заново с /start", show_alert=True)
+        return
+    parking = dict(state.get('parking') or {})
+    parking['free_ack'] = True
+    state['parking'] = parking
+    await callback_query.answer("Окей, больше не буду напоминать, пока не поедешь 🅿️")
+    try:
+        await callback_query.message.edit_text("Окей, больше не буду напоминать, пока не поедешь 🅿️")
+    except Exception:
+        try:
+            await callback_query.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
 
 @router.callback_query(lambda c: c.data.startswith('aqsnooze_'))
 async def handle_airport_queue_snooze(callback_query: types.CallbackQuery):
