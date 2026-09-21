@@ -5844,6 +5844,16 @@ async def process_airport_queue_ping(user_id, lat, lon, live_period=None):
             is_snoozed = now < datetime.fromisoformat(snoozed_until_str)
         except Exception:
             is_snoozed = False
+    # ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "и пропадает если
+    # человек уже встал в очередь"): если у водителя уже есть СВОЯ свежая
+    # отметка (за QUEUE_ENTRY_TTL_MINUTES) по этому аэропорту/зоне - он уже
+    # встал в очередь, напоминание "🚗 ВСТАТЬ В ОЧЕРЕДЬ" больше не нужно.
+    # Тот же принцип, что и is_snoozed (пуш подавляется), но источник другой -
+    # не ручной снуз, а факт реальной отметки. is_already_queued используется
+    # и ниже (уровни расстояния), и в check_airport_queue_timers (пуш "уже 30
+    # минут рядом").
+    city_for_marks = ICAO_TO_CITY.get(icao)
+    is_already_queued = bool(city_for_marks and user_recent_queue_marks(user_id, city_for_marks, icao, zone_key))
     # Смена АЭРОПОРТА или, для Шереметьево, смена ЗОНЫ (B <-> C <-> D,
     # это отдельные подъезды - водитель, переехавший из одной в другую,
     # по факту заново въезжает в радиус) - начинаем отслеживание с чистого
@@ -5890,7 +5900,7 @@ async def process_airport_queue_ping(user_id, lat, lon, live_period=None):
         for level_idx, level_km in enumerate(levels_km):
             if dist_km <= level_km and level_idx not in entered_levels:
                 entered_levels.add(level_idx)
-                if not is_snoozed:
+                if not is_snoozed and not is_already_queued:
                     kind = 'enter_outer' if level_idx == 0 else f'enter_level_{level_idx}'
                     await send_airport_queue_push(user_id, icao, kind, dist_km, zone_label, zone_key)
         aq['entered_levels'] = sorted(entered_levels)
@@ -12505,6 +12515,13 @@ async def check_airport_queue_timers():
                 is_snoozed = now < datetime.fromisoformat(snoozed_until_str)
             except Exception:
                 is_snoozed = False
+        # ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "и пропадает
+        # если человек уже встал в очередь") - тот же принцип, что в
+        # process_airport_queue_ping: если у водителя уже есть своя свежая
+        # отметка по этому аэропорту/зоне, таймерный пуш "уже 30 минут рядом"
+        # тоже не нужен - он уже отметился.
+        city_for_marks = ICAO_TO_CITY.get(icao)
+        is_already_queued = bool(city_for_marks and user_recent_queue_marks(user_id, city_for_marks, icao, zone_key))
 
         aq_updated = dict(aq)
         changed = False
@@ -12512,7 +12529,7 @@ async def check_airport_queue_timers():
         # час рядом" - AIRPORT_QUEUE_TIME_PUSHES_MIN теперь содержит только
         # 30 минут (см. константу выше), пуш 60 больше не шлётся.
         (pushed_30,) = AIRPORT_QUEUE_TIME_PUSHES_MIN
-        if elapsed_minutes >= pushed_30 and not aq.get('pushed_30') and not is_snoozed:
+        if elapsed_minutes >= pushed_30 and not aq.get('pushed_30') and not is_snoozed and not is_already_queued:
             await send_airport_queue_push(user_id, icao, 30, zone_label=zone_label, zone_key=zone_key)
             aq_updated['pushed_30'] = True
             changed = True
