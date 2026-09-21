@@ -468,6 +468,16 @@ PARKING_STATIONARY_MINUTES = 2.5
 # нет. 30 км - с запасом покрывает сам город и ближайшие пригороды, где ещё
 # действуют городские платные парковки.
 PARKING_CITY_RADIUS_KM = 30
+# Зона аэропорта для пуша о платной парковке (см. _in_parking_zone). ИЗМЕНЕНО
+# 21.09.2026 по просьбе пользователя: пуш о платной парковке не должен
+# приходить внутри радиуса, где уже работает отдельный пуш "Встать в
+# очередь" (airport_queue_outer_radius_km) - иначе водитель получает два
+# конфликтующих пуша про одну и ту же точку. Поэтому зона аэропорта для
+# парковки теперь - "бублик" от airport_queue_outer_radius_km(icao) (не
+# включая) до PARKING_AIRPORT_ZONE_RADIUS_KM: ближе к терминалу зона занята
+# фичей "Очередь", дальше (но всё ещё в районе аэропорта) может сработать
+# пуш о платной парковке.
+PARKING_AIRPORT_ZONE_RADIUS_KM = 8
 # После "🅿️ Стою на бесплатной парковке" пуш не глушится навсегда - через
 # столько минут (если водитель так и не поехал дальше) спрашиваем снова
 # (вдруг парковка на самом деле стала платной/сменилась зона и т.п.), по
@@ -6642,18 +6652,30 @@ async def process_airport_queue_ping(user_id, lat, lon, live_period=None):
 def _in_parking_zone(lat, lon, city):
     """True, если точка (lat, lon) в зоне действия фичи "Парковка" - либо в
     пределах PARKING_CITY_RADIUS_KM от центра города (RAIN_CITY_COORDS),
-    либо в зоне любого аэропорта (nearest_airport_zone) - см. комментарий у
+    либо в зоне аэропорта (nearest_airport_zone) - см. комментарий у
     PARKING_CITY_RADIUS_KM выше (аэропорт может быть за пределами города,
     например Внуково). Зоны ж/д вокзалов отдельно не проверяем - они и так
-    покрыты городским радиусом."""
+    покрыты городским радиусом.
+
+    ВАЖНО (правка 21.09.2026): зона аэропорта для парковки НЕ включает
+    радиус airport_queue_outer_radius_km(icao) - там уже работает свой пуш
+    "Встать в очередь" (см. process_airport_queue_ping), и присылать вдобавок
+    пуш про платную парковку в той же точке было бы дублированием/конфликтом
+    (см. PARKING_AIRPORT_ZONE_RADIUS_KM). Зона парковки у аэропорта -
+    "бублик" СНАРУЖИ радиуса очереди и ВНУТРИ PARKING_AIRPORT_ZONE_RADIUS_KM.
+    Если аэропорт также попадает в городской радиус - городская проверка
+    выше всё равно сработает как обычно, ограничение касается только самой
+    зоны аэропорта."""
     city_coords = RAIN_CITY_COORDS.get(city) if city else None
     if city_coords:
         c_lat, c_lon = city_coords
         if haversine_km(lat, lon, c_lat, c_lon) <= PARKING_CITY_RADIUS_KM:
             return True
     icao, dist_km, zone_key, zone_label = nearest_airport_zone(lat, lon)
-    if icao is not None and dist_km is not None and dist_km <= airport_queue_outer_radius_km(icao):
-        return True
+    if icao is not None and dist_km is not None:
+        queue_radius_km = airport_queue_outer_radius_km(icao)
+        if queue_radius_km < dist_km <= PARKING_AIRPORT_ZONE_RADIUS_KM:
+            return True
     return False
 
 async def process_parking_ping(user_id, lat, lon):
