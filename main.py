@@ -6483,6 +6483,16 @@ async def handle_cabinet_data_api(request):
     init_data = request.headers.get('X-Telegram-Init-Data', '')
     parsed = validate_telegram_webapp_init_data(init_data, BOT_TOKEN) if BOT_TOKEN else None
     if not parsed:
+        # Временное диагностическое логирование (21.09.2026) - пользователь
+        # видит "Не удалось загрузить данные" в реальном кабинете, а эта
+        # ветка (401) раньше молча ничего не писала в лог, поэтому причину
+        # было не видно в Railway logs. Не логируем сам init_data целиком
+        # (в нём подпись/telegram user payload) - только длину и факт
+        # наличия BOT_TOKEN.
+        logger.warning(
+            f"⚠️ /cabinet/data: невалидный initData (len={len(init_data)}, "
+            f"bot_token_set={bool(BOT_TOKEN)}) - отдаю 401"
+        )
         return web.json_response({'error': 'invalid_init_data'}, status=401)
     try:
         tg_user = json.loads(parsed.get('user', '{}'))
@@ -6490,6 +6500,7 @@ async def handle_cabinet_data_api(request):
     except Exception:
         user_id = None
     if not user_id:
+        logger.warning("⚠️ /cabinet/data: initData валиден, но не удалось извлечь user_id - отдаю 401")
         return web.json_response({'error': 'invalid_init_data'}, status=401)
 
     try:
@@ -6632,15 +6643,22 @@ async def handle_cabinet_profile_api(request):
 # это персональные данные/действия конкретного человека.
 def _cabinet_require_user(request):
     """Общая проверка initData для всех новых /cabinet/* эндпоинтов ниже -
-    возвращает user_id или None (вызывающий код тогда отвечает 401)."""
+    возвращает user_id или None (вызывающий код тогда отвечает 401).
+    Временное диагностическое логирование (21.09.2026, см. такое же у
+    /cabinet/data выше) - причина 401 раньше нигде не логировалась."""
     init_data = request.headers.get('X-Telegram-Init-Data', '')
     parsed = validate_telegram_webapp_init_data(init_data, BOT_TOKEN) if BOT_TOKEN else None
     if not parsed:
+        logger.warning(
+            f"⚠️ {request.path}: невалидный initData (len={len(init_data)}, "
+            f"bot_token_set={bool(BOT_TOKEN)}) - отдаю 401"
+        )
         return None
     try:
         tg_user = json.loads(parsed.get('user', '{}'))
         return tg_user.get('id')
     except Exception:
+        logger.warning(f"⚠️ {request.path}: initData валиден, но не удалось извлечь user_id - отдаю 401")
         return None
 
 CABINET_FINANCE_API_PATH = '/cabinet/finance'
