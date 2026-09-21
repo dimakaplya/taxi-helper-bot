@@ -1987,6 +1987,22 @@ def init_db():
     ):
         if col not in existing_columns:
             cursor.execute(f'ALTER TABLE shared_orders ADD COLUMN {col} {coltype}')
+    # Миграция (22.09.2026, по прямой просьбе пользователя: "надо добавить
+    # поля моя комиссия ... нужно везде сделать поле цена от и до, но
+    # необязательно чтобы обе цены были указаны - достаточно одной цифры") -
+    # старая колонка price TEXT NOT NULL ОСТАЁТСЯ как есть (колонки не
+    # удаляем - см. паттерн выше) и по-прежнему заполняется при создании
+    # заказа для обратной совместимости (см. create_shared_order), но
+    # реальным источником истины для новых заказов становятся price_from/
+    # price_to. commission_from/commission_to - НЕобязательное поле целиком
+    # (комиссия за передачу заказа может быть не у всех отправителей).
+    # Тот же PRAGMA table_info + ADD COLUMN паттерн, что и выше.
+    for col, coltype in (
+        ('price_from', 'TEXT'), ('price_to', 'TEXT'),
+        ('commission_from', 'TEXT'), ('commission_to', 'TEXT'),
+    ):
+        if col not in existing_columns:
+            cursor.execute(f'ALTER TABLE shared_orders ADD COLUMN {col} {coltype}')
     # "▶️ НАЧАТЬ СМЕНУ"/"⏹ Завершить смену" (по просьбе пользователя,
     # 20.09.2026) - история смен водителя: дата, длительность, км. Хранится
     # ОТДЕЛЬНОЙ таблицей (а не в user_states JSON), чтобы не перезаписывать
@@ -2409,17 +2425,30 @@ def format_user_contact(user):
     name = escape_md(user.full_name or 'без имени')
     return f"{name} (ник не задан, ID: {user.id})"
 
-def create_shared_order(sender_id, sender_contact, city, category, pickup, dropoff, price, car_class, passengers,
-                         client_phone=None, loader_needed=None, cargo_length_cm=None, cargo_width_cm=None,
-                         cargo_height_cm=None, cargo_volume_m3=None, cargo_weight_kg=None):
+def create_shared_order(sender_id, sender_contact, city, category, pickup, dropoff, price_from, price_to, car_class,
+                         passengers, client_phone=None, loader_needed=None, cargo_length_cm=None, cargo_width_cm=None,
+                         cargo_height_cm=None, cargo_volume_m3=None, cargo_weight_kg=None,
+                         commission_from=None, commission_to=None):
+    """price_from/price_to - диапазон стоимости поездки (по прямой просьбе
+    пользователя, 22.09.2026 - "нужно везде сделать поле цена от и до, но
+    необязательно чтобы обе цены были указаны"), commission_from/
+    commission_to - тот же диапазон для "моя комиссия" (НЕобязательное поле
+    целиком). Старая колонка price TEXT NOT NULL заполняется для обратной
+    совместимости комбинированным значением - см. price_compat ниже."""
     init_db()
+    if price_from and price_to:
+        price_compat = f"{price_from}-{price_to}"
+    else:
+        price_compat = price_from or price_to or ''
     conn = get_db_connection()
     cursor = conn.execute(
-        'INSERT INTO shared_orders (sender_id, sender_contact, city, category, pickup, dropoff, price, car_class, '
-        'passengers, client_phone, loader_needed, cargo_length_cm, cargo_width_cm, cargo_height_cm, cargo_volume_m3, cargo_weight_kg) '
-        'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-        (sender_id, sender_contact, city, category, pickup, dropoff, price, car_class, passengers, client_phone,
-         loader_needed, cargo_length_cm, cargo_width_cm, cargo_height_cm, cargo_volume_m3, cargo_weight_kg)
+        'INSERT INTO shared_orders (sender_id, sender_contact, city, category, pickup, dropoff, price, price_from, '
+        'price_to, car_class, passengers, client_phone, loader_needed, cargo_length_cm, cargo_width_cm, '
+        'cargo_height_cm, cargo_volume_m3, cargo_weight_kg, commission_from, commission_to) '
+        'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        (sender_id, sender_contact, city, category, pickup, dropoff, price_compat, price_from, price_to, car_class,
+         passengers, client_phone, loader_needed, cargo_length_cm, cargo_width_cm, cargo_height_cm, cargo_volume_m3,
+         cargo_weight_kg, commission_from, commission_to)
     )
     order_id = cursor.lastrowid
     conn.commit()
@@ -2430,7 +2459,28 @@ _SHARED_ORDER_FIELDS = ['order_id', 'sender_id', 'sender_contact', 'city', 'cate
                          'price', 'car_class', 'passengers', 'status', 'accepted_by', 'accepted_by_contact',
                          'created_at', 'accepted_at', 'client_phone', 'cargo_length_cm', 'cargo_width_cm',
                          'cargo_height_cm', 'cargo_volume_m3', 'cargo_weight_kg', 'loader_needed',
-                         'sender_confirmed_at', 'accepter_confirmed_at']
+                         'sender_confirmed_at', 'accepter_confirmed_at',
+                         'price_from', 'price_to', 'commission_from', 'commission_to']
+
+def format_share_order_price_range(from_val, to_val, label='Стоимость', emoji='💰'):
+    """Универсальный форматтер для полей-диапазонов "от/до" - цена поездки и
+    "моя комиссия" (по прямой просьбе пользователя, 22.09.2026: "нужно везде
+    сделать поле цена от и до, но необязательно чтобы обе цены были указаны -
+    достаточно одной цифры"). Если задана только ОДНА граница - показываем её
+    БЕЗ "от"/"до" (подтверждено пользователем явно, а не "от 1500 ₽"), если
+    заданы ОБЕ - диапазоном "1500–2000 ₽", если НИ ОДНОЙ - пустая строка
+    (используется в условных строках, как у пассажиров/грузчика/груза).
+    Переиспользуется и для price, и для commission, чтобы не дублировать
+    логику форматирования от/до."""
+    from_val = from_val if from_val not in (None, '') else None
+    to_val = to_val if to_val not in (None, '') else None
+    if from_val is None and to_val is None:
+        return ""
+    if from_val is not None and to_val is not None:
+        value = f"{from_val}–{to_val}"
+    else:
+        value = str(from_val if from_val is not None else to_val)
+    return f"{emoji} {label}: {value} ₽\n"
 
 def get_shared_order(order_id):
     init_db()
@@ -4118,7 +4168,15 @@ def shared_order_yes_no_keyboard():
 SHARED_ORDER_STEP_PROMPTS = {
     'pickup': "📍 Введи адрес *подачи* (точка А):",
     'dropoff': "🏁 Введи адрес *прибытия* (точка Б):",
-    'price': "💰 Введи стоимость поездки в рублях (только число):",
+    # По прямой просьбе пользователя (22.09.2026) - цена стала диапазоном
+    # "от/до", но допускается указать только одну границу (достаточно одной
+    # цифры) - блокируем переход дальше, только если ОБЕ границы пусты (см.
+    # shared_order_flow, шаг 'price_to'). Комиссия - та же схема, но
+    # полностью необязательна целиком.
+    'price_from': "💰 Введи минимальную цену поездки в рублях, или *-*, если не хочешь её указывать:",
+    'price_to': "💰 Введи максимальную цену поездки в рублях, или *-*, если не хочешь её указывать:",
+    'commission_from': "💼 Введи минимальную сумму своей комиссии в рублях (сколько хочешь получить за передачу заказа), или *-*, если комиссии нет:",
+    'commission_to': "💼 Введи максимальную сумму своей комиссии в рублях, или *-*, если не хочешь её указывать:",
     'client_phone': "📱 Введи номер телефона клиента (его передадим водителю, который примет заказ). Если номера нет - пришли *-*:",
     'loader_needed': "🧑‍🔧 Нужен грузчик? Выбери *Да* или *Нет*:",
     'cargo_length': "📏 Введи длину груза в сантиметрах (только число), или *-*, если неизвестно:",
@@ -4142,11 +4200,14 @@ async def show_shared_order_confirmation(message, data, category, city):
         parts = [p for p in [dims, f"{data['cargo_volume_m3']} м³" if data.get('cargo_volume_m3') else '',
                               f"{data['cargo_weight_kg']} кг" if data.get('cargo_weight_kg') else ''] if p]
         cargo_line = f"📦 Груз: {', '.join(parts)}\n"
+    price_line = format_share_order_price_range(data.get('price_from'), data.get('price_to'))
+    commission_line = format_share_order_price_range(data.get('commission_from'), data.get('commission_to'), label='Комиссия', emoji='💼')
     text = (
         "*Проверь заказ перед отправкой:*\n\n"
         f"📍 Подача: {escape_md(data['pickup'])}\n"
         f"🏁 Прибытие: {escape_md(data['dropoff'])}\n"
-        f"💰 Стоимость: {data['price']} ₽\n"
+        f"{price_line}"
+        f"{commission_line}"
         f"🚘 Класс: {data['car_class']}\n"
         f"{passengers_line}"
         f"{loader_line}"
@@ -4237,8 +4298,15 @@ def share_order_webapp_html(category=None):
   <input type="text" id="pickup" placeholder="Откуда забрать пассажира">
   <label>🏁 Адрес прибытия</label>
   <input type="text" id="dropoff" placeholder="Куда везти">
-  <label>💰 Стоимость, ₽</label>
-  <input type="number" id="price" placeholder="1500" min="0">
+  <label>💰 Цена от, ₽</label>
+  <input type="number" id="priceFrom" placeholder="1500" min="0">
+  <label>💰 Цена до, ₽</label>
+  <input type="number" id="priceTo" placeholder="2000" min="0">
+  <label>💼 Моя комиссия, ₽ (необязательно)</label>
+  <div style="display:flex; gap:8px;">
+    <input type="number" id="commissionFrom" placeholder="Комиссия от" min="0">
+    <input type="number" id="commissionTo" placeholder="Комиссия до" min="0">
+  </div>
   <label>🚘 Класс автомобиля</label>
   <div class="pills" id="carClassPills"></div>
   <div id="paxSection">
@@ -4331,10 +4399,16 @@ def share_order_webapp_html(category=None):
     errEl.textContent = '';
     const pickup = document.getElementById('pickup').value.trim();
     const dropoff = document.getElementById('dropoff').value.trim();
-    const price = document.getElementById('price').value.trim();
+    const priceFrom = document.getElementById('priceFrom').value.trim();
+    const priceTo = document.getElementById('priceTo').value.trim();
+    const commissionFrom = document.getElementById('commissionFrom').value.trim();
+    const commissionTo = document.getElementById('commissionTo').value.trim();
     const clientPhone = document.getElementById('clientPhone').value.trim();
     if (!pickup || !dropoff) { errEl.textContent = 'Заполни адреса подачи и прибытия.'; return; }
-    if (!price || Number(price) <= 0) { errEl.textContent = 'Укажи стоимость поездки.'; return; }
+    // По прямой просьбе пользователя (22.09.2026) - "необязательно чтобы обе
+    // цены были указаны - достаточно одной цифры", но хотя бы ОДНА граница
+    // цены обязательна (комиссия - полностью необязательна, без этой проверки).
+    if ((!priceFrom || Number(priceFrom) <= 0) && (!priceTo || Number(priceTo) <= 0)) { errEl.textContent = 'Укажи хотя бы одну цену - от или до.'; return; }
     if (!carClass) { errEl.textContent = 'Выбери класс автомобиля.'; return; }
     // "Нужен грузчик?" ОБЯЗАТЕЛЕН для классов с loader_choice (по прямой
     // просьбе пользователя, 22.09.2026) - блокируем отправку без ответа.
@@ -4355,7 +4429,9 @@ def share_order_webapp_html(category=None):
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': (tg ? tg.initData : '') },
         body: JSON.stringify({
-          pickup, dropoff, price, car_class: carClass, passengers: classHasPax(carClass) ? pax : null,
+          pickup, dropoff, price_from: priceFrom || null, price_to: priceTo || null,
+          commission_from: commissionFrom || null, commission_to: commissionTo || null,
+          car_class: carClass, passengers: classHasPax(carClass) ? pax : null,
           client_phone: clientPhone || null,
           loader_needed: classNeedsLoader(carClass) ? loaderNeeded : null,
           cargo_length_cm: hasCargo && cargoLength ? cargoLength : null,
@@ -4395,8 +4471,8 @@ async def handle_share_order_webapp(request):
     )
 
 async def handle_share_order_submit_api(request):
-    """POST {pickup, dropoff, price, car_class, passengers, client_phone} ->
-    создаёт и рассылает заказ. initData ОБЯЗАТЕЛЕН и строго проверяется (тот
+    """POST {pickup, dropoff, price_from, price_to, commission_from, commission_to,
+    car_class, passengers, client_phone} -> создаёт и рассылает заказ. initData ОБЯЗАТЕЛЕН и строго проверяется (тот
     же helper, что у /cabinet/* - validate_telegram_webapp_init_data) - это
     персональное действие от имени конкретного отправителя, без валидной
     подписи неизвестно, кто отправитель. Переиспользует ТЕ ЖЕ функции, что и
@@ -4431,7 +4507,14 @@ async def handle_share_order_submit_api(request):
         body = await request.json()
         pickup = str(body.get('pickup') or '').strip()
         dropoff = str(body.get('dropoff') or '').strip()
-        price_digits = re.sub(r'[^\d]', '', str(body.get('price') or ''))
+        # По прямой просьбе пользователя (22.09.2026) - цена стала диапазоном
+        # "от/до", каждая граница необязательна по отдельности, но хотя бы
+        # одна должна быть указана (проверяется ниже). Комиссия - та же
+        # схема "от/до", но полностью необязательна.
+        price_from_digits = re.sub(r'[^\d]', '', str(body.get('price_from') or ''))
+        price_to_digits = re.sub(r'[^\d]', '', str(body.get('price_to') or ''))
+        commission_from_digits = re.sub(r'[^\d]', '', str(body.get('commission_from') or ''))
+        commission_to_digits = re.sub(r'[^\d]', '', str(body.get('commission_to') or ''))
         car_class = str(body.get('car_class') or '').strip()
         passengers_raw = body.get('passengers')
         passengers = int(passengers_raw) if passengers_raw not in (None, '') else 0
@@ -4454,7 +4537,8 @@ async def handle_share_order_submit_api(request):
     # но НИКОГДА не доверяем только клиенту) - по прямой просьбе пользователя
     # (22.09.2026): лимит пассажиров по классу и обязательный "Нужен грузчик?"
     # для непассажирских классов.
-    if (not pickup or not dropoff or not price_digits or car_class not in SHARE_ORDER_CAR_CLASS_NAMES
+    if (not pickup or not dropoff or (not price_from_digits and not price_to_digits)
+            or car_class not in SHARE_ORDER_CAR_CLASS_NAMES
             or (class_requires_passengers and (passengers <= 0 or passengers > max_pax))
             or (class_requires_loader and not loader_needed)):
         return web.json_response({'error': 'invalid_body'}, status=400)
@@ -4469,13 +4553,15 @@ async def handle_share_order_submit_api(request):
         # пользователя, 22.09.2026), у остальных классов игнорируем, даже
         # если клиент вдруг их прислал.
         cargo_length_cm = cargo_width_cm = cargo_height_cm = cargo_volume_m3 = cargo_weight_kg = None
-    data = {'pickup': pickup, 'dropoff': dropoff, 'price': price_digits, 'car_class': car_class,
-            'passengers': passengers_str, 'client_phone': client_phone, 'loader_needed': loader_needed,
+    data = {'pickup': pickup, 'dropoff': dropoff, 'price_from': price_from_digits or None, 'price_to': price_to_digits or None,
+            'commission_from': commission_from_digits or None, 'commission_to': commission_to_digits or None,
+            'car_class': car_class, 'passengers': passengers_str, 'client_phone': client_phone, 'loader_needed': loader_needed,
             'cargo_length_cm': cargo_length_cm, 'cargo_width_cm': cargo_width_cm, 'cargo_height_cm': cargo_height_cm,
             'cargo_volume_m3': cargo_volume_m3, 'cargo_weight_kg': cargo_weight_kg}
     order_id = create_shared_order(
-        user_id, sender_contact, city, category, pickup, dropoff, price_digits, car_class, passengers_str,
-        client_phone, loader_needed, cargo_length_cm, cargo_width_cm, cargo_height_cm, cargo_volume_m3, cargo_weight_kg,
+        user_id, sender_contact, city, category, pickup, dropoff, price_from_digits or None, price_to_digits or None,
+        car_class, passengers_str, client_phone, loader_needed, cargo_length_cm, cargo_width_cm, cargo_height_cm,
+        cargo_volume_m3, cargo_weight_kg, commission_from_digits or None, commission_to_digits or None,
     )
     try:
         sent = await broadcast_shared_order(order_id, data, city, category, user_id)
@@ -4541,17 +4627,68 @@ async def shared_order_flow(message: types.Message):
             await message.answer("Адрес не может быть пустым, попробуй ещё раз:")
             return
         draft['data']['dropoff'] = text
-        draft['step'] = 'price'
+        draft['step'] = 'price_from'
         state['order_draft'] = draft
-        await message.answer(SHARED_ORDER_STEP_PROMPTS['price'], reply_markup=shared_order_cancel_keyboard(), parse_mode='Markdown')
+        await message.answer(SHARED_ORDER_STEP_PROMPTS['price_from'], reply_markup=shared_order_cancel_keyboard(), parse_mode='Markdown')
         return
 
-    if step == 'price':
-        price_digits = re.sub(r'[^\d]', '', text)
-        if not price_digits:
-            await message.answer("Не понял сумму - введи просто число, например 1500:")
+    # Цена "от/до" и комиссия "от/до" - по прямой просьбе пользователя
+    # (22.09.2026): "нужно везде сделать поле цена от и до, но необязательно
+    # чтобы обе цены были указаны - достаточно одной цифры". Каждый шаг
+    # принимает число или "-" (тот же skip-токен, что у шагов размеров груза
+    # выше). Для цены (в отличие от комиссии) хотя бы одна граница
+    # ОБЯЗАТЕЛЬНА - проверяется по завершении шага 'price_to'.
+    if step == 'price_from':
+        if text == '-':
+            draft['data']['price_from'] = None
+        else:
+            digits = re.sub(r'[^\d]', '', text)
+            if not digits:
+                await message.answer("Не понял сумму - введи просто число, например 1500, или *-*, если не хочешь её указывать:", parse_mode='Markdown')
+                return
+            draft['data']['price_from'] = digits
+        draft['step'] = 'price_to'
+        state['order_draft'] = draft
+        await message.answer(SHARED_ORDER_STEP_PROMPTS['price_to'], reply_markup=shared_order_cancel_keyboard(), parse_mode='Markdown')
+        return
+
+    if step == 'price_to':
+        if text == '-':
+            draft['data']['price_to'] = None
+        else:
+            digits = re.sub(r'[^\d]', '', text)
+            if not digits:
+                await message.answer("Не понял сумму - введи просто число, например 2000, или *-*, если не хочешь её указывать:", parse_mode='Markdown')
+                return
+            draft['data']['price_to'] = digits
+        if not draft['data'].get('price_from') and not draft['data'].get('price_to'):
+            # Хотя бы одна граница цены обязательна - возвращаемся к первой.
+            draft['step'] = 'price_from'
+            state['order_draft'] = draft
+            await message.answer("Нужно указать хотя бы одну цену - от или до. " + SHARED_ORDER_STEP_PROMPTS['price_from'], parse_mode='Markdown')
             return
-        draft['data']['price'] = price_digits
+        draft['step'] = 'commission_from'
+        state['order_draft'] = draft
+        await message.answer(SHARED_ORDER_STEP_PROMPTS['commission_from'], reply_markup=shared_order_cancel_keyboard(), parse_mode='Markdown')
+        return
+
+    if step == 'commission_from':
+        if text == '-':
+            draft['data']['commission_from'] = None
+        else:
+            digits = re.sub(r'[^\d]', '', text)
+            draft['data']['commission_from'] = digits or None
+        draft['step'] = 'commission_to'
+        state['order_draft'] = draft
+        await message.answer(SHARED_ORDER_STEP_PROMPTS['commission_to'], reply_markup=shared_order_cancel_keyboard(), parse_mode='Markdown')
+        return
+
+    if step == 'commission_to':
+        if text == '-':
+            draft['data']['commission_to'] = None
+        else:
+            digits = re.sub(r'[^\d]', '', text)
+            draft['data']['commission_to'] = digits or None
         draft['step'] = 'car_class'
         state['order_draft'] = draft
         await message.answer("🚘 Выбери класс автомобиля 👇", reply_markup=shared_order_car_class_keyboard())
@@ -4686,11 +4823,14 @@ async def broadcast_shared_order(order_id, data, city, category, sender_id):
     passengers_line = f"👥 Пассажиров: {data['passengers']}\n" if data.get('passengers') else ""
     loader_line = f"🧑‍🔧 Нужен грузчик: {'Да' if data.get('loader_needed') == 'yes' else 'Нет'}\n" if data.get('loader_needed') else ""
     cargo_line = format_shared_order_cargo_line(data)
+    price_line = format_share_order_price_range(data.get('price_from'), data.get('price_to'))
+    commission_line = format_share_order_price_range(data.get('commission_from'), data.get('commission_to'), label='Комиссия', emoji='💼')
     text = (
         f"🔄 *Заказ от другого водителя* (#{order_id})\n\n"
         f"📍 Подача: {escape_md(data['pickup'])}\n"
         f"🏁 Прибытие: {escape_md(data['dropoff'])}\n"
-        f"💰 Стоимость: {data['price']} ₽\n"
+        f"{price_line}"
+        f"{commission_line}"
         f"🚘 Класс: {data['car_class']}\n"
         f"{passengers_line}"
         f"{loader_line}"
@@ -4735,10 +4875,11 @@ async def confirm_send_shared_order(callback_query: types.CallbackQuery):
 
     sender_contact = format_user_contact(callback_query.from_user)
     order_id = create_shared_order(
-        user_id, sender_contact, city, category, data['pickup'], data['dropoff'], data['price'], data['car_class'],
-        data['passengers'], data.get('client_phone'), data.get('loader_needed'),
+        user_id, sender_contact, city, category, data['pickup'], data['dropoff'], data.get('price_from'),
+        data.get('price_to'), data['car_class'], data['passengers'], data.get('client_phone'), data.get('loader_needed'),
         data.get('cargo_length_cm'), data.get('cargo_width_cm'), data.get('cargo_height_cm'),
         data.get('cargo_volume_m3'), data.get('cargo_weight_kg'),
+        data.get('commission_from'), data.get('commission_to'),
     )
     state.pop('order_draft', None)
 
@@ -4782,7 +4923,8 @@ async def accept_shared_order(callback_query: types.CallbackQuery):
         f"✅ *Вы приняли заказ #{order_id}*\n\n"
         f"📍 Подача: {escape_md(order['pickup'])}\n"
         f"🏁 Прибытие: {escape_md(order['dropoff'])}\n"
-        f"💰 Стоимость: {order['price']} ₽\n"
+        f"{format_share_order_price_range(order.get('price_from'), order.get('price_to'))}"
+        f"{format_share_order_price_range(order.get('commission_from'), order.get('commission_to'), label='Комиссия', emoji='💼')}"
         f"🚘 Класс: {order['car_class']}\n"
     )
     if order.get('passengers'):
