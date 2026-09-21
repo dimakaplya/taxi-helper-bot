@@ -1901,6 +1901,15 @@ def init_db():
         )
     ''')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_finance_history_user_date ON finance_history (user_id, calc_date)')
+    # Миграция: количество выполненных заказов за день добавлено позже, чем
+    # сама таблица finance_history (по просьбе пользователя, 21.09.2026) -
+    # CREATE TABLE IF NOT EXISTS не трогает уже существующую (на Railway)
+    # таблицу, колонку нужно добавлять отдельно (см. аналогичную миграцию
+    # client_phone у shared_orders выше).
+    cursor.execute('PRAGMA table_info(finance_history)')
+    existing_columns = {row[1] for row in cursor.fetchall()}
+    if 'trips_count' not in existing_columns:
+        cursor.execute('ALTER TABLE finance_history ADD COLUMN trips_count INTEGER')
     # Профиль водителя (см. CABINET_WEBAPP_PATH ниже) - ник/ФИО, тариф,
     # машина - вводится в личном кабинете (WebApp), отдельная таблица (не
     # user_state), т.к. это устойчивые анкетные данные, а не сиюминутное
@@ -2099,13 +2108,15 @@ def get_finance_history(user_id, months=SHIFT_HISTORY_MONTHS):
     """Посчитанные итоги "📊 ДЕНЬ - ИТОГ" пользователя за последние `months`
     месяцев (см. save_finance_result/finance_history) - используется для
     графика заработка в личном кабинете (см. handle_cabinet_data_api).
-    Возвращает кортежи (calc_date, income, net_profit), новые сверху."""
+    Возвращает кортежи (calc_date, income, net_profit, trips_count), новые
+    сверху (trips_count может быть None - для расчётов, сохранённых до
+    появления этого поля, 21.09.2026)."""
     try:
         init_db()
         conn = get_db_connection()
         cutoff = (datetime.now(timezone.utc) - timedelta(days=months * 30)).date().isoformat()
         cursor = conn.execute(
-            'SELECT calc_date, income, net_profit FROM finance_history '
+            'SELECT calc_date, income, net_profit, trips_count FROM finance_history '
             'WHERE user_id = ? AND calc_date >= ? ORDER BY calc_date DESC, id DESC',
             (user_id, cutoff)
         )
@@ -2116,16 +2127,18 @@ def get_finance_history(user_id, months=SHIFT_HISTORY_MONTHS):
         logger.error(f"❌ Не удалось прочитать историю финансов пользователя {user_id}: {e}")
         return []
 
-def save_finance_result(user_id, income, net_profit):
+def save_finance_result(user_id, income, net_profit, trips_count=None):
     """Сохраняет один посчитанный итог "📊 ДЕНЬ - ИТОГ" (см.
     send_courier_finance_result) в статистику - по просьбе пользователя,
-    20.09.2026 ("выдаётся сумарный доход сохраняется в статистику")."""
+    20.09.2026 ("выдаётся сумарный доход сохраняется в статистику").
+    trips_count - количество выполненных заказов за день, опционально
+    (по просьбе пользователя, 21.09.2026)."""
     try:
         init_db()
         conn = get_db_connection()
         conn.execute(
-            'INSERT INTO finance_history (user_id, calc_date, income, net_profit) VALUES (?, ?, ?, ?)',
-            (user_id, datetime.now(timezone.utc).date().isoformat(), income, net_profit)
+            'INSERT INTO finance_history (user_id, calc_date, income, net_profit, trips_count) VALUES (?, ?, ?, ?, ?)',
+            (user_id, datetime.now(timezone.utc).date().isoformat(), income, net_profit, trips_count)
         )
         conn.commit()
         conn.close()
@@ -3659,7 +3672,8 @@ COURIER_WEAR_RESERVE_RATE = 0.10
 DEFAULT_TAX_RATE_PERCENT = 6.0
 
 COURIER_FINANCE_STEP_PROMPTS = {
-    'income': "💰 Доход за день, ₽ (только число):",
+    'income': "💰 Доход за день, ₽ (с учётом вычета комиссии сервисов, только число):",
+    'trips': "🚕 Количество выполненных заказов за день (только число):",
     'km': "🚗 Километраж за день, км:",
     'consumption': "⛽ Расход топлива на 100 км (л или кВтч):",
     'fuel_price': "💵 Стоимость топлива за литр/кВтч, ₽:",
@@ -8415,10 +8429,11 @@ async def handle_cabinet_data_api(request):
         # аналогии со сменами выше), это ближе к реальности, чем "только
         # последний" (человек мог посчитать доход дважды за смену).
         finance_by_day = {}
-        for calc_date, income, net_profit in finance_rows:
-            agg = finance_by_day.setdefault(calc_date, {'income': 0.0, 'net_profit': 0.0})
+        for calc_date, income, net_profit, trips_count in finance_rows:
+            agg = finance_by_day.setdefault(calc_date, {'income': 0.0, 'net_profit': 0.0, 'trips_count': 0})
             agg['income'] += income
             agg['net_profit'] += net_profit
+            agg['trips_count'] += trips_count or 0
 
         today = datetime.now(timezone.utc).date()
         today_str = today.isoformat()
@@ -8478,6 +8493,14 @@ async def handle_cabinet_data_api(request):
                 'best_day': best_day,
             },
             'chart': {'days': days_axis, 'earnings': earnings_series, 'hours': hours_series},
+            # Данные сегодняшних завершённых смен - используются в WebApp,
+            # чтобы автоматически подставить км/часы в форму "Финансы" (по
+            # аналогии с Telegram-версией, см. today_shift_totals/
+            # advance_finance_step, 21.09.2026).
+            'today_shift': (lambda st: {
+                'km': round(st['km'], 1), 'hours': round(st['minutes'] / 60, 2),
+                'airport_wait_minutes': st['airport_wait_minutes'],
+            })(today_shift_totals(user_id)),
         }
     except Exception:
         logger.exception(f"❌ Ошибка при сборе данных личного кабинета user_id={user_id}")
@@ -8574,6 +8597,7 @@ async def handle_cabinet_finance_api(request):
         body = await request.json()
         data = {
             'income': float(body['income']),
+            'trips_count': int(body['trips_count']) if body.get('trips_count') else None,
             'km': float(body['km']),
             'consumption': float(body['consumption']),
             'fuel_price': float(body['fuel_price']),
@@ -8589,13 +8613,14 @@ async def handle_cabinet_finance_api(request):
         return web.json_response({'error': 'invalid_body'}, status=400)
 
     r = calculate_finance_result(data)
-    save_finance_result(user_id, r['income'], r['net_profit'])
+    save_finance_result(user_id, r['income'], r['net_profit'], r['trips_count'])
     return web.json_response({
         'income': round(r['income']), 'fuel_cost': round(r['fuel_cost']),
         'wear_reserve': round(r['wear_reserve']), 'rent': round(r['rent']),
         'expenses': round(r['expenses']), 'tax_amount': round(r['tax_amount']),
         'tax_rate': r['tax_rate'], 'net_profit': round(r['net_profit']),
         'per_hour': round(r['per_hour']), 'is_rented': r['is_rented'],
+        'trips_count': r['trips_count'], 'avg_check': round(r['avg_check']) if r['avg_check'] else None,
     })
 
 CABINET_DEMAND_API_PATH = '/cabinet/demand'
@@ -8982,8 +9007,10 @@ def cabinet_webapp_html():
      save_finance_result, что и Telegram-версия). -->
 <div class="tab-pane" id="tab-finance">
   <div class="card">
-    <div class="field-row"><label>💰 Доход за день, ₽</label><input type="number" inputmode="decimal" id="finIncome" placeholder="2340"></div>
+    <div class="field-row"><label>💰 Доход за день, ₽ (с учётом вычета комиссии сервисов)</label><input type="number" inputmode="decimal" id="finIncome" placeholder="2340"></div>
+    <div class="field-row"><label>🚕 Количество поездок за день</label><input type="number" inputmode="numeric" id="finTrips" placeholder="12"></div>
     <div class="field-row"><label>🚗 Километраж за день, км</label><input type="number" inputmode="decimal" id="finKm" placeholder="87"></div>
+    <div id="finAutoNote" class="muted" style="display:none;font-size:12px;margin:-4px 0 8px;"></div>
     <div class="field-row"><label>⛽ Расход топлива на 100 км</label><input type="number" inputmode="decimal" id="finConsumption" placeholder="6.2"></div>
     <div class="field-row"><label>💵 Стоимость топлива/литр, ₽</label><input type="number" inputmode="decimal" id="finFuelPrice" placeholder="61.5"></div>
     <div class="field-row">
@@ -9076,6 +9103,9 @@ def cabinet_webapp_html():
   const accentSoft = isDark ? 'rgba(255,196,0,.28)' : 'rgba(255,196,0,.18)';
   const params = new URLSearchParams(window.location.search);
   const tariffOptions = (params.get('tariffs') || '').split(',').filter(Boolean);
+  // Сегодняшние завершённые смены (см. today_shift_totals) - для автоподстановки
+  // км/часов на вкладке "Финансы" (21.09.2026), заполняется в load() ниже.
+  let todayShiftData = null;
 
   function fmtMoney(n) { return Math.round(n).toLocaleString('ru-RU') + ' ₽'; }
   function fmtHours(h) { return h.toLocaleString('ru-RU', {maximumFractionDigits: 1}) + ' ч'; }
@@ -9173,6 +9203,7 @@ def cabinet_webapp_html():
       const t = data.totals;
 
       renderProfile(data.profile || {});
+      todayShiftData = data.today_shift || null;
 
       document.getElementById('todayNet').textContent = fmtMoney(t.today_net_profit);
       document.getElementById('todayHours').textContent = fmtHours(t.today_hours);
@@ -9256,10 +9287,22 @@ def cabinet_webapp_html():
 
   // ---- ФИНАНСЫ ----
   function initFinanceTab() {
+    // Автоподстановка км/часов из сегодняшних завершённых смен (по аналогии
+    // с Telegram-версией, см. today_shift_totals/advance_finance_step,
+    // 21.09.2026) - если данных нет, поля остаются пустыми (placeholder-пример).
+    if (todayShiftData && (todayShiftData.km > 0 || todayShiftData.hours > 0)) {
+      document.getElementById('finKm').value = todayShiftData.km;
+      document.getElementById('finHours').value = todayShiftData.hours;
+      const noteEl = document.getElementById('finAutoNote');
+      noteEl.style.display = 'block';
+      noteEl.textContent = 'Из сегодняшних смен: ' + todayShiftData.km + ' км, ' + todayShiftData.hours +
+        ' ч за рулём. Данные взяты автоматически - если что-то не так, можешь поправить.';
+    }
     document.getElementById('finCalcBtn').addEventListener('click', async () => {
       const resEl = document.getElementById('finResult');
       const payload = {
         income: parseFloat(document.getElementById('finIncome').value) || 0,
+        trips_count: parseInt(document.getElementById('finTrips').value) || 0,
         km: parseFloat(document.getElementById('finKm').value) || 0,
         consumption: parseFloat(document.getElementById('finConsumption').value) || 0,
         fuel_price: parseFloat(document.getElementById('finFuelPrice').value) || 0,
@@ -9283,6 +9326,7 @@ def cabinet_webapp_html():
           '<div class="tile accent" style="margin-bottom:8px"><div class="label">Чистыми за день</div><div class="value">' + fmtMoney(r.net_profit) + '</div>' +
           '<div class="sub">≈ ' + fmtMoney(r.per_hour) + '/ч</div></div>' +
           '<p class="muted">Валовый доход: ' + fmtMoney(r.income) + '<br>' +
+          (r.trips_count ? '🚕 Заказов: ' + r.trips_count + '  ·  средний чек ≈ ' + fmtMoney(r.avg_check) + ' ₽<br>' : '') +
           '⛽ Топливо: −' + fmtMoney(r.fuel_cost) + '<br>' +
           (r.is_rented ? '🔧 Резерв на износ: не учтён (аренда)<br>' : '🔧 Резерв на износ (10%): −' + fmtMoney(r.wear_reserve) + '<br>') +
           (r.rent ? '🚘 Аренда ТС: −' + fmtMoney(r.rent) + '<br>' : '') +
@@ -9901,7 +9945,8 @@ FINANCE_FIELD_LABELS = {
 }
 
 FINANCE_STEP_ORDER = {
-    'income': 'km',
+    'income': 'trips',
+    'trips': 'km',
     'km': 'consumption',
     'consumption': 'fuel_price',
     'fuel_price': 'car_ownership',
@@ -10010,6 +10055,16 @@ async def courier_finance_flow(message: types.Message):
             await message.answer("Не понял сумму - введи просто число, например 2340:")
             return
         draft['data']['income'] = value
+        draft['step'] = 'trips'
+        await advance_finance_step(message.answer, user_id, state, draft)
+        return
+
+    if step == 'trips':
+        value = parse_decimal(text)
+        if value is None or value < 0 or int(value) != value:
+            await message.answer("Не понял количество заказов - введи целое число, например 12:")
+            return
+        draft['data']['trips_count'] = int(value)
         draft['step'] = 'km'
         await advance_finance_step(message.answer, user_id, state, draft)
         return
@@ -10115,6 +10170,10 @@ def calculate_finance_result(data):
     hours = data['hours']
     airport_wait_minutes = data.get('airport_wait_minutes', 0)
     car_ownership = data.get('car_ownership', CAR_OWNERSHIP_OWN)
+    # Количество выполненных заказов за день - в саму формулу чистыми не
+    # входит (по просьбе пользователя, 21.09.2026), просто проносится насквозь
+    # и используется для доп. статистики "средний чек" ниже.
+    trips_count = data.get('trips_count') or data.get('trips')
 
     is_rented = car_ownership == CAR_OWNERSHIP_RENTED
     fuel_cost = (km / 100) * consumption * fuel_price
@@ -10122,12 +10181,14 @@ def calculate_finance_result(data):
     tax_amount = income * (tax_rate / 100)
     net_profit = income - fuel_cost - wear_reserve - rent - expenses - tax_amount
     per_hour = net_profit / hours if hours else 0.0
+    avg_check = (income / trips_count) if trips_count else None
     return {
         'income': income, 'km': km, 'consumption': consumption, 'fuel_price': fuel_price,
         'rent': rent, 'expenses': expenses, 'tax_rate': tax_rate, 'hours': hours,
         'airport_wait_minutes': airport_wait_minutes, 'car_ownership': car_ownership,
         'is_rented': is_rented, 'fuel_cost': fuel_cost, 'wear_reserve': wear_reserve,
         'tax_amount': tax_amount, 'net_profit': net_profit, 'per_hour': per_hour,
+        'trips_count': trips_count, 'avg_check': avg_check,
     }
 
 async def send_courier_finance_result(message: types.Message, user_id, data):
@@ -10140,6 +10201,7 @@ async def send_courier_finance_result(message: types.Message, user_id, data):
     airport_wait_minutes, car_ownership = r['airport_wait_minutes'], r['car_ownership']
     is_rented, fuel_cost, wear_reserve = r['is_rented'], r['fuel_cost'], r['wear_reserve']
     tax_amount, net_profit, per_hour = r['tax_amount'], r['net_profit'], r['per_hour']
+    trips_count, avg_check = r['trips_count'], r['avg_check']
 
     def fmt(n):
         return f"{n:,.0f}".replace(',', ' ')
@@ -10153,7 +10215,11 @@ async def send_courier_finance_result(message: types.Message, user_id, data):
         "📊 *ДЕНЬ — ИТОГ*",
         WHERE_TO_GO_DIVIDER,
         "_Учтено в расчёте:_",
-        f"💰 Доход: {fmt(income)} ₽",
+        f"💰 Доход (за вычетом комиссии сервисов): {fmt(income)} ₽",
+    ]
+    if trips_count:
+        lines.append(f"🚕 Заказов: {trips_count}  ·  средний чек ≈ {fmt(avg_check)} ₽")
+    lines += [
         f"🛣 Пробег: {fmt(km)} км  ·  ⛽ {consumption:g} л/100км × {fuel_price:g} ₽/л",
         f"🚘 Машина: {CAR_OWNERSHIP_LABELS.get(car_ownership, CAR_OWNERSHIP_LABELS[CAR_OWNERSHIP_OWN])}",
     ]
@@ -10185,7 +10251,7 @@ async def send_courier_finance_result(message: types.Message, user_id, data):
 
     category = user_state.get(user_id, {}).get('category')
     await message.answer('\n'.join(lines), reply_markup=courier_module_keyboard(category), parse_mode='Markdown')
-    save_finance_result(user_id, income, net_profit)
+    save_finance_result(user_id, income, net_profit, trips_count)
 
 CITY_MAP = {
     "🏛️ МОСКВА": "moscow", "🕯️ СПБ": "spb", "🌲 НОВОСИБИРСК": "novosibirsk",
