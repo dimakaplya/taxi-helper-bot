@@ -477,14 +477,13 @@ PARKING_FREE_ACK_RECHECK_MINUTES = 15
 # платформам (iOS/Android). Если для города+платформы своей ссылки нет -
 # используется общий фолбэк PARKING_APP_LINK_FALLBACK ниже (одно
 # приложение "Парковки России" покрывает все города, поэтому по
-# умолчанию везде одна и та же ссылка на iOS; Android-ссылку пользователь
-# пришлёт позже).
+# умолчанию везде одна и та же ссылка и на iOS, и на Android).
 PARKING_APP_LINKS = {
     # 'moscow': {'ios': 'https://...', 'android': 'https://...'},
 }
 PARKING_APP_LINK_FALLBACK = {
     'ios': 'https://apps.apple.com/us/app/%D0%BF%D0%B0%D1%80%D0%BA%D0%BE%D0%B2%D0%BA%D0%B8-%D1%80%D0%BE%D1%81%D1%81%D0%B8%D0%B8/id1434426876?l=ru',
-    # 'android': 'https://...',  # пришлёшь позже
+    'android': 'https://play.google.com/store/apps/details?id=ru.mosparking.appnew',
 }
 
 # ==================== ПРАЗДНИКИ ====================
