@@ -1194,6 +1194,43 @@ def load_all_recent_bot_messages():
     except Exception as e:
         logger.error(f"❌ Не удалось восстановить очередь последних сообщений: {e}")
 
+# ДОБАВЛЕНО 22.09.2026 (см. комментарий у CREATE TABLE last_reply_keyboard_messages
+# в init_db) - персистентность для _last_reply_keyboard_msg_id, той же
+# схемой, что recent_bot_messages выше (save/load переживают рестарт
+# Railway). По одной строке на чат - INSERT ... ON CONFLICT UPDATE, старое
+# значение просто перезаписывается новым (нам нужен только последний id).
+def save_last_reply_keyboard_message(chat_id, message_id):
+    try:
+        init_db()
+        conn = get_db_connection()
+        conn.execute(
+            'INSERT INTO last_reply_keyboard_messages (chat_id, message_id, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP) '
+            'ON CONFLICT(chat_id) DO UPDATE SET message_id=excluded.message_id, updated_at=excluded.updated_at',
+            (chat_id, message_id)
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"❌ Не удалось сохранить последнее menu-сообщение чата {chat_id}: {e}")
+
+def load_all_last_reply_keyboard_messages():
+    """Восстанавливает _last_reply_keyboard_msg_id из БД при старте - без
+    этого после каждого редеплоя сообщение с меню, отправленное в прошлом
+    запуске, никогда бы не удалялось следующим таким сообщением (см.
+    комментарий у CREATE TABLE last_reply_keyboard_messages в init_db)."""
+    try:
+        init_db()
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT chat_id, message_id FROM last_reply_keyboard_messages')
+        rows = cursor.fetchall()
+        conn.close()
+        for chat_id, message_id in rows:
+            _last_reply_keyboard_msg_id[chat_id] = message_id
+        logger.info(f"✅ Восстановлены последние menu-сообщения для {len(rows)} чатов из БД")
+    except Exception as e:
+        logger.error(f"❌ Не удалось восстановить последние menu-сообщения: {e}")
+
 user_state = PersistentUserStateStore()
 
 _flights_data_cache = None
@@ -2046,6 +2083,29 @@ def init_db():
         )
     ''')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_recent_bot_messages_chat ON recent_bot_messages (chat_id, id)')
+    # ДОБАВЛЕНО 22.09.2026 (жалоба пользователя со скриншотом - "Опять не
+    # удаляет сообщения", видно что сообщения с ReplyKeyboardMarkup вроде
+    # "Выбери, что нужно дальше" / "✅ Бот обновлён" копятся в чате
+    # одновременно, хотя должно оставаться только одно последнее меню - см.
+    # _last_reply_keyboard_msg_id выше). БАГ: recent_bot_messages (общая
+    # очередь) пережила добавление персистентности в БД ещё 21.09.2026, а
+    # вот _last_reply_keyboard_msg_id (id ПОСЛЕДНЕГО сообщения с меню на
+    # чат) как жила только в памяти процесса, так и осталась - при каждом
+    # редеплое Railway (а их в этой сессии было много) она обнулялась.
+    # Следующее сообщение с меню после рестарта не находило "предыдущее" (в
+    # свежем пустом dict prev_id всегда None) и не удаляло его - то самое
+    # menu-сообщение, отправленное ДО рестарта, зависало в чате навсегда.
+    # Фикс - тот же паттерн, что и у recent_bot_messages: отдельная таблица,
+    # по одной строке на чат (последнее известное menu-сообщение), значение
+    # обновляется при каждой отправке и восстанавливается при старте (см.
+    # load_all_last_reply_keyboard_messages в main()).
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS last_reply_keyboard_messages (
+            chat_id INTEGER PRIMARY KEY,
+            message_id INTEGER NOT NULL,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS airport_statuses (
             icao TEXT PRIMARY KEY,
@@ -3179,6 +3239,12 @@ class SingleMessageMiddleware(BaseRequestMiddleware):
                     # его полностью заменяет.
                     prev_id = _last_reply_keyboard_msg_id.get(chat_id)
                     _last_reply_keyboard_msg_id[chat_id] = result.message_id
+                    # ИСПРАВЛЕНО 22.09.2026 - без записи в БД это значение
+                    # терялось при каждом рестарте Railway, и первое
+                    # menu-сообщение после рестарта никогда не удаляло то,
+                    # что было отправлено ДО него (см. CREATE TABLE
+                    # last_reply_keyboard_messages в init_db).
+                    _fire_and_forget(asyncio.to_thread(save_last_reply_keyboard_message, chat_id, result.message_id))
                     if prev_id is not None and prev_id != result.message_id:
                         _schedule_delete_message(chat_id, prev_id)
                 elif skip_trim:
@@ -16160,6 +16226,7 @@ async def main():
         return
     load_all_user_states()
     load_all_recent_bot_messages()
+    load_all_last_reply_keyboard_messages()
     # На случай, если в БД скопилось больше KEEP_LAST_N_MESSAGES на чат
     # (например, при смене этой константы, или если предыдущий процесс
     # упал посреди записи) - подчищаем лишнее один раз при старте, теперь
