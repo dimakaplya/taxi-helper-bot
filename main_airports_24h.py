@@ -1880,6 +1880,20 @@ def init_db():
         )
     ''')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_finance_history_user_date ON finance_history (user_id, calc_date)')
+    # Профиль водителя (см. CABINET_WEBAPP_PATH ниже) - ник/ФИО, тариф,
+    # машина - вводится в личном кабинете (WebApp), отдельная таблица (не
+    # user_state), т.к. это устойчивые анкетные данные, а не сиюминутное
+    # состояние навигации по боту, по просьбе пользователя 21.09.2026.
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS driver_profiles (
+            user_id INTEGER PRIMARY KEY,
+            full_name TEXT,
+            tariff TEXT,
+            car_model TEXT,
+            car_plate TEXT,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
     # Миграция (20.09.2026): на уже существующей БД таблица shift_history
     # могла быть создана раньше без этой колонки - CREATE TABLE IF NOT
     # EXISTS её не добавит, поэтому добавляем отдельно, игнорируя ошибку
@@ -2096,6 +2110,41 @@ def save_finance_result(user_id, income, net_profit):
         conn.close()
     except Exception as e:
         logger.error(f"❌ Не удалось сохранить итог дня пользователя {user_id}: {e}")
+
+def get_driver_profile(user_id):
+    """Профиль водителя из личного кабинета (см. driver_profiles в init_db) -
+    None, если ещё ничего не заполнял."""
+    try:
+        init_db()
+        conn = get_db_connection()
+        cursor = conn.execute(
+            'SELECT full_name, tariff, car_model, car_plate FROM driver_profiles WHERE user_id = ?', (user_id,)
+        )
+        row = cursor.fetchone()
+        conn.close()
+        if not row:
+            return None
+        return {'full_name': row[0] or '', 'tariff': row[1] or '', 'car_model': row[2] or '', 'car_plate': row[3] or ''}
+    except Exception as e:
+        logger.error(f"❌ Не удалось прочитать профиль водителя {user_id}: {e}")
+        return None
+
+def save_driver_profile(user_id, full_name, tariff, car_model, car_plate):
+    try:
+        init_db()
+        conn = get_db_connection()
+        conn.execute(
+            'INSERT INTO driver_profiles (user_id, full_name, tariff, car_model, car_plate, updated_at) VALUES (?, ?, ?, ?, ?, ?) '
+            'ON CONFLICT(user_id) DO UPDATE SET full_name = excluded.full_name, tariff = excluded.tariff, '
+            'car_model = excluded.car_model, car_plate = excluded.car_plate, updated_at = excluded.updated_at',
+            (user_id, full_name, tariff, car_model, car_plate, datetime.now(ZoneInfo('UTC')).strftime('%Y-%m-%d %H:%M:%S'))
+        )
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"❌ Не удалось сохранить профиль водителя {user_id}: {e}")
+        return False
 
 def save_airport_status(icao, status):
     try:
@@ -3982,7 +4031,12 @@ async def start_courier_finance(message: types.Message):
     # требует HTTPS для WebApp).
     stats_row = [InlineKeyboardButton(text="📈 Статистика смен", callback_data="show_shift_stats")]
     if PUBLIC_URL:
-        stats_row.append(InlineKeyboardButton(text="👤 Личный кабинет", web_app=WebAppInfo(url=f"{PUBLIC_URL}{CABINET_WEBAPP_PATH}")))
+        # tariffs= - варианты тарифа для выпадающего списка в анкете личного
+        # кабинета (см. cabinet_webapp_html) - берутся из CATEGORIES текущей
+        # категории водителя, тот же приём, что city/category у карты.
+        tariff_options = CATEGORIES.get(state.get('category'), {}).get('tariffs', [])
+        cabinet_url = f"{PUBLIC_URL}{CABINET_WEBAPP_PATH}?tariffs={urllib.parse.quote(','.join(tariff_options))}"
+        stats_row.append(InlineKeyboardButton(text="👤 Личный кабинет", web_app=WebAppInfo(url=cabinet_url)))
     await message.answer(
         "Или посмотри статистику своих смен за последние 6 месяцев:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[stats_row]),
@@ -6424,6 +6478,7 @@ async def handle_cabinet_data_api(request):
             agg['net_profit'] += net_profit
 
         today = datetime.now(timezone.utc).date()
+        today_str = today.isoformat()
         week_cutoff = (today - timedelta(days=7)).isoformat()
         month_cutoff = (today - timedelta(days=30)).isoformat()
 
@@ -6436,10 +6491,25 @@ async def handle_cabinet_data_api(request):
             net = sum(a['net_profit'] for d, a in finance_by_day.items() if d >= cutoff)
             return net
 
+        # "За сегодня" (по просьбе пользователя, 21.09.2026) - тот же принцип
+        # sum_shifts/sum_finance с cutoff=today_str, отдельно от недели/месяца.
+        today_minutes, today_km = sum_shifts(today_str)
+        today_net_profit = sum_finance(today_str)
         week_minutes, week_km = sum_shifts(week_cutoff)
         month_minutes, month_km = sum_shifts(month_cutoff)
         total_minutes = sum(a['minutes'] for a in shifts_by_day.values())
         total_km = sum(a['km'] for a in shifts_by_day.values())
+        period_net_profit = sum(a['net_profit'] for a in finance_by_day.values())
+        avg_per_hour = (period_net_profit / (total_minutes / 60)) if total_minutes else 0
+
+        # "Лучший день" за весь период по чистыми - для карточки-акцента в
+        # кабинете (по просьбе пользователя, "крутая визуализация"), не
+        # только сухие суммы.
+        best_day = None
+        if finance_by_day:
+            best_date = max(finance_by_day, key=lambda d: finance_by_day[d]['net_profit'])
+            if finance_by_day[best_date]['net_profit'] > 0:
+                best_day = {'date': best_date, 'net_profit': round(finance_by_day[best_date]['net_profit'])}
 
         # Графики - последние 30 дней, по возрастанию даты (слева направо на
         # графике = раньше -> позже), включая дни без данных (нули), чтобы
@@ -6450,13 +6520,19 @@ async def handle_cabinet_data_api(request):
         hours_series = [round(shifts_by_day.get(d, {}).get('minutes', 0) / 60, 1) for d in days_axis]
 
         result = {
+            'profile': get_driver_profile(user_id) or {'full_name': '', 'tariff': '', 'car_model': '', 'car_plate': ''},
             'totals': {
+                'today_hours': round(today_minutes / 60, 1), 'today_km': round(today_km),
+                'today_net_profit': round(today_net_profit),
                 'week_hours': round(week_minutes / 60, 1), 'week_km': round(week_km),
                 'month_hours': round(month_minutes / 60, 1), 'month_km': round(month_km),
                 'period_hours': round(total_minutes / 60, 1), 'period_km': round(total_km),
                 'period_months': SHIFT_HISTORY_MONTHS,
                 'week_net_profit': round(sum_finance(week_cutoff)),
                 'month_net_profit': round(sum_finance(month_cutoff)),
+                'period_net_profit': round(period_net_profit),
+                'avg_per_hour': round(avg_per_hour),
+                'best_day': best_day,
             },
             'chart': {'days': days_axis, 'earnings': earnings_series, 'hours': hours_series},
         }
@@ -6465,13 +6541,54 @@ async def handle_cabinet_data_api(request):
         return web.json_response({'error': 'internal_error'}, status=500)
     return web.json_response(result)
 
+CABINET_PROFILE_API_PATH = '/cabinet/profile'
+CABINET_PROFILE_FIELD_MAX_LEN = 60  # разумный предел на длину каждого поля анкеты - защита от мусора/абьюза поля
+
+async def handle_cabinet_profile_api(request):
+    """Сохраняет анкету водителя (ник/ФИО, тариф, машина, номер) из личного
+    кабинета - POST с телом {full_name, tariff, car_model, car_plate}. Та же
+    строгая проверка initData, что и у /cabinet/data (см. комментарий у
+    CABINET_WEBAPP_PATH) - это запись чужих персональных данных, без
+    валидной подписи запрос просто отклоняется."""
+    init_data = request.headers.get('X-Telegram-Init-Data', '')
+    parsed = validate_telegram_webapp_init_data(init_data, BOT_TOKEN) if BOT_TOKEN else None
+    if not parsed:
+        return web.json_response({'error': 'invalid_init_data'}, status=401)
+    try:
+        tg_user = json.loads(parsed.get('user', '{}'))
+        user_id = tg_user.get('id')
+    except Exception:
+        user_id = None
+    if not user_id:
+        return web.json_response({'error': 'invalid_init_data'}, status=401)
+
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({'error': 'invalid_body'}, status=400)
+
+    def clean(value):
+        return str(value or '').strip()[:CABINET_PROFILE_FIELD_MAX_LEN]
+
+    full_name = clean(body.get('full_name'))
+    tariff = clean(body.get('tariff'))
+    car_model = clean(body.get('car_model'))
+    car_plate = clean(body.get('car_plate'))
+
+    ok = save_driver_profile(user_id, full_name, tariff, car_model, car_plate)
+    if not ok:
+        return web.json_response({'error': 'save_failed'}, status=500)
+    return web.json_response({'ok': True})
+
 def cabinet_webapp_html():
     """HTML-страница личного кабинета (Chart.js, без API-ключей - тот же
     источник CDN, что уже используется для Leaflet на карте водителей, см.
     map_webapp_html). Данные запрашиваются с initData в заголовке (см.
-    handle_cabinet_data_api) - без city/category в URL, в отличие от карты,
-    так как кабинет всегда про ОДНОГО конкретного человека, определяемого
-    по подписи, а не по query-параметрам."""
+    handle_cabinet_data_api/handle_cabinet_profile_api) - без city/category в
+    URL, в отличие от карты, так как кабинет всегда про ОДНОГО конкретного
+    человека, определяемого по подписи, а не по query-параметрам; ?tariffs=
+    (список через запятую) - единственный query-параметр, нужен только для
+    выпадающего списка тарифа в анкете (см. start_courier_finance)."""
     return """<!doctype html>
 <html lang="ru">
 <head>
@@ -6488,15 +6605,56 @@ def cabinet_webapp_html():
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     background: var(--tg-theme-bg-color, #f2f2f7); color: var(--tg-theme-text-color, #000);
   }
-  h1 { font-size: 19px; margin: 4px 0 16px; }
-  .tiles { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-bottom: 18px; }
-  .tile {
-    background: var(--tg-theme-secondary-bg-color, #fff); border-radius: 14px; padding: 12px 14px;
+  h2.section-title { font-size: 14px; font-weight: 600; opacity: .8; margin: 20px 0 8px; }
+
+  /* Карточка профиля - градиентная "визитка" вверху страницы */
+  .profile-card {
+    display: flex; align-items: center; gap: 12px; border-radius: 18px; padding: 16px;
+    background: linear-gradient(135deg, #34A853, #1a7f43); color: #fff; margin-bottom: 16px;
+    box-shadow: 0 4px 14px rgba(26,127,67,.3);
   }
-  .tile .label { font-size: 12px; opacity: .6; margin-bottom: 4px; }
-  .tile .value { font-size: 19px; font-weight: 700; font-variant-numeric: tabular-nums; }
-  .tile .sub { font-size: 12px; opacity: .55; margin-top: 2px; }
-  .section-title { font-size: 14px; font-weight: 600; opacity: .8; margin: 20px 0 8px; }
+  .avatar {
+    width: 52px; height: 52px; border-radius: 50%; background: rgba(255,255,255,.22);
+    display: flex; align-items: center; justify-content: center; font-size: 22px; font-weight: 700;
+    flex-shrink: 0;
+  }
+  .profile-info { min-width: 0; flex: 1; }
+  .profile-name { font-size: 16.5px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .profile-sub { font-size: 12.5px; opacity: .9; margin-top: 2px; display: flex; gap: 8px; flex-wrap: wrap; }
+  .profile-sub span { background: rgba(255,255,255,.18); border-radius: 8px; padding: 2px 7px; }
+  .edit-btn {
+    background: rgba(255,255,255,.2); border: none; color: #fff; border-radius: 10px;
+    padding: 7px 10px; font-size: 12.5px; font-weight: 600; flex-shrink: 0;
+  }
+
+  /* Форма анкеты */
+  .profile-form {
+    display: none; background: var(--tg-theme-secondary-bg-color, #fff); border-radius: 14px;
+    padding: 14px; margin-bottom: 16px;
+  }
+  .profile-form label { display: block; font-size: 12px; opacity: .6; margin: 10px 0 4px; }
+  .profile-form label:first-child { margin-top: 0; }
+  .profile-form input, .profile-form select {
+    width: 100%; padding: 10px 11px; border-radius: 10px; border: 1px solid rgba(127,127,127,.3);
+    background: var(--tg-theme-bg-color, #f2f2f7); color: var(--tg-theme-text-color, #000); font-size: 14.5px;
+  }
+  .profile-form .save-btn {
+    width: 100%; margin-top: 14px; padding: 11px; border: none; border-radius: 10px;
+    background: #34A853; color: #fff; font-size: 14.5px; font-weight: 700;
+  }
+  .profile-form .save-msg { text-align: center; font-size: 12.5px; margin-top: 8px; min-height: 16px; }
+
+  .tiles { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
+  .tiles.cols-3 { grid-template-columns: repeat(3, 1fr); }
+  .tile {
+    background: var(--tg-theme-secondary-bg-color, #fff); border-radius: 14px; padding: 12px 13px;
+  }
+  .tile .label { font-size: 11.5px; opacity: .6; margin-bottom: 4px; }
+  .tile .value { font-size: 18px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .tile .sub { font-size: 11.5px; opacity: .55; margin-top: 2px; }
+  .tile.accent { background: linear-gradient(135deg, rgba(52,168,83,.16), rgba(52,168,83,.05)); }
+  .highlight-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px; }
+
   .chart-card {
     background: var(--tg-theme-secondary-bg-color, #fff); border-radius: 14px; padding: 12px 10px 6px;
   }
@@ -6505,23 +6663,69 @@ def cabinet_webapp_html():
 </style>
 </head>
 <body>
-<h1>👤 Личный кабинет</h1>
 <div id="state">Загружаю данные…</div>
 <div id="content" style="display:none">
+
+  <div class="profile-card">
+    <div class="avatar" id="avatarLetter">🚕</div>
+    <div class="profile-info">
+      <div class="profile-name" id="profileName">Водитель</div>
+      <div class="profile-sub" id="profileSub"></div>
+    </div>
+    <button class="edit-btn" id="editBtn">✏️ Изменить</button>
+  </div>
+
+  <div class="profile-form" id="profileForm">
+    <label>Имя / ник</label>
+    <input type="text" id="fFullName" maxlength="60" placeholder="Как к тебе обращаться">
+    <label>Тариф</label>
+    <select id="fTariff"></select>
+    <label>Марка и модель авто</label>
+    <input type="text" id="fCarModel" maxlength="60" placeholder="Например, Kia Rio">
+    <label>Гос. номер</label>
+    <input type="text" id="fCarPlate" maxlength="60" placeholder="А123БВ777">
+    <button class="save-btn" id="saveBtn">Сохранить</button>
+    <div class="save-msg" id="saveMsg"></div>
+  </div>
+
+  <h2 class="section-title">Сегодня</h2>
+  <div class="tiles cols-3">
+    <div class="tile accent"><div class="label">Заработано</div><div class="value" id="todayNet">—</div></div>
+    <div class="tile"><div class="label">За рулём</div><div class="value" id="todayHours">—</div></div>
+    <div class="tile"><div class="label">Пробег</div><div class="value" id="todayKm">—</div></div>
+  </div>
+
+  <h2 class="section-title">За 7 дней</h2>
+  <div class="tiles cols-3">
+    <div class="tile accent"><div class="label">Заработано</div><div class="value" id="weekNet">—</div></div>
+    <div class="tile"><div class="label">За рулём</div><div class="value" id="weekHours">—</div></div>
+    <div class="tile"><div class="label">Пробег</div><div class="value" id="weekKm">—</div></div>
+  </div>
+
+  <h2 class="section-title">За 30 дней</h2>
+  <div class="tiles cols-3">
+    <div class="tile accent"><div class="label">Заработано</div><div class="value" id="monthNet">—</div></div>
+    <div class="tile"><div class="label">За рулём</div><div class="value" id="monthHours">—</div></div>
+    <div class="tile"><div class="label">Пробег</div><div class="value" id="monthKm">—</div></div>
+  </div>
+
+  <h2 class="section-title" id="periodTitle">За всё время</h2>
   <div class="tiles">
-    <div class="tile"><div class="label">За 7 дней</div><div class="value" id="weekHours">—</div><div class="sub" id="weekKm"></div></div>
-    <div class="tile"><div class="label">Заработано за 7 дней</div><div class="value" id="weekNet">—</div></div>
-    <div class="tile"><div class="label">За 30 дней</div><div class="value" id="monthHours">—</div><div class="sub" id="monthKm"></div></div>
-    <div class="tile"><div class="label">Заработано за 30 дней</div><div class="value" id="monthNet">—</div></div>
-  </div>
-  <div class="section-title" id="periodTitle">За всё время</div>
-  <div class="tiles" style="grid-template-columns: 1fr 1fr;">
+    <div class="tile accent"><div class="label">Заработано</div><div class="value" id="periodNet">—</div></div>
     <div class="tile"><div class="label">Часов за рулём</div><div class="value" id="periodHours">—</div></div>
-    <div class="tile"><div class="label">Пробег</div><div class="value" id="periodKm">—</div></div>
   </div>
-  <div class="section-title">Заработок по дням (30 дней)</div>
+  <div class="highlight-row">
+    <div class="tile"><div class="label">Пробег за период</div><div class="value" id="periodKm">—</div></div>
+    <div class="tile"><div class="label">В среднем за час</div><div class="value" id="avgPerHour">—</div></div>
+  </div>
+  <div class="tile" id="bestDayTile" style="margin-top: 10px; display: none;">
+    <div class="label">🏆 Лучший день</div>
+    <div class="value" id="bestDayValue">—</div>
+  </div>
+
+  <h2 class="section-title">Заработок по дням (30 дней)</h2>
   <div class="chart-card"><canvas id="earningsChart" height="180"></canvas></div>
-  <div class="section-title">Часы за рулём по дням (30 дней)</div>
+  <h2 class="section-title">Часы за рулём по дням (30 дней)</h2>
   <div class="chart-card"><canvas id="hoursChart" height="180"></canvas></div>
 </div>
 <script>
@@ -6533,6 +6737,8 @@ def cabinet_webapp_html():
   const textColor = isDark ? 'rgba(255,255,255,.65)' : 'rgba(0,0,0,.55)';
   const accent = '#34A853';
   const accentSoft = isDark ? 'rgba(52,168,83,.25)' : 'rgba(52,168,83,.15)';
+  const params = new URLSearchParams(window.location.search);
+  const tariffOptions = (params.get('tariffs') || '').split(',').filter(Boolean);
 
   function fmtMoney(n) { return Math.round(n).toLocaleString('ru-RU') + ' ₽'; }
   function fmtHours(h) { return h.toLocaleString('ru-RU', {maximumFractionDigits: 1}) + ' ч'; }
@@ -6556,6 +6762,72 @@ def cabinet_webapp_html():
     };
   }
 
+  function fillTariffSelect(selectEl, current) {
+    selectEl.innerHTML = '';
+    const opts = tariffOptions.length ? tariffOptions : [current].filter(Boolean);
+    if (!opts.length) {
+      const o = document.createElement('option');
+      o.value = ''; o.textContent = 'Не указан'; selectEl.appendChild(o);
+      return;
+    }
+    opts.forEach(name => {
+      const o = document.createElement('option');
+      o.value = name; o.textContent = name;
+      if (name === current) o.selected = true;
+      selectEl.appendChild(o);
+    });
+  }
+
+  function renderProfile(profile) {
+    const name = profile.full_name || '';
+    document.getElementById('avatarLetter').textContent = name ? name.trim()[0].toUpperCase() : '🚕';
+    document.getElementById('profileName').textContent = name || 'Водитель';
+    const subParts = [];
+    if (profile.tariff) subParts.push(profile.tariff);
+    if (profile.car_model) subParts.push(profile.car_model);
+    if (profile.car_plate) subParts.push(profile.car_plate);
+    const sub = document.getElementById('profileSub');
+    sub.innerHTML = subParts.length ? subParts.map(p => `<span>${p}</span>`).join('') : '<span>Заполни анкету →</span>';
+
+    document.getElementById('fFullName').value = name;
+    document.getElementById('fCarModel').value = profile.car_model || '';
+    document.getElementById('fCarPlate').value = profile.car_plate || '';
+    fillTariffSelect(document.getElementById('fTariff'), profile.tariff || '');
+  }
+
+  const editBtn = document.getElementById('editBtn');
+  const profileForm = document.getElementById('profileForm');
+  editBtn.addEventListener('click', () => {
+    const showing = profileForm.style.display === 'block';
+    profileForm.style.display = showing ? 'none' : 'block';
+    editBtn.textContent = showing ? '✏️ Изменить' : '✕ Закрыть';
+  });
+
+  document.getElementById('saveBtn').addEventListener('click', async () => {
+    const saveMsg = document.getElementById('saveMsg');
+    const payload = {
+      full_name: document.getElementById('fFullName').value,
+      tariff: document.getElementById('fTariff').value,
+      car_model: document.getElementById('fCarModel').value,
+      car_plate: document.getElementById('fCarPlate').value,
+    };
+    saveMsg.textContent = 'Сохраняю…';
+    try {
+      const resp = await fetch('""" + CABINET_PROFILE_API_PATH + """', {
+        method: 'POST',
+        headers: { 'X-Telegram-Init-Data': initData, 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (!resp.ok) throw new Error('http_' + resp.status);
+      renderProfile(payload);
+      saveMsg.textContent = '✅ Сохранено';
+      if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
+      setTimeout(() => { saveMsg.textContent = ''; }, 2000);
+    } catch (e) {
+      saveMsg.textContent = 'Не получилось сохранить, попробуй ещё раз';
+    }
+  });
+
   async function load() {
     try {
       const resp = await fetch('""" + CABINET_DATA_API_PATH + """', { headers: { 'X-Telegram-Init-Data': initData } });
@@ -6563,15 +6835,30 @@ def cabinet_webapp_html():
       const data = await resp.json();
       const t = data.totals;
 
+      renderProfile(data.profile || {});
+
+      document.getElementById('todayNet').textContent = fmtMoney(t.today_net_profit);
+      document.getElementById('todayHours').textContent = fmtHours(t.today_hours);
+      document.getElementById('todayKm').textContent = fmtKm(t.today_km);
+
+      document.getElementById('weekNet').textContent = fmtMoney(t.week_net_profit);
       document.getElementById('weekHours').textContent = fmtHours(t.week_hours);
       document.getElementById('weekKm').textContent = fmtKm(t.week_km);
-      document.getElementById('weekNet').textContent = fmtMoney(t.week_net_profit);
+
+      document.getElementById('monthNet').textContent = fmtMoney(t.month_net_profit);
       document.getElementById('monthHours').textContent = fmtHours(t.month_hours);
       document.getElementById('monthKm').textContent = fmtKm(t.month_km);
-      document.getElementById('monthNet').textContent = fmtMoney(t.month_net_profit);
+
       document.getElementById('periodTitle').textContent = 'За ' + t.period_months + ' мес.';
+      document.getElementById('periodNet').textContent = fmtMoney(t.period_net_profit);
       document.getElementById('periodHours').textContent = fmtHours(t.period_hours);
       document.getElementById('periodKm').textContent = fmtKm(t.period_km);
+      document.getElementById('avgPerHour').textContent = t.avg_per_hour ? (fmtMoney(t.avg_per_hour) + '/ч') : '—';
+
+      if (t.best_day) {
+        document.getElementById('bestDayTile').style.display = 'block';
+        document.getElementById('bestDayValue').textContent = fmtMoney(t.best_day.net_profit) + ' · ' + shortDate(t.best_day.date);
+      }
 
       const labels = data.chart.days.map(shortDate);
 
@@ -10151,6 +10438,7 @@ async def start_subscription_webhook_server():
     # Личный кабинет (см. блок "ЛИЧНЫЙ КАБИНЕТ (WebApp)" выше)
     app.router.add_get(CABINET_WEBAPP_PATH, handle_cabinet_webapp)
     app.router.add_get(CABINET_DATA_API_PATH, handle_cabinet_data_api)
+    app.router.add_post(CABINET_PROFILE_API_PATH, handle_cabinet_profile_api)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', SUBSCRIPTION_WEBHOOK_PORT)
