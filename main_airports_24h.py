@@ -27,9 +27,9 @@ import fetch_yandex_data  # логика похода в Yandex Rasp API, зап
 import fetch_trains_data  # поезда дальнего следования (Казанский, Ленинградский) - тот же ключ и квота
 import fetch_favt_notices  # логика сбора уведомлений Росавиации (@favt_info), тоже фоново
 import fetch_road_events   # ДТП по городам (Москва: @dtp777+@DtOperativno слиты в одну ленту, СПб: @dtp_spb78) - тем же способом, фоново
-import fetch_concert_events  # афиша концертов из Telegram-каналов (Москва: @concerts_moscow, СПб: @spb_conc) - второй источник для "🎭 События города", тем же способом, фоново
+import fetch_concert_events  # афиша концертов из Telegram-каналов (Москва: @concerts_moscow, СПб: @spb_conc) - второй источник для "🎭 СОБЫТИЯ ГОРОДА", тем же способом, фоново
 import fetch_mos_road_data  # официальный API data.mos.ru (доп. источник для Москвы) - см. MOS_DATA_API_KEY ниже
-import fetch_timepad_data  # афиша города (TimePad) для кнопки "🎭 События города" - используется
+import fetch_timepad_data  # афиша города (TimePad) для кнопки "🎭 СОБЫТИЯ ГОРОДА" - используется
                             # только для TIMEPAD_CITY_MAP; timepad_data.json обновляется ЛОКАЛЬНО
                             # (см. fetch_timepad_data.py), Railway не может дотянуться до TimePad
                             # (Cloudflare блокирует датацентровые IP, см. комментарий в самом файле)
@@ -67,7 +67,7 @@ FLIGHTS_DATA_MAX_AGE_HOURS = 26  # если данные старше - счит
 TRAINS_DATA_FILE = os.path.join(DATA_DIR, 'trains_data.json')
 WEATHER_DATA_FILE = os.path.join(DATA_DIR, 'weather_data.json')  # снепшот погоды по всем городам - см. weather_data_updater
 # Вокзалы теперь не только в Москве - у каждой станции (см. config.json,
-# читается через config_loader.py) есть свой город бота. Кнопка "🚆 Вокзалы"
+# читается через config_loader.py) есть свой город бота. Кнопка "🚆 ВОКЗАЛЫ"
 # видна в городе, только если для него есть хотя бы одна станция здесь.
 # STATION_CITY/STATION_CAPACITY раньше были захардкожены вручную (и
 # дублировались в fetch_trains_data.py) - рассинхрон таких копий уже
@@ -184,7 +184,7 @@ ROAD_EVENTS_DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 ROAD_EVENTS_UPDATE_INTERVAL_MINUTES = 2
 
 # Афиша концертов из Telegram-каналов (Москва: @concerts_moscow, СПб:
-# @spb_conc) - второй источник для "🎭 События города" вместе с TimePad, тот
+# @spb_conc) - второй источник для "🎭 СОБЫТИЯ ГОРОДА" вместе с TimePad, тот
 # же способ сбора, что и ROAD_EVENTS_* выше (см. fetch_concert_events.py).
 # Афиша меняется медленнее, чем сводки ДТП - обновляем реже (раз в 3 часа,
 # как FAVT/TimePad-подобные источники, а не каждые 10 минут).
@@ -221,7 +221,7 @@ TIMEPAD_DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'ti
 # нагружать лимиты") погода теперь работает ТОЧНО ПО ТОЙ ЖЕ схеме, что и
 # рейсы/поезда: отдельный фоновый сборщик раз в WEATHER_UPDATE_INTERVAL_MINUTES
 # пишет снепшот по всем 12 городам в weather_data.json на постоянном
-# Railway Volume, а все места, которым нужна погода (кнопка "🌤 Погода",
+# Railway Volume, а все места, которым нужна погода (кнопка "🌤 ПОГОДА",
 # "Куда ехать", утреннее приветствие, автопуш о дожде) читают ГОТОВЫЙ
 # снепшот из файла вместо live-запроса к API на каждое действие
 # пользователя - см. load_weather_data/get_cached_weather_forecast ниже.
@@ -259,7 +259,7 @@ WEATHER_UPDATE_INTERVAL_MINUTES = 60
 # пользователя: не "уже идёт", а заблаговременное предупреждение.
 RAIN_LEAD_MINUTES = 30
 # Прогноз на сколько часов вперёд показываем в ручном режиме (кнопка
-# "🌤 Погода") - почасовая разбивка: осадки/вид осадка + температура.
+# "🌤 ПОГОДА") - почасовая разбивка: осадки/вид осадка + температура.
 RAIN_FORECAST_HOURS = 12
 
 # Коды погоды Open-Meteo (WMO weathercode) -> (человеческое название, вес
@@ -315,19 +315,19 @@ def describe_weathercode(code):
 # умолчанию ON, чтобы не заставлять существующих пользователей заново всё
 # включать после обновления бота).
 NOTIFICATION_TYPES = {
-    'weather': {'label': 'Погода/осадки', 'emoji': '🌤'},
-    'airport_status': {'label': 'Статус аэропорта', 'emoji': '✈️'},
-    'high_demand': {'label': 'Повышенный спрос', 'emoji': '📈'},
-    'holidays': {'label': 'Праздники', 'emoji': '🎉'},
-    'peak_hours': {'label': 'Часы пика', 'emoji': '📅'},
+    'weather': {'label': 'ПОГОДА/ОСАДКИ', 'emoji': '🌤'},
+    'airport_status': {'label': 'СТАТУС АЭРОПОРТА', 'emoji': '✈️'},
+    'high_demand': {'label': 'ПОВЫШЕННЫЙ СПРОС', 'emoji': '📈'},
+    'holidays': {'label': 'ПРАЗДНИКИ', 'emoji': '🎉'},
+    'peak_hours': {'label': 'ЧАСЫ ПИКА', 'emoji': '📅'},
     # По просьбе пользователя (20.09.2026): "делай пуши перекрытий... и
     # крупные ДТП" - общая настройка на весь город (см. AskUserQuestion:
     # "всем в городе, у кого включены пуши"), не привязана к
     # активной смене - см. push_road_incident_alerts ниже.
-    'road_events': {'label': 'Перекрытия и крупные ДТП', 'emoji': '⛔'},
+    'road_events': {'label': 'ПЕРЕКРЫТИЯ И КРУПНЫЕ ДТП', 'emoji': '⛔'},
     # По просьбе пользователя (20.09.2026): "сделай приветственное сообщение
     # утром каждый день в 9.00" - см. morning_greeting_checker ниже.
-    'morning_greeting': {'label': 'Утреннее приветствие 9:00', 'emoji': '☀️'},
+    'morning_greeting': {'label': 'УТРЕННЕЕ ПРИВЕТСТВИЕ 9:00', 'emoji': '☀️'},
 }
 
 def notifications_enabled(state, notif_key):
@@ -350,7 +350,7 @@ def notifications_enabled(state, notif_key):
 # "📍 Ошибка GPS" (см. handle_airport_queue_snooze) - для водителя, который
 # едет с заказом/не планирует вставать в очередь, ИЛИ у которого геолокация
 # ошибочно показала близость к аэропорту (глушение GPS сигнала).
-# Включается/выключается кнопкой "📍 Очередь у аэропорта" в Инструментах
+# Включается/выключается кнопкой "📍 ОЧЕРЕДЬ У АЭРОПОРТА" в Инструментах
 # водителя (обычный toggle) - НЕ добавлена в NOTIFICATION_TYPES/notif_prefs,
 # потому что сам факт включения трансляции уже и есть согласие на эти пуши;
 # отдельная on/off настройка была бы избыточной.
@@ -1493,7 +1493,7 @@ def estimate_attendance(event):
     return int(tickets_total * 0.7), int(tickets_total)
 
 def build_event_message(event, city):
-    """Текст + инлайн-кнопки для ОДНОГО события TimePad. "🚗 Поехали": у
+    """Текст + инлайн-кнопки для ОДНОГО события TimePad. "🚗 ПОЕХАЛИ": у
     TimePad нет координат площадки вообще (только текстовый адрес) - кнопка
     ведёт на ссылку-ПОИСК по адресу https://yandex.ru/maps/?text=<адрес>
     (Яндекс.Карты сами геокодируют текст), а НЕ на схему yandexnavi://
@@ -1501,7 +1501,7 @@ def build_event_message(event, city):
     установлен именно Яндекс.Навигатор - кнопка молча ничего не сделает), а
     обычная https-ссылка на Яндекс.Карты открывается всегда - в приложении
     Карт/Навигатора, если оно установлено и ассоциировано с доменом, и в
-    браузере в любом случае, если нет. "🔗 Подробнее" - страница события на TimePad."""
+    браузере в любом случае, если нет. "🔗 ПОДРОБНЕЕ" - страница события на TimePad."""
     date_str = format_event_datetime(event, city)
     lo, hi = estimate_attendance(event)
     lines = [f"🎫 *{event['title']}*"]
@@ -1516,9 +1516,9 @@ def build_event_message(event, city):
     buttons = []
     if address:
         from urllib.parse import quote
-        buttons.append(InlineKeyboardButton(text="🚗 Поехали", url=f"https://yandex.ru/maps/?text={quote(address)}"))
+        buttons.append(InlineKeyboardButton(text="🚗 ПОЕХАЛИ", url=f"https://yandex.ru/maps/?text={quote(address)}"))
     if event.get('url'):
-        buttons.append(InlineKeyboardButton(text="🔗 Подробнее", url=event['url']))
+        buttons.append(InlineKeyboardButton(text="🔗 ПОДРОБНЕЕ", url=event['url']))
     keyboard = InlineKeyboardMarkup(inline_keyboard=[buttons]) if buttons else None
     return text, keyboard
 
@@ -1845,12 +1845,12 @@ def init_db():
     existing_columns = {row[1] for row in cursor.fetchall()}
     if 'client_phone' not in existing_columns:
         cursor.execute('ALTER TABLE shared_orders ADD COLUMN client_phone TEXT')
-    # "▶️ Начать смену"/"⏹ Завершить смену" (по просьбе пользователя,
+    # "▶️ НАЧАТЬ СМЕНУ"/"⏹ Завершить смену" (по просьбе пользователя,
     # 20.09.2026) - история смен водителя: дата, длительность, км. Хранится
     # ОТДЕЛЬНОЙ таблицей (а не в user_states JSON), чтобы не перезаписывать
     # растущий блоб на каждое изменение состояния и чтобы можно было делать
     # обычные SQL-запросы по дате (см. get_shift_history/save_shift_record,
-    # показывается в "💰 Финансы" -> "📈 Статистика смен" за 6 месяцев).
+    # показывается в "💰 ФИНАНСЫ" -> "📈 СТАТИСТИКА СМЕН" за 6 месяцев).
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS shift_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2625,7 +2625,7 @@ _recent_bot_message_ids = {}  # chat_id -> список последних messa
 # ДОБАВЛЕНО 21.09.2026 (прямая просьба пользователя - "сделай так чтобы
 # события грузились все бот не удалял и оставлял тока два последних"): по
 # умолчанию KEEP_LAST_N_MESSAGES=2 стирает ВСЕ сообщения бота без разбора,
-# включая карточки афиши ("🎭 События города" - до 20 отдельных сообщений
+# включая карточки афиши ("🎭 СОБЫТИЯ ГОРОДА" - до 20 отдельных сообщений
 # одно за другим), из-за чего в чате оставались только 2 последние карточки,
 # а остальные исчезали почти сразу после отправки. Нужно исключение именно
 # для этого экрана - карточки событий должны оставаться в чате все, не
@@ -2743,17 +2743,17 @@ async def initialize_bot():
 
 def city_keyboard():
     return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[
-        [KeyboardButton(text="🏛️ Москва"), KeyboardButton(text="🕯️ СПб")],
-        [KeyboardButton(text="🌲 Новосибирск"), KeyboardButton(text="🏔️ Екатеринбург")],
-        [KeyboardButton(text="🎓 Казань"), KeyboardButton(text="❄️ Челябинск")],
-        [KeyboardButton(text="🌾 Омск"), KeyboardButton(text="🏭 Самара")],
-        [KeyboardButton(text="🌊 Ростов"), KeyboardButton(text="🏰 Нижний Новгород")],
-        [KeyboardButton(text="🌴 Краснодар"), KeyboardButton(text="🏖️ Сочи")]
+        [KeyboardButton(text="🏛️ МОСКВА"), KeyboardButton(text="🕯️ СПБ")],
+        [KeyboardButton(text="🌲 НОВОСИБИРСК"), KeyboardButton(text="🏔️ ЕКАТЕРИНБУРГ")],
+        [KeyboardButton(text="🎓 КАЗАНЬ"), KeyboardButton(text="❄️ ЧЕЛЯБИНСК")],
+        [KeyboardButton(text="🌾 ОМСК"), KeyboardButton(text="🏭 САМАРА")],
+        [KeyboardButton(text="🌊 РОСТОВ"), KeyboardButton(text="🏰 НИЖНИЙ НОВГОРОД")],
+        [KeyboardButton(text="🌴 КРАСНОДАР"), KeyboardButton(text="🏖️ СОЧИ")]
     ])
 
 def category_keyboard():
     keyboard_buttons = [[KeyboardButton(text=f"{cat_data['name']}")] for cat_data in CATEGORIES.values()]
-    keyboard_buttons.append([KeyboardButton(text="← Назад"), KeyboardButton(text="🏙 Выбор города")])
+    keyboard_buttons.append([KeyboardButton(text="← НАЗАД"), KeyboardButton(text="🏙 ВЫБОР ГОРОДА")])
     return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=keyboard_buttons)
 
 # Курьеру и Грузовому такси аэропорты не нужны (это не про перевозку
@@ -2962,7 +2962,7 @@ def get_city_now(city):
         return datetime.now()
 
 CATEGORY_PEAK_HOURS_SUBTITLE = {
-    # Подзаголовок под заголовком "Часы пика" - поясняет водителю, что для
+    # Подзаголовок под заголовком "ЧАСЫ ПИКА" - поясняет водителю, что для
     # courier/cargo это НЕ общегородской спрос такси, а расклад именно под
     # его категорию (см. CATEGORY_WEEKDAY_HOUR_LOAD выше).
     'courier': '_по времени активных заказов доставки еды (обед/ужин, пт-вс доходнее)_\n',
@@ -3095,23 +3095,31 @@ def peak_hours_weekday_keyboard(current_weekday, category=None):
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def services_keyboard(category=None, city=None, user_id=None):
+    # (21.09.2026) По просьбе пользователя ВСЕ подписи кнопок (Reply- и
+    # Inline-клавиатуры) по всему боту написаны ЗАГЛАВНЫМИ БУКВАМИ - эмодзи
+    # и знаки препинания не трогаем, меняем регистр только у букв (.upper()).
+    # ВАЖНО: текст кнопки - это "ключ", по которому её ищут обработчики
+    # (message.text == "...", словари вида NEARBY_BUTTON_TO_KIND), поэтому
+    # при любом изменении текста кнопки нужно поменять ВСЕ места, где эта
+    # строка сравнивается/используется как ключ, иначе кнопка перестанет
+    # работать молча.
     # Итоговый набор кнопок меню услуг (по заданному порядку). "Заказы
-    # города" (было "Повышенный спрос") убрана по просьбе пользователя - была
+    # города" (было "ПОВЫШЕННЫЙ СПРОС") убрана по просьбе пользователя - была
     # заглушкой без своей логики. "Дорожные события" тоже пока без
-    # обработчика - как было. "🎭 События города" (афиша TimePad) - только
+    # обработчика - как было. "🎭 СОБЫТИЯ ГОРОДА" (афиша TimePad) - только
     # у Такси/Ultima, курьеру и грузовому такси не актуальна (см.
-    # CATEGORIES_WITHOUT_EVENTS). "✈️🚆 Авиа/ЖД" объединяет аэропорты и
+    # CATEGORIES_WITHOUT_EVENTS). "✈️🚆 АВИА/ЖД" объединяет аэропорты и
     # вокзалы в одну кнопку главного меню (короче список) - при нажатии
     # show_transport_menu показывает инлайн-подменю с двумя вариантами;
-    # "🚆 Вокзалы" внутри него виден, только если город в TRAIN_CITIES (см.
-    # STATION_CITY) - иначе только "✈️ Аэропорты". "🔄 Отдать заказ" - только
+    # "🚆 ВОКЗАЛЫ" внутри него виден, только если город в TRAIN_CITIES (см.
+    # STATION_CITY) - иначе только "✈️ АЭРОПОРТЫ". "🔄 ОТДАТЬ ЗАКАЗ" - только
     # Такси/Ultima (см. SHARED_ORDER_CATEGORIES).
-    # "🧰 Инструменты водителя" - отдельный модуль (см.
+    # "🧰 ИНСТРУМЕНТЫ ВОДИТЕЛЯ" - отдельный модуль (см.
     # COURIER_MODULE_CATEGORIES) с финансовым калькулятором смены +
     # заглушки под карту точек; изначально делался под курьеров, но по
     # просьбе пользователя открыт всем категориям (калькулятор дохода/км/
     # топлива/часов одинаково полезен и такси, и грузовому такси).
-    # "🌤 Погода" - на верхнем уровне (не внутри "Инструменты водителя") по
+    # "🌤 ПОГОДА" - на верхнем уровне (не внутри "Инструменты водителя") по
     # просьбе пользователя - почасовой прогноз + автопуш за RAIN_LEAD_MINUTES
     # минут до начала осадков (см. блок "ПОГОДА / ОСАДКИ" выше по файлу).
     # Раскладка в 2 колонки (по просьбе пользователя, тот же приём, что и в
@@ -3119,10 +3127,10 @@ def services_keyboard(category=None, city=None, user_id=None):
     # (с учётом всех условий по категории выше), а потом режутся по 2 в ряд,
     # так что раскладка остаётся 2-колоночной независимо от того, сколько
     # именно кнопок видно конкретной категории.
-    # "🔓 Бесплатный VPN TAXI HELPER" - НЕ в общей 2-колоночной сетке ниже, а
-    # отдельной строкой в самом низу (перед "← Назад"/"🏙 Выбор города") - по
+    # "🔓 БЕСПЛАТНЫЙ VPN TAXI HELPER" - НЕ в общей 2-колоночной сетке ниже, а
+    # отдельной строкой в самом низу (перед "← НАЗАД"/"🏙 ВЫБОР ГОРОДА") - по
     # просьбе пользователя.
-    # "▶️ Начать смену"/"⏹ Завершить смену" - САМАЯ верхняя строка меню, ВЫШЕ
+    # "▶️ НАЧАТЬ СМЕНУ"/"⏹ Завершить смену" - САМАЯ верхняя строка меню, ВЫШЕ
     # "💰 КУДА ЕХАТЬ ➡️" (по прямой просьбе пользователя, 20.09.2026) - одна
     # кнопка-переключатель (текст меняется в зависимости от того, идёт ли
     # смена, см. is_shift_active/toggle_shift), доступна ВСЕМ категориям (в
@@ -3137,7 +3145,7 @@ def services_keyboard(category=None, city=None, user_id=None):
     # пользователем 19.09.2026).
     # user_id - опциональный (по умолчанию None), чтобы не переписывать
     # КАЖДЫЙ из ~19 существующих вызовов services_keyboard(category, city) в
-    # файле: без него кнопка безопасно показывает "▶️ Начать смену" (тот же
+    # файле: без него кнопка безопасно показывает "▶️ НАЧАТЬ СМЕНУ" (тот же
     # эффект, как если бы смена не шла) - минорная неточность на редких
     # экранах, где именно этот вызов не передал user_id, а не падение.
     # По просьбе пользователя (20.09.2026): "Начать смену" и "Куда ехать" -
@@ -3150,7 +3158,7 @@ def services_keyboard(category=None, city=None, user_id=None):
     # "category not in CATEGORIES_WITHOUT_AIRPORTS" для этой кнопки.
     shift_active = is_shift_active(user_state.get(user_id, {})) if user_id is not None else False
     top_rows = [[KeyboardButton(text="⏹ ЗАВЕРШИТЬ СМЕНУ" if shift_active else "✅ НАЧАТЬ СМЕНУ")]]
-    # "🗺 Карта водителей" (по просьбе пользователя, 21.09.2026) - в одном
+    # "🗺 КАРТА ВОДИТЕЛЕЙ" (по просьбе пользователя, 21.09.2026) - в одном
     # ряду с "💰 КУДА ЕХАТЬ ➡️", а не отдельной строкой внизу меню - открывает
     # интерактивную WebApp-карту через web_app=WebAppInfo (единственный
     # надёжный способ открыть кастомную веб-страницу внутри Telegram).
@@ -3162,7 +3170,7 @@ def services_keyboard(category=None, city=None, user_id=None):
     # открывает карту.
     # "💰 КУДА ЕХАТЬ ➡️" сама стала WebApp (по просьбе пользователя,
     # 21.09.2026, "и куда ехать тоже сделай миниапс") - тот же принцип, что
-    # у "🌤 Погода" выше: город/категория не персональные данные (берутся из
+    # у "🌤 ПОГОДА" выше: город/категория не персональные данные (берутся из
     # ?city=&category= в URL, как у карты), поэтому initData не нужен и
     # можно вешать web_app= прямо на кнопку Reply-клавиатуры. Если
     # PUBLIC_URL/city не заданы - остаётся старая текстовая кнопка (шлёт
@@ -3177,18 +3185,18 @@ def services_keyboard(category=None, city=None, user_id=None):
         where_to_go_row = [KeyboardButton(text="💰 КУДА ЕХАТЬ ➡️")]
     if category in MAP_CATEGORY_STYLE and PUBLIC_URL and city:
         map_url = f"{PUBLIC_URL}{MAP_WEBAPP_PATH}?city={urllib.parse.quote(city)}&category={urllib.parse.quote(category)}"
-        where_to_go_row.append(KeyboardButton(text="🗺 Карта водителей", web_app=WebAppInfo(url=map_url)))
+        where_to_go_row.append(KeyboardButton(text="🗺 КАРТА ВОДИТЕЛЕЙ", web_app=WebAppInfo(url=map_url)))
     top_rows.append(where_to_go_row)
 
     # По просьбе пользователя (21.09.2026): "надо обьеденить кнопки
     # инструменты водителя и настройки сделать одну кнопку Личный кабинет и в
     # нем сделать приложение где будут все функции этих кнопок" - "🧰
-    # Инструменты водителя" и "⚙️ Настройки" убраны из главного меню (сами
+    # Инструменты водителя" и "⚙️ НАСТРОЙКИ" убраны из главного меню (сами
     # хендлеры courier_module_keyboard/show_notification_settings и их
     # подпункты НЕ удалены - оставлены как есть на случай, если куда-то ещё
     # ведут внутренние переходы, просто из главного меню на них больше нет
-    # прямого пути), вместо них - одна кнопка "👤 Личный кабинет"
-    # (web_app=WebAppInfo, тот же паттерн, что у "🗺 Карта водителей" выше),
+    # прямого пути), вместо них - одна кнопка "👤 ЛИЧНЫЙ КАБИНЕТ"
+    # (web_app=WebAppInfo, тот же паттерн, что у "🗺 КАРТА ВОДИТЕЛЕЙ" выше),
     # открывающая расширенный /cabinet WebApp со всеми разделами обеих кнопок
     # (включая гео-фичи "Рядом" через navigator.geolocation в браузере -
     # см. блок "ЛИЧНЫЙ КАБИНЕТ (WebApp)"). Тот же guard PUBLIC_URL and city,
@@ -3199,7 +3207,7 @@ def services_keyboard(category=None, city=None, user_id=None):
     # из главного меню без такого guard, но теперь единственный путь к ним -
     # эта кнопка; отсутствие PUBLIC_URL - редкий локальный/дев-запуск.
     # ВАЖНО (21.09.2026, по факту): кнопка в Reply-клавиатуре с web_app=
-    # (как у "🗺 Карта водителей" выше) НЕ передаёт Telegram initData -
+    # (как у "🗺 КАРТА ВОДИТЕЛЕЙ" выше) НЕ передаёт Telegram initData -
     # проверено на реальном устройстве (debug на экране кабинета показал
     # tg=ok, platform/version распознаны из хэша, но initData.len=0 и
     # initDataUnsafe.user=absent). Карта эту проблему не показывала, т.к.
@@ -3214,7 +3222,7 @@ def services_keyboard(category=None, city=None, user_id=None):
     # зависит от тарифов категории, поэтому выставляем ПЕРСОНАЛЬНО на чат
     # (см. set_cabinet_menu_button) - лёгкий fire-and-forget с кэшем по
     # user_id, чтобы не дёргать API Telegram на каждый показ меню с одним и
-    # тем же URL. Сама кнопка "👤 Личный кабинет" из Reply-клавиатуры теперь
+    # тем же URL. Сама кнопка "👤 ЛИЧНЫЙ КАБИНЕТ" из Reply-клавиатуры теперь
     # УБРАНА (по просьбе пользователя, "удали тогда её из меню") -
     # open_cabinet_from_menu ниже оставлен в коде на случай регресса Menu
     # Button, но с главного меню на него больше нет прямого пути.
@@ -3224,51 +3232,54 @@ def services_keyboard(category=None, city=None, user_id=None):
         _fire_and_forget(set_cabinet_menu_button(user_id, cabinet_url))
 
     # items теперь хранит готовые KeyboardButton (не текст) - нужно для
-    # "🌤 Погода" ниже, которая в зависимости от PUBLIC_URL/city либо
+    # "🌤 ПОГОДА" ниже, которая в зависимости от PUBLIC_URL/city либо
     # обычная кнопка, либо WebApp (см. комментарий там).
     items = []
     if category in SHARED_ORDER_CATEGORIES:
-        items.append(KeyboardButton(text="🔄 Отдать заказ"))
-    # "🌤 Погода" - миниапп с анимацией (по просьбе пользователя, 21.09.2026,
+        items.append(KeyboardButton(text="🔄 ОТДАТЬ ЗАКАЗ"))
+    # "🌤 ПОГОДА" - миниапп с анимацией (по просьбе пользователя, 21.09.2026,
     # "погоду тоже сделай миниапсом красивое анимирование") - погода не
     # персональные данные (город берётся из query-параметра URL, как у
     # карты), поэтому initData не нужен и можно вешать web_app= прямо на
     # кнопку Reply-клавиатуры (в отличие от личного кабинета - см.
     # комментарий выше про initData.len=0 у web_app в Reply-клавиатуре,
     # ограничение касается именно ПОДПИСАННЫХ данных, публичным данным оно
-    # не мешает - тот же принцип, что уже у "🗺 Карта водителей"). Если
+    # не мешает - тот же принцип, что уже у "🗺 КАРТА ВОДИТЕЛЕЙ"). Если
     # PUBLIC_URL/city не заданы - остаётся старая текстовая кнопка
     # (show_weather_forecast ниже сама разберётся, если city вдруг пуст).
     if PUBLIC_URL and city:
         weather_url = f"{PUBLIC_URL}{WEATHER_WEBAPP_PATH}?city={urllib.parse.quote(city)}"
-        items.append(KeyboardButton(text="🌤 Погода", web_app=WebAppInfo(url=weather_url)))
+        items.append(KeyboardButton(text="🌤 ПОГОДА", web_app=WebAppInfo(url=weather_url)))
     else:
-        items.append(KeyboardButton(text="🌤 Погода"))
-    # "💳 Чаевые" вынесена в главное меню (по просьбе пользователя,
-    # 21.09.2026) - раньше была только внутри "🧰 Инструменты водителя"
+        items.append(KeyboardButton(text="🌤 ПОГОДА"))
+    # "💳 ЧАЕВЫЕ" вынесена в главное меню (по просьбе пользователя,
+    # 21.09.2026) - раньше была только внутри "🧰 ИНСТРУМЕНТЫ ВОДИТЕЛЯ"
     # (сейчас недоступной с главного меню, см. комментарий выше), тот же
     # текст статьи/ссылок, что и раньше (см. show_tips_app_main_menu ниже -
     # новый хендлер без требования in_courier_module, старый "💳 Получить
-    # чаевые" внутри courier_module_keyboard не трогали).
-    items.append(KeyboardButton(text="💳 Чаевые"))
-    # "✈️🚆 Авиа/ЖД" убрана отсюда (по просьбе пользователя, 21.09.2026:
+    # чаевые" внутри courier_module_keyboard не трогали). НЕ добавляется в
+    # общий список items (2-колоночная сетка ниже) - по повторной просьбе
+    # пользователя (21.09.2026, "чаевые спусти вниз в самый выше кнопок
+    # назад и выбор города") кнопка теперь отдельной строкой в самом низу
+    # меню, прямо над "← НАЗАД"/"🏙 ВЫБОР ГОРОДА" (см. buttons.append ниже).
+    # "✈️🚆 АВИА/ЖД" убрана отсюда (по просьбе пользователя, 21.09.2026:
     # "авиа жд и событие города в одну строчку") - раньше была в этой общей
     # 2-колоночной сетке (парой со следующей по списку кнопкой), теперь
-    # ставится в один ряд с "🚨 События города"/"⛔ Дорожные события" ниже
+    # ставится в один ряд с "🚨 СОБЫТИЯ ГОРОДА"/"⛔ ДОРОЖНЫЕ СОБЫТИЯ" ниже
     # (см. events_row).
-    # "🎭 События города" и "⛔ Дорожные события" объединены в ОДНУ кнопку
+    # "🎭 СОБЫТИЯ ГОРОДА" и "⛔ ДОРОЖНЫЕ СОБЫТИЯ" объединены в ОДНУ кнопку
     # главного меню (по финальному уточнению пользователя, 20.09.2026:
     # "объедини в главном меню их в одну"; эмодзи кнопки в меню уточнялся
     # пользователем дважды - сначала "⛔События города", затем финально
-    # "🚨 События города") - при нажатии показывает инлайн-подменю с двумя
-    # вариантами (там уже свои подписи "🎭 События города"/"⛔ Дорожные
+    # "🚨 СОБЫТИЯ ГОРОДА") - при нажатии показывает инлайн-подменю с двумя
+    # вариантами (там уже свои подписи "🎭 СОБЫТИЯ ГОРОДА"/"⛔ Дорожные
     # события"), см. show_events_and_roads_menu/open_city_events_from_menu/
     # open_road_events_from_menu ниже). Для courier/cargo
     # (CATEGORIES_WITHOUT_EVENTS) афиша не актуальна - им показываем кнопку
-    # "⛔ Дорожные события" отдельно, как раньше. НЕ добавляем эту кнопку в
+    # "⛔ ДОРОЖНЫЕ СОБЫТИЯ" отдельно, как раньше. НЕ добавляем эту кнопку в
     # общий список items (2-колоночная сетка выше) - она в одном ряду с
-    # "✈️🚆 Авиа/ЖД" (см. events_row ниже).
-    events_button_text = "🚨 События города" if category not in CATEGORIES_WITHOUT_EVENTS else "⛔ Дорожные события"
+    # "✈️🚆 АВИА/ЖД" (см. events_row ниже).
+    events_button_text = "🚨 СОБЫТИЯ ГОРОДА" if category not in CATEGORIES_WITHOUT_EVENTS else "⛔ ДОРОЖНЫЕ СОБЫТИЯ"
 
     buttons = []
     buttons.extend(top_rows)
@@ -3276,25 +3287,29 @@ def services_keyboard(category=None, city=None, user_id=None):
         items[i:i + 2]
         for i in range(0, len(items), 2)
     )
-    # "✈️🚆 Авиа/ЖД" + "🚨 События города"/"⛔ Дорожные события" - один ряд
+    # "✈️🚆 АВИА/ЖД" + "🚨 СОБЫТИЯ ГОРОДА"/"⛔ ДОРОЖНЫЕ СОБЫТИЯ" - один ряд
     # (по прямой просьбе пользователя, 21.09.2026). Если категория без
     # аэропортов (CATEGORIES_WITHOUT_AIRPORTS), в ряду остаётся только кнопка
     # событий - без второй кнопки.
     events_row = []
     if category not in CATEGORIES_WITHOUT_AIRPORTS:
-        events_row.append(KeyboardButton(text="✈️🚆 Авиа/ЖД"))
+        events_row.append(KeyboardButton(text="✈️🚆 АВИА/ЖД"))
     events_row.append(KeyboardButton(text=events_button_text))
     buttons.append(events_row)
-    # "👤 Личный кабинет" здесь БОЛЬШЕ НЕТ как отдельной кнопки Reply-
+    # "👤 ЛИЧНЫЙ КАБИНЕТ" здесь БОЛЬШЕ НЕТ как отдельной кнопки Reply-
     # клавиатуры (убрана по просьбе пользователя, 21.09.2026 - "удали тогда
     # её из меню") - открывается через Menu Button (см. комментарий выше,
     # set_cabinet_menu_button), кнопка слева от поля ввода сообщения.
-    buttons.append([KeyboardButton(text="🔓 Бесплатный VPN TAXI HELPER")])
-    # "🤝 Реферальная программа" (по просьбе пользователя, 20.09.2026) - своей
+    buttons.append([KeyboardButton(text="🔓 БЕСПЛАТНЫЙ VPN TAXI HELPER")])
+    # "🤝 РЕФЕРАЛЬНАЯ ПРОГРАММА" (по просьбе пользователя, 20.09.2026) - своей
     # строкой, под VPN - см. блок "РЕФЕРАЛЬНАЯ ПРОГРАММА" ниже
     # (show_referral_program и остальные хендлеры referral_*).
-    buttons.append([KeyboardButton(text="🤝 Реферальная программа")])
-    buttons.append([KeyboardButton(text="← Назад"), KeyboardButton(text="🏙 Выбор города")])
+    buttons.append([KeyboardButton(text="🤝 РЕФЕРАЛЬНАЯ ПРОГРАММА")])
+    # "💳 ЧАЕВЫЕ" - самая нижняя строка перед "← НАЗАД"/"🏙 ВЫБОР ГОРОДА" (по
+    # прямой просьбе пользователя, 21.09.2026 - см. комментарий у items
+    # выше про то, почему кнопка убрана из общей сетки).
+    buttons.append([KeyboardButton(text="💳 ЧАЕВЫЕ")])
+    buttons.append([KeyboardButton(text="← НАЗАД"), KeyboardButton(text="🏙 ВЫБОР ГОРОДА")])
     return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=buttons)
 
 # ==================== МОДУЛЬ "ИНСТРУМЕНТЫ ВОДИТЕЛЯ" (бывш. "Курьеру") ====================
@@ -3311,11 +3326,11 @@ def services_keyboard(category=None, city=None, user_id=None):
 COURIER_MODULE_CATEGORIES = set(CATEGORIES.keys())  # все категории
 
 COURIER_STUB_SECTIONS = {
-    "🛠 ТО транспорта",
+    "🛠 ТО ТРАНСПОРТА",
 }
 
-# "🚻 Туалеты"/"🅿️ Парковка" переведены с заглушки на реальные точки
-# (OpenStreetMap) + добавлены "🔧 Шиномонтаж"/"🚿 Мойки" - см.
+# "🚻 ТУАЛЕТЫ"/"🅿️ ПАРКОВКА" переведены с заглушки на реальные точки
+# (OpenStreetMap) + добавлены "🔧 ШИНОМОНТАЖ"/"🚿 МОЙКИ" - см.
 # NEARBY_SERVICES/show_nearby_prompt/handle_nearby_location ниже. Кнопка
 # запрашивает геолокацию, показывает ближайшие NEARBY_RESULTS_COUNT точек с
 # расстоянием и часами работы (если есть в OSM) и кнопкой "Поехали" (открывает
@@ -3324,39 +3339,39 @@ COURIER_STUB_SECTIONS = {
 # где были длинные (см. NEARBY_BUTTON_TO_KIND). "🔔 Уведомления" - отдельная
 # настройка, какие типы автопушей получать (см. блок "НАСТРОЙКИ ПУШЕЙ" ниже).
 def courier_module_keyboard(category=None):
-    """"📍 Очередь у аэропорта" здесь больше НЕТ (перенесена в "⚙️ Настройки",
+    """"📍 ОЧЕРЕДЬ У АЭРОПОРТА" здесь больше НЕТ (перенесена в "⚙️ НАСТРОЙКИ",
     см. notification_settings_keyboard/toggle_airport_queue_inline, по
     просьбе пользователя 19.09.2026)."""
     buttons = [
-        [KeyboardButton(text="💰 Финансы"), KeyboardButton(text="📈 Спрос сейчас")],
-        [KeyboardButton(text="📅 Часы пика"), KeyboardButton(text="🚻 Туалеты")],
-        [KeyboardButton(text="🅿️ Парковка"), KeyboardButton(text="🔧 Шиномонтаж")],
-        [KeyboardButton(text="🚿 Мойки"), KeyboardButton(text="🍷 Алкомаркеты 24ч")],
-        [KeyboardButton(text="🛒 Магазины 24ч"), KeyboardButton(text="🔌 Электрозарядки")],
-        # "⛽ Где бензин" перенесена сюда из главного меню (по просьбе
+        [KeyboardButton(text="💰 ФИНАНСЫ"), KeyboardButton(text="📈 СПРОС СЕЙЧАС")],
+        [KeyboardButton(text="📅 ЧАСЫ ПИКА"), KeyboardButton(text="🚻 ТУАЛЕТЫ")],
+        [KeyboardButton(text="🅿️ ПАРКОВКА"), KeyboardButton(text="🔧 ШИНОМОНТАЖ")],
+        [KeyboardButton(text="🚿 МОЙКИ"), KeyboardButton(text="🍷 АЛКОМАРКЕТЫ 24Ч")],
+        [KeyboardButton(text="🛒 МАГАЗИНЫ 24Ч"), KeyboardButton(text="🔌 ЭЛЕКТРОЗАРЯДКИ")],
+        # "⛽ ГДЕ БЕНЗИН" перенесена сюда из главного меню (по просьбе
         # пользователя, 19.09.2026) - раньше была отдельной кнопкой в
         # services_keyboard.
-        [KeyboardButton(text="🛠 ТО транспорта"), KeyboardButton(text="⛽ Где бензин")],
-        # "💳 Получить чаевые" - по просьбе пользователя (20.09.2026) - ссылки
+        [KeyboardButton(text="🛠 ТО ТРАНСПОРТА"), KeyboardButton(text="⛽ ГДЕ БЕНЗИН")],
+        # "💳 ПОЛУЧИТЬ ЧАЕВЫЕ" - по просьбе пользователя (20.09.2026) - ссылки
         # на приложение "Яндекс Чаевые: на карту по QR" (App Store/Google
         # Play), см. show_tips_app.
-        [KeyboardButton(text="💳 Получить чаевые")],
+        [KeyboardButton(text="💳 ПОЛУЧИТЬ ЧАЕВЫЕ")],
     ]
     # "💰 КУДА ЕХАТЬ ➡️" отсюда убрана - перенесена в services_keyboard как
     # верхняя строка главного меню (по просьбе пользователя, 19.09.2026).
     # "🔔 Уведомления" тоже отсюда убрана - теперь доступна через
-    # "⚙️ Настройки" в главном меню (по просьбе пользователя, 19.09.2026).
-    # "📍 Очередь у аэропорта" тоже отсюда убрана (по просьбе пользователя,
-    # 19.09.2026) - переключатель перенесён в "⚙️ Настройки" (см.
+    # "⚙️ НАСТРОЙКИ" в главном меню (по просьбе пользователя, 19.09.2026).
+    # "📍 ОЧЕРЕДЬ У АЭРОПОРТА" тоже отсюда убрана (по просьбе пользователя,
+    # 19.09.2026) - переключатель перенесён в "⚙️ НАСТРОЙКИ" (см.
     # notification_settings_keyboard/toggle_airport_queue_inline).
-    buttons.append([KeyboardButton(text="← Назад"), KeyboardButton(text="🏙 Выбор города")])
+    buttons.append([KeyboardButton(text="← НАЗАД"), KeyboardButton(text="🏙 ВЫБОР ГОРОДА")])
     return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=buttons)
 
 def notification_settings_keyboard(state, category=None):
     """Инлайн-клавиатура с переключателями по каждому типу пуша (✅/☐) -
     нажатие на кнопку тоглит именно этот тип и перерисовывает клавиатуру на
     месте (см. toggle_notification_setting), без отправки нового сообщения.
-    "📍 Очередь у аэропорта" добавлена сюда же отдельной строкой-
+    "📍 ОЧЕРЕДЬ У АЭРОПОРТА" добавлена сюда же отдельной строкой-
     переключателем (по просьбе пользователя, 19.09.2026 - раньше была
     отдельной кнопкой в "Инструменты водителя", теперь тоже настройка) -
     скрыта для courier/cargo (см. CATEGORIES_WITHOUT_AIRPORTS), как и была."""
@@ -3374,12 +3389,12 @@ def notification_settings_keyboard(state, category=None):
             callback_data="notif_toggle_airport_queue",
         )])
     # "🛣 Счётчик км" как отдельный переключатель здесь БЫЛ (20.09.2026), но
-    # по уточнению пользователя перепроектирован в "▶️ Начать смену"/
+    # по уточнению пользователя перепроектирован в "▶️ НАЧАТЬ СМЕНУ"/
     # "⏹ Завершить смену" в главном меню - см. блок "СМЕНА" ниже
     # (start_shift/finish_shift). Настройка отсюда убрана.
     # "🗺 Показываться на карте" отдельным тумблером здесь БЫЛА (21.09.2026),
     # но по прямому уточнению пользователя (21.09.2026) заменена на триггер
-    # "▶️ Начать смену"/"⏹ Завершить смену" - показ на карте включается
+    # "▶️ НАЧАТЬ СМЕНУ"/"⏹ Завершить смену" - показ на карте включается
     # автоматически при начале смены (водитель сразу же выбирает тарифы, в
     # которых работает - см. shift_tariffs_keyboard/toggle_shift) и
     # выключается при завершении. Отдельной настройки больше нет.
@@ -3387,15 +3402,15 @@ def notification_settings_keyboard(state, category=None):
 
 # Кнопка (текст меню) -> ключ в NEARBY_SERVICES. Тексты сокращены под
 # раскладку в 2 колонки (см. courier_module_keyboard) - было "🅿️ Парковка /
-# остановка", стало "🅿️ Парковка".
+# остановка", стало "🅿️ ПАРКОВКА".
 NEARBY_BUTTON_TO_KIND = {
-    "🚻 Туалеты": 'toilets',
-    "🅿️ Парковка": 'parking',
-    "🔧 Шиномонтаж": 'tires',
-    "🚿 Мойки": 'car_wash',
-    "🍷 Алкомаркеты 24ч": 'alcohol',
-    "🛒 Магазины 24ч": 'grocery24',
-    "🔌 Электрозарядки": 'ev_charging',
+    "🚻 ТУАЛЕТЫ": 'toilets',
+    "🅿️ ПАРКОВКА": 'parking',
+    "🔧 ШИНОМОНТАЖ": 'tires',
+    "🚿 МОЙКИ": 'car_wash',
+    "🍷 АЛКОМАРКЕТЫ 24Ч": 'alcohol',
+    "🛒 МАГАЗИНЫ 24Ч": 'grocery24',
+    "🔌 ЭЛЕКТРОЗАРЯДКИ": 'ev_charging',
 }
 
 NEARBY_SERVICES = {
@@ -3540,8 +3555,8 @@ def yandex_navi_url(lat, lon):
 
 def nearby_location_keyboard():
     return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[
-        [KeyboardButton(text="📍 Отправить геолокацию", request_location=True)],
-        [KeyboardButton(text="❌ Отмена")],
+        [KeyboardButton(text="📍 ОТПРАВИТЬ ГЕОЛОКАЦИЮ", request_location=True)],
+        [KeyboardButton(text="❌ ОТМЕНА")],
     ])
 
 def format_nearby_distance(dist_km):
@@ -3586,7 +3601,7 @@ def render_nearby_results(kind, scored_points):
     return text, InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def courier_finance_cancel_keyboard():
-    return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[[KeyboardButton(text="❌ Отмена")]])
+    return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[[KeyboardButton(text="❌ ОТМЕНА")]])
 
 # Резерв на износ/ремонт - фиксированный % от валового дохода (см. README
 # прототипа: "доход минус топливо минус резерв на износ"). Пользователь явно
@@ -3629,8 +3644,8 @@ CAR_OWNERSHIP_LABELS = {
 
 def car_ownership_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="🔧 Своя / кредит / лизинг", callback_data="finance_car_own"),
-        InlineKeyboardButton(text="🔑 В аренде", callback_data="finance_car_rented"),
+        InlineKeyboardButton(text="🔧 СВОЯ / КРЕДИТ / ЛИЗИНГ", callback_data="finance_car_own"),
+        InlineKeyboardButton(text="🔑 В АРЕНДЕ", callback_data="finance_car_rented"),
     ]])
 
 # Поля, которые обычно не меняются изо дня в день - после первого ввода
@@ -3667,7 +3682,7 @@ def parse_decimal(text):
 # после самого первого /start, до экрана выбора города: сначала картинка с
 # "продающим" описанием бота (первое сообщение), затем вторым сообщением -
 # объяснение, зачем нужна геолокация "Всегда" и как её включить на
-# iPhone/Android. Повторные /start и клик по кнопке "🏙 Выбор города" этот
+# iPhone/Android. Повторные /start и клик по кнопке "🏙 ВЫБОР ГОРОДА" этот
 # питч больше не показывают - см. проверку user_id not in user_state в
 # обработчике start().
 WELCOME_PHOTO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'assets', 'welcome.jpg')
@@ -3726,7 +3741,7 @@ async def send_welcome_pitch(message: types.Message):
     await message.answer(WELCOME_GEO_TEXT, parse_mode='Markdown')
 
 async def send_start_screen(message: types.Message):
-    """Общий код /start и кнопки "🏙 Выбор города" - сбрасывает весь user_state
+    """Общий код /start и кнопки "🏙 ВЫБОР ГОРОДА" - сбрасывает весь user_state
     (включая любой незавершённый черновик заказа/расчёта) и возвращает на
     экран выбора города. Кнопка добавлена, чтобы не заставлять пользователя
     искать команду /start в интерфейсе Telegram - она есть на всех
@@ -3797,11 +3812,11 @@ async def force_fetch_flights(message: types.Message):
         logger.error(f"❌ Ошибка /forcefetch: {e}")
         await message.answer(f"❌ Ошибка при обновлении: {e}")
 
-@router.message(lambda message: message.text == "🏙 Выбор города")
+@router.message(lambda message: message.text == "🏙 ВЫБОР ГОРОДА")
 async def start_button(message: types.Message):
     await send_start_screen(message)
 
-@router.message(lambda message: message.text == "← Назад")
+@router.message(lambda message: message.text == "← НАЗАД")
 async def go_back(message: types.Message):
     user_id = message.from_user.id
     state = user_state.get(user_id)
@@ -3812,7 +3827,7 @@ async def go_back(message: types.Message):
         return
 
     if state.pop('in_courier_module', None):
-        # Были в подменю "🧰 Инструменты водителя" -> возвращаемся на экран услуг (категория и город остаются)
+        # Были в подменю "🧰 ИНСТРУМЕНТЫ ВОДИТЕЛЯ" -> возвращаемся на экран услуг (категория и город остаются)
         state.pop('nearby_pending', None)  # на случай если "Назад" пришёл, пока ждали геолокацию
         await message.answer("Выбери услугу 👇", reply_markup=services_keyboard(state.get('category'), state.get('city'), user_id))
         return
@@ -3834,19 +3849,19 @@ async def go_back(message: types.Message):
 # (на confirm ждём нажатия инлайн-кнопок, а не текста).
 
 def shared_order_cancel_keyboard():
-    return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[[KeyboardButton(text="❌ Отмена")]])
+    return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[[KeyboardButton(text="❌ ОТМЕНА")]])
 
 def shared_order_car_class_keyboard(category):
     tariffs = CATEGORIES.get(category, {}).get('tariffs', [])
     buttons = [[KeyboardButton(text=t)] for t in tariffs]
-    buttons.append([KeyboardButton(text="❌ Отмена")])
+    buttons.append([KeyboardButton(text="❌ ОТМЕНА")])
     return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=buttons)
 
 def shared_order_passengers_keyboard():
     buttons = [
         [KeyboardButton(text="1"), KeyboardButton(text="2"), KeyboardButton(text="3")],
         [KeyboardButton(text="4"), KeyboardButton(text="5"), KeyboardButton(text="6")],
-        [KeyboardButton(text="❌ Отмена")],
+        [KeyboardButton(text="❌ ОТМЕНА")],
     ]
     return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=buttons)
 
@@ -3871,12 +3886,12 @@ async def show_shared_order_confirmation(message, data, category, city):
         f"действовать {SHARED_ORDER_EXPIRY_HOURS} час, пока кто-то не примет._"
     )
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📤 Отправить заказ", callback_data="order_confirm_send")],
-        [InlineKeyboardButton(text="❌ Отменить", callback_data="order_confirm_cancel")]
+        [InlineKeyboardButton(text="📤 ОТПРАВИТЬ ЗАКАЗ", callback_data="order_confirm_send")],
+        [InlineKeyboardButton(text="❌ ОТМЕНИТЬ", callback_data="order_confirm_cancel")]
     ])
     await message.answer(text, reply_markup=keyboard, parse_mode='Markdown')
 
-@router.message(lambda message: message.text == "🔄 Отдать заказ")
+@router.message(lambda message: message.text == "🔄 ОТДАТЬ ЗАКАЗ")
 async def start_shared_order(message: types.Message):
     user_id = message.from_user.id
     state = user_state.get(user_id)
@@ -3904,7 +3919,7 @@ async def shared_order_flow(message: types.Message):
     category = state.get('category')
     city = state.get('city')
 
-    if text == "❌ Отмена":
+    if text == "❌ ОТМЕНА":
         state.pop('order_draft', None)
         await message.answer("Черновик заказа отменён.", reply_markup=services_keyboard(category, city, user_id))
         return
@@ -3975,7 +3990,7 @@ async def shared_order_flow(message: types.Message):
         return
 
     # step == 'confirm' - здесь ждём нажатия инлайн-кнопок на сообщении выше,
-    # а не текста; "❌ Отмена" обработана в самом начале функции.
+    # а не текста; "❌ ОТМЕНА" обработана в самом начале функции.
     await message.answer("Нажми «📤 Отправить заказ» или «❌ Отменить» на сообщении выше 👆")
 
 async def broadcast_shared_order(order_id, data, city, category, sender_id):
@@ -4002,8 +4017,8 @@ async def broadcast_shared_order(order_id, data, city, category, sender_id):
         f"_Предложение действует {SHARED_ORDER_EXPIRY_HOURS} час. Кто первый примет - получит контакт отправителя._"
     )
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Принять заказ", callback_data=f"order_accept_{order_id}")],
-        [InlineKeyboardButton(text="❌ Отказаться", callback_data=f"order_decline_{order_id}")]
+        [InlineKeyboardButton(text="✅ ПРИНЯТЬ ЗАКАЗ", callback_data=f"order_accept_{order_id}")],
+        [InlineKeyboardButton(text="❌ ОТКАЗАТЬСЯ", callback_data=f"order_decline_{order_id}")]
     ])
     sent = 0
     for uid in recipients:
@@ -4110,7 +4125,7 @@ async def decline_shared_order(callback_query: types.CallbackQuery):
 
 # ==================== МОДУЛЬ "ИНСТРУМЕНТЫ ВОДИТЕЛЯ" - хендлеры ====================
 
-@router.message(lambda message: message.text == "🧰 Инструменты водителя")
+@router.message(lambda message: message.text == "🧰 ИНСТРУМЕНТЫ ВОДИТЕЛЯ")
 async def open_courier_module(message: types.Message):
     user_id = message.from_user.id
     state = user_state.get(user_id)
@@ -4128,28 +4143,28 @@ async def open_courier_module(message: types.Message):
     state['in_courier_module'] = True
     await message.answer("🧰 *Инструменты водителя*\n\nВыбери раздел 👇", reply_markup=courier_module_keyboard(state.get('category')), parse_mode='Markdown')
 
-@router.message(lambda message: message.text == "💰 Финансы" and user_state.get(message.from_user.id, {}).get('in_courier_module'))
+@router.message(lambda message: message.text == "💰 ФИНАНСЫ" and user_state.get(message.from_user.id, {}).get('in_courier_module'))
 async def start_courier_finance(message: types.Message):
     user_id = message.from_user.id
     state = user_state[user_id]
     state['courier_finance_draft'] = {'step': 'income', 'data': {}}
     await message.answer(COURIER_FINANCE_STEP_PROMPTS['income'], reply_markup=courier_finance_cancel_keyboard())
-    # "📈 Статистика смен" - по просьбе пользователя (20.09.2026) доступна
+    # "📈 СТАТИСТИКА СМЕН" - по просьбе пользователя (20.09.2026) доступна
     # прямо отсюда, отдельной инлайн-кнопкой под первым шагом расчёта (см.
     # show_shift_stats) - не отдельный пункт меню, чтобы не плодить кнопки в
-    # courier_module_keyboard. "👤 Личный кабинет" (21.09.2026) - та же
+    # courier_module_keyboard. "👤 ЛИЧНЫЙ КАБИНЕТ" (21.09.2026) - та же
     # статистика, но графиками в WebApp (см. CABINET_WEBAPP_PATH) вместо
     # текстового списка по дням; показывается только если PUBLIC_URL задан
-    # (тот же guard, что у "🗺 Карта водителей" в services_keyboard - Telegram
+    # (тот же guard, что у "🗺 КАРТА ВОДИТЕЛЕЙ" в services_keyboard - Telegram
     # требует HTTPS для WebApp).
-    stats_row = [InlineKeyboardButton(text="📈 Статистика смен", callback_data="show_shift_stats")]
+    stats_row = [InlineKeyboardButton(text="📈 СТАТИСТИКА СМЕН", callback_data="show_shift_stats")]
     if PUBLIC_URL:
         # tariffs= - варианты тарифа для выпадающего списка в анкете личного
         # кабинета (см. cabinet_webapp_html) - берутся из CATEGORIES текущей
         # категории водителя, тот же приём, что city/category у карты.
         tariff_options = CATEGORIES.get(state.get('category'), {}).get('tariffs', [])
         cabinet_url = f"{PUBLIC_URL}{CABINET_WEBAPP_PATH}?tariffs={urllib.parse.quote(','.join(tariff_options))}"
-        stats_row.append(InlineKeyboardButton(text="👤 Личный кабинет", web_app=WebAppInfo(url=cabinet_url)))
+        stats_row.append(InlineKeyboardButton(text="👤 ЛИЧНЫЙ КАБИНЕТ", web_app=WebAppInfo(url=cabinet_url)))
     await message.answer(
         "Или посмотри статистику своих смен за последние 6 месяцев:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[stats_row]),
@@ -4168,9 +4183,9 @@ async def courier_stub_section(message: types.Message):
 TIPS_APP_URL_IOS = "https://apps.apple.com/us/app/%D1%8F%D0%BD%D0%B4%D0%B5%D0%BA%D1%81-%D1%87%D0%B0%D0%B5%D0%B2%D1%8B%D0%B5-%D0%BD%D0%B0-%D0%BA%D0%B0%D1%80%D1%82%D1%83-%D0%BF%D0%BE-qr/id1513175603?l=ru"
 TIPS_APP_URL_ANDROID = "https://play.google.com/store/apps/details?id=com.chaevieprosto.app"
 
-@router.message(lambda message: message.text == "💳 Получить чаевые" and user_state.get(message.from_user.id, {}).get('in_courier_module'))
+@router.message(lambda message: message.text == "💳 ПОЛУЧИТЬ ЧАЕВЫЕ" and user_state.get(message.from_user.id, {}).get('in_courier_module'))
 async def show_tips_app(message: types.Message):
-    """"💳 Получить чаевые" - по просьбе пользователя (20.09.2026), ссылки
+    """"💳 ПОЛУЧИТЬ ЧАЕВЫЕ" - по просьбе пользователя (20.09.2026), ссылки
     на приложение "Яндекс Чаевые: на карту по QR" (генерирует QR-код для
     приёма чаевых на карту) - тот же паттерн, что show_fuel_bot/show_vpn_bot:
     просто ссылки на стороннее приложение, без интеграции."""
@@ -4186,17 +4201,17 @@ async def show_tips_app(message: types.Message):
     # применительно к самой задаче (получить чаевые), с явным указанием
     # платформы, а не общее "скачать".
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🍎 Получить чаевые на iPhone", url=TIPS_APP_URL_IOS)],
-        [InlineKeyboardButton(text="🤖 Получить чаевые на Android", url=TIPS_APP_URL_ANDROID)],
+        [InlineKeyboardButton(text="🍎 ПОЛУЧИТЬ ЧАЕВЫЕ НА IPHONE", url=TIPS_APP_URL_IOS)],
+        [InlineKeyboardButton(text="🤖 ПОЛУЧИТЬ ЧАЕВЫЕ НА ANDROID", url=TIPS_APP_URL_ANDROID)],
     ])
     await message.answer(text, reply_markup=keyboard, parse_mode='Markdown')
     await message.answer("Выбери, что нужно дальше 👇", reply_markup=courier_module_keyboard(category))
 
-@router.message(lambda message: message.text == "💳 Чаевые")
+@router.message(lambda message: message.text == "💳 ЧАЕВЫЕ")
 async def show_tips_app_main_menu(message: types.Message):
-    """"💳 Чаевые" - главное меню (по просьбе пользователя, 21.09.2026,
+    """"💳 ЧАЕВЫЕ" - главное меню (по просьбе пользователя, 21.09.2026,
     "чаевые вынеси на главное меню") - тот же контент, что у show_tips_app
-    выше (старая кнопка "💳 Получить чаевые" внутри courier_module_keyboard
+    выше (старая кнопка "💳 ПОЛУЧИТЬ ЧАЕВЫЕ" внутри courier_module_keyboard
     не трогали - оставлена как есть), но без требования in_courier_module и
     с возвратом в services_keyboard, а не courier_module_keyboard."""
     user_id = message.from_user.id
@@ -4207,8 +4222,8 @@ async def show_tips_app_main_menu(message: types.Message):
         "он сканирует и переводит чаевые тебе на карту."
     )
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🍎 Получить чаевые на iPhone", url=TIPS_APP_URL_IOS)],
-        [InlineKeyboardButton(text="🤖 Получить чаевые на Android", url=TIPS_APP_URL_ANDROID)],
+        [InlineKeyboardButton(text="🍎 ПОЛУЧИТЬ ЧАЕВЫЕ НА IPHONE", url=TIPS_APP_URL_IOS)],
+        [InlineKeyboardButton(text="🤖 ПОЛУЧИТЬ ЧАЕВЫЕ НА ANDROID", url=TIPS_APP_URL_ANDROID)],
     ])
     await message.answer(text, reply_markup=keyboard, parse_mode='Markdown')
     await message.answer(
@@ -4216,7 +4231,7 @@ async def show_tips_app_main_menu(message: types.Message):
         reply_markup=services_keyboard(state.get('category'), state.get('city'), user_id),
     )
 
-@router.message(lambda message: message.text == "📈 Спрос сейчас" and user_state.get(message.from_user.id, {}).get('in_courier_module'))
+@router.message(lambda message: message.text == "📈 СПРОС СЕЙЧАС" and user_state.get(message.from_user.id, {}).get('in_courier_module'))
 async def show_kef_bot(message: types.Message):
     """Ссылка на стороннего бота @Yan_rus_bot (коэффициент повышенного
     спроса/"кэф" по зонам города) - тот же паттерн, что show_fuel_bot/
@@ -4225,7 +4240,7 @@ async def show_kef_bot(message: types.Message):
     прямая интеграция потребовала бы обхода Яндекса, этого не делаем)."""
     category = user_state.get(message.from_user.id, {}).get('category')
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📈 Открыть бота с кэфом", url=KEF_BOT_URL)]
+        [InlineKeyboardButton(text="📈 ОТКРЫТЬ БОТА С КЭФОМ", url=KEF_BOT_URL)]
     ])
     text = (
         "📈 *Спрос сейчас*\n\n"
@@ -4234,7 +4249,7 @@ async def show_kef_bot(message: types.Message):
     )
     await message.answer(text, reply_markup=keyboard, parse_mode='Markdown')
 
-@router.message(lambda message: message.text == "📅 Часы пика" and user_state.get(message.from_user.id, {}).get('in_courier_module'))
+@router.message(lambda message: message.text == "📅 ЧАСЫ ПИКА" and user_state.get(message.from_user.id, {}).get('in_courier_module'))
 async def show_peak_hours(message: types.Message):
     """Часы пика по дням недели (см. блок "ЧАСЫ ПИКА ПО ДНЯМ НЕДЕЛИ" выше
     по файлу) - показывает ТЕКУЩИЙ день недели по местному времени города
@@ -4254,14 +4269,14 @@ async def show_peak_hours(message: types.Message):
 
 @router.callback_query(lambda c: c.data.startswith('peak_day_'))
 async def switch_peak_hours_day(callback_query: types.CallbackQuery):
-    """Переключение дня недели на экране "Часы пика" - перерисовывает то же
+    """Переключение дня недели на экране "ЧАСЫ ПИКА" - перерисовывает то же
     сообщение (edit_text), без "Сейчас: ..." строки (она осмысленна только
     для текущего реального дня, см. format_peak_hours_text). callback_data -
     "peak_day_{0-6}" (такси/Ultima) или "peak_day_{0-6}_{category}"
     (courier/cargo - своя таблица часов пика, см.
     peak_hours_weekday_keyboard) - category берём из callback_data, а не из
     user_state, чтобы переключение дней недели корректно работало даже если
-    пользователь сменил категорию, не закрывая старое сообщение "Часы пика"."""
+    пользователь сменил категорию, не закрывая старое сообщение "ЧАСЫ ПИКА"."""
     user_id = callback_query.from_user.id
     state = user_state.get(user_id, {})
     city = state.get('city')
@@ -4320,7 +4335,7 @@ def score_station_candidate(city, code, station, category):
     аэропортов. По просьбе пользователя (21.09.2026) вокзалы тоже участвуют
     в "Куда ехать", а не только аэропорты. score - тот же % загрузки
     текущего получаса, что показывается на кнопке вокзала в разделе
-    "✈️🚆 Авиа/ЖД" - шкалы сопоставимы (обе - % от часовой ёмкости),
+    "✈️🚆 АВИА/ЖД" - шкалы сопоставимы (обе - % от часовой ёмкости),
     прямое сравнение с score аэропорта корректно."""
     load, trains_in_period, _ = compute_current_train_period_load(code, category)
     reasons = []
@@ -4840,9 +4855,9 @@ async def show_where_to_go(message: types.Message):
     # "Город/центр", посчитанный по своей таблице часов пика).
     await send_where_to_go(message, user_id, city, category)
 
-@router.message(lambda message: message.text == "⚙️ Настройки")
+@router.message(lambda message: message.text == "⚙️ НАСТРОЙКИ")
 async def show_notification_settings(message: types.Message):
-    """"⚙️ Настройки" в главном меню (по просьбе пользователя, 19.09.2026,
+    """"⚙️ НАСТРОЙКИ" в главном меню (по просьбе пользователя, 19.09.2026,
     перенесена сюда из "Инструменты водителя", где была кнопкой
     "🔔 Уведомления"). Пока внутри только один раздел - настройка автопушей
     по типам (см. блок "НАСТРОЙКИ ПУШЕЙ" выше по файлу): каждый тип
@@ -4873,7 +4888,7 @@ async def toggle_notification_setting(callback_query: types.CallbackQuery):
 
 @router.callback_query(lambda c: c.data == "notif_toggle_airport_queue")
 async def toggle_airport_queue_inline(callback_query: types.CallbackQuery):
-    """Переключатель "📍 Очередь у аэропорта" внутри "⚙️ Настройки" (по
+    """Переключатель "📍 ОЧЕРЕДЬ У АЭРОПОРТА" внутри "⚙️ НАСТРОЙКИ" (по
     просьбе пользователя, 19.09.2026 - перенесена сюда из "Инструменты
     водителя", где раньше была отдельной reply-кнопкой, см.
     toggle_airport_queue_tracking - та же логика влкл/выкл живой геопозиции,
@@ -4907,7 +4922,7 @@ async def toggle_airport_queue_inline(callback_query: types.CallbackQuery):
 # _location_tracking_active рядом с хендлерами location). Кнопка меняется на
 # "⏹ Завершить смену" - при нажатии показывает итог (время + км) и СРАЗУ
 # сохраняет запись в таблицу shift_history (см. save_shift_record) для
-# статистики за 6 месяцев в "💰 Финансы" (см. show_shift_stats).
+# статистики за 6 месяцев в "💰 ФИНАНСЫ" (см. show_shift_stats).
 #
 # state['shift'] = {'started_at': iso, 'total_km': float, 'last_lat': float,
 # 'last_lon': float} - есть шифт = смена идёт, отсутствует/None = не идёт.
@@ -4935,7 +4950,7 @@ def shift_tariff_options(category):
 def shift_tariffs_keyboard(category, selected):
     """Инлайн-клавиатура выбора тарифов перед стартом смены - несколько
     можно выбрать одновременно (✅/☐, тоглятся на месте), внизу кнопка
-    "▶️ Начать смену" подтверждает выбор. selected - set выбранных строк
+    "▶️ НАЧАТЬ СМЕНУ" подтверждает выбор. selected - set выбранных строк
     тарифа (из shift_tariff_options(category)); тариф идентифицируется по
     своему порядковому индексу в списке (callback_data), т.к. сами названия
     тарифов могут содержать пробелы/плюсы, неудобные для callback_data."""
@@ -4944,7 +4959,7 @@ def shift_tariffs_keyboard(category, selected):
     for idx, label in enumerate(tariffs):
         mark = '✅' if label in selected else '☐'
         buttons.append([InlineKeyboardButton(text=f"{mark} {label}", callback_data=f"shift_tariff_toggle_{idx}")])
-    buttons.append([InlineKeyboardButton(text="▶️ Начать смену", callback_data="shift_tariff_confirm")])
+    buttons.append([InlineKeyboardButton(text="▶️ НАЧАТЬ СМЕНУ", callback_data="shift_tariff_confirm")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def format_shift_tariffs_label(tariffs):
@@ -5266,7 +5281,7 @@ async def shift_tariff_toggle(callback_query: types.CallbackQuery):
 
 @router.callback_query(lambda c: c.data == "shift_tariff_confirm")
 async def shift_tariff_confirm(callback_query: types.CallbackQuery):
-    """Кнопка "▶️ Начать смену" внутри клавиатуры выбора тарифов - можно
+    """Кнопка "▶️ НАЧАТЬ СМЕНУ" внутри клавиатуры выбора тарифов - можно
     подтвердить и без единого выбранного тарифа (просто не будет подписи
     тарифов на карте, останется только категория)."""
     await callback_query.answer()
@@ -5299,9 +5314,9 @@ async def finish_shift_and_notify(user_id, category, city, send_func, header=Non
     # По просьбе пользователя (21.09.2026): сразу по завершении смены
     # показать потраченное на топливо/эл-заряд, используя ранее сохранённые
     # цену топлива и средний расход (см. FINANCE_REMEMBERED_FIELDS/
-    # finance_defaults - тот же профиль, что заполняется в "💰 Финансы"). Если
+    # finance_defaults - тот же профиль, что заполняется в "💰 ФИНАНСЫ"). Если
     # ни разу не вводились - строку пропускаем (не заставляем вводить
-    # прямо тут, обычный ввод остаётся в "💰 Указать доход за день" ниже).
+    # прямо тут, обычный ввод остаётся в "💰 УКАЗАТЬ ДОХОД ЗА ДЕНЬ" ниже).
     state = user_state.get(user_id) or {}
     defaults = finance_defaults(state)
     consumption = defaults.get('consumption')
@@ -5329,7 +5344,7 @@ async def finish_shift_and_notify(user_id, category, city, send_func, header=Non
     await send_func(
         "Хочешь сразу посчитать доход за эту смену?",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="💰 Указать доход за день", callback_data="start_finance_after_shift"),
+            InlineKeyboardButton(text="💰 УКАЗАТЬ ДОХОД ЗА ДЕНЬ", callback_data="start_finance_after_shift"),
         ]]),
     )
 
@@ -5361,7 +5376,7 @@ def enable_airport_queue_tracking(user_id):
     state['airport_queue_active'] = True
     state['airport_queue'] = {}
 
-@router.message(lambda message: message.text == "📍 Очередь у аэропорта" and user_state.get(message.from_user.id, {}).get('in_courier_module') and user_state.get(message.from_user.id, {}).get('category') not in CATEGORIES_WITHOUT_AIRPORTS)
+@router.message(lambda message: message.text == "📍 ОЧЕРЕДЬ У АЭРОПОРТА" and user_state.get(message.from_user.id, {}).get('in_courier_module') and user_state.get(message.from_user.id, {}).get('category') not in CATEGORIES_WITHOUT_AIRPORTS)
 async def toggle_airport_queue_tracking(message: types.Message):
     """Кнопка-переключатель (toggle, без отдельного экрана): первое нажатие
     включает отслеживание живой геопозиции и объясняет, как её включить в
@@ -5437,7 +5452,7 @@ def find_airport_queue_join_target(icao, zone_key=None):
     """Находит (city, airport_idx) в AIRPORTS_INFO для кнопки "🚗 Встать в
     очередь" на гео-пуше об аэропорте - переиспользует ту же самоотчётную
     очередь (callback_data f"join_queue_{city}_{idx}"), что и кнопка
-    "🚗 Занять очередь" в разделе "✈️🚆 Авиа/ЖД" (см. show_range_picker). По
+    "🚗 ЗАНЯТЬ ОЧЕРЕДЬ" в разделе "✈️🚆 АВИА/ЖД" (см. show_range_picker). По
     прямой просьбе пользователя (20.09.2026): "каждый пуш от аэропорта
     должен предлагать чтобы водитель не забывал вставать в очередь". Для
     аэропортов с зонами (Шереметьево) ищет запись именно с нужным zone_key,
@@ -5474,23 +5489,23 @@ async def send_airport_queue_push(user_id, icao, kind, dist_km=None, zone_label=
         # в зоне аэропорта раз, второй раз можно уже не спрашивать"): если у
         # водителя уже есть СВОЯ свежая отметка по этому аэропорту/терминалу
         # (он уже проходил выбор тарифа и диапазона недавно) - добавляем
-        # кнопку-подтверждение "✅ Уже в очереди", которая одним нажатием
+        # кнопку-подтверждение "✅ УЖЕ В ОЧЕРЕДИ", которая одним нажатием
         # просто освежает время той же самой отметки (тот же диапазон машин),
-        # без повторного выбора тарифа/диапазона. "🚗 Встать в очередь"
+        # без повторного выбора тарифа/диапазона. "🚗 ВСТАТЬ В ОЧЕРЕДЬ"
         # остаётся рядом - на случай, если число машин в очереди изменилось
         # и нужно отметить заново.
         own_marks = user_recent_queue_marks(user_id, target_city, icao, zone_key)
         if own_marks:
             keep_key = f"qkeep_{target_city}_{icao}_{zone_key or '-'}"
-            buttons.append([InlineKeyboardButton(text="✅ Уже в очереди", callback_data=keep_key)])
-        buttons.append([InlineKeyboardButton(text="🚗 Встать в очередь" if not own_marks else "🔄 Обновить очередь", callback_data=f"join_queue_{target_city}_{airport_idx}")])
+            buttons.append([InlineKeyboardButton(text="✅ УЖЕ В ОЧЕРЕДИ", callback_data=keep_key)])
+        buttons.append([InlineKeyboardButton(text="🚗 ВСТАТЬ В ОЧЕРЕДЬ" if not own_marks else "🔄 Обновить очередь", callback_data=f"join_queue_{target_city}_{airport_idx}")])
         # ДОБАВЛЕНО 21.09.2026 (прямая просьба пользователя): водитель может
         # ехать с заказом/без намерения вставать в очередь этого аэропорта -
         # кнопка снимает пуши очереди на AIRPORT_QUEUE_SNOOZE_MINUTES минут
         # для ЭТОГО аэропорта/зоны, "чтобы человека лишний раз не тревожить".
         # На ВСЕХ пушах очереди (по прямой просьбе пользователя), не только
         # на первом.
-        buttons.append([InlineKeyboardButton(text="📍❌ Ошибка GPS / Очередь не требуется", callback_data=f"aqsnooze_{icao}_{zone_key or '-'}")])
+        buttons.append([InlineKeyboardButton(text="📍❌ ОШИБКА GPS / ОЧЕРЕДЬ НЕ ТРЕБУЕТСЯ", callback_data=f"aqsnooze_{icao}_{zone_key or '-'}")])
         reply_markup = InlineKeyboardMarkup(inline_keyboard=buttons)
     try:
         await bot.send_message(user_id, text, reply_markup=reply_markup, parse_mode='Markdown')
@@ -5975,7 +5990,7 @@ MAP_CHROME_CSS = """
   .legend { position: absolute; top: 10px; right: 10px; z-index: 1000; background: #1c1c1c; color: #fff; border: 1px solid rgba(255,196,0,.4); border-radius: 8px; padding: 8px 10px; font-family: -apple-system, sans-serif; font-size: 12px; box-shadow: 0 1px 4px rgba(0,0,0,.35); }
   .legend div { display: flex; align-items: center; gap: 6px; margin: 3px 0; }
   .legend .dot { width: 11px; height: 11px; border-radius: 50%; border: 1px solid rgba(255,255,255,.5); display: inline-block; }
-  .filter-toggle { position: absolute; top: 10px; left: 10px; z-index: 1000; background: #FFC400; color: #000; border-radius: 8px; padding: 8px 12px; font-family: -apple-system, sans-serif; font-size: 12.5px; font-weight: 600; box-shadow: 0 1px 4px rgba(0,0,0,.35); cursor: pointer; user-select: none; }
+  .filter-toggle { position: absolute; top: 10px; left: 10px; z-index: 1000; background: #FFC400; color: #000; border-radius: 8px; padding: 8px 12px; font-family: -apple-system, sans-serif; font-size: 12.5px; font-weight: 600; box-shadow: 0 1px 4px rgba(0,0,0,.35); cursor: pointer; user-select: none; text-transform: uppercase; }
   .airport-icon { display: flex; align-items: center; justify-content: center; font-size: 20px; filter: drop-shadow(0 1px 2px rgba(0,0,0,.5)); }
   .airport-popup h4 { margin: 0 0 4px; font-family: -apple-system, sans-serif; font-size: 13.5px; color: #000; }
   .airport-popup .row { font-family: -apple-system, sans-serif; font-size: 12.5px; margin: 2px 0; color: #333; }
@@ -6305,7 +6320,7 @@ def map_webapp_html():
 # (aiohttp-роут + самодостаточная HTML-страница), но БЕЗ строгой проверки
 # initData (как у /map/positions выше, а не как у /cabinet/* - погода не
 # персональные данные, город приходит через ?city= в URL, initData тут
-# просто не нужен вообще, поэтому кнопка "🌤 Погода" в главном меню - самая
+# просто не нужен вообще, поэтому кнопка "🌤 ПОГОДА" в главном меню - самая
 # обычная web_app= прямо в Reply-клавиатуре, без ограничения, что мешало
 # личному кабинету, см. комментарий у services_keyboard). Источник данных -
 # тот же weather_data.json/get_cached_weather_forecast, что у текстовой
@@ -7059,7 +7074,7 @@ async def handle_map_city_events_api(request):
     отдаём ТОЛЬКО события, для которых при сборе удалось геокодировать
     площадку/адрес (см. geocode_posts в fetch_concert_events.py и
     geocode_events в fetch_timepad_data.py) - события без координат на карту
-    не попадают, но остаются в обычном разделе "🎭 События города" внутри
+    не попадают, но остаются в обычном разделе "🎭 СОБЫТИЯ ГОРОДА" внутри
     бота. На карте видны только события в окне [сейчас; +MAP_EVENT_ADVANCE_HOURS]
     (см. MAP_EVENT_ADVANCE_HOURS выше) - не раньше и не позже, чтобы не
     захламлять карту метками далёких во времени мероприятий."""
@@ -7355,7 +7370,7 @@ async def handle_cabinet_finance_api(request):
 CABINET_DEMAND_API_PATH = '/cabinet/demand'
 
 async def handle_cabinet_demand_api(request):
-    """"📈 Спрос сейчас" - в Telegram-версии (show_kef_bot) это просто ссылка
+    """"📈 СПРОС СЕЙЧАС" - в Telegram-версии (show_kef_bot) это просто ссылка
     на стороннего бота @Yan_rus_bot (нет своих данных по кэфам, см. комментарий
     у KEF_BOT_URL) - отдаём ту же ссылку/текст, без выдумывания новых данных."""
     user_id = _cabinet_require_user(request)
@@ -7367,7 +7382,7 @@ CABINET_PEAK_API_PATH = '/cabinet/peak'
 
 async def handle_cabinet_peak_api(request):
     """Часы пика - переиспользует format_peak_hours_text (та же таблица
-    WEEKDAY_HOUR_LOAD/get_weekday_hour_load, что и текстовая "📅 Часы пика").
+    WEEKDAY_HOUR_LOAD/get_weekday_hour_load, что и текстовая "📅 ЧАСЫ ПИКА").
     Опциональный query-параметр weekday=0..6 - как переключение дня в
     switch_peak_hours_day."""
     user_id = _cabinet_require_user(request)
@@ -7535,7 +7550,7 @@ def cabinet_webapp_html():
   .profile-sub span { background: rgba(255,255,255,.18); border-radius: 8px; padding: 2px 7px; }
   .edit-btn {
     background: rgba(255,255,255,.2); border: none; color: #fff; border-radius: 10px;
-    padding: 7px 10px; font-size: 12.5px; font-weight: 600; flex-shrink: 0;
+    padding: 7px 10px; font-size: 12.5px; font-weight: 600; flex-shrink: 0; text-transform: uppercase;
   }
 
   /* Форма анкеты */
@@ -7551,7 +7566,7 @@ def cabinet_webapp_html():
   }
   .profile-form .save-btn {
     width: 100%; margin-top: 14px; padding: 11px; border: none; border-radius: 10px;
-    background: #FFC400; color: #000; font-size: 14.5px; font-weight: 700;
+    background: #FFC400; color: #000; font-size: 14.5px; font-weight: 700; text-transform: uppercase;
   }
   .profile-form .save-msg { text-align: center; font-size: 12.5px; margin-top: 8px; min-height: 16px; }
 
@@ -7584,7 +7599,7 @@ def cabinet_webapp_html():
   .nav-pill {
     flex-shrink: 0; border: none; border-radius: 999px; padding: 8px 13px; font-size: 12.5px;
     font-weight: 600; background: var(--tg-theme-secondary-bg-color, #fff);
-    color: var(--tg-theme-text-color, #000); opacity: .65; white-space: nowrap;
+    color: var(--tg-theme-text-color, #000); opacity: .65; white-space: nowrap; text-transform: uppercase;
   }
   .nav-pill.active { background: #FFC400; color: #000; opacity: 1; }
   .tab-pane { display: none; }
@@ -7603,18 +7618,19 @@ def cabinet_webapp_html():
   }
   .btn {
     width: 100%; padding: 11px; border: none; border-radius: 10px; background: #FFC400;
-    color: #000; font-size: 14.5px; font-weight: 700; margin-top: 4px;
+    color: #000; font-size: 14.5px; font-weight: 700; margin-top: 4px; text-transform: uppercase;
   }
   .btn.secondary { background: rgba(127,127,127,.18); color: var(--tg-theme-text-color, #000); }
   .link-btn {
     display: block; text-decoration: none; text-align: center; padding: 12px; border-radius: 10px;
     background: #FFC400; color: #000 !important; font-weight: 700; font-size: 14.5px; margin-bottom: 8px;
+    text-transform: uppercase;
   }
   .pill-row { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
   .pill-btn {
     border: none; border-radius: 999px; padding: 8px 12px; font-size: 12.5px; font-weight: 600;
     background: var(--tg-theme-secondary-bg-color, #fff); color: var(--tg-theme-text-color, #000);
-    opacity: .75;
+    opacity: .75; text-transform: uppercase;
   }
   .pill-btn.active { background: #FFC400; color: #000; opacity: 1; }
   .point-card { background: var(--tg-theme-secondary-bg-color, #fff); border-radius: 12px; padding: 11px 12px; margin-bottom: 8px; }
@@ -7622,7 +7638,7 @@ def cabinet_webapp_html():
   .point-card .pc-sub { font-size: 12px; opacity: .65; margin-bottom: 8px; }
   .point-card .pc-go {
     display: inline-block; text-decoration: none; background: #FFC400; color: #000 !important;
-    padding: 7px 12px; border-radius: 8px; font-size: 12.5px; font-weight: 700;
+    padding: 7px 12px; border-radius: 8px; font-size: 12.5px; font-weight: 700; text-transform: uppercase;
   }
   .switch-row {
     display: flex; align-items: center; justify-content: space-between; padding: 11px 0;
@@ -7800,7 +7816,7 @@ def cabinet_webapp_html():
 </div>
 
 <!-- ==================== НАСТРОЙКИ ====================
-     Те же notif_prefs/airport_queue_active, что и в Telegram "⚙️ Настройки"
+     Те же notif_prefs/airport_queue_active, что и в Telegram "⚙️ НАСТРОЙКИ"
      (notification_settings_keyboard/toggle_notification_setting/
      toggle_airport_queue_inline) - через handle_cabinet_settings_api. -->
 <div class="tab-pane" id="tab-settings">
@@ -7985,7 +8001,7 @@ def cabinet_webapp_html():
   load();
 
   // ==================== НАВИГАЦИЯ ПО РАЗДЕЛАМ (21.09.2026) ====================
-  // Объединение "🧰 Инструменты водителя" + "⚙️ Настройки" в "👤 Личный
+  // Объединение "🧰 ИНСТРУМЕНТЫ ВОДИТЕЛЯ" + "⚙️ НАСТРОЙКИ" в "👤 Личный
   // кабинет" (по просьбе пользователя) - переключение между разделами внутри
   // одного WebApp, без перезагрузки страницы. Данные каждого раздела грузятся
   // лениво (при первом открытии таба), а не все сразу при открытии кабинета.
@@ -8239,7 +8255,7 @@ async def handle_airport_queue_location(message: types.Message):
     и просто ничего не делает, если сама выключена (см. их код).
 
     БАГФИКС: "and not ...nearby_pending" в фильтре обязателен. Кнопки
-    "🚻 Туалеты"/"🚿 Мойки"/и т.п. (см. show_nearby_prompt/handle_nearby_location
+    "🚻 ТУАЛЕТЫ"/"🚿 МОЙКИ"/и т.п. (см. show_nearby_prompt/handle_nearby_location
     ниже) просят разовую геопозицию тем же способом - обычным
     message.location. Без этого условия, если у водителя уже включена
     "Очередь у аэропорта" (airport_queue_active=True) и он ОДНОВРЕМЕННО
@@ -8284,8 +8300,8 @@ async def handle_airport_queue_location_update(message: types.Message):
 
 @router.message(lambda message: message.text in NEARBY_BUTTON_TO_KIND and user_state.get(message.from_user.id, {}).get('in_courier_module'))
 async def show_nearby_prompt(message: types.Message):
-    """Нажатие на "🚻 Туалеты"/"🅿️ Парковка"/"🔧 Шиномонтаж"/
-    "🚿 Мойки" - запрашивает у водителя геолокацию (кнопка request_location в
+    """Нажатие на "🚻 ТУАЛЕТЫ"/"🅿️ ПАРКОВКА"/"🔧 ШИНОМОНТАЖ"/
+    "🚿 МОЙКИ" - запрашивает у водителя геолокацию (кнопка request_location в
     nearby_location_keyboard). Сама выдача ближайших точек - в
     handle_nearby_location ниже, после того как Telegram пришлёт location.
 
@@ -8308,7 +8324,7 @@ async def show_nearby_prompt(message: types.Message):
         reply_markup=nearby_location_keyboard(),
     )
 
-@router.message(lambda message: user_state.get(message.from_user.id, {}).get('nearby_pending') and message.text == "❌ Отмена")
+@router.message(lambda message: user_state.get(message.from_user.id, {}).get('nearby_pending') and message.text == "❌ ОТМЕНА")
 async def cancel_nearby_prompt(message: types.Message):
     user_id = message.from_user.id
     category = user_state[user_id].get('category')
@@ -8362,7 +8378,7 @@ async def send_nearby_results(message: types.Message, user_id, kind, lat, lon):
 
 @router.message(lambda message: getattr(message, 'location', None) is not None and user_state.get(message.from_user.id, {}).get('nearby_pending'))
 async def handle_nearby_location(message: types.Message):
-    """Водитель прислал геолокацию (кнопка "📍 Отправить геолокацию") после
+    """Водитель прислал геолокацию (кнопка "📍 ОТПРАВИТЬ ГЕОЛОКАЦИЮ") после
     show_nearby_prompt - см. send_nearby_results для самой логики показа."""
     user_id = message.from_user.id
     state = user_state[user_id]
@@ -8372,7 +8388,7 @@ async def handle_nearby_location(message: types.Message):
 
 @router.callback_query(lambda c: c.data == "show_shift_stats")
 async def show_shift_stats(callback_query: types.CallbackQuery):
-    """"📈 Статистика смен" - инлайн-кнопка под первым шагом "💰 Финансы" (см.
+    """"📈 СТАТИСТИКА СМЕН" - инлайн-кнопка под первым шагом "💰 ФИНАНСЫ" (см.
     start_courier_finance). Показывает итоги за неделю/месяц/6 месяцев плюс
     последние 14 дней по дням - вся история хранится в БД 6 месяцев (см.
     get_shift_history/SHIFT_HISTORY_MONTHS), но выводить построчно все ~180
@@ -8432,7 +8448,7 @@ async def show_shift_stats(callback_query: types.CallbackQuery):
     await callback_query.message.answer(
         text,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="📊 По дням недели / неделям / месяцам", callback_data="show_shift_breakdown"),
+            InlineKeyboardButton(text="📊 ПО ДНЯМ НЕДЕЛИ / НЕДЕЛЯМ / МЕСЯЦАМ", callback_data="show_shift_breakdown"),
         ]]),
         parse_mode='Markdown',
     )
@@ -8444,7 +8460,7 @@ async def show_shift_breakdown(callback_query: types.CallbackQuery):
       чтобы видеть, какие дни недели самые "рабочие"/прибыльные;
     - по неделям (последние 8 недель, начало недели - понедельник);
     - по месяцам (последние 6 календарных месяцев).
-    Отдельная кнопка под "📈 Статистика смен", чтобы не перегружать основной
+    Отдельная кнопка под "📈 СТАТИСТИКА СМЕН", чтобы не перегружать основной
     экран - он уже показывает итоги за 7/30/180 дней и последние дни."""
     await callback_query.answer()
     user_id = callback_query.from_user.id
@@ -8541,9 +8557,9 @@ def today_shift_totals(user_id):
 
 @router.callback_query(lambda c: c.data == "start_finance_after_shift")
 async def start_finance_after_shift(callback_query: types.CallbackQuery):
-    """Кнопка "💰 Указать доход за день" под сообщением "СМЕНА ЗАВЕРШЕНА" (по
+    """Кнопка "💰 УКАЗАТЬ ДОХОД ЗА ДЕНЬ" под сообщением "СМЕНА ЗАВЕРШЕНА" (по
     просьбе пользователя, 20.09.2026, см. toggle_shift) - запускает тот же
-    пошаговый расчёт, что и обычная кнопка "💰 Финансы" (start_courier_finance),
+    пошаговый расчёт, что и обычная кнопка "💰 ФИНАНСЫ" (start_courier_finance),
     сразу с шага "Доход". Km за смену уже известен (только что завершилась) -
     подставится автоматически на шаге "Километраж" кнопкой "✅ Использовать N
     км", как и при обычном заходе в финансы (см. today_shifts_km)."""
@@ -8609,7 +8625,7 @@ async def advance_finance_step(target, user_id, state, draft):
             await target(
                 f"🚘 Машина: *{CAR_OWNERSHIP_LABELS[remembered]}* (как в прошлый раз).",
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-                    InlineKeyboardButton(text="🔄 Сменить", callback_data="finance_car_change"),
+                    InlineKeyboardButton(text="🔄 СМЕНИТЬ", callback_data="finance_car_change"),
                 ]]),
                 parse_mode='Markdown',
             )
@@ -8626,7 +8642,7 @@ async def advance_finance_step(target, user_id, state, draft):
             await target(
                 f"{COURIER_FINANCE_STEP_PROMPTS[step]}\n\n_Прошлый раз: {label}_",
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-                    InlineKeyboardButton(text=f"✅ Использовать снова: {label}", callback_data=f"finance_use_default_{step}"),
+                    InlineKeyboardButton(text=f"✅ ИСПОЛЬЗОВАТЬ СНОВА: {label}", callback_data=f"finance_use_default_{step}"),
                 ]]),
                 parse_mode='Markdown',
             )
@@ -8679,7 +8695,7 @@ async def use_finance_default(callback_query: types.CallbackQuery):
 
 @router.callback_query(lambda c: c.data in ("finance_car_own", "finance_car_rented"))
 async def set_car_ownership(callback_query: types.CallbackQuery):
-    """Кнопки "🔧 Своя / кредит / лизинг" / "🔑 В аренде" на шаге
+    """Кнопки "🔧 СВОЯ / КРЕДИТ / ЛИЗИНГ" / "🔑 В АРЕНДЕ" на шаге
     'car_ownership' (по просьбе пользователя, 20.09.2026: "если машина в
     аренде то 10% не учитывай а если личная или кредит лизинг то учитывай")
     - запоминает выбор как профиль (см. FINANCE_REMEMBERED_FIELDS) и решает,
@@ -8706,7 +8722,7 @@ async def set_car_ownership(callback_query: types.CallbackQuery):
 
 @router.callback_query(lambda c: c.data == "finance_car_change")
 async def change_car_ownership(callback_query: types.CallbackQuery):
-    """Кнопка "🔄 Сменить" под автоподставленным типом машины (см.
+    """Кнопка "🔄 СМЕНИТЬ" под автоподставленным типом машины (см.
     advance_finance_step, шаг 'car_ownership') - откатывает черновик назад
     к явному вопросу, если запомненное значение сейчас неверно (например,
     водитель пересел с личной машины на арендованную)."""
@@ -8741,7 +8757,7 @@ async def courier_finance_flow(message: types.Message):
     draft = state['courier_finance_draft']
     text = (message.text or '').strip()
 
-    if text == "❌ Отмена":
+    if text == "❌ ОТМЕНА":
         state.pop('courier_finance_draft', None)
         await message.answer("Расчёт отменён.", reply_markup=courier_module_keyboard(state.get('category')))
         return
@@ -8932,10 +8948,10 @@ async def send_courier_finance_result(message: types.Message, user_id, data):
     save_finance_result(user_id, income, net_profit)
 
 CITY_MAP = {
-    "🏛️ Москва": "moscow", "🕯️ СПб": "spb", "🌲 Новосибирск": "novosibirsk",
-    "🏔️ Екатеринбург": "ekb", "🎓 Казань": "kazan", "❄️ Челябинск": "chelyabinsk",
-    "🌾 Омск": "omsk", "🏭 Самара": "samara", "🌊 Ростов": "rostov",
-    "🏰 Нижний Новгород": "nnovgorod", "🌴 Краснодар": "krasnodar", "🏖️ Сочи": "sochi"
+    "🏛️ МОСКВА": "moscow", "🕯️ СПБ": "spb", "🌲 НОВОСИБИРСК": "novosibirsk",
+    "🏔️ ЕКАТЕРИНБУРГ": "ekb", "🎓 КАЗАНЬ": "kazan", "❄️ ЧЕЛЯБИНСК": "chelyabinsk",
+    "🌾 ОМСК": "omsk", "🏭 САМАРА": "samara", "🌊 РОСТОВ": "rostov",
+    "🏰 НИЖНИЙ НОВГОРОД": "nnovgorod", "🌴 КРАСНОДАР": "krasnodar", "🏖️ СОЧИ": "sochi"
 }
 
 @router.message(lambda message: message.text in CITY_MAP)
@@ -8947,7 +8963,7 @@ async def select_city(message: types.Message):
     если пользователь просто написал в чат что-то, содержащее название
     города как часть текста - по просьбе пользователя город теперь меняется
     ТОЛЬКО явным нажатием кнопки на экране выбора города (после /start или
-    "🏙 Выбор города", см. send_start_screen) - больше нигде и никогда сам не
+    "🏙 ВЫБОР ГОРОДА", см. send_start_screen) - больше нигде и никогда сам не
     "слетает". Фолбэк на "moscow" по умолчанию тоже убран - раз попадание
     сюда теперь возможно только по точному совпадению кнопки из CITY_MAP,
     city_map.get(...) всегда находит город, запасной вариант был не нужен и
@@ -9025,7 +9041,7 @@ async def select_category(message: types.Message):
             "и времени ожидания будут приходить автоматически."
         )
         suggest_kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📍 Как включить трансляцию", callback_data="airport_queue_enable_now")]
+            [InlineKeyboardButton(text="📍 КАК ВКЛЮЧИТЬ ТРАНСЛЯЦИЮ", callback_data="airport_queue_enable_now")]
         ])
         await message.answer(suggest_text, reply_markup=suggest_kb)
 
@@ -9043,7 +9059,7 @@ async def enable_airport_queue_now(callback_query: types.CallbackQuery):
     enable_airport_queue_tracking(user_id)
     await callback_query.message.answer(airport_queue_enable_text(), parse_mode='Markdown')
 
-@router.message(lambda message: message.text == "🌤 Погода")
+@router.message(lambda message: message.text == "🌤 ПОГОДА")
 async def show_weather_forecast(message: types.Message):
     """Ручной просмотр погоды по своему городу - почасовая разбивка (вид
     осадков + температура) на RAIN_FORECAST_HOURS часов вперёд. Второй режим
@@ -9069,13 +9085,13 @@ async def show_weather_forecast(message: types.Message):
     text = format_weather_forecast_text(city_name, forecast)
     await message.answer(text, parse_mode='Markdown', reply_markup=services_keyboard(category, city, user_id))
 
-@router.message(lambda message: message.text == "⛽ Где бензин")
+@router.message(lambda message: message.text == "⛽ ГДЕ БЕНЗИН")
 async def show_fuel_bot(message: types.Message):
     """Ссылка на отдельного стороннего бота @gde_benzin_rubot (народная карта
     наличия топлива на АЗС по России) - не встроенные в Taxi Helper данные,
     а прямой переход в его собственный чат."""
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⛽ Открыть «Где бензин»", url=FUEL_BOT_URL)]
+        [InlineKeyboardButton(text="⛽ ОТКРЫТЬ «ГДЕ БЕНЗИН»", url=FUEL_BOT_URL)]
     ])
     text = (
         "⛽ *Где бензин*\n\n"
@@ -9084,7 +9100,7 @@ async def show_fuel_bot(message: types.Message):
     )
     await message.answer(text, reply_markup=keyboard, parse_mode='Markdown')
 
-@router.message(lambda message: message.text == "🔓 Бесплатный VPN TAXI HELPER")
+@router.message(lambda message: message.text == "🔓 БЕСПЛАТНЫЙ VPN TAXI HELPER")
 async def show_vpn_bot(message: types.Message):
     """Ссылка на стороннего VPN-бота (реферальная, VPN_BOT_URL) - тот же
     паттерн, что и show_fuel_bot выше: кнопка просто открывает чужой чат,
@@ -9092,7 +9108,7 @@ async def show_vpn_bot(message: types.Message):
     "TAXI HELPER" - по просьбе пользователя должно фигурировать везде, где
     упоминается эта кнопка (текст кнопки, заголовок сообщения, инлайн-кнопка)."""
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔓 Открыть VPN TAXI HELPER", url=VPN_BOT_URL)]
+        [InlineKeyboardButton(text="🔓 ОТКРЫТЬ VPN TAXI HELPER", url=VPN_BOT_URL)]
     ])
     text = (
         "🔓 *Бесплатный VPN TAXI HELPER*\n\n"
@@ -9137,15 +9153,15 @@ def format_road_event_time(iso_time, city):
     except Exception:
         return ''
 
-@router.message(lambda message: message.text == "👤 Личный кабинет")
+@router.message(lambda message: message.text == "👤 ЛИЧНЫЙ КАБИНЕТ")
 async def open_cabinet_from_menu(message: types.Message):
-    """Кнопка "👤 Личный кабинет" главного меню (см. services_keyboard) -
+    """Кнопка "👤 ЛИЧНЫЙ КАБИНЕТ" главного меню (см. services_keyboard) -
     сама кнопка в Reply-клавиатуре ОБЫЧНАЯ (без web_app=) - см. комментарий
     у cabinet_row в services_keyboard про то, почему: у кнопок с web_app=
     прямо в Reply-клавиатуре initData приходит пустым (проверено на
     реальном устройстве). Поэтому по нажатию просто присылаем отдельным
     сообщением инлайн-кнопку с web_app= (тот же рабочий паттерн, что и
-    "👤 Личный кабинет"/"📈 Статистика смен" внутри start_courier_finance) -
+    "👤 ЛИЧНЫЙ КАБИНЕТ"/"📈 СТАТИСТИКА СМЕН" внутри start_courier_finance) -
     у инлайн-кнопок initData передаётся нормально."""
     user_id = message.from_user.id
     state = user_state.get(user_id, {})
@@ -9157,13 +9173,13 @@ async def open_cabinet_from_menu(message: types.Message):
     tariff_options = CATEGORIES.get(category, {}).get('tariffs', [])
     cabinet_url = f"{PUBLIC_URL}{CABINET_WEBAPP_PATH}?tariffs={urllib.parse.quote(','.join(tariff_options))}"
     await message.answer(
-        "👤 Личный кабинет",
+        "👤 ЛИЧНЫЙ КАБИНЕТ",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="Открыть", web_app=WebAppInfo(url=cabinet_url)),
+            InlineKeyboardButton(text="ОТКРЫТЬ", web_app=WebAppInfo(url=cabinet_url)),
         ]]),
     )
 
-@router.message(lambda message: message.text == "⛔ Дорожные события")
+@router.message(lambda message: message.text == "⛔ ДОРОЖНЫЕ СОБЫТИЯ")
 async def show_road_events(message: types.Message, user_id_override=None):
     """ДТП и дорожные происшествия по городам - пересылаем сами тексты
     последних сообщений из публичных Telegram-каналов (Москва -> @dtp777 +
@@ -9261,7 +9277,7 @@ async def show_road_events(message: types.Message, user_id_override=None):
 def build_concert_event_message(post, city):
     """Текст + инлайн-кнопки для ОДНОГО структурированного концертного
     события (см. parse_event_fields в fetch_concert_events.py) - тот же стиль,
-    что build_event_message у TimePad. "🚗 Поехали" - поиск по названию места
+    что build_event_message у TimePad. "🚗 ПОЕХАЛИ" - поиск по названию места
     на Яндекс.Картах (как и у TimePad, координат у канала нет, только текстовое
     название площадки/адреса); показывается только если место распознано."""
     tz = ZoneInfo(EVENT_CITY_TIMEZONE.get(city, 'Europe/Moscow'))
@@ -9307,25 +9323,25 @@ def build_concert_event_message(post, city):
         # на обычную https-ссылку на Яндекс.Карты (yandex_navi_url) - она
         # валидна для Telegram и открывается в приложении Навигатора/Карт,
         # если оно установлено, иначе в браузере.
-        buttons.append(InlineKeyboardButton(text="🚗 Поехали", url=f"https://yandex.ru/maps/?text={quote(place)}"))
+        buttons.append(InlineKeyboardButton(text="🚗 ПОЕХАЛИ", url=f"https://yandex.ru/maps/?text={quote(place)}"))
     keyboard = InlineKeyboardMarkup(inline_keyboard=[buttons]) if buttons else None
     return text, keyboard
 
-@router.message(lambda message: message.text == "🚨 События города" and user_state.get(message.from_user.id, {}).get('category') not in CATEGORIES_WITHOUT_EVENTS)
+@router.message(lambda message: message.text == "🚨 СОБЫТИЯ ГОРОДА" and user_state.get(message.from_user.id, {}).get('category') not in CATEGORIES_WITHOUT_EVENTS)
 async def show_events_and_roads_menu(message: types.Message):
-    """"🚨 События города" в главном меню теперь открывает инлайн-подменю из
+    """"🚨 СОБЫТИЯ ГОРОДА" в главном меню теперь открывает инлайн-подменю из
     двух вариантов (объединение по просьбе пользователя, 20.09.2026; эмодзи
-    кнопки в меню уточнялся дважды - финально "🚨 События города") - сама
+    кнопки в меню уточнялся дважды - финально "🚨 СОБЫТИЯ ГОРОДА") - сама
     афиша (show_city_events) и дорожные события (show_road_events) вызываются
     из callback-хендлеров ниже (open_city_events_from_menu/
     open_road_events_from_menu), передавая user_id_override, т.к.
     callback_query.message - это сообщение бота, не пользователя.
     CATEGORIES_WITHOUT_EVENTS (courier/cargo) сюда не попадают - у них
-    кнопка называется "⛔ Дорожные события" и ведёт прямо на show_road_events
+    кнопка называется "⛔ ДОРОЖНЫЕ СОБЫТИЯ" и ведёт прямо на show_road_events
     (см. services_keyboard)."""
     buttons = [
-        [InlineKeyboardButton(text="🎭 События города", callback_data="events_menu_city")],
-        [InlineKeyboardButton(text="⛔ Дорожные события", callback_data="events_menu_roads")],
+        [InlineKeyboardButton(text="🎭 СОБЫТИЯ ГОРОДА", callback_data="events_menu_city")],
+        [InlineKeyboardButton(text="⛔ ДОРОЖНЫЕ СОБЫТИЯ", callback_data="events_menu_roads")],
     ]
     await message.answer("Выбери 👇", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
 
@@ -9359,7 +9375,7 @@ async def show_city_events(message: types.Message, user_id_override=None):
     если ОБА источника пусты.
 
     user_id_override - см. show_road_events (тот же паттерн для вызова из
-    инлайн-подменю "🎭 События города")."""
+    инлайн-подменю "🎭 СОБЫТИЯ ГОРОДА")."""
     user_id = user_id_override if user_id_override is not None else message.from_user.id
     if user_id not in user_state or 'city' not in user_state[user_id]:
         await message.answer("Сначала выбери город!")
@@ -9409,19 +9425,19 @@ async def show_city_events(message: types.Message, user_id_override=None):
         _skip_message_trim.reset(token)
 
 AIRPORT_MENU_KEYBOARD = InlineKeyboardMarkup(inline_keyboard=[
-    [InlineKeyboardButton(text="📥 Прилеты", callback_data="airport_arrivals")],
-    [InlineKeyboardButton(text="🔄 Доступность", callback_data="airport_availability")],
-    [InlineKeyboardButton(text="📋 Очередь", callback_data="airport_queue")]
+    [InlineKeyboardButton(text="📥 ПРИЛЕТЫ", callback_data="airport_arrivals")],
+    [InlineKeyboardButton(text="🔄 ДОСТУПНОСТЬ", callback_data="airport_availability")],
+    [InlineKeyboardButton(text="📋 ОЧЕРЕДЬ", callback_data="airport_queue")]
 ])
 
-@router.message(lambda message: message.text == "✈️🚆 Авиа/ЖД")
+@router.message(lambda message: message.text == "✈️🚆 АВИА/ЖД")
 async def show_transport_menu(message: types.Message):
-    """Объединённая кнопка "✈️🚆 Авиа/ЖД" (было 2 отдельные кнопки -
-    "✈️ Аэропорты" и "🚆 Вокзалы" - объединены в одну по просьбе
+    """Объединённая кнопка "✈️🚆 АВИА/ЖД" (было 2 отдельные кнопки -
+    "✈️ АЭРОПОРТЫ" и "🚆 ВОКЗАЛЫ" - объединены в одну по просьбе
     пользователя, чтобы короче было главное меню услуг). При нажатии -
-    инлайн-подменю с этими двумя вариантами; "🚆 Вокзалы" в нём показывается,
+    инлайн-подменю с этими двумя вариантами; "🚆 ВОКЗАЛЫ" в нём показывается,
     только если город есть в TRAIN_CITIES (см. STATION_CITY) - иначе только
-    "✈️ Аэропорты", без лишнего пункта "недоступно"."""
+    "✈️ АЭРОПОРТЫ", без лишнего пункта "недоступно"."""
     user_id = message.from_user.id
     if user_id not in user_state:
         await message.answer("Сначала выбери город!")
@@ -9431,9 +9447,9 @@ async def show_transport_menu(message: types.Message):
     if category in CATEGORIES_WITHOUT_AIRPORTS:
         await message.answer("Для этой категории транспорт недоступен.", reply_markup=services_keyboard(category, city, user_id))
         return
-    buttons = [[InlineKeyboardButton(text="✈️ Аэропорты", callback_data="transport_airports")]]
+    buttons = [[InlineKeyboardButton(text="✈️ АЭРОПОРТЫ", callback_data="transport_airports")]]
     if city in TRAIN_CITIES:
-        buttons.append([InlineKeyboardButton(text="🚆 Вокзалы", callback_data="transport_trains")])
+        buttons.append([InlineKeyboardButton(text="🚆 ВОКЗАЛЫ", callback_data="transport_trains")])
     await message.answer("Выбери 👇", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
 
 @router.callback_query(lambda c: c.data == "transport_airports")
@@ -9469,8 +9485,8 @@ def build_train_stations_keyboard(category, city):
 @router.callback_query(lambda c: c.data == "transport_trains")
 async def show_train_stations_menu(callback_query: types.CallbackQuery):
     """Список вокзалов ВЫБРАННОГО ГОРОДА (см. STATION_CITY и
-    fetch_trains_data.py). Пункт "🚆 Вокзалы" и так показывается в подменю
-    "✈️🚆 Авиа/ЖД" только в городах из TRAIN_CITIES (см. show_transport_menu),
+    fetch_trains_data.py). Пункт "🚆 ВОКЗАЛЫ" и так показывается в подменю
+    "✈️🚆 АВИА/ЖД" только в городах из TRAIN_CITIES (см. show_transport_menu),
     но проверяем город и здесь на случай, если пользователь сменил город, не
     обновив клавиатуру."""
     await callback_query.answer()
@@ -9565,7 +9581,7 @@ async def show_train_station_arrivals(callback_query: types.CallbackQuery):
     if not any_trains:
         text += f"_На ближайшие {TRAIN_FORECAST_HOURS} часов прибытий не найдено._\n"
 
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="train_stations_back")]])
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ НАЗАД", callback_data="train_stations_back")]])
     await msg.edit_text(text, reply_markup=keyboard, parse_mode='Markdown')
     await callback_query.answer()
 
@@ -9610,10 +9626,10 @@ async def show_airport_info(callback_query: types.CallbackQuery):
     legend = "🔴0-25% Не ехать | 🟡26-50% Уточни очередь | 🟢51-85% Занимай очередь | 🟣>85% Срочно ехать"
     # ДОБАВЛЕНО 21.09.2026 (пользователь уточнил - "я про кнопку назад"): у
     # этого экрана не было инлайн-кнопки "Назад" вообще - единственный путь
-    # назад был через нижнюю reply-клавиатуру "← Назад", что сбрасывает
+    # назад был через нижнюю reply-клавиатуру "← НАЗАД", что сбрасывает
     # состояние целиком. Добавлена кнопка на родительский экран (меню
     # аэропорта, transport_airports), как и у соседних дочерних экранов.
-    keyboard.inline_keyboard.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="transport_airports")])
+    keyboard.inline_keyboard.append([InlineKeyboardButton(text="⬅️ НАЗАД", callback_data="transport_airports")])
     await msg.edit_text(f"✅ Аэропорты (прилеты):\n\n{legend}", reply_markup=keyboard)
     await callback_query.answer()
 
@@ -9683,7 +9699,7 @@ async def show_airport_details(callback_query: types.CallbackQuery):
         text += "_⚠️ Разбивка по терминалам сегодня недоступна (нет данных о терминале в расписании) - показаны цифры по всему аэропорту_\n"
     text += f"_Рекомендации рассчитаны для: {class_label}_\n"
     # Текущая очередь по тарифам (те же крауд-отметки водителей, что и в
-    # разделе "📋 Очередь" - см. format_queue_breakdown) - по просьбе
+    # разделе "📋 ОЧЕРЕДЬ" - см. format_queue_breakdown) - по просьбе
     # пользователя показываем прямо в окне "Прилёты", а не только отдельным
     # пунктом меню.
     text += format_queue_breakdown(city, airport['icao'], category, zone_key=airport.get('zone_key'))
@@ -9747,7 +9763,7 @@ async def show_airport_details(callback_query: types.CallbackQuery):
         text += "\n"
 
     text += "_🔴0-25% Не ехать | 🟡26-50% Уточни очередь | 🟢51-85% Занимай очередь | 🟣>85% Срочно ехать_"
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="airport_arrivals")]])
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ НАЗАД", callback_data="airport_arrivals")]])
     await msg.edit_text(text, reply_markup=keyboard, parse_mode='Markdown')
     await callback_query.answer()
 
@@ -9866,7 +9882,7 @@ async def show_airport_availability(callback_query: types.CallbackQuery):
         # ДОБАВЛЕНО 21.09.2026 (пользователь уточнил - "я про кнопку назад"):
         # у этого экрана не было инлайн-кнопки "Назад" - добавлена на
         # родительский экран (меню аэропорта, transport_airports).
-        keyboard.inline_keyboard.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="transport_airports")])
+        keyboard.inline_keyboard.append([InlineKeyboardButton(text="⬅️ НАЗАД", callback_data="transport_airports")])
         await msg.edit_text(f"🔄 *Доступность аэропортов*\nВыбери аэропорт для подробностей 👇\n\n{legend}", reply_markup=keyboard, parse_mode='Markdown')
     except Exception as e:
         logger.error(f"❌ Ошибка в show_airport_availability: {e}")
@@ -9950,7 +9966,7 @@ async def show_availability_details(callback_query: types.CallbackQuery):
         else:
             text += "_Уведомлений Росавиации по этому аэропорту за последние 12ч нет_\n"
 
-        back_keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="airport_availability")]])
+        back_keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ НАЗАД", callback_data="airport_availability")]])
         try:
             await msg.edit_text(text, reply_markup=back_keyboard, parse_mode='Markdown')
         except Exception as e:
@@ -9986,7 +10002,7 @@ async def show_queue_airport_picker(message, user_id):
     city = user_state[user_id]['city']
     airports = AIRPORTS_INFO.get(city, [])
     buttons = [[InlineKeyboardButton(text=f"{airport['emoji']} {airport['name']}", callback_data=f"queue_airport_{city}_{i}")] for i, airport in enumerate(airports)]
-    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="airport_queue")])
+    buttons.append([InlineKeyboardButton(text="⬅️ НАЗАД", callback_data="airport_queue")])
     keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
     await message.edit_text("Выбери аэропорт 👇", reply_markup=keyboard)
 
@@ -10002,9 +10018,9 @@ def queue_tariff_multiselect_keyboard(tariffs, selected_idxs):
     for i, t in enumerate(tariffs):
         mark = "✅" if i in selected_idxs else "⬜"
         buttons.append([InlineKeyboardButton(text=f"{mark} {t}", callback_data=f"queue_tariff_toggle_{i}")])
-    done_label = f"▶️ Готово ({len(selected_idxs)})" if selected_idxs else "▶️ Готово"
+    done_label = f"▶️ ГОТОВО ({len(selected_idxs)})" if selected_idxs else "▶️ ГОТОВО"
     buttons.append([InlineKeyboardButton(text=done_label, callback_data="queue_tariffs_done")])
-    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="airport_queue")])
+    buttons.append([InlineKeyboardButton(text="⬅️ НАЗАД", callback_data="airport_queue")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 @router.callback_query(lambda c: c.data == "airport_queue")
@@ -10102,9 +10118,9 @@ async def show_queue_options(callback_query: types.CallbackQuery):
     user_state[user_id]['queue_airport'] = (city, airport_idx)
     airport = AIRPORTS_INFO[city][airport_idx]
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📋 Текущая очередь", callback_data=f"view_queue_{city}_{airport_idx}")],
-        [InlineKeyboardButton(text="🚗 Занять очередь", callback_data=f"join_queue_{city}_{airport_idx}")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="airport_queue")]
+        [InlineKeyboardButton(text="📋 ТЕКУЩАЯ ОЧЕРЕДЬ", callback_data=f"view_queue_{city}_{airport_idx}")],
+        [InlineKeyboardButton(text="🚗 ЗАНЯТЬ ОЧЕРЕДЬ", callback_data=f"join_queue_{city}_{airport_idx}")],
+        [InlineKeyboardButton(text="⬅️ НАЗАД", callback_data="airport_queue")]
     ])
     text = f"*{airport['emoji']} {airport['name']}*\nКласс: {queue_multi_tariff_line(user_id)}"
     await callback_query.message.edit_text(text, reply_markup=keyboard, parse_mode='Markdown')
@@ -10159,7 +10175,7 @@ async def render_range_picker(message, user_id, city, airport_idx, airport, tari
             row = []
     if row:
         buttons.append(row)
-    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="airport_queue")])
+    buttons.append([InlineKeyboardButton(text="⬅️ НАЗАД", callback_data="airport_queue")])
 
     current_tariff = tariffs[idx]
     step_line = f" ({idx + 1}/{len(tariffs)})" if len(tariffs) > 1 else ""
@@ -10244,15 +10260,15 @@ async def submit_range(callback_query: types.CallbackQuery):
             f"Класс: {queue_multi_tariff_line(user_id)}"
         )
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🚗 Отметить ещё раз", callback_data=f"join_queue_{city}_{airport_idx}")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="airport_queue")]
+        [InlineKeyboardButton(text="🚗 ОТМЕТИТЬ ЕЩЁ РАЗ", callback_data=f"join_queue_{city}_{airport_idx}")],
+        [InlineKeyboardButton(text="⬅️ НАЗАД", callback_data="airport_queue")]
     ])
     await callback_query.message.edit_text(text, reply_markup=keyboard, parse_mode='Markdown')
     await callback_query.answer("Отметка сохранена")
 
 @router.callback_query(lambda c: c.data.startswith('qkeep_'))
 async def keep_queue_marks(callback_query: types.CallbackQuery):
-    """Кнопка "✅ Уже в очереди" на повторном пуше "давно рядом с
+    """Кнопка "✅ УЖЕ В ОЧЕРЕДИ" на повторном пуше "давно рядом с
     аэропортом" (см. send_airport_queue_push) - ДОБАВЛЕНО 20.09.2026 по
     просьбе пользователя: "если он отметился в зоне аэропорта раз, второй
     раз можно уже не спрашивать". Не открывает заново выбор тарифа/диапазона -
@@ -10352,9 +10368,9 @@ async def view_queue(callback_query: types.CallbackQuery):
         text += f"Пока нет свежих отметок от водителей за последние {QUEUE_ENTRY_TTL_MINUTES // 60}ч.\nОтметь сам, сколько видишь машин 👇"
 
     buttons = [
-        [InlineKeyboardButton(text="🚗 Отметить очередь", callback_data=f"join_queue_{city}_{airport_idx}")],
-        [InlineKeyboardButton(text="🔄 Обновить", callback_data=f"view_queue_{city}_{airport_idx}")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="airport_queue")]
+        [InlineKeyboardButton(text="🚗 ОТМЕТИТЬ ОЧЕРЕДЬ", callback_data=f"join_queue_{city}_{airport_idx}")],
+        [InlineKeyboardButton(text="🔄 ОБНОВИТЬ", callback_data=f"view_queue_{city}_{airport_idx}")],
+        [InlineKeyboardButton(text="⬅️ НАЗАД", callback_data="airport_queue")]
     ]
 
     await callback_query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode='Markdown')
@@ -10661,7 +10677,7 @@ def format_queue_breakdown(city, icao, category, zone_key=None):
 # (1) упреждающий пуш водителям выбранного города за RAIN_LEAD_MINUTES минут
 #     ДО начала (или заметного усиления) осадков - не "уже идёт", а "скоро
 #     начнётся" (см. check_rain_transitions/push_rain_alert ниже);
-# (2) кнопка "🌤 Погода" на верхнем уровне меню (рядом с "🔄 Отдать заказ") -
+# (2) кнопка "🌤 ПОГОДА" на верхнем уровне меню (рядом с "🔄 ОТДАТЬ ЗАКАЗ") -
 #     ручной просмотр почасовой разбивки на RAIN_FORECAST_HOURS часов вперёд:
 #     вид осадков + температура на каждый час (см. show_weather_forecast).
 
@@ -10672,7 +10688,7 @@ async def fetch_rain_forecast(city):
     ИЗМЕНЕНО 21.09.2026 (пользователь - "раз в час собирал инфу... чтобы не
     нагружать лимиты", после инцидента с "Open-Meteo вернул 429"): раньше эта
     функция вызывалась НАПРЯМУЮ из каждого места, которому нужна погода
-    (кнопка "🌤 Погода", "Куда ехать", утреннее приветствие, проверка на
+    (кнопка "🌤 ПОГОДА", "Куда ехать", утреннее приветствие, проверка на
     дождь) - то есть живой запрос к API на каждое действие пользователя.
     Теперь единственный вызывающий - weather_data_updater() (фоновая задача
     ниже), раз в WEATHER_UPDATE_INTERVAL_MINUTES по всем городам разом.
@@ -10937,7 +10953,7 @@ async def check_rain_transitions():
             await push_rain_alert(city, event)
 
 def format_weather_forecast_text(city_name, forecast):
-    """Почасовая разбивка для ручного режима (кнопка "🌤 Погода") -
+    """Почасовая разбивка для ручного режима (кнопка "🌤 ПОГОДА") -
     вид осадков (или "ясно"/"облачно" и т.д. по weathercode) + температура на
     каждый из RAIN_FORECAST_HOURS часов вперёд, не только ближайшее окно
     (в отличие от find_upcoming_precip_event, который смотрит только на
@@ -10999,7 +11015,7 @@ ULTIMA_NO_OUTERWEAR_TEMP_C = 25
 
 async def build_morning_greeting_text(city, category=None):
     """Текст "Доброе утро" - число/день недели по местному времени города,
-    текущая погода (тот же источник Open-Meteo, что и у "🌤 Погода"/пушей о
+    текущая погода (тот же источник Open-Meteo, что и у "🌤 ПОГОДА"/пушей о
     дожде), пожелание хорошего дня и побольше клиентов - по формулировке
     пользователя. Погода - best-effort: если Open-Meteo недоступен,
     сообщение всё равно уходит, просто без строки о погоде (лучше приветствие
@@ -11034,7 +11050,7 @@ async def build_morning_greeting_text(city, category=None):
 
 def morning_greeting_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="✅ Да, показать", callback_data="morning_greeting_show_where_to_go"),
+        InlineKeyboardButton(text="✅ ДА, ПОКАЗАТЬ", callback_data="morning_greeting_show_where_to_go"),
     ]])
 
 async def push_morning_greeting(user_id, city, category=None):
@@ -11048,7 +11064,7 @@ async def push_morning_greeting(user_id, city, category=None):
 
 @router.callback_query(lambda c: c.data == "morning_greeting_show_where_to_go")
 async def morning_greeting_show_where_to_go(callback_query: types.CallbackQuery):
-    """Кнопка "✅ Да, показать" на утреннем приветствии - сразу показывает
+    """Кнопка "✅ ДА, ПОКАЗАТЬ" на утреннем приветствии - сразу показывает
     сводку "Куда ехать" в ответ (по прямому уточнению пользователя), тем же
     вызовом, что и кнопка "💰 КУДА ЕХАТЬ" в главном меню (см. send_where_to_go)."""
     await callback_query.answer()
@@ -11360,7 +11376,24 @@ async def push_airport_status_change(icao, airport, old_status, new_status, noti
 # (см. init_db) и шлём пуш, только если он изменился. Локально/вне Railway
 # переменной нет - тогда пуш не шлём вообще (иначе слали бы на каждый
 # локальный запуск), см. проверку ниже.
-BOT_UPDATED_MESSAGE = "🔄 *Бот обновился до новой версии.*"
+BOT_UPDATED_MESSAGE = (
+    "🔄 *Бот обновился до новой версии.*\n\n"
+    "Если меню снизу выглядит по-старому - нажми кнопку ниже, чтобы обновить "
+    "его (это не сбрасывает смену, город и остальные данные, просто "
+    "перерисовывает клавиатуру)."
+)
+# Кнопка "🔄 ОБНОВИТЬ МЕНЮ" под пушем об обновлении (по просьбе пользователя,
+# 21.09.2026: "сделай где приходит обновление бота сообщение кнопку чтобы
+# бота перезагрузить... но сохрани уже активированные... начатую смену и
+# тд") - Telegram Reply-клавиатура на телефоне кэшируется и не перерисовывается
+# сама по себе, пока бот не пришлёт НОВОЕ сообщение с новым reply_markup;
+# раньше единственным способом обновить её было написать боту что-то самому.
+# handle_refresh_menu_button ниже просто заново шлёт ТЕКУЩИЙ services_keyboard
+# по уже сохранённым category/city из user_state - НИЧЕГО в самом state не
+# трогает (смена/черновик заказа/что угодно ещё остаются как были).
+BOT_UPDATED_REFRESH_KEYBOARD = InlineKeyboardMarkup(inline_keyboard=[[
+    InlineKeyboardButton(text="🔄 ОБНОВИТЬ МЕНЮ", callback_data="refresh_menu"),
+]])
 
 def get_bot_meta(key):
     init_db()
@@ -11442,13 +11475,40 @@ async def notify_users_about_new_deploy():
     sent, failed = 0, 0
     for user_id in recipients:
         try:
-            await bot.send_message(user_id, BOT_UPDATED_MESSAGE, parse_mode='Markdown')
+            await bot.send_message(user_id, BOT_UPDATED_MESSAGE, parse_mode='Markdown', reply_markup=BOT_UPDATED_REFRESH_KEYBOARD)
             sent += 1
         except Exception as e:
             failed += 1
             logger.warning(f"⚠️ Не удалось отправить пуш об обновлении пользователю {user_id}: {e}")
         await asyncio.sleep(0.05)  # Telegram допускает ~30 сообщений/сек в разные чаты
     logger.info(f"🔄 Пуш об обновлении разослан: {sent} успешно, {failed} ошибок")
+
+@router.callback_query(lambda c: c.data == "refresh_menu")
+async def handle_refresh_menu_button(callback_query: types.CallbackQuery):
+    """"🔄 ОБНОВИТЬ МЕНЮ" под пушем "Бот обновился" (см. BOT_UPDATED_MESSAGE/
+    BOT_UPDATED_REFRESH_KEYBOARD выше) - просто заново отправляет ТЕКУЩИЙ
+    services_keyboard по уже сохранённым category/city из user_state, чтобы
+    у пользователя на телефоне перерисовалась Reply-клавиатура (она
+    кэшируется Telegram и не обновляется сама, пока не придёт новое
+    сообщение с новым reply_markup). НИЧЕГО в user_state не меняет и не
+    сбрасывает - активная смена, черновик заказа, любое другое состояние
+    остаются как были, ровно то, что просил пользователь ("сохрани уже
+    активированные к примеру начатую смену")."""
+    await callback_query.answer("Обновляю меню…")
+    user_id = callback_query.from_user.id
+    state = user_state.get(user_id, {})
+    category = state.get('category')
+    city = state.get('city')
+    if not category or not city:
+        await callback_query.message.answer(
+            "Сначала выбери категорию и город, чтобы показать меню 🙂",
+            reply_markup=category_keyboard(),
+        )
+        return
+    await callback_query.message.answer(
+        "✅ Меню обновлено 👇",
+        reply_markup=services_keyboard(category, city, user_id),
+    )
 
 # ==================== ПЛАТНАЯ ПОДПИСКА ====================
 # По просьбе пользователя (20.09.2026): "сделай так чтобы бот был платный
@@ -11669,8 +11729,8 @@ async def create_tinkoff_payment(user_id: int):
 def subscription_paywall_keyboard(pay_url):
     buttons = []
     if pay_url:
-        buttons.append([InlineKeyboardButton(text=f"💳 Оплатить {SUBSCRIPTION_PRICE_RUB}₽", url=pay_url)])
-    buttons.append([InlineKeyboardButton(text="🔄 Я оплатил(а), проверить", callback_data="sub_pay_check")])
+        buttons.append([InlineKeyboardButton(text=f"💳 ОПЛАТИТЬ {SUBSCRIPTION_PRICE_RUB}₽", url=pay_url)])
+    buttons.append([InlineKeyboardButton(text="🔄 Я ОПЛАТИЛ(А), ПРОВЕРИТЬ", callback_data="sub_pay_check")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
@@ -11857,7 +11917,7 @@ async def start_subscription_webhook_server():
     app.router.add_get(CABINET_DATA_API_PATH, handle_cabinet_data_api)
     app.router.add_post(CABINET_PROFILE_API_PATH, handle_cabinet_profile_api)
     # Расширение личного кабинета (21.09.2026, объединение "Инструменты
-    # водителя" + "Настройки" -> "👤 Личный кабинет", см. блок "ЛИЧНЫЙ КАБИНЕТ
+    # водителя" + "Настройки" -> "👤 ЛИЧНЫЙ КАБИНЕТ", см. блок "ЛИЧНЫЙ КАБИНЕТ
     # - РАСШИРЕНИЕ" выше) - новые разделы WebApp: Финансы/Спрос сейчас/Часы
     # пика/Рядом (гео)/Настройки.
     app.router.add_post(CABINET_FINANCE_API_PATH, handle_cabinet_finance_api)
@@ -12117,7 +12177,7 @@ REFERRAL_SHARE_TEXT_TEMPLATE = (
 
 
 def referral_menu_keyboard(referral_link):
-    # "🔗 Моя ссылка"/"📤 Поделиться ссылкой" - по прямой просьбе пользователя
+    # "🔗 МОЯ ССЫЛКА"/"📤 ПОДЕЛИТЬСЯ ССЫЛКОЙ" - по прямой просьбе пользователя
     # (20.09.2026: "нужна кнопка... чтобы люди понимали какую ссылку давать
     # чтобы делиться"). "Поделиться" - через switch_inline_query: открывает
     # у пользователя список его чатов Telegram с уже готовым текстом+ссылкой,
@@ -12127,10 +12187,10 @@ def referral_menu_keyboard(referral_link):
     # сообщением, чтобы было удобно скопировать долгим нажатием.
     share_text = REFERRAL_SHARE_TEXT_TEMPLATE.format(link=referral_link)
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔗 Моя ссылка", callback_data="referral_link_show")],
-        [InlineKeyboardButton(text="📤 Поделиться ссылкой", switch_inline_query=share_text)],
-        [InlineKeyboardButton(text="📋 Мои рефералы", callback_data="referral_list")],
-        [InlineKeyboardButton(text="💸 Вывести средства", callback_data="referral_withdraw_start")],
+        [InlineKeyboardButton(text="🔗 МОЯ ССЫЛКА", callback_data="referral_link_show")],
+        [InlineKeyboardButton(text="📤 ПОДЕЛИТЬСЯ ССЫЛКОЙ", switch_inline_query=share_text)],
+        [InlineKeyboardButton(text="📋 МОИ РЕФЕРАЛЫ", callback_data="referral_list")],
+        [InlineKeyboardButton(text="💸 ВЫВЕСТИ СРЕДСТВА", callback_data="referral_withdraw_start")],
     ])
 
 
@@ -12139,10 +12199,10 @@ def get_referral_link(bot_username, user_id):
 
 
 def referral_withdraw_cancel_keyboard():
-    return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[[KeyboardButton(text="❌ Отмена")]])
+    return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[[KeyboardButton(text="❌ ОТМЕНА")]])
 
 
-@router.message(lambda message: message.text == "🤝 Реферальная программа")
+@router.message(lambda message: message.text == "🤝 РЕФЕРАЛЬНАЯ ПРОГРАММА")
 async def show_referral_program(message: types.Message):
     user_id = message.from_user.id
     ensure_referral_row(user_id)
@@ -12242,7 +12302,7 @@ async def referral_withdraw_flow(message: types.Message):
     category = state.get('category')
     city = state.get('city')
 
-    if text == "❌ Отмена":
+    if text == "❌ ОТМЕНА":
         state.pop('referral_withdraw', None)
         await message.answer("Заявка на вывод отменена.", reply_markup=services_keyboard(category, city, user_id))
         return
@@ -12298,8 +12358,8 @@ async def referral_withdraw_flow(message: types.Message):
             f"✅ Поступит на карту: {payout / 100:.0f}₽\n\n"
             f"Обработка обычно занимает до 1-2 рабочих дней.",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="✅ Подтвердить", callback_data="referral_withdraw_confirm")],
-                [InlineKeyboardButton(text="❌ Отмена", callback_data="referral_withdraw_cancel")],
+                [InlineKeyboardButton(text="✅ ПОДТВЕРДИТЬ", callback_data="referral_withdraw_confirm")],
+                [InlineKeyboardButton(text="❌ ОТМЕНА", callback_data="referral_withdraw_cancel")],
             ])
         )
         return
@@ -12426,7 +12486,7 @@ async def admin_mark_referral_paid(message: types.Message):
 # По просьбе пользователя (20.09.2026): "делай пуши перекрытий... и крупные
 # ДТП" - отдельный пуш-тип, независимый от статусов аэропортов/часов пика.
 # Источник - та же лента road_events_data.json (см. fetch_road_events.py),
-# что уже показывается по кнопке "⛔ Дорожные события" - is_closure/is_severe
+# что уже показывается по кнопке "⛔ ДОРОЖНЫЕ СОБЫТИЯ" - is_closure/is_severe
 # посчитаны уже там (см. CLOSURE_KEYWORDS/SEVERE_INCIDENT_KEYWORDS), здесь
 # только дедуп (см. was_road_event_alert_sent) и рассылка.
 ROAD_EVENT_ALERT_TEXT_LIMIT = 500  # обрезаем длинный пост в самом пуше - полный текст всё равно доступен по кнопке
