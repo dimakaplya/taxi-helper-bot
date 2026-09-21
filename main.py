@@ -310,6 +310,53 @@ PRECIP_WEATHERCODES = {code for code, (_, weight, _) in WEATHERCODE_INFO.items()
 def describe_weathercode(code):
     return WEATHERCODE_INFO.get(code, ('осадки', 1, '🌧'))
 
+# Влияние осадков на спрос по 10-балльной шкале, присланное пользователем
+# 22.09.2026 - ДВЕ РАЗНЫЕ шкалы: у Ultima (Business/Premier/Élite/Cruise)
+# спрос от дождя растёт заметнее, чем у обычного такси (Эконом/Комфорт/
+# Комфорт+) - меньше свободных премиальных машин, клиенты охотнее берут
+# дорогое такси, лишь бы не мокнуть. Ключ - интенсивность осадков (см.
+# WEATHERCODE_TO_INTENSITY ниже, сопоставляет каждый код погоды Open-Meteo
+# с одной из этих 7 градаций).
+RAIN_IMPACT_TAXI = {
+    'none': 0, 'drizzle': 1, 'light': 2, 'moderate': 3,
+    'heavy': 5, 'downpour': 7, 'extreme': 8,
+}
+RAIN_IMPACT_ULTIMA = {
+    'none': 0, 'drizzle': 1, 'light': 2, 'moderate': 4,
+    'heavy': 7, 'downpour': 9, 'extreme': 10,
+}
+# Категория -> своя шкала выше. courier/cargo своей шкалы не прислали -
+# используют шкалу обычного такси (ближе по типу транспорта/спроса, чем
+# Ultima), как и любая не перечисленная категория.
+CATEGORY_RAIN_IMPACT = {
+    'taxi': RAIN_IMPACT_TAXI,
+    'ultima': RAIN_IMPACT_ULTIMA,
+}
+
+def get_rain_impact_scale(category):
+    """Возвращает 10-балльную шкалу влияния осадков на спрос для категории -
+    см. CATEGORY_RAIN_IMPACT/RAIN_IMPACT_TAXI/RAIN_IMPACT_ULTIMA выше."""
+    return CATEGORY_RAIN_IMPACT.get(category, RAIN_IMPACT_TAXI)
+
+# Код погоды Open-Meteo -> градация интенсивности осадков (ключ шкалы выше).
+# Коды без активных осадков (0-3, туман 45/48) сюда не входят - для них
+# интенсивность 'none' (обрабатывается отдельно, см. rain_impact_score).
+WEATHERCODE_TO_INTENSITY = {
+    51: 'drizzle', 53: 'drizzle', 55: 'light', 56: 'light', 57: 'moderate',
+    61: 'light', 63: 'moderate', 65: 'heavy', 66: 'moderate', 67: 'heavy',
+    71: 'light', 73: 'moderate', 75: 'heavy', 77: 'light',
+    80: 'moderate', 81: 'downpour', 82: 'extreme',
+    85: 'moderate', 86: 'heavy',
+    95: 'downpour', 96: 'downpour', 99: 'extreme',
+}
+
+def rain_impact_score(code, category):
+    """Балл влияния текущих/ожидаемых осадков (код Open-Meteo) на спрос для
+    данной категории - по 10-балльной шкале пользователя (см.
+    CATEGORY_RAIN_IMPACT). 0, если осадков нет/код неизвестен."""
+    intensity = WEATHERCODE_TO_INTENSITY.get(code, 'none')
+    return get_rain_impact_scale(category).get(intensity, 0)
+
 # ==================== НАСТРОЙКИ ПУШЕЙ ====================
 # По просьбе пользователя - каждый тип автопуша можно включить/выключить
 # отдельно (кнопка "🔔 Уведомления" в "Инструменты водителя", см.
@@ -5681,8 +5728,15 @@ async def score_city_candidate(city, category=None):
         current = forecast.get('current', {})
         code = current.get('weathercode')
         if code in PRECIP_WEATHERCODES:
-            _name, weight, emoji = describe_weathercode(code)
-            bonus = weight * 8  # вес 1-8 -> бонус 8-64 баллов
+            _name, _weight, emoji = describe_weathercode(code)
+            # ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя - прислал
+            # 10-балльную шкалу влияния осадков на спрос, отдельную для
+            # Ultima и для обычного такси, см. CATEGORY_RAIN_IMPACT) - балл
+            # осадков теперь зависит от категории: у Ultima дождь поднимает
+            # спрос заметнее. impact 0-10 -> бонус 0-80 баллов (было: общий
+            # вес 1-8 -> 8-64, без разницы между категориями).
+            impact = rain_impact_score(code, category)
+            bonus = impact * 8
             score += bonus
             reasons.append(f"{emoji} осадки сейчас - спрос выше обычного")
         else:
@@ -5690,10 +5744,12 @@ async def score_city_candidate(city, category=None):
             # сейчас нет, но по почасовому прогнозу они начнутся в пределах
             # RAIN_LEAD_MINUTES (тот же порог, что у упреждающих пушей
             # push_rain_alert), даём водителю подъехать заранее: бонус
-            # поменьше, чем за уже идущие осадки (вес 1-8 -> 4-32 балла).
+            # поменьше, чем за уже идущие осадки (impact 0-10 -> 0-40 баллов,
+            # тоже по категории - см. комментарий выше).
             upcoming = find_upcoming_precip_event(forecast)
             if upcoming and upcoming['hour_offset'] > 0:
-                bonus = upcoming['weight'] * 4
+                impact = rain_impact_score(upcoming['code'], category)
+                bonus = impact * 4
                 score += bonus
                 reasons.append(f"{upcoming['emoji']} скоро осадки - спрос скоро вырастет")
 
