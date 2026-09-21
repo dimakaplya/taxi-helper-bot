@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 from math import radians, sin, cos, asin, sqrt
 from aiogram import Bot, Dispatcher, Router, types, BaseMiddleware
 from aiogram.filters import Command
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo, FSInputFile
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo, FSInputFile, MenuButtonWebApp, MenuButtonDefault
 from aiogram.client.session.middlewares.base import BaseRequestMiddleware
 from aiogram.methods import SendMessage, TelegramMethod
 from aiogram.methods.base import TelegramType
@@ -2658,6 +2658,31 @@ def _fire_and_forget(coro):
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
 
+# ==================== MENU BUTTON ЛИЧНОГО КАБИНЕТА (21.09.2026) ====================
+# По просьбе пользователя - открывать "Личный кабинет" в один тап, а не
+# через промежуточное сообщение с инлайн-кнопкой (см. open_cabinet_from_menu
+# выше в файле). У кнопок с web_app= в Reply-клавиатуре initData приходит
+# пустым (проверено на реальном устройстве - см. комментарий у cabinet_row в
+# services_keyboard), а вот "кнопка меню" слева от поля ввода (Menu Button,
+# bot.set_chat_menu_button) с web_app= передаёт initData так же штатно, как
+# инлайн-кнопки - и открывается в один тап, без промежуточного сообщения.
+# Устанавливается ПЕРСОНАЛЬНО на чат (chat_id=user_id), т.к. сама ссылка
+# зависит от тарифов конкретной категории водителя (?tariffs=...) - в
+# отличие от команд бота, Menu Button можно задавать per-chat.
+_cabinet_menu_button_cache = {}  # user_id -> последний выставленный cabinet_url, чтобы не дёргать API повторно с тем же URL
+
+async def set_cabinet_menu_button(user_id, cabinet_url):
+    if _cabinet_menu_button_cache.get(user_id) == cabinet_url:
+        return
+    try:
+        await bot.set_chat_menu_button(
+            chat_id=user_id,
+            menu_button=MenuButtonWebApp(text="Кабинет", web_app=WebAppInfo(url=cabinet_url)),
+        )
+        _cabinet_menu_button_cache[user_id] = cabinet_url
+    except Exception as e:
+        logger.warning(f"⚠️ Не удалось выставить Menu Button личного кабинета для {user_id}: {e}")
+
 class SingleMessageMiddleware(BaseRequestMiddleware):
     async def __call__(self, make_request, bot_instance: Bot, method: TelegramMethod[TelegramType]):
         if isinstance(method, SendMessage):
@@ -3165,19 +3190,36 @@ def services_keyboard(category=None, city=None, user_id=None):
     # tg=ok, platform/version распознаны из хэша, но initData.len=0 и
     # initDataUnsafe.user=absent). Карта эту проблему не показывала, т.к.
     # отдаёт публичные данные без проверки подписи, а личному кабинету
-    # initData обязателен (там персональные данные). Поэтому кнопка кабинета
-    # в самой Reply-клавиатуре теперь ОБЫЧНАЯ (без web_app) - по нажатию
-    # хендлер open_cabinet_from_menu ниже присылает отдельным сообщением
-    # ИНЛАЙН-кнопку с web_app (тот же паттерн, что уже работал в "💰
-    # Финансы" -> start_courier_finance) - у инлайн-кнопок initData
-    # передаётся штатно.
-    show_cabinet_row = bool(PUBLIC_URL and city)
-    cabinet_row = KeyboardButton(text="👤 Личный кабинет") if show_cabinet_row else None
+    # initData обязателен (там персональные данные). Сначала кабинет
+    # открывался через промежуточное сообщение с инлайн-кнопкой
+    # (open_cabinet_from_menu) - у инлайн-кнопок initData передаётся
+    # штатно, но это два тапа. По просьбе пользователя (21.09.2026, "в один
+    # тап") - теперь используем Menu Button (кнопка слева от поля ввода,
+    # bot.set_chat_menu_button) с web_app= - initData у неё тоже передаётся
+    # штатно, а открывается в один тап, без лишнего сообщения. Ссылка
+    # зависит от тарифов категории, поэтому выставляем ПЕРСОНАЛЬНО на чат
+    # (см. set_cabinet_menu_button) - лёгкий fire-and-forget с кэшем по
+    # user_id, чтобы не дёргать API Telegram на каждый показ меню с одним и
+    # тем же URL. Сама кнопка "👤 Личный кабинет" из Reply-клавиатуры теперь
+    # УБРАНА (по просьбе пользователя, "удали тогда её из меню") -
+    # open_cabinet_from_menu ниже оставлен в коде на случай регресса Menu
+    # Button, но с главного меню на него больше нет прямого пути.
+    if PUBLIC_URL and city and user_id is not None:
+        tariff_options = CATEGORIES.get(category, {}).get('tariffs', [])
+        cabinet_url = f"{PUBLIC_URL}{CABINET_WEBAPP_PATH}?tariffs={urllib.parse.quote(','.join(tariff_options))}"
+        _fire_and_forget(set_cabinet_menu_button(user_id, cabinet_url))
 
     items = []
     if category in SHARED_ORDER_CATEGORIES:
         items.append("🔄 Отдать заказ")
     items.append("🌤 Погода")
+    # "💳 Чаевые" вынесена в главное меню (по просьбе пользователя,
+    # 21.09.2026) - раньше была только внутри "🧰 Инструменты водителя"
+    # (сейчас недоступной с главного меню, см. комментарий выше), тот же
+    # текст статьи/ссылок, что и раньше (см. show_tips_app_main_menu ниже -
+    # новый хендлер без требования in_courier_module, старый "💳 Получить
+    # чаевые" внутри courier_module_keyboard не трогали).
+    items.append("💳 Чаевые")
     # "✈️🚆 Авиа/ЖД" убрана отсюда (по просьбе пользователя, 21.09.2026:
     # "авиа жд и событие города в одну строчку") - раньше была в этой общей
     # 2-колоночной сетке (парой со следующей по списку кнопкой), теперь
@@ -3212,13 +3254,10 @@ def services_keyboard(category=None, city=None, user_id=None):
         events_row.append(KeyboardButton(text="✈️🚆 Авиа/ЖД"))
     events_row.append(KeyboardButton(text=events_button_text))
     buttons.append(events_row)
-    # "👤 Личный кабинет" - своей отдельной строкой (по просьбе пользователя,
-    # 21.09.2026, "инструменты водителя и настройки сделать одну кнопку
-    # Личный кабинет") - раньше делила ряд с "События города", теперь в
-    # том же ряду "Авиа/ЖД" (см. выше), поэтому кабинет вынесен отдельно,
-    # чтобы не собирать 3 кнопки в одну строку.
-    if cabinet_row is not None:
-        buttons.append([cabinet_row])
+    # "👤 Личный кабинет" здесь БОЛЬШЕ НЕТ как отдельной кнопки Reply-
+    # клавиатуры (убрана по просьбе пользователя, 21.09.2026 - "удали тогда
+    # её из меню") - открывается через Menu Button (см. комментарий выше,
+    # set_cabinet_menu_button), кнопка слева от поля ввода сообщения.
     buttons.append([KeyboardButton(text="🔓 Бесплатный VPN TAXI HELPER")])
     # "🤝 Реферальная программа" (по просьбе пользователя, 20.09.2026) - своей
     # строкой, под VPN - см. блок "РЕФЕРАЛЬНАЯ ПРОГРАММА" ниже
@@ -4121,6 +4160,30 @@ async def show_tips_app(message: types.Message):
     ])
     await message.answer(text, reply_markup=keyboard, parse_mode='Markdown')
     await message.answer("Выбери, что нужно дальше 👇", reply_markup=courier_module_keyboard(category))
+
+@router.message(lambda message: message.text == "💳 Чаевые")
+async def show_tips_app_main_menu(message: types.Message):
+    """"💳 Чаевые" - главное меню (по просьбе пользователя, 21.09.2026,
+    "чаевые вынеси на главное меню") - тот же контент, что у show_tips_app
+    выше (старая кнопка "💳 Получить чаевые" внутри courier_module_keyboard
+    не трогали - оставлена как есть), но без требования in_courier_module и
+    с возвратом в services_keyboard, а не courier_module_keyboard."""
+    user_id = message.from_user.id
+    state = user_state.get(user_id, {})
+    text = (
+        "💳 *Получить чаевые*\n\n"
+        "Приложение «Яндекс Чаевые: на карту по QR» - покажи QR-код пассажиру, "
+        "он сканирует и переводит чаевые тебе на карту."
+    )
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🍎 Получить чаевые на iPhone", url=TIPS_APP_URL_IOS)],
+        [InlineKeyboardButton(text="🤖 Получить чаевые на Android", url=TIPS_APP_URL_ANDROID)],
+    ])
+    await message.answer(text, reply_markup=keyboard, parse_mode='Markdown')
+    await message.answer(
+        "Выбери, что нужно дальше 👇",
+        reply_markup=services_keyboard(state.get('category'), state.get('city'), user_id),
+    )
 
 @router.message(lambda message: message.text == "📈 Спрос сейчас" and user_state.get(message.from_user.id, {}).get('in_courier_module'))
 async def show_kef_bot(message: types.Message):
