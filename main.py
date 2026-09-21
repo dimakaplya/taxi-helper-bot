@@ -7710,17 +7710,17 @@ def transport_webapp_html():
   .status-closed { color: #ff6b6b; }
   .status-coordinated { color: #FFC400; }
   .status-open { color: #4caf50; }
-  /* ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "а кнопку встать в
-     очередь тоже надо вывести пусть будет и тут") - форма отметки очереди
-     прямо внутри карточки аэропорта. */
-  .queue-toggle {
-    margin-top: 8px; text-align: center; padding: 9px; border-radius: 10px;
-    background: rgba(255,196,0,.1); border: 1px solid rgba(255,196,0,.35);
-    color: #FFC400; font-size: 12.5px; font-weight: 700; cursor: pointer;
+  /* ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя - "снизу её под
+     списком, большую") - одна крупная кнопка "ОТМЕТИТЬ ОЧЕРЕДЬ" под ВСЕМ
+     списком аэропортов, а не своя маленькая внутри каждой карточки. */
+  .queue-toggle-main {
+    margin-top: 14px; text-align: center; padding: 16px; border-radius: 14px;
+    background: rgba(255,196,0,.14); border: 1.5px solid #FFC400;
+    color: #FFC400; font-size: 15.5px; font-weight: 800; cursor: pointer;
   }
-  .queue-form { display: none; margin-top: 8px; }
-  .queue-form.open { display: block; }
-  .queue-form .lbl { font-size: 11px; color: #9a9a9a; margin: 8px 0 5px; }
+  .queue-form-main { display: none; margin-top: 12px; padding: 12px 14px; background: #141414; border: 1px solid rgba(255,255,255,.08); border-radius: 14px; }
+  .queue-form-main.open { display: block; }
+  .lbl { font-size: 11px; color: #9a9a9a; margin: 8px 0 5px; }
   .pills { display: flex; flex-wrap: wrap; gap: 6px; }
   .pill {
     padding: 6px 10px; border-radius: 8px; background: #1c1c1c; border: 1px solid rgba(255,255,255,.12);
@@ -7748,7 +7748,11 @@ def transport_webapp_html():
     <div class="tab" id="tabTrains" data-tab="trains">🚆 Вокзалы</div>
   </div>
   <div class="legend">🔴0-25% Не ехать | 🟡26-50% Уточни очередь | 🟢51-85% Занимай очередь | 🟣&gt;85% Срочно ехать</div>
-  <div class="section active" id="secAirports"></div>
+  <div class="section active" id="secAirports">
+    <div id="airportsList"></div>
+    <div class="queue-toggle-main" id="queueToggleMain" style="display:none">🚗 ОТМЕТИТЬ ОЧЕРЕДЬ</div>
+    <div class="queue-form-main" id="queueFormMain"></div>
+  </div>
   <div class="section" id="secTrains"></div>
 </div>
 <script>
@@ -7784,7 +7788,6 @@ def transport_webapp_html():
   // живёт только пока открыта страница, между отметками не сохраняется.
   let TARIFFS = [];
   let QUEUE_RANGES = [];
-  const queueSelection = {};
 
   function showTab(name) {
     document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
@@ -7792,14 +7795,21 @@ def transport_webapp_html():
     document.getElementById('secTrains').classList.toggle('active', name === 'trains');
   }
   document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', () => showTab(t.dataset.tab)));
+  document.getElementById('queueToggleMain').addEventListener('click', () => {
+    document.getElementById('queueFormMain').classList.toggle('open');
+  });
+
+  let currentAirports = [];
 
   function renderAirports(airports) {
-    const sec = document.getElementById('secAirports');
+    currentAirports = airports;
+    const list = document.getElementById('airportsList');
     if (!airports.length) {
-      sec.innerHTML = '<div class="empty">Аэропортов для этого города не найдено.</div>';
+      list.innerHTML = '<div class="empty">Аэропортов для этого города не найдено.</div>';
+      document.getElementById('queueToggleMain').style.display = 'none';
       return;
     }
-    sec.innerHTML = airports.map((a, i) => {
+    list.innerHTML = airports.map((a, i) => {
       let head, sub;
       if (a.closed) {
         head = esc(a.emoji) + ' ' + esc(a.name) + ' <span class="load status-closed">🔴 ЗАКРЫТ</span>';
@@ -7828,133 +7838,108 @@ def transport_webapp_html():
         (a.notices || []).forEach(n => {
           detail += '<div class="notice"><span class="nt">📢 ' + esc(n.time) + '</span>' + esc(n.text) + '</div>';
         });
-        if (a.queue_text) {
-          detail += '<div class="queue-box" id="queueBox' + i + '">' + esc(a.queue_text) + '</div>';
-        } else {
-          detail += '<div class="queue-box" id="queueBox' + i + '"></div>';
-        }
-        // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "а кнопку
-        // встать в очередь тоже надо вывести пусть будет и тут") - та же
-        // отметка длины очереди, что в чате (join_queue_.../qsub_), только
-        // все тарифы и диапазон выбираются на одном экране мини-аппа.
-        detail += renderQueueForm(i);
+        detail += '<div class="queue-box" id="queueBox' + i + '">' + esc(a.queue_text || '') + '</div>';
       }
       return '<div class="item" data-idx="' + i + '" data-kind="a">' +
         '<div class="head">' + head + '</div><div class="sub">' + sub + '</div>' +
         '<div class="detail" id="detA' + i + '">' + detail + '</div>' +
         '</div>';
     }).join('');
-    sec.querySelectorAll('.item').forEach(el => {
-      el.addEventListener('click', (ev) => {
-        // Клики внутри формы отметки очереди не должны схлопывать карточку -
-        // сама форма/кнопки сами останавливают всплытие (см. wireQueueForm).
+    list.querySelectorAll('.item').forEach(el => {
+      el.addEventListener('click', () => {
         const idx = el.dataset.idx;
         document.getElementById('detA' + idx).classList.toggle('open');
       });
     });
-    airports.forEach((a, i) => { if (!a.closed) wireQueueForm(i); });
+    // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "снизу её под
+    // списком, большую") - одна крупная кнопка "ОТМЕТИТЬ ОЧЕРЕДЬ" под ВСЕМ
+    // списком аэропортов (а не своя внутри каждой карточки), по нажатию
+    // сначала спрашивает, какой аэропорт.
+    const hasOpenAirports = airports.some(a => !a.closed);
+    const toggleMain = document.getElementById('queueToggleMain');
+    toggleMain.style.display = hasOpenAirports ? 'block' : 'none';
+    resetQueueMainForm();
   }
 
-  // ДОБАВЛЕНО 22.09.2026 - разметка формы отметки очереди для одного
-  // аэропорта (индекс i): переключатель "Отметить очередь", чекбоксы
-  // тарифов (если у категории есть тарифы) и пилюли диапазона под каждым
-  // выбранным тарифом.
-  function renderQueueForm(i) {
-    let html = '<div class="queue-toggle" data-qtoggle="' + i + '">🚗 ОТМЕТИТЬ ОЧЕРЕДЬ</div>';
-    html += '<div class="queue-form" id="qform' + i + '">';
-    if (TARIFFS.length) {
-      html += '<div class="lbl">Выбери класс(ы) - можно несколько:</div>';
-      html += '<div class="pills" id="qtariffs' + i + '">' + TARIFFS.map(t =>
-        '<div class="pill" data-tariff="' + esc(t) + '">' + esc(t) + '</div>'
-      ).join('') + '</div>';
-    }
-    html += '<div id="qranges' + i + '"></div>';
-    html += '<button class="queue-submit" id="qsubmit' + i + '" disabled>ОТПРАВИТЬ ОТМЕТКУ</button>';
-    html += '<div class="queue-msg" id="qmsg' + i + '"></div>';
-    html += '</div>';
-    return html;
+  // Состояние крупной формы "ОТМЕТИТЬ ОЧЕРЕДЬ" под списком - шаг 1 (выбор
+  // аэропорта), затем шаг 2 (тарифы + диапазон), один экземпляр формы на
+  // всю страницу.
+  const queueMain = { airportIdx: null, tariffs: [], ranges: {} };
+
+  function resetQueueMainForm() {
+    queueMain.airportIdx = null;
+    queueMain.tariffs = [];
+    queueMain.ranges = {};
+    const form = document.getElementById('queueFormMain');
+    form.classList.remove('open');
+    renderQueueMainForm();
   }
 
-  function queueRangePills(airportIdx, tariffKey) {
-    return '<div class="pills">' + QUEUE_RANGES.map(r =>
-      '<div class="pill" data-range-for="' + esc(tariffKey) + '" data-range="' + esc(r) + '">' + esc(r) + '</div>'
+  function renderQueueMainForm() {
+    const form = document.getElementById('queueFormMain');
+    const openAirports = currentAirports.map((a, i) => ({ a, i })).filter(x => !x.a.closed);
+    let html = '<div class="lbl">Какой аэропорт?</div>';
+    html += '<div class="pills" id="qmAirports">' + openAirports.map(x =>
+      '<div class="pill' + (queueMain.airportIdx === x.i ? ' sel' : '') + '" data-airport-idx="' + x.i + '">' + esc(x.a.emoji) + ' ' + esc(x.a.name) + '</div>'
     ).join('') + '</div>';
-  }
-
-  function updateQueueRangeBlocks(i) {
-    // Без тарифов у категории (пустой TARIFFS) - один общий диапазон под
-    // ключом "_"; с тарифами - свой блок диапазона под каждым выбранным.
-    const sel = queueSelection[i] || (queueSelection[i] = { tariffs: [], ranges: {} });
-    const wrap = document.getElementById('qranges' + i);
-    const keys = TARIFFS.length ? sel.tariffs : ['_'];
-    if (!keys.length) {
-      wrap.innerHTML = '';
-    } else {
-      wrap.innerHTML = keys.map(key => {
+    if (queueMain.airportIdx !== null) {
+      if (TARIFFS.length) {
+        html += '<div class="lbl">Выбери класс(ы) - можно несколько:</div>';
+        html += '<div class="pills" id="qmTariffs">' + TARIFFS.map(t =>
+          '<div class="pill' + (queueMain.tariffs.includes(t) ? ' sel' : '') + '" data-tariff="' + esc(t) + '">' + esc(t) + '</div>'
+        ).join('') + '</div>';
+      }
+      const keys = TARIFFS.length ? queueMain.tariffs : ['_'];
+      html += '<div id="qmRanges">' + keys.map(key => {
         const title = key === '_' ? 'Сколько машин видишь в очереди?' : key + ' - сколько машин видишь?';
-        return '<div class="range-block"><div class="rt">' + esc(title) + '</div>' + queueRangePills(i, key) + '</div>';
-      }).join('');
-      wrap.querySelectorAll('.pill[data-range-for]').forEach(p => {
-        const key = p.dataset.rangeFor;
-        if (sel.ranges[key] === p.dataset.range) p.classList.add('sel');
-        p.addEventListener('click', (ev) => {
-          ev.stopPropagation();
-          sel.ranges[key] = p.dataset.range;
-          wrap.querySelectorAll('.pill[data-range-for="' + key.replace(/"/g, '\\\\"') + '"]').forEach(pp => pp.classList.toggle('sel', pp === p));
-          refreshQueueSubmitState(i);
-        });
-      });
+        return '<div class="range-block"><div class="rt">' + esc(title) + '</div><div class="pills">' + QUEUE_RANGES.map(r =>
+          '<div class="pill' + (queueMain.ranges[key] === r ? ' sel' : '') + '" data-range-for="' + esc(key) + '" data-range="' + esc(r) + '">' + esc(r) + '</div>'
+        ).join('') + '</div></div>';
+      }).join('') + '</div>';
+      const ready = keys.length > 0 && keys.every(k => queueMain.ranges[k]);
+      html += '<button class="queue-submit" id="qmSubmit"' + (ready ? '' : ' disabled') + '>ОТПРАВИТЬ ОТМЕТКУ</button>';
     }
-    refreshQueueSubmitState(i);
+    html += '<div class="queue-msg" id="qmMsg"></div>';
+    form.innerHTML = html;
+    wireQueueMainForm();
   }
 
-  function refreshQueueSubmitState(i) {
-    const sel = queueSelection[i] || { tariffs: [], ranges: {} };
-    const keys = TARIFFS.length ? sel.tariffs : ['_'];
-    const ready = keys.length > 0 && keys.every(k => sel.ranges[k]);
-    document.getElementById('qsubmit' + i).disabled = !ready;
+  function wireQueueMainForm() {
+    const form = document.getElementById('queueFormMain');
+    form.querySelectorAll('[data-airport-idx]').forEach(p => {
+      p.addEventListener('click', () => {
+        queueMain.airportIdx = Number(p.dataset.airportIdx);
+        queueMain.tariffs = [];
+        queueMain.ranges = {};
+        renderQueueMainForm();
+      });
+    });
+    form.querySelectorAll('[data-tariff]').forEach(p => {
+      p.addEventListener('click', () => {
+        const t = p.dataset.tariff;
+        const idx = queueMain.tariffs.indexOf(t);
+        if (idx === -1) queueMain.tariffs.push(t);
+        else { queueMain.tariffs.splice(idx, 1); delete queueMain.ranges[t]; }
+        renderQueueMainForm();
+      });
+    });
+    form.querySelectorAll('[data-range-for]').forEach(p => {
+      p.addEventListener('click', () => {
+        queueMain.ranges[p.dataset.rangeFor] = p.dataset.range;
+        renderQueueMainForm();
+      });
+    });
+    const submitBtn = document.getElementById('qmSubmit');
+    if (submitBtn) submitBtn.addEventListener('click', submitQueueMainForm);
   }
 
-  function wireQueueForm(i) {
-    queueSelection[i] = { tariffs: [], ranges: {} };
-    const toggle = document.querySelector('[data-qtoggle="' + i + '"]');
-    if (toggle) {
-      toggle.addEventListener('click', (ev) => {
-        ev.stopPropagation();
-        document.getElementById('qform' + i).classList.toggle('open');
-      });
-    }
-    const tariffWrap = document.getElementById('qtariffs' + i);
-    if (tariffWrap) {
-      tariffWrap.querySelectorAll('.pill').forEach(p => {
-        p.addEventListener('click', (ev) => {
-          ev.stopPropagation();
-          const t = p.dataset.tariff;
-          const sel = queueSelection[i];
-          const idx = sel.tariffs.indexOf(t);
-          if (idx === -1) { sel.tariffs.push(t); p.classList.add('sel'); }
-          else { sel.tariffs.splice(idx, 1); p.classList.remove('sel'); delete sel.ranges[t]; p.classList.remove('sel'); }
-          updateQueueRangeBlocks(i);
-        });
-      });
-    }
-    updateQueueRangeBlocks(i);
-    const submitBtn = document.getElementById('qsubmit' + i);
-    if (submitBtn) {
-      submitBtn.addEventListener('click', (ev) => {
-        ev.stopPropagation();
-        submitQueueForm(i);
-      });
-    }
-  }
-
-  async function submitQueueForm(i) {
-    const sel = queueSelection[i];
-    const keys = TARIFFS.length ? sel.tariffs : ['_'];
-    const entries = keys.map(k => ({ tariff: k === '_' ? null : k, range: sel.ranges[k] }));
-    const msgEl = document.getElementById('qmsg' + i);
-    const btn = document.getElementById('qsubmit' + i);
-    btn.disabled = true;
+  async function submitQueueMainForm() {
+    const i = queueMain.airportIdx;
+    const keys = TARIFFS.length ? queueMain.tariffs : ['_'];
+    const entries = keys.map(k => ({ tariff: k === '_' ? null : k, range: queueMain.ranges[k] }));
+    const msgEl = document.getElementById('qmMsg');
+    const btn = document.getElementById('qmSubmit');
+    if (btn) btn.disabled = true;
     msgEl.textContent = '';
     msgEl.className = 'queue-msg';
     try {
@@ -7971,15 +7956,13 @@ def transport_webapp_html():
         const box = document.getElementById('queueBox' + i);
         if (box) box.textContent = data.queue_text;
       }
-      // Сбрасываем выбор диапазонов (но оставляем выбранные тарифы - удобно
-      // отметиться ещё раз через минуту тем же набором классов).
-      sel.ranges = {};
-      updateQueueRangeBlocks(i);
+      // Оставляем выбранный аэропорт+тарифы (удобно отметиться ещё раз
+      // через минуту), сбрасываем только диапазоны.
+      queueMain.ranges = {};
+      renderQueueMainForm();
     } catch (e) {
       msgEl.textContent = '⚠️ Не удалось отправить отметку - попробуй ещё раз.';
       msgEl.className = 'queue-msg err';
-    } finally {
-      refreshQueueSubmitState(i);
     }
   }
 
