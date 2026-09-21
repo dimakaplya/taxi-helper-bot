@@ -2222,6 +2222,14 @@ def init_db():
     existing_columns = {row[1] for row in cursor.fetchall()}
     if 'tariffs' not in existing_columns:
         cursor.execute("ALTER TABLE map_positions ADD COLUMN tariffs TEXT NOT NULL DEFAULT '[]'")
+    if 'heading' not in existing_columns:
+        # ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - показывать на
+        # карте направление движения машинки): направление в градусах
+        # (0-360, по часовой от севера), как его отдаёт Telegram в живой
+        # геопозиции (Location.heading) - может отсутствовать (NULL), если
+        # устройство водителя его не передаёт (не все телефоны/версии
+        # клиента это умеют). См. update_map_position/get_map_positions.
+        cursor.execute("ALTER TABLE map_positions ADD COLUMN heading INTEGER")
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_map_positions_city ON map_positions (city, updated_at)')
     conn.commit()
     conn.close()
@@ -7115,23 +7123,27 @@ MAP_AIRPORTS_API_PATH = '/map/airports'
 # для них очередь не считаем.
 MAP_AIRPORT_QUEUE_CATEGORIES = ['taxi', 'ultima']
 
-def update_map_position(user_id, city, category, lat, lon, tariffs=None):
+def update_map_position(user_id, city, category, lat, lon, tariffs=None, heading=None):
     """Записывает/обновляет последнюю позицию водителя для общей карты.
     Вызывается только пока у водителя активна смена (см.
     maybe_update_map_position/start_shift_and_notify) - сюда напрямую лучше
     не звать. tariffs - список тарифов, выбранных при старте смены (см.
-    shift_tariffs_keyboard), для подписи маркера."""
+    shift_tariffs_keyboard), для подписи маркера. heading - направление
+    движения в градусах (0-360, по часовой от севера) из Telegram Location,
+    может быть None (не все устройства его отдают) - см. комментарий у
+    миграции heading выше."""
     conn = get_db_connection()
     cursor = conn.cursor()
     tariffs_json = json.dumps(list(tariffs or []), ensure_ascii=False)
     cursor.execute('''
-        INSERT INTO map_positions (user_id, city, category, lat, lon, tariffs, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        INSERT INTO map_positions (user_id, city, category, lat, lon, tariffs, heading, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
         ON CONFLICT(user_id) DO UPDATE SET
             city = excluded.city, category = excluded.category,
             lat = excluded.lat, lon = excluded.lon, tariffs = excluded.tariffs,
+            heading = excluded.heading,
             updated_at = CURRENT_TIMESTAMP
-    ''', (user_id, city, category, lat, lon, tariffs_json))
+    ''', (user_id, city, category, lat, lon, tariffs_json, heading))
     conn.commit()
     conn.close()
 
@@ -7160,12 +7172,12 @@ def get_map_positions(city, category=None):
     cursor = conn.cursor()
     if category and category in MAP_CATEGORY_STYLE:
         cursor.execute('''
-            SELECT category, lat, lon, tariffs FROM map_positions
+            SELECT category, lat, lon, tariffs, heading FROM map_positions
             WHERE city = ? AND category = ? AND updated_at >= datetime('now', ?)
         ''', (city, category, f'-{MAP_VISIBILITY_STALE_MINUTES} minutes'))
     else:
         cursor.execute('''
-            SELECT category, lat, lon, tariffs FROM map_positions
+            SELECT category, lat, lon, tariffs, heading FROM map_positions
             WHERE city = ? AND updated_at >= datetime('now', ?)
         ''', (city, f'-{MAP_VISIBILITY_STALE_MINUTES} minutes'))
     rows = cursor.fetchall()
@@ -7176,7 +7188,7 @@ def get_map_positions(city, category=None):
             tariffs = json.loads(r[3]) if r[3] else []
         except Exception:
             tariffs = []
-        result.append({'category': r[0], 'lat': r[1], 'lon': r[2], 'tariffs': tariffs})
+        result.append({'category': r[0], 'lat': r[1], 'lon': r[2], 'tariffs': tariffs, 'heading': r[4]})
     return result
 
 def get_all_map_positions_with_user_id():
@@ -7317,7 +7329,7 @@ async def nearby_drivers_checker():
             logger.exception("❌ Ошибка фоновой проверки соседних водителей")
         await asyncio.sleep(NEARBY_DRIVERS_CHECK_INTERVAL_MINUTES * 60)
 
-def maybe_update_map_position(user_id, lat, lon):
+def maybe_update_map_position(user_id, lat, lon, heading=None):
     """Хук из обработчиков живой геопозиции (см. вызовы ниже) - пишет позицию
     в map_positions, ТОЛЬКО пока у водителя идёт смена (см.
     is_shift_active/start_shift_and_notify) - по прямому уточнению
@@ -7325,7 +7337,10 @@ def maybe_update_map_position(user_id, lat, lon):
     автоматически появляется на карте когда завершает смену на карте его не
     видно". Отдельной настройки-тумблера для показа на карте больше нет.
     Если категория не входит в MAP_CATEGORY_STYLE (на всякий случай) -
-    ничего не пишет."""
+    ничего не пишет. heading - направление движения (0-360°), если Telegram
+    его прислал (см. комментарий у миграции heading в map_positions) - по
+    просьбе пользователя (22.09.2026), чтобы иконка машинки на карте могла
+    показывать, в какую сторону едет водитель."""
     state = user_state.get(user_id) or {}
     shift = state.get('shift')
     if not shift:
@@ -7335,7 +7350,7 @@ def maybe_update_map_position(user_id, lat, lon):
     if not category or not city or category not in MAP_CATEGORY_STYLE:
         return
     try:
-        update_map_position(user_id, city, category, lat, lon, tariffs=shift.get('tariffs'))
+        update_map_position(user_id, city, category, lat, lon, tariffs=shift.get('tariffs'), heading=heading)
     except Exception:
         logger.exception(f"❌ Не удалось обновить позицию на карте для user_id={user_id}")
 
@@ -7375,7 +7390,9 @@ MAP_CHROME_CSS = """
   .legend .dot { width: 11px; height: 11px; border-radius: 50%; border: 1px solid rgba(255,255,255,.5); display: inline-block; }
   .filter-toggle { position: absolute; top: 10px; left: 10px; z-index: 1000; background: #FFC400; color: #000; border-radius: 8px; padding: 8px 12px; font-family: -apple-system, sans-serif; font-size: 12.5px; font-weight: 600; box-shadow: 0 1px 4px rgba(0,0,0,.35); cursor: pointer; user-select: none; text-transform: uppercase; }
   .airport-icon { display: flex; align-items: center; justify-content: center; font-size: 20px; filter: drop-shadow(0 1px 2px rgba(0,0,0,.5)); }
-  .car-icon-inner { width: 24px; height: 24px; border-radius: 50%; border: 1.5px solid #333; display: flex; align-items: center; justify-content: center; font-size: 13px; box-shadow: 0 1px 3px rgba(0,0,0,.4); }
+  .car-icon-wrap { position: relative; width: 36px; height: 36px; }
+  .car-icon-inner { position: absolute; top: 6px; left: 6px; width: 24px; height: 24px; border-radius: 50%; border: 1.5px solid #333; display: flex; align-items: center; justify-content: center; font-size: 13px; box-shadow: 0 1px 3px rgba(0,0,0,.4); }
+  .car-icon-arrow { position: absolute; top: 0; left: 14px; width: 0; height: 0; border-left: 4px solid transparent; border-right: 4px solid transparent; border-bottom: 7px solid #222; transform-origin: 4px 18px; filter: drop-shadow(0 1px 1px rgba(0,0,0,.4)); }
   .airport-popup h4 { margin: 0 0 4px; font-family: -apple-system, sans-serif; font-size: 13.5px; color: #000; }
   .airport-popup .row { font-family: -apple-system, sans-serif; font-size: 12.5px; margin: 2px 0; color: #333; }
   .airport-label { background: rgba(20,20,20,.92); color: #fff; border: 1px solid rgba(255,196,0,.55); border-radius: 6px; padding: 3px 6px; font-family: -apple-system, sans-serif; font-size: 11px; line-height: 1.35; white-space: nowrap; box-shadow: 0 1px 3px rgba(0,0,0,.35); }
@@ -7484,11 +7501,22 @@ def map_webapp_html():
         // залитая цветом категории (тем же, что раньше был у кружка) -
         // чтобы на карте сразу было видно, что это за водитель, а не просто
         // цветная точка.
+        // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "машинка
+        // может показывать направление?"): если Telegram прислал heading
+        // (направление движения, 0-360° по часовой от севера - не все
+        // устройства его отдают, см. миграцию heading в map_positions),
+        // рисуем маленькую стрелку у края кружка, повёрнутую в эту сторону -
+        // саму иконку (эмодзи) не крутим, чтобы машинка/человечек/грузовик
+        // не переворачивались "вверх ногами" при развороте.
+        const hasHeading = p.heading !== null && p.heading !== undefined;
+        const arrowHtml = hasHeading
+          ? `<div class="car-icon-arrow" style="transform:rotate(${{p.heading}}deg)"></div>`
+          : '';
         const icon = L.divIcon({{
           className: 'car-icon',
-          html: `<div class="car-icon-inner" style="background:${{style.color}}">${{style.icon || '🚗'}}</div>`,
-          iconSize: [24, 24],
-          iconAnchor: [12, 12],
+          html: `<div class="car-icon-wrap"><div class="car-icon-inner" style="background:${{style.color}}">${{style.icon || '🚗'}}</div>${{arrowHtml}}</div>`,
+          iconSize: [36, 36],
+          iconAnchor: [18, 18],
         }});
         const marker = L.marker([p.lat, p.lon], {{ icon }}).bindPopup(popupText).addTo(map);
         markers.push(marker);
@@ -10593,11 +10621,12 @@ async def handle_airport_queue_location(message: types.Message):
     обработается как обычно."""
     user_id = message.from_user.id
     lat, lon = message.location.latitude, message.location.longitude
+    heading = getattr(message.location, 'heading', None)
     await process_airport_queue_ping(user_id, lat, lon, live_period=getattr(message.location, 'live_period', None))
     await process_parking_ping(user_id, lat, lon)
     km_counter_ping(user_id, lat, lon)
     remember_live_location(user_id, lat, lon)
-    maybe_update_map_position(user_id, lat, lon)
+    maybe_update_map_position(user_id, lat, lon, heading=heading)
     await maybe_start_pending_shift(message, user_id)
     state = user_state.get(user_id) or {}
     if state.get('airport_queue_active') and is_shift_active(state):
@@ -10617,11 +10646,12 @@ async def handle_airport_queue_location_update(message: types.Message):
     handle_airport_queue_location."""
     user_id = message.from_user.id
     lat, lon = message.location.latitude, message.location.longitude
+    heading = getattr(message.location, 'heading', None)
     await process_airport_queue_ping(user_id, lat, lon, live_period=getattr(message.location, 'live_period', None))
     await process_parking_ping(user_id, lat, lon)
     km_counter_ping(user_id, lat, lon)
     remember_live_location(user_id, lat, lon)
-    maybe_update_map_position(user_id, lat, lon)
+    maybe_update_map_position(user_id, lat, lon, heading=heading)
     await maybe_start_pending_shift(message, user_id)
 
 @router.message(lambda message: message.text in NEARBY_BUTTON_TO_KIND and user_state.get(message.from_user.id, {}).get('in_courier_module'))
