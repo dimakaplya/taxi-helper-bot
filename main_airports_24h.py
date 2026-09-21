@@ -367,6 +367,27 @@ def notifications_enabled(state, notif_key):
 # по порядку и шлёт пуш за каждый
 # впервые пройденный уровень.
 AIRPORT_QUEUE_RADIUS_LEVELS_KM = [2.0, 1.0, 0.5]
+# ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя - "кнопка с сообщением
+# встать в очередь пока юзер не встал должна быть на главном экране пока он
+# находится в зоне аэропорта в 1.5 км, единственное исключение для внуково
+# 2.5 км"): внешний ("въехал в зону аэропорта") уровень из
+# AIRPORT_QUEUE_RADIUS_LEVELS_KM[0] теперь берётся отсюда - за пределами
+# аэропортов, обычная зона 1.5 км; для Внуково (UUWW) явно задано
+# исключение 2.5 км (прямая просьба пользователя). см.
+# airport_queue_outer_radius_km() ниже - process_airport_queue_ping
+# использует именно её вместо AIRPORT_QUEUE_RADIUS_LEVELS_KM[0] для первого
+# (самого внешнего) уровня, остальные уровни (1.0/0.5 км) не меняются.
+AIRPORT_QUEUE_OUTER_RADIUS_DEFAULT_KM = 1.5
+AIRPORT_QUEUE_OUTER_RADIUS_OVERRIDES_KM = {
+    'UUWW': 2.5,  # VKO (Внуково)
+}
+
+def airport_queue_outer_radius_km(icao):
+    """Радиус "зоны аэропорта" для самого внешнего уровня гео-пушей очереди
+    (см. AIRPORT_QUEUE_OUTER_RADIUS_DEFAULT_KM/_OVERRIDES_KM выше) - 1.5 км
+    для всех аэропортов, кроме Внуково (2.5 км, прямая просьба пользователя,
+    22.09.2026)."""
+    return AIRPORT_QUEUE_OUTER_RADIUS_OVERRIDES_KM.get(icao, AIRPORT_QUEUE_OUTER_RADIUS_DEFAULT_KM)
 # Пользователь также попросил убрать пуш "уже 1 час рядом" и пуш "уже 15
 # минут рядом" (последнего на самом деле и не было - только 30/60), оставив
 # ТОЛЬКО "уже 30 минут рядом" - это финальное ненавязчивое напоминание,
@@ -5841,23 +5862,32 @@ async def process_airport_queue_ping(user_id, lat, lon, live_period=None):
     if snoozed_until_str:
         aq['snoozed_until'] = snoozed_until_str  # переносим snooze дальше, пока не истёк (см. is_snoozed выше)
 
-    if dist_km <= AIRPORT_QUEUE_RADIUS_LEVELS_KM[0]:
+    # ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя - "зона аэропорта в
+    # 1.5 км, исключение для внуково 2.5 км"): самый внешний уровень больше
+    # не фиксированный AIRPORT_QUEUE_RADIUS_LEVELS_KM[0] (2 км для всех) - он
+    # берётся из airport_queue_outer_radius_km(icao), у Внуково это 2.5 км,
+    # у остальных 1.5 км. Уровни ПОУЖЕ (1 км/500 м) не меняются - идут следом
+    # за внешним, как и раньше.
+    outer_radius_km = airport_queue_outer_radius_km(icao)
+    levels_km = [outer_radius_km] + [lvl for lvl in AIRPORT_QUEUE_RADIUS_LEVELS_KM[1:] if lvl < outer_radius_km]
+    if dist_km <= outer_radius_km:
         if not aq.get('entered_outer_at'):
             # Первый вход в САМЫЙ ШИРОКИЙ радиус - как и раньше, начало
             # отсчёта для таймера "уже 30 минут рядом" (см. check_airport_queue_timers).
             aq['entered_outer_at'] = now.isoformat()
             aq['pushed_30'] = False
         # ИЗМЕНЕНО 21.09.2026: раньше было только 2 фиксированных уровня
-        # (outer/inner), теперь идём по AIRPORT_QUEUE_RADIUS_LEVELS_KM (3
-        # км/2км/1км/500м) по порядку - шлём пуш за каждый уровень, который
-        # водитель проходит ВПЕРВЫЕ за этот заход (entered_levels - список
-        # уже пройденных индексов уровня, чтобы не дублировать пуш при
-        # повторных пингах на том же расстоянии). Если сейчас snooze
-        # (водитель нажал "не буду вставать в очередь") - уровень всё равно
-        # ЗАПОМИНАЕМ как пройденный (чтобы после истечения snooze не
-        # засыпало пушами за все пропущенные уровни разом), но пуш НЕ шлём.
+        # (outer/inner), теперь идём по levels_km (внешний уровень аэропорта +
+        # оставшиеся более узкие уровни) по порядку - шлём пуш за каждый
+        # уровень, который водитель проходит ВПЕРВЫЕ за этот заход
+        # (entered_levels - список уже пройденных индексов уровня, чтобы не
+        # дублировать пуш при повторных пингах на том же расстоянии). Если
+        # сейчас snooze (водитель нажал "не буду вставать в очередь") -
+        # уровень всё равно ЗАПОМИНАЕМ как пройденный (чтобы после истечения
+        # snooze не засыпало пушами за все пропущенные уровни разом), но пуш
+        # НЕ шлём.
         entered_levels = set(aq.get('entered_levels') or [])
-        for level_idx, level_km in enumerate(AIRPORT_QUEUE_RADIUS_LEVELS_KM):
+        for level_idx, level_km in enumerate(levels_km):
             if dist_km <= level_km and level_idx not in entered_levels:
                 entered_levels.add(level_idx)
                 if not is_snoozed:
