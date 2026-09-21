@@ -3112,16 +3112,18 @@ def _fire_and_forget(coro):
     task.add_done_callback(_background_tasks.discard)
 
 # ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "сделаем чтобы он всё
-# это делал только с 1 минутным таймером удаления чтобы успели прочитать"):
-# везде, где общая чистка чата (SingleMessageMiddleware,
-# ChatCleanupIncomingMiddleware, track_bot_update_message, startup-пасс в
-# main()) раньше удаляла "выпавшие" сообщения СРАЗУ, теперь ставим удаление
-# через задержку DELETE_MESSAGE_DELAY_SECONDS, чтобы у человека было время
-# прочитать сообщение, прежде чем оно исчезнет. Сама постановка в очередь
-# (кого в итоге удалить) не меняется - меняется только момент физического
+# это делал только с 1 минутным таймером удаления чтобы успели прочитать"),
+# ИЗМЕНЕНО 22.09.2026 (тот же день, повторная просьба - "сократим время
+# удаление сообщение с 60 секунд до 30 секунд"): везде, где общая чистка
+# чата (SingleMessageMiddleware, ChatCleanupIncomingMiddleware,
+# track_bot_update_message, startup-пасс в main()) раньше удаляла
+# "выпавшие" сообщения СРАЗУ, теперь ставим удаление через задержку
+# DELETE_MESSAGE_DELAY_SECONDS, чтобы у человека было время прочитать
+# сообщение, прежде чем оно исчезнет. Сама постановка в очередь (кого в
+# итоге удалить) не меняется - меняется только момент физического
 # bot.delete_message. fire-and-forget (через _fire_and_forget) - ждать
 # результат не нужно, это фоновая уборка.
-DELETE_MESSAGE_DELAY_SECONDS = 60
+DELETE_MESSAGE_DELAY_SECONDS = 30
 
 async def _delayed_delete_message(chat_id, message_id, delay=DELETE_MESSAGE_DELAY_SECONDS):
     await asyncio.sleep(delay)
