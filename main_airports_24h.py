@@ -7538,14 +7538,14 @@ def map_webapp_html():
   renderLegend();
   renderToggle();
   const map = L.map('map').setView([55.7558, 37.6173], 11);
-  // ИЗМЕНЕНО 22.09.2026 (второй раз): CartoDB тоже оказался нерабочим без
-  // ключа - закрыли анонимный доступ к basemaps.cartocdn.com ("API key
-  // required", см. скриншот пользователя). Оба "бесплатных без ключа"
-  // варианта (Яндекс неофициально и CartoDB) на практике не сработали,
-  // поэтому вернулись к единственному гарантированно надёжному источнику -
-  // обычным тайлам OpenStreetMap, а тёмный вид даёт CSS-фильтр инверсии на
-  // .leaflet-tile-pane (см. MAP_CHROME_CSS выше) - тайлы всегда светлые
-  // (стандартный OSM), но на экране выглядят тёмными.
+  // ИЗМЕНЕНО 22.09.2026: пробовали переключиться на Wikimedia
+  // (maps.wikimedia.org) как альтернативный бесплатный источник, но перед
+  // выкладкой проверили curl'ом - Wikimedia требует Referer со своего же
+  // домена (хотлинк-защита), без него отдаёт 403. Для WebApp бота (Referer
+  // будет с PUBLIC_URL, не с wikimedia.org) это сломалось бы точно так же,
+  // как раньше CartoDB - поэтому остались на единственном проверенном
+  // рабочем источнике, tile.openstreetmap.org. Тёмный вид даёт CSS-фильтр
+  // инверсии на .leaflet-tile-pane (см. MAP_CHROME_CSS выше).
   L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
     attribution: '© OpenStreetMap',
     maxZoom: 19,
@@ -13938,6 +13938,36 @@ BOT_UPDATED_REFRESH_KEYBOARD = InlineKeyboardMarkup(inline_keyboard=[[
     InlineKeyboardButton(text="🔄 ОБНОВИТЬ БОТА", callback_data="refresh_menu"),
 ]])
 
+# ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "чтобы в чате было
+# только два последних сообщения [об обновлении]"): и пуш "Вышло обновление
+# бота", и ответ "✅ Бот обновлён" на кнопку шлются при КАЖДОМ деплое/каждом
+# нажатии - при частых редеплоях (как в этой сессии) чат быстро забивается
+# одинаковыми сообщениями. Храним id последних отправленных сообщений этого
+# типа на пользователя (user_state[uid]['bot_update_msg_ids'], в памяти -
+# переживать рестарт бота им не нужно, максимум одно старое сообщение не
+# удалится) и после каждого нового сообщения удаляем все, кроме
+# BOT_UPDATE_MESSAGES_TO_KEEP последних. Best-effort - Telegram не даёт
+# удалять сообщения старше 48 часов и/или уже удалённые пользователем,
+# такие ошибки просто игнорируем.
+BOT_UPDATE_MESSAGES_TO_KEEP = 2
+
+async def track_bot_update_message(user_id, message_id):
+    """Запоминает id только что отправленного сообщения "об обновлении бота"
+    (пуш или ответ на кнопку) и удаляет более старые из чата, оставляя не
+    больше BOT_UPDATE_MESSAGES_TO_KEEP последних - см. комментарий выше."""
+    state = user_state.setdefault(user_id, {})
+    ids = list(state.get('bot_update_msg_ids') or [])
+    ids.append(message_id)
+    to_delete = ids[:-BOT_UPDATE_MESSAGES_TO_KEEP] if len(ids) > BOT_UPDATE_MESSAGES_TO_KEEP else []
+    state['bot_update_msg_ids'] = ids[-BOT_UPDATE_MESSAGES_TO_KEEP:]
+    if not bot:
+        return
+    for old_id in to_delete:
+        try:
+            await bot.delete_message(user_id, old_id)
+        except Exception:
+            pass  # старше 48ч / уже удалено пользователем / и т.п. - не критично
+
 def get_bot_meta(key):
     init_db()
     conn = get_db_connection()
@@ -14018,7 +14048,8 @@ async def notify_users_about_new_deploy():
     sent, failed = 0, 0
     for user_id in recipients:
         try:
-            await bot.send_message(user_id, BOT_UPDATED_MESSAGE, parse_mode='Markdown', reply_markup=BOT_UPDATED_REFRESH_KEYBOARD)
+            msg = await bot.send_message(user_id, BOT_UPDATED_MESSAGE, parse_mode='Markdown', reply_markup=BOT_UPDATED_REFRESH_KEYBOARD)
+            await track_bot_update_message(user_id, msg.message_id)
             sent += 1
         except Exception as e:
             failed += 1
@@ -14048,10 +14079,11 @@ async def handle_refresh_menu_button(callback_query: types.CallbackQuery):
             reply_markup=category_keyboard(),
         )
         return
-    await callback_query.message.answer(
+    msg = await callback_query.message.answer(
         "✅ Бот обновлён 👇",
         reply_markup=services_keyboard(category, city, user_id),
     )
+    await track_bot_update_message(user_id, msg.message_id)
 
 # ==================== ПЛАТНАЯ ПОДПИСКА ====================
 # По просьбе пользователя (20.09.2026): "сделай так чтобы бот был платный
