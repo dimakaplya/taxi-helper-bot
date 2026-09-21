@@ -7484,26 +7484,52 @@ def map_webapp_html():
   // чтобы карта не осталась пустой.
   const YANDEX_TILE_URL = 'https://vec0{{s}}.maps.yandex.net/tiles?l=map&v=24.06.02-0&x={{x}}&y={{y}}&z={{z}}&scale=1&lang=ru_RU';
   const OSM_TILE_URL = 'https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png';
+  // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "если отвалится, то
+  // заново переподключится к Яндексу"): после падения на OSM карта не
+  // остаётся на нём навсегда - раз в YANDEX_RETRY_MINUTES пробуем снова
+  // переключиться на Яндекс (вдруг подложка отошла и снова работает). Если
+  // Яндекс опять посыпался ошибками - тот же порог tileErrorCount снова
+  // роняет карту на OSM, и цикл повторяется. baseLayer - текущий активный
+  // тайловый слой (Яндекс или OSM), чтобы было что убирать при переключении
+  // в любую сторону.
+  const YANDEX_RETRY_MINUTES = 5;
+  const YANDEX_ERROR_THRESHOLD = 8;
+  let baseLayer = null;
   let tileErrorCount = 0;
-  let fellBackToOsm = false;
-  const yandexLayer = L.tileLayer(YANDEX_TILE_URL, {{
-    subdomains: ['01', '02', '03', '04'],
-    attribution: '© Яндекс.Карты',
-    maxZoom: 19,
-  }});
-  yandexLayer.on('tileerror', () => {{
-    if (fellBackToOsm) return;
-    tileErrorCount += 1;
-    // Порог с запасом - несколько тайлов по краям могут не загрузиться и в
-    // норме (нет данных за пределами покрытия), падать на OSM должны только
-    // при массовых ошибках (сама подложка недоступна).
-    if (tileErrorCount > 8) {{
-      fellBackToOsm = true;
-      map.removeLayer(yandexLayer);
-      L.tileLayer(OSM_TILE_URL, {{ attribution: '© OpenStreetMap', maxZoom: 19 }}).addTo(map);
-    }}
-  }});
-  yandexLayer.addTo(map);
+  let onYandex = false;
+
+  function switchToOsm() {{
+    if (baseLayer) map.removeLayer(baseLayer);
+    baseLayer = L.tileLayer(OSM_TILE_URL, {{ attribution: '© OpenStreetMap', maxZoom: 19 }}).addTo(map);
+    onYandex = false;
+  }}
+
+  function switchToYandex() {{
+    if (baseLayer) map.removeLayer(baseLayer);
+    tileErrorCount = 0;
+    onYandex = true;
+    const layer = L.tileLayer(YANDEX_TILE_URL, {{
+      subdomains: ['01', '02', '03', '04'],
+      attribution: '© Яндекс.Карты',
+      maxZoom: 19,
+    }});
+    layer.on('tileerror', () => {{
+      if (!onYandex) return;
+      tileErrorCount += 1;
+      // Порог с запасом - несколько тайлов по краям могут не загрузиться и
+      // в норме (нет данных за пределами покрытия), падать на OSM должны
+      // только при массовых ошибках (сама подложка недоступна).
+      if (tileErrorCount > YANDEX_ERROR_THRESHOLD) {{
+        switchToOsm();
+      }}
+    }});
+    baseLayer = layer.addTo(map);
+  }}
+
+  switchToYandex();
+  setInterval(() => {{
+    if (!onYandex) switchToYandex();
+  }}, YANDEX_RETRY_MINUTES * 60 * 1000);
   let markers = [];
   let airportMarkers = [];
   let airportsLoaded = false;
