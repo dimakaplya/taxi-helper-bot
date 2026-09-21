@@ -2434,6 +2434,31 @@ def init_db():
         # клиента это умеют). См. update_map_position/get_map_positions.
         cursor.execute("ALTER TABLE map_positions ADD COLUMN heading INTEGER")
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_map_positions_city ON map_positions (city, updated_at)')
+    # ДОБАВЛЕНО 22.09.2026 (см. блок "ЗАПРАВКИ + ЭЛЕКТРОЗАРЯДКИ НА КАРТЕ" выше
+    # по файлу) - крауд-отметки "что есть на заправке/свободна ли зарядка".
+    # station_id - osm "type/id" из fuel_charging_data.json (см.
+    # fetch_fuel_charging_data.py), НЕ строка из основной user_state - таблицы
+    # никак не зависят от того, когда в последний раз пересобирали сам JSON
+    # со списком точек, пока сам id заправки/зарядки не поменялся.
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS gas_station_fuel_status (
+            station_id TEXT NOT NULL,
+            fuel_type TEXT NOT NULL,
+            available INTEGER NOT NULL,
+            reported_by INTEGER,
+            reported_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (station_id, fuel_type)
+        )
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS charging_station_status (
+            station_id TEXT PRIMARY KEY,
+            status TEXT NOT NULL,
+            occupied_by INTEGER,
+            updated_by INTEGER,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
     conn.commit()
     conn.close()
     _db_initialized = True
@@ -7516,6 +7541,130 @@ MAP_WEBAPP_PATH = '/map'
 MAP_POSITIONS_API_PATH = '/map/positions'
 MAP_AIRPORTS_API_PATH = '/map/airports'
 
+# ==================== ЗАПРАВКИ + ЭЛЕКТРОЗАРЯДКИ НА КАРТЕ ====================
+# ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "вынеси на карту все
+# заправки города и сделай фильтр чтоб можно было отключать/включать,
+# электрозарядку тоже туда же добавь значками с фильтром, на заправке
+# отмечать есть 92/95/100/дизель или нет, на зарядке - занята/очередь/
+# свободна"). Источник точек - OpenStreetMap через Overpass API (см.
+# fetch_fuel_charging_data.py - тот же паттерн сбора вручную через браузер,
+# что у парковок/туалетов, Overpass не отвечает напрямую из облака/с
+# компьютера пользователя). Сами точки (координаты/название) СТАТИЧНЫ и
+# обновляются только пересбором fuel_charging_data.json, а вот "что там
+# сейчас есть" (бензин по видам, свободна ли зарядка) - КРАУДСОРС от самих
+# водителей через попап на карте, хранится в БД (см. таблицы
+# gas_station_fuel_status/charging_station_status в init_db) и не привязано
+# к самому JSON-файлу, переживает его пересборку, пока station id (osm
+# type/id, см. докстринг fetch_fuel_charging_data.py) не меняется.
+FUEL_CHARGING_DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fuel_charging_data.json')
+_fuel_charging_cache = None
+_fuel_charging_mtime = None
+
+def load_fuel_charging_data():
+    """Читает fuel_charging_data.json с тем же кэшем по mtime, что и
+    load_nearby_data/load_flights_data - файл обновляется НЕ фоновой задачей
+    бота (см. docstring fetch_fuel_charging_data.py), а вручную/по расписанию
+    с компьютера с доступом в обход блокировки Overpass."""
+    global _fuel_charging_cache, _fuel_charging_mtime
+    try:
+        mtime = os.path.getmtime(FUEL_CHARGING_DATA_FILE)
+        if _fuel_charging_cache is not None and _fuel_charging_mtime == mtime:
+            return _fuel_charging_cache
+        with open(FUEL_CHARGING_DATA_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        _fuel_charging_cache = data
+        _fuel_charging_mtime = mtime
+        return data
+    except FileNotFoundError:
+        return None
+    except Exception as e:
+        logger.error(f"❌ Ошибка чтения {FUEL_CHARGING_DATA_FILE}: {e}")
+        return None
+
+# Виды топлива, которые можно отметить на заправке (по просьбе пользователя -
+# "92-й 95-й 100-й и дизель"). Ключи - технические (used как fuel_type в БД/
+# API), FUEL_TYPE_LABELS - то, что видит водитель.
+FUEL_TYPES = ['92', '95', '100', 'diesel']
+FUEL_TYPE_LABELS = {'92': 'АИ-92', '95': 'АИ-95', '100': 'АИ-100', 'diesel': 'ДТ'}
+
+# Статусы зарядки, которые можно отметить (по просьбе пользователя - "занято
+# очередь либо нет статус... занять зарядку покинуть зарядку"). Отметка
+# "свободно" - это и есть "покинул(а) зарядку" (сбрасывает занятость).
+CHARGING_STATUSES = ['free', 'busy', 'queue']
+CHARGING_STATUS_LABELS = {'free': '🟢 Свободна', 'busy': '🟡 Занята', 'queue': '🔴 Очередь'}
+
+MAP_FUEL_STATIONS_API_PATH = '/map/fuel_stations'
+MAP_CHARGING_STATIONS_API_PATH = '/map/charging_stations'
+MAP_FUEL_REPORT_API_PATH = '/map/fuel_report'
+MAP_CHARGING_REPORT_API_PATH = '/map/charging_report'
+
+def get_gas_fuel_statuses():
+    """dict {station_id: {fuel_type: {'available': bool, 'reported_at': iso_str}}}
+    - вся таблица целиком (крауд-отметки есть далеко не у всех ~3000+ заправок,
+    таблица растёт медленно, одним запросом дешевле, чем N обращений по
+    station_id на каждую точку при отрисовке карты)."""
+    try:
+        init_db()
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT station_id, fuel_type, available, reported_at FROM gas_station_fuel_status')
+        rows = cursor.fetchall()
+        conn.close()
+    except Exception as e:
+        logger.error(f"❌ Не удалось прочитать gas_station_fuel_status: {e}")
+        return {}
+    result = {}
+    for station_id, fuel_type, available, reported_at in rows:
+        result.setdefault(station_id, {})[fuel_type] = {'available': bool(available), 'reported_at': reported_at}
+    return result
+
+def set_gas_fuel_status(station_id, fuel_type, available, user_id):
+    try:
+        init_db()
+        conn = get_db_connection()
+        conn.execute(
+            'INSERT INTO gas_station_fuel_status (station_id, fuel_type, available, reported_by, reported_at) '
+            'VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP) '
+            'ON CONFLICT(station_id, fuel_type) DO UPDATE SET available=excluded.available, '
+            'reported_by=excluded.reported_by, reported_at=excluded.reported_at',
+            (station_id, fuel_type, 1 if available else 0, user_id)
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"❌ Не удалось сохранить отметку по заправке {station_id}/{fuel_type}: {e}")
+
+def get_charging_statuses():
+    """dict {station_id: {'status': str, 'updated_at': iso_str}}."""
+    try:
+        init_db()
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT station_id, status, updated_at FROM charging_station_status')
+        rows = cursor.fetchall()
+        conn.close()
+    except Exception as e:
+        logger.error(f"❌ Не удалось прочитать charging_station_status: {e}")
+        return {}
+    return {station_id: {'status': status, 'updated_at': updated_at} for station_id, status, updated_at in rows}
+
+def set_charging_status(station_id, status, user_id):
+    try:
+        init_db()
+        conn = get_db_connection()
+        occupied_by = user_id if status == 'busy' else None
+        conn.execute(
+            'INSERT INTO charging_station_status (station_id, status, occupied_by, updated_by, updated_at) '
+            'VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP) '
+            'ON CONFLICT(station_id) DO UPDATE SET status=excluded.status, occupied_by=excluded.occupied_by, '
+            'updated_by=excluded.updated_by, updated_at=excluded.updated_at',
+            (station_id, status, occupied_by, user_id)
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"❌ Не удалось сохранить статус зарядки {station_id}: {e}")
+
 # Категории, чья очередь показывается в попапе аэропорта на карте (по
 # просьбе пользователя, 22.09.2026: "названия и очереди какие сейчас там
 # плюс текущая загрузка... открыт он или закрыт") - курьер/грузовое такси
@@ -7822,6 +7971,24 @@ MAP_CHROME_CSS = """
   .event-popup .place { color: #555; }
   .event-popup .time { color: #777; font-size: 11px; margin-top: 4px; }
   .event-popup a { color: #b08b00; }
+  /* ДОБАВЛЕНО 22.09.2026 - слои "Заправки"/"Электрозарядки" на карте (см.
+     блок "ЗАПРАВКИ + ЭЛЕКТРОЗАРЯДКИ НА КАРТЕ" в main.py). Панель с
+     чекбоксами - под жёлтой кнопкой "Показать все категории" (та стоит
+     top:10px, left:56px), чтобы не наезжать друг на друга. */
+  .layer-toggle { position: absolute; top: 52px; left: 56px; z-index: 1000; background: #1c1c1c; color: #fff; border: 1px solid rgba(255,196,0,.4); border-radius: 8px; padding: 6px 10px; font-family: -apple-system, sans-serif; font-size: 12px; box-shadow: 0 1px 4px rgba(0,0,0,.35); }
+  .layer-toggle label { display: flex; align-items: center; gap: 6px; margin: 3px 0; cursor: pointer; user-select: none; white-space: nowrap; }
+  .fuel-icon, .charging-icon { display: flex; align-items: center; justify-content: center; font-size: 18px; filter: drop-shadow(0 1px 2px rgba(0,0,0,.5)); }
+  .fuel-popup, .charging-popup { font-family: -apple-system, sans-serif; font-size: 12.5px; max-width: 230px; color: #000; }
+  .fuel-popup h4, .charging-popup h4 { margin: 0 0 6px; font-size: 13.5px; }
+  .fuel-popup .sub, .charging-popup .sub { color: #666; font-size: 11.5px; margin-bottom: 6px; }
+  .status-btn-row { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 2px; }
+  .status-btn { border: 1px solid #bbb; border-radius: 6px; padding: 5px 8px; font-size: 12px; font-family: -apple-system, sans-serif; cursor: pointer; background: #f2f2f2; color: #333; }
+  .status-btn.on-yes { background: #2e7d32; color: #fff; border-color: #2e7d32; }
+  .status-btn.on-no { background: #c62828; color: #fff; border-color: #c62828; }
+  .status-btn.on-free { background: #2e7d32; color: #fff; border-color: #2e7d32; }
+  .status-btn.on-busy { background: #f9a825; color: #000; border-color: #f9a825; }
+  .status-btn.on-queue { background: #c62828; color: #fff; border-color: #c62828; }
+  .status-note { color: #888; font-size: 10.5px; margin-top: 6px; }
 """
 
 def map_webapp_html():
@@ -7836,6 +8003,8 @@ def map_webapp_html():
     /map/positions?city=&category= с заголовком, содержащим initData, для
     проверки подписи на сервере (см. validate_telegram_webapp_init_data)."""
     style_json = json.dumps(MAP_CATEGORY_STYLE, ensure_ascii=False)
+    fuel_type_labels_json = json.dumps(FUEL_TYPE_LABELS, ensure_ascii=False)
+    charging_status_labels_json = json.dumps(CHARGING_STATUS_LABELS, ensure_ascii=False)
     return f"""<!doctype html>
 <html lang="ru">
 <head>
@@ -7853,9 +8022,15 @@ def map_webapp_html():
 <div id="map"></div>
 <div class="filter-toggle" id="filterToggle">Показать все категории</div>
 <div class="legend" id="legend"></div>
+<div class="layer-toggle" id="layerToggle">
+  <label><input type="checkbox" id="fuelLayerCheckbox"> ⛽ Заправки</label>
+  <label><input type="checkbox" id="chargingLayerCheckbox"> 🔌 Зарядки</label>
+</div>
 <script>
   const CATEGORY_STYLE = {style_json};
   const CATEGORY_LABEL = {{ taxi: 'Такси', ultima: 'Ultima' }};
+  const FUEL_TYPE_LABELS = {fuel_type_labels_json};
+  const CHARGING_STATUS_LABELS = {charging_status_labels_json};
   const STATUS_ICON = {{ open: '🟢', coordinated: '🟡', closed: '🔴' }};
   const tg = window.Telegram && window.Telegram.WebApp;
   if (tg) {{ tg.ready(); tg.expand(); }}
@@ -8141,6 +8316,148 @@ def map_webapp_html():
       }});
     }} catch (e) {{ /* тихо */ }}
   }}
+  // Заправки + электрозарядки - по просьбе пользователя (см. коммит):
+  // отдельные слои со своими чекбоксами (по умолчанию выключены - в
+  // Москве, например, 861 заправка + 302 зарядки, при включённых обоих
+  // слоях сразу карта была бы перегружена и медленно грузилась бы), тап по
+  // значку открывает попап с крауд-отметками (бензин 92/95/100/ДТ - есть/
+  // нет; зарядка - свободна/занята/очередь), сохраняются через
+  // /map/fuel_report и /map/charging_report (initData на сервере проверяется
+  // как и везде, см. validate_telegram_webapp_init_data).
+  let fuelStations = [];
+  let fuelMarkers = [];
+  let fuelLoaded = false;
+  let chargingStations = [];
+  let chargingMarkers = [];
+  let chargingLoaded = false;
+
+  function buildFuelPopup(p) {{
+    let html = `<div class="fuel-popup"><h4>⛽ ${{p.name || 'Заправка'}}</h4>`;
+    html += `<div class="sub">Отметь, что есть на заправке:</div><div class="status-btn-row">`;
+    ['92', '95', '100', 'diesel'].forEach(ft => {{
+      const info = (p.fuel && p.fuel[ft]) || null;
+      let cls = 'status-btn';
+      if (info && info.available === true) cls += ' on-yes';
+      if (info && info.available === false) cls += ' on-no';
+      html += `<button class="${{cls}}" onclick="window.reportFuel('${{p.id}}','${{ft}}',true)">${{FUEL_TYPE_LABELS[ft]}} есть</button>`;
+      html += `<button class="${{cls}}" onclick="window.reportFuel('${{p.id}}','${{ft}}',false)">${{FUEL_TYPE_LABELS[ft]}} нет</button>`;
+    }});
+    html += `</div><div class="status-note">Отметки водителей, могут устаревать</div></div>`;
+    return html;
+  }}
+
+  window.reportFuel = async function(stationId, fuelType, available) {{
+    try {{
+      const initData = tg ? tg.initData : '';
+      await fetch('{MAP_FUEL_REPORT_API_PATH}', {{
+        method: 'POST',
+        headers: {{ 'Content-Type': 'application/json', 'X-Telegram-Init-Data': initData }},
+        body: JSON.stringify({{ station_id: stationId, fuel_type: fuelType, available: available }}),
+      }});
+    }} catch (e) {{ /* тихо */ }}
+    const p = fuelStations.find(s => s.id === stationId);
+    if (p) {{
+      p.fuel = p.fuel || {{}};
+      p.fuel[fuelType] = {{ available: available }};
+      const marker = fuelMarkers.find(m => m._stationId === stationId);
+      if (marker) marker.setPopupContent(buildFuelPopup(p));
+    }}
+  }};
+
+  async function loadFuelStations() {{
+    try {{
+      const resp = await fetch(`{MAP_FUEL_STATIONS_API_PATH}?city=${{encodeURIComponent(city)}}`);
+      if (!resp.ok) return;
+      const data = await resp.json();
+      fuelStations = data.stations || [];
+      fuelMarkers.forEach(m => map.removeLayer(m));
+      fuelMarkers = [];
+      fuelStations.forEach(p => {{
+        const icon = L.divIcon({{ className: 'fuel-icon', html: '⛽', iconSize: [22, 22] }});
+        const marker = L.marker([p.lat, p.lon], {{ icon }}).bindPopup(buildFuelPopup(p)).addTo(map);
+        marker._stationId = p.id;
+        fuelMarkers.push(marker);
+      }});
+      fuelLoaded = true;
+    }} catch (e) {{ /* тихо */ }}
+  }}
+
+  function clearFuelStations() {{
+    fuelMarkers.forEach(m => map.removeLayer(m));
+    fuelMarkers = [];
+    fuelLoaded = false;
+  }}
+
+  function buildChargingPopup(p) {{
+    let html = `<div class="charging-popup"><h4>🔌 ${{p.name || 'Электрозарядка'}}</h4>`;
+    if (p.operator) html += `<div class="sub">${{p.operator}}</div>`;
+    const socketKeys = Object.keys(p.sockets || {{}});
+    if (socketKeys.length) {{
+      html += `<div class="sub">Порты: ${{socketKeys.map(k => `${{k}} × ${{p.sockets[k]}}`).join(', ')}}</div>`;
+    }}
+    const curStatus = p.status;
+    html += `<div class="status-btn-row">`;
+    ['free', 'busy', 'queue'].forEach(st => {{
+      let cls = 'status-btn';
+      if (curStatus === st) cls += ' on-' + st;
+      html += `<button class="${{cls}}" onclick="window.reportCharging('${{p.id}}','${{st}}')">${{CHARGING_STATUS_LABELS[st]}}</button>`;
+    }});
+    html += `</div><div class="status-note">Отметки водителей, могут устаревать</div></div>`;
+    return html;
+  }}
+
+  window.reportCharging = async function(stationId, status) {{
+    try {{
+      const initData = tg ? tg.initData : '';
+      await fetch('{MAP_CHARGING_REPORT_API_PATH}', {{
+        method: 'POST',
+        headers: {{ 'Content-Type': 'application/json', 'X-Telegram-Init-Data': initData }},
+        body: JSON.stringify({{ station_id: stationId, status: status }}),
+      }});
+    }} catch (e) {{ /* тихо */ }}
+    const p = chargingStations.find(s => s.id === stationId);
+    if (p) {{
+      p.status = status;
+      const marker = chargingMarkers.find(m => m._stationId === stationId);
+      if (marker) marker.setPopupContent(buildChargingPopup(p));
+    }}
+  }}
+
+  async function loadChargingStations() {{
+    try {{
+      const resp = await fetch(`{MAP_CHARGING_STATIONS_API_PATH}?city=${{encodeURIComponent(city)}}`);
+      if (!resp.ok) return;
+      const data = await resp.json();
+      chargingStations = data.stations || [];
+      chargingMarkers.forEach(m => map.removeLayer(m));
+      chargingMarkers = [];
+      chargingStations.forEach(p => {{
+        const icon = L.divIcon({{ className: 'charging-icon', html: '🔌', iconSize: [22, 22] }});
+        const marker = L.marker([p.lat, p.lon], {{ icon }}).bindPopup(buildChargingPopup(p)).addTo(map);
+        marker._stationId = p.id;
+        chargingMarkers.push(marker);
+      }});
+      chargingLoaded = true;
+    }} catch (e) {{ /* тихо */ }}
+  }}
+
+  function clearChargingStations() {{
+    chargingMarkers.forEach(m => map.removeLayer(m));
+    chargingMarkers = [];
+    chargingLoaded = false;
+  }}
+
+  const fuelCheckbox = document.getElementById('fuelLayerCheckbox');
+  const chargingCheckbox = document.getElementById('chargingLayerCheckbox');
+  fuelCheckbox.addEventListener('change', () => {{
+    if (fuelCheckbox.checked) loadFuelStations(); else clearFuelStations();
+  }});
+  chargingCheckbox.addEventListener('change', () => {{
+    if (chargingCheckbox.checked) loadChargingStations(); else clearChargingStations();
+  }});
+  setInterval(() => {{ if (fuelCheckbox.checked) loadFuelStations(); }}, 60000);
+  setInterval(() => {{ if (chargingCheckbox.checked) loadChargingStations(); }}, 60000);
+
   loadPositions();
   loadAirports();
   loadStations();
@@ -8848,6 +9165,108 @@ async def handle_map_stations_api(request):
         logger.exception("❌ Ошибка при получении вокзалов для карты водителей")
         result = []
     return web.json_response({'stations': result})
+
+async def handle_map_fuel_stations_api(request):
+    """JSON API для меток заправок на карте (см. блок "ЗАПРАВКИ +
+    ЭЛЕКТРОЗАРЯДКИ НА КАРТЕ") - координаты/название из статичного
+    fuel_charging_data.json + крауд-отметки по видам топлива из
+    gas_station_fuel_status. Публичные данные, initData не обязателен (как
+    у /map/airports/stations) - это ЧТЕНИЕ, а не отметка."""
+    city = request.query.get('city', '')
+    result = []
+    try:
+        data = load_fuel_charging_data() or {}
+        points = [p for p in (data.get('cities', {}).get(city) or []) if p.get('kind') == 'fuel']
+        statuses = get_gas_fuel_statuses()
+        for p in points:
+            result.append({
+                'id': p['id'], 'lat': p['lat'], 'lon': p['lon'],
+                'name': p.get('name'),
+                'fuel': statuses.get(p['id'], {}),
+            })
+    except Exception:
+        logger.exception("❌ Ошибка при получении заправок для карты водителей")
+        result = []
+    return web.json_response({'stations': result})
+
+async def handle_map_charging_stations_api(request):
+    """Как handle_map_fuel_stations_api, но для зарядок - плюс sockets/
+    operator из fuel_charging_data.json и текущий статус (свободна/занята/
+    очередь) из charging_station_status."""
+    city = request.query.get('city', '')
+    result = []
+    try:
+        data = load_fuel_charging_data() or {}
+        points = [p for p in (data.get('cities', {}).get(city) or []) if p.get('kind') == 'charging']
+        statuses = get_charging_statuses()
+        for p in points:
+            st = statuses.get(p['id'])
+            result.append({
+                'id': p['id'], 'lat': p['lat'], 'lon': p['lon'],
+                'name': p.get('name'), 'operator': p.get('operator'),
+                'sockets': p.get('sockets') or {},
+                'status': st['status'] if st else None,
+                'updated_at': st['updated_at'] if st else None,
+            })
+    except Exception:
+        logger.exception("❌ Ошибка при получении зарядок для карты водителей")
+        result = []
+    return web.json_response({'stations': result})
+
+async def handle_map_fuel_report_api(request):
+    """POST {station_id, fuel_type, available: bool} - крауд-отметка "есть/
+    нет 92-й/95-й/100-й/дизель" на конкретной заправке. initData ОБЯЗАТЕЛЕН
+    и строго проверяется (тот же паттерн, что у /transport/queue/submit) -
+    отметка привязана к user_id, кто её оставил."""
+    init_data = request.headers.get('X-Telegram-Init-Data', '')
+    parsed = validate_telegram_webapp_init_data(init_data, BOT_TOKEN) if BOT_TOKEN else None
+    if not parsed:
+        return web.json_response({'error': 'invalid_init_data'}, status=401)
+    try:
+        tg_user = json.loads(parsed.get('user', '{}'))
+        user_id = tg_user.get('id')
+    except Exception:
+        user_id = None
+    if not user_id:
+        return web.json_response({'error': 'invalid_init_data'}, status=401)
+    try:
+        body = await request.json()
+        station_id = str(body.get('station_id') or '')
+        fuel_type = str(body.get('fuel_type') or '')
+        available = bool(body.get('available'))
+    except Exception:
+        return web.json_response({'error': 'invalid_body'}, status=400)
+    if not station_id or fuel_type not in FUEL_TYPES:
+        return web.json_response({'error': 'invalid_params'}, status=400)
+    set_gas_fuel_status(station_id, fuel_type, available, user_id)
+    return web.json_response({'ok': True})
+
+async def handle_map_charging_report_api(request):
+    """POST {station_id, status: 'free'|'busy'|'queue'} - крауд-отметка
+    статуса зарядки. "free" - это же и есть "покинул(а) зарядку" (сбрасывает
+    occupied_by), "busy" - "занял(а) зарядку". Тот же паттерн проверки
+    initData, что у handle_map_fuel_report_api."""
+    init_data = request.headers.get('X-Telegram-Init-Data', '')
+    parsed = validate_telegram_webapp_init_data(init_data, BOT_TOKEN) if BOT_TOKEN else None
+    if not parsed:
+        return web.json_response({'error': 'invalid_init_data'}, status=401)
+    try:
+        tg_user = json.loads(parsed.get('user', '{}'))
+        user_id = tg_user.get('id')
+    except Exception:
+        user_id = None
+    if not user_id:
+        return web.json_response({'error': 'invalid_init_data'}, status=401)
+    try:
+        body = await request.json()
+        station_id = str(body.get('station_id') or '')
+        status = str(body.get('status') or '')
+    except Exception:
+        return web.json_response({'error': 'invalid_body'}, status=400)
+    if not station_id or status not in CHARGING_STATUSES:
+        return web.json_response({'error': 'invalid_params'}, status=400)
+    set_charging_status(station_id, status, user_id)
+    return web.json_response({'ok': True})
 
 MAP_ROAD_EVENTS_API_PATH = '/map/road_events'
 
@@ -15115,6 +15534,10 @@ async def start_subscription_webhook_server():
     app.router.add_get(MAP_POSITIONS_API_PATH, handle_map_positions_api)
     app.router.add_get(MAP_AIRPORTS_API_PATH, handle_map_airports_api)
     app.router.add_get(MAP_STATIONS_API_PATH, handle_map_stations_api)
+    app.router.add_get(MAP_FUEL_STATIONS_API_PATH, handle_map_fuel_stations_api)
+    app.router.add_get(MAP_CHARGING_STATIONS_API_PATH, handle_map_charging_stations_api)
+    app.router.add_post(MAP_FUEL_REPORT_API_PATH, handle_map_fuel_report_api)
+    app.router.add_post(MAP_CHARGING_REPORT_API_PATH, handle_map_charging_report_api)
     app.router.add_get(MAP_ROAD_EVENTS_API_PATH, handle_map_road_events_api)
     app.router.add_get(MAP_CITY_EVENTS_API_PATH, handle_map_city_events_api)
     # Локальная раздача telegram-web-app.js (21.09.2026, см. блок "ЛОКАЛЬНАЯ
