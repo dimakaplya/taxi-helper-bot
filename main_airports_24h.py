@@ -415,7 +415,7 @@ AIRPORT_QUEUE_TIME_PUSHES_MIN = (30,)  # "уже 30 минут рядом"
 # внутри того же аэропорта и одним нажатием глушит пуши по ВСЕМ его
 # зонам сразу. См. get_airport_queue_snoozed_until/set_airport_queue_snooze
 # ниже.
-AIRPORT_QUEUE_SNOOZE_MINUTES = 30
+AIRPORT_QUEUE_SNOOZE_MINUTES = 15
 # Как часто (минуты) фоновый чекер досылает пуши по времени - пуши по
 # расстоянию (AIRPORT_QUEUE_RADIUS_LEVELS_KM) шлются сразу по факту нового
 # пинга геопозиции, а этот идёт по прошедшему времени, поэтому нужен
