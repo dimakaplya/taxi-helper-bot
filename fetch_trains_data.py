@@ -121,7 +121,15 @@ def fetch_station_arrivals(station_code, date_str):
                     },
                     timeout=30,
                 )
-                REQUEST_COUNT += 1
+                # ИСПРАВЛЕНО 21.09.2026 - тот же фикс, что в
+                # fetch_yandex_data.py (см. комментарий там): не считаем
+                # попытки, отклонённые как 429 (Too Many Requests), в
+                # локальный счётчик суточной квоты - реальный лимит Яндекса
+                # их, судя по всему, не расходует, а повторы (до
+                # RETRY_ATTEMPTS раз на один логический запрос) сильно
+                # завышали локальный счётчик относительно реального.
+                if resp.status_code != 429:
+                    REQUEST_COUNT += 1
                 if resp.status_code == 429:
                     if attempt < RETRY_ATTEMPTS:
                         wait_s = RETRY_BACKOFF_BASE * attempt
