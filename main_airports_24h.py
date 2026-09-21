@@ -860,11 +860,19 @@ SHARED_ORDER_EXPIRY_HOURS = 1  # предложение считается не�
 # минивэн ... сделать выбор до семи пассажиров а в остальных тарифах не более
 # пяти пассажиров" - у минивэнов лимит 7, у остальных пассажирских классов - 5,
 # для непассажирских классов поле не имеет смысла (None).
+# ИСПРАВЛЕНО 22.09.2026 (прямая просьба пользователя - "неправильно лимиты...
+# бизнес минивэн до пяти человек"): до 7 пассажиров - ТОЛЬКО "Такси Минивэн"
+# (обычный минивэн), "Бизнес минивэн" - как остальные премиум-классы, до 5.
 # 'cargo_dims' - по прямой просьбе пользователя (22.09.2026): "в грузовых
 # вариантах исполнения указать размеры груза" - ТОЛЬКО у "Грузовая машина".
 # 'loader_choice' - по прямой просьбе пользователя (22.09.2026): "для пеших
-# курьеров и грузового авто ... сделать обязательно выбор нужен ли грузчик" -
-# у всех трёх непассажирских классов вопрос "Нужен грузчик?" ОБЯЗАТЕЛЕН.
+# курьеров и грузового авто ... выбор нужен ли грузчик" - у всех трёх
+# непассажирских классов есть вопрос "Нужен грузчик?". ИЗМЕНЕНО 22.09.2026
+# (прямая просьба пользователя - "выбор нужен грузчик или не сделать
+# произвольно"): раньше был ОБЯЗАТЕЛЕН, теперь необязателен - можно
+# пропустить/оставить без ответа, см. везде, где раньше стояла проверка
+# "не отправлять без ответа" (WebApp JS, handle_share_order_submit_api,
+# текстовый флоу).
 SHARE_ORDER_CAR_CLASSES = [
     {'name': 'Пеший курьер', 'passengers': False, 'loader_choice': True},
     {'name': 'Курьер на авто', 'passengers': False, 'loader_choice': True},
@@ -875,7 +883,7 @@ SHARE_ORDER_CAR_CLASSES = [
     {'name': 'Бизнес седан', 'passengers': True, 'max_passengers': 5},
     {'name': 'Люкс седан', 'passengers': True, 'max_passengers': 5},
     {'name': 'Люкс джип', 'passengers': True, 'max_passengers': 5},
-    {'name': 'Бизнес минивэн', 'passengers': True, 'max_passengers': 7},
+    {'name': 'Бизнес минивэн', 'passengers': True, 'max_passengers': 5},
 ]
 SHARE_ORDER_CAR_CLASS_NAMES = [c['name'] for c in SHARE_ORDER_CAR_CLASSES]
 SHARE_ORDER_PASSENGERS_BY_CLASS = {c['name']: c['passengers'] for c in SHARE_ORDER_CAR_CLASSES}
@@ -2552,23 +2560,25 @@ def increment_completed_orders(user_id):
         return None
 
 def confirm_shared_order_done(order_id, is_sender):
-    """Отмечает подтверждение ОДНОЙ стороны (sender_confirmed_at или
-    accepter_confirmed_at) - см. order_done_{order_id} ниже. Возвращает
-    (order_after, just_completed) - just_completed=True ТОЛЬКО когда это
-    подтверждение было ВТОРЫМ (обе колонки теперь не NULL) - взаимное
-    подтверждение по прямой просьбе пользователя (22.09.2026), защита от
-    накрутки счётчика одной стороной."""
+    """Отмечает подтверждение выполнения заказа. ИЗМЕНЕНО 22.09.2026 (прямая
+    просьба пользователя - "засчитывается только у того, кто заказ принял...
+    тот, кто его дал - он ему не нужен"): взаимное подтверждение убрано,
+    остался только accepter_confirmed_at (is_sender всегда False у
+    единственного вызывающего - order_done_callback; параметр оставлен для
+    совместимости сигнатуры/на случай если понадобится другая сторона
+    позже). Возвращает (order_after, just_completed) - just_completed=True,
+    только если ИМЕННО ЭТО нажатие впервые проставило accepter_confirmed_at
+    (защита от повторного тапа, который иначе удвоил бы счётчик)."""
     init_db()
     conn = get_db_connection()
     now = datetime.now(ZoneInfo('UTC')).strftime('%Y-%m-%d %H:%M:%S')
     col = 'sender_confirmed_at' if is_sender else 'accepter_confirmed_at'
     cursor = conn.execute(f"UPDATE shared_orders SET {col}=? WHERE order_id=? AND {col} IS NULL", (now, order_id))
     conn.commit()
-    newly_set = cursor.rowcount == 1  # False, если эта сторона уже подтверждала раньше (повторный тап на кнопку)
+    just_completed = cursor.rowcount == 1  # False, если уже подтверждали раньше (повторный тап на кнопку)
     conn.close()
     order = get_shared_order(order_id)
-    just_completed = bool(newly_set and order and order['sender_confirmed_at'] and order['accepter_confirmed_at'])
-    if just_completed and order['status'] != 'completed':
+    if just_completed and order and order['status'] != 'completed':
         conn = get_db_connection()
         conn.execute("UPDATE shared_orders SET status='completed' WHERE order_id=?", (order_id,))
         conn.commit()
@@ -4160,8 +4170,13 @@ def shared_order_passengers_keyboard(car_class=None):
     return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=buttons)
 
 def shared_order_yes_no_keyboard():
+    # "➖ Не отвечать" добавлена 22.09.2026 (прямая просьба пользователя -
+    # "выбор нужен грузчик или не нужен сделать произвольно") - "Нужен
+    # грузчик?" больше не обязателен, можно пропустить кнопкой (эквивалент
+    # ввода "-" текстом, см. обработку step == 'loader_needed').
     return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[
         [KeyboardButton(text="Да"), KeyboardButton(text="Нет")],
+        [KeyboardButton(text="➖ Не отвечать")],
         [KeyboardButton(text="❌ ОТМЕНА")],
     ])
 
@@ -4178,7 +4193,7 @@ SHARED_ORDER_STEP_PROMPTS = {
     'commission_from': "💼 Введи минимальную сумму своей комиссии в рублях (сколько хочешь получить за передачу заказа), или *-*, если комиссии нет:",
     'commission_to': "💼 Введи максимальную сумму своей комиссии в рублях, или *-*, если не хочешь её указывать:",
     'client_phone': "📱 Введи номер телефона клиента (его передадим водителю, который примет заказ). Если номера нет - пришли *-*:",
-    'loader_needed': "🧑‍🔧 Нужен грузчик? Выбери *Да* или *Нет*:",
+    'loader_needed': "🧑‍🔧 Нужен грузчик? Выбери *Да* или *Нет*, или пришли *-*, если не хочешь отвечать:",
     'cargo_length': "📏 Введи длину груза в сантиметрах (только число), или *-*, если неизвестно:",
     'cargo_width': "📏 Введи ширину груза в сантиметрах (только число), или *-*, если неизвестно:",
     'cargo_height': "📏 Введи высоту груза в сантиметрах (только число), или *-*, если неизвестно:",
@@ -4410,9 +4425,9 @@ def share_order_webapp_html(category=None):
     // цены обязательна (комиссия - полностью необязательна, без этой проверки).
     if ((!priceFrom || Number(priceFrom) <= 0) && (!priceTo || Number(priceTo) <= 0)) { errEl.textContent = 'Укажи хотя бы одну цену - от или до.'; return; }
     if (!carClass) { errEl.textContent = 'Выбери класс автомобиля.'; return; }
-    // "Нужен грузчик?" ОБЯЗАТЕЛЕН для классов с loader_choice (по прямой
-    // просьбе пользователя, 22.09.2026) - блокируем отправку без ответа.
-    if (classNeedsLoader(carClass) && !loaderNeeded) { errEl.textContent = 'Укажи, нужен ли грузчик.'; return; }
+    // "Нужен грузчик?" НЕОБЯЗАТЕЛЕН (изменено 22.09.2026 по прямой просьбе
+    // пользователя - "сделать произвольно") - можно отправить без ответа,
+    // отдельной проверки на отправке больше нет.
 
     const cargoLength = document.getElementById('cargoLength').value.trim();
     const cargoWidth = document.getElementById('cargoWidth').value.trim();
@@ -4532,15 +4547,16 @@ async def handle_share_order_submit_api(request):
 
     class_requires_passengers = SHARE_ORDER_PASSENGERS_BY_CLASS.get(car_class)
     max_pax = SHARE_ORDER_MAX_PASSENGERS_BY_CLASS.get(car_class) or 5
-    class_requires_loader = SHARE_ORDER_LOADER_CHOICE_BY_CLASS.get(car_class)
+    # ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя - "выбор нужен грузчик
+    # или не нужен сделать произвольно"): "Нужен грузчик?" больше НЕ
+    # обязателен - loader_needed просто сохраняется, если пришёл, без
+    # блокировки отправки при его отсутствии.
     # Серверная валидация (дублирует клиентскую в share_order_webapp_html,
     # но НИКОГДА не доверяем только клиенту) - по прямой просьбе пользователя
-    # (22.09.2026): лимит пассажиров по классу и обязательный "Нужен грузчик?"
-    # для непассажирских классов.
+    # (22.09.2026): лимит пассажиров по классу.
     if (not pickup or not dropoff or (not price_from_digits and not price_to_digits)
             or car_class not in SHARE_ORDER_CAR_CLASS_NAMES
-            or (class_requires_passengers and (passengers <= 0 or passengers > max_pax))
-            or (class_requires_loader and not loader_needed)):
+            or (class_requires_passengers and (passengers <= 0 or passengers > max_pax))):
         return web.json_response({'error': 'invalid_body'}, status=400)
 
     # tg_user - тот же {id, first_name, username, ...}, что Telegram кладёт в
@@ -4706,8 +4722,9 @@ async def shared_order_flow(message: types.Message):
             await message.answer(f"👥 Сколько пассажиров? (максимум {max_pax})", reply_markup=shared_order_passengers_keyboard(text))
         elif SHARE_ORDER_LOADER_CHOICE_BY_CLASS.get(text):
             # Пеший курьер/Курьер на авто/Грузовая машина - "Пассажиров" не
-            # имеет смысла, но "Нужен грузчик?" ОБЯЗАТЕЛЕН (по прямой просьбе
-            # пользователя, 22.09.2026).
+            # имеет смысла; "Нужен грузчик?" задаётся, но необязателен
+            # (изменено 22.09.2026 по прямой просьбе пользователя - можно
+            # пропустить, см. shared_order_yes_no_keyboard/step=='loader_needed').
             draft['data']['passengers'] = ''
             draft['step'] = 'loader_needed'
             state['order_draft'] = draft
@@ -4732,10 +4749,10 @@ async def shared_order_flow(message: types.Message):
         return
 
     if step == 'loader_needed':
-        if text not in ('Да', 'Нет'):
-            await message.answer("Выбери кнопкой «Да» или «Нет» 👇", reply_markup=shared_order_yes_no_keyboard())
+        if text not in ('Да', 'Нет', '➖ Не отвечать', '-'):
+            await message.answer("Выбери кнопкой «Да»/«Нет», или «Не отвечать», если не хочешь указывать 👇", reply_markup=shared_order_yes_no_keyboard())
             return
-        draft['data']['loader_needed'] = 'yes' if text == 'Да' else 'no'
+        draft['data']['loader_needed'] = 'yes' if text == 'Да' else ('no' if text == 'Нет' else None)
         if SHARE_ORDER_CARGO_DIMS_BY_CLASS.get(draft['data'].get('car_class')):
             draft['step'] = 'cargo_length'
             state['order_draft'] = draft
@@ -4938,8 +4955,12 @@ async def accept_shared_order(callback_query: types.CallbackQuery):
         text += f"📱 Телефон клиента: {escape_md(order['client_phone'])}\n"
     text += f"\n📞 Свяжитесь с отправителем: {order['sender_contact']}"
     # "✅ ЗАКАЗ ВЫПОЛНЕН" - по прямой просьбе пользователя (22.09.2026),
-    # взаимное подтверждение выполнения (см. order_done_{order_id} ниже) -
-    # кнопка есть и здесь (у принявшего), и в уведомлении отправителя ниже.
+    # ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя - "засчитывается
+    # только у того, кто заказ принял и выполняет, тот кто его дал - он
+    # ему не нужен"): кнопка теперь ТОЛЬКО у принявшего (accepted_by) -
+    # отправителю она не показывается, счётчик засчитывается одним
+    # нажатием, без ожидания подтверждения второй стороны (см.
+    # order_done_{order_id} ниже).
     done_keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ ЗАКАЗ ВЫПОЛНЕН", callback_data=f"order_done_{order_id}")]
     ])
@@ -4951,7 +4972,7 @@ async def accept_shared_order(callback_query: types.CallbackQuery):
             await bot.send_message(
                 order['sender_id'],
                 f"🎉 *Ваш заказ #{order_id} принят!*\n\n📞 Свяжитесь с водителем: {accepted_by_contact}",
-                reply_markup=done_keyboard, parse_mode='Markdown'
+                parse_mode='Markdown'
             )
         except Exception as e:
             logger.warning(f"⚠️ Не удалось уведомить отправителя {order['sender_id']} о принятии заказа #{order_id}: {e}")
@@ -4963,47 +4984,43 @@ async def decline_shared_order(callback_query: types.CallbackQuery):
 
 @router.callback_query(lambda c: c.data.startswith('order_done_'))
 async def order_done_callback(callback_query: types.CallbackQuery):
-    """"✅ ЗАКАЗ ВЫПОЛНЕН" - по прямой просьбе пользователя (22.09.2026):
-    "чтобы было что оба приняли ... верификация обоих подтверждения прошла" -
-    счётчик у ПРИНЯВШЕГО (accepted_by) увеличивается только когда ОБЕ
-    стороны нажали эту кнопку (см. confirm_shared_order_done/
-    increment_completed_orders). Кнопка есть и у отправителя, и у принявшего
-    (см. accept_shared_order) - определяем, кто именно нажал, по
-    from_user.id относительно order['sender_id']/order['accepted_by']."""
+    """"✅ ЗАКАЗ ВЫПОЛНЕН" - по прямой просьбе пользователя (22.09.2026).
+    ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя - "засчитывается только
+    у того, кто заказ принял и выполняет, тот кто его дал - он ему не
+    нужен"): раньше требовалось взаимное подтверждение (и отправитель, и
+    принявший), теперь кнопка есть ТОЛЬКО у принявшего (accepted_by, см.
+    accept_shared_order) и счётчик засчитывается ОДНИМ нажатием, без
+    ожидания второй стороны. accepter_confirmed_at всё равно используется -
+    как флаг "уже засчитано", чтобы повторное нажатие не удваивало счётчик."""
     order_id = int(callback_query.data[len('order_done_'):])
     order = get_shared_order(order_id)
     if not order or not order.get('accepted_by'):
         await callback_query.answer("Заказ не найден", show_alert=True)
         return
-    clicker_id = callback_query.from_user.id
-    if clicker_id == order['sender_id']:
-        is_sender = True
-    elif clicker_id == order['accepted_by']:
-        is_sender = False
-    else:
+    if callback_query.from_user.id != order['accepted_by']:
         await callback_query.answer("Это не ваш заказ", show_alert=True)
         return
 
-    order_after, just_completed = confirm_shared_order_done(order_id, is_sender)
-    other_confirmed = bool(order_after['accepter_confirmed_at'] if is_sender else order_after['sender_confirmed_at'])
+    order_after, just_completed = confirm_shared_order_done(order_id, is_sender=False)
 
-    if just_completed or other_confirmed:
-        await callback_query.message.edit_text(f"✅ Заказ #{order_id} завершён! Обе стороны подтвердили выполнение.")
+    if just_completed:
+        await callback_query.message.edit_text(f"✅ Заказ #{order_id} засчитан как выполненный!")
     else:
-        await callback_query.message.edit_text("✅ Отмечено, ждём подтверждения второй стороны.")
+        # accepter_confirmed_at уже был проставлен раньше (повторное
+        # нажатие) - счётчик не трогаем повторно.
+        await callback_query.message.edit_text(f"✅ Заказ #{order_id} уже был отмечен как выполненный.")
     await callback_query.answer("Отмечено!")
 
     if just_completed and bot:
+        # Отправителю больше НЕ шлём отдельное уведомление (22.09.2026 -
+        # ему эта механика "не нужна", см. docstring выше) - счётчик и
+        # сообщение только у принявшего.
         new_count = increment_completed_orders(order['accepted_by'])
         count_text = f" Выполненных заказов: {new_count}" if new_count is not None else ""
         try:
             await bot.send_message(order['accepted_by'], f"🎉 Заказ засчитан!{count_text}")
         except Exception as e:
             logger.warning(f"⚠️ Не удалось уведомить принявшего {order['accepted_by']} о засчитанном заказе #{order_id}: {e}")
-        try:
-            await bot.send_message(order['sender_id'], f"✅ Обе стороны подтвердили выполнение заказа #{order_id}.")
-        except Exception as e:
-            logger.warning(f"⚠️ Не удалось уведомить отправителя {order['sender_id']} о завершении заказа #{order_id}: {e}")
 
 # ==================== МОДУЛЬ "ИНСТРУМЕНТЫ ВОДИТЕЛЯ" - хендлеры ====================
 
