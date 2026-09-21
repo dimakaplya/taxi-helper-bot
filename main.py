@@ -7473,10 +7473,37 @@ def map_webapp_html():
   renderLegend();
   renderToggle();
   const map = L.map('map').setView([55.7558, 37.6173], 11);
-  L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
-    attribution: '© OpenStreetMap',
+  // ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя - подложка Яндекс.Карт):
+  // НЕОФИЦИАЛЬНЫЕ тайлы Яндекса без API-ключа (обычный слепой XYZ-эндпоинт,
+  // совместимый с системой координат Leaflet "из коробки") - пользователь
+  // осознанно выбрал этот вариант вместо официального JS API (нужен ключ и
+  // полная переделка карты под ymaps) или CartoDB (без рисков). Яндекс может
+  // в любой момент поменять версию тайлов ("v=...") или начать резать такие
+  // запросы - на этот случай ниже есть fallback: если тайлы Яндекса массово
+  // не грузятся (tileerror), автоматически переключаемся на OpenStreetMap,
+  // чтобы карта не осталась пустой.
+  const YANDEX_TILE_URL = 'https://vec0{{s}}.maps.yandex.net/tiles?l=map&v=24.06.02-0&x={{x}}&y={{y}}&z={{z}}&scale=1&lang=ru_RU';
+  const OSM_TILE_URL = 'https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png';
+  let tileErrorCount = 0;
+  let fellBackToOsm = false;
+  const yandexLayer = L.tileLayer(YANDEX_TILE_URL, {{
+    subdomains: ['01', '02', '03', '04'],
+    attribution: '© Яндекс.Карты',
     maxZoom: 19,
-  }}).addTo(map);
+  }});
+  yandexLayer.on('tileerror', () => {{
+    if (fellBackToOsm) return;
+    tileErrorCount += 1;
+    // Порог с запасом - несколько тайлов по краям могут не загрузиться и в
+    // норме (нет данных за пределами покрытия), падать на OSM должны только
+    // при массовых ошибках (сама подложка недоступна).
+    if (tileErrorCount > 8) {{
+      fellBackToOsm = true;
+      map.removeLayer(yandexLayer);
+      L.tileLayer(OSM_TILE_URL, {{ attribution: '© OpenStreetMap', maxZoom: 19 }}).addTo(map);
+    }}
+  }});
+  yandexLayer.addTo(map);
   let markers = [];
   let airportMarkers = [];
   let airportsLoaded = false;
