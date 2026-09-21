@@ -7371,6 +7371,7 @@ MAP_CHROME_CSS = """
   .legend .dot { width: 11px; height: 11px; border-radius: 50%; border: 1px solid rgba(255,255,255,.5); display: inline-block; }
   .filter-toggle { position: absolute; top: 10px; left: 10px; z-index: 1000; background: #FFC400; color: #000; border-radius: 8px; padding: 8px 12px; font-family: -apple-system, sans-serif; font-size: 12.5px; font-weight: 600; box-shadow: 0 1px 4px rgba(0,0,0,.35); cursor: pointer; user-select: none; text-transform: uppercase; }
   .airport-icon { display: flex; align-items: center; justify-content: center; font-size: 20px; filter: drop-shadow(0 1px 2px rgba(0,0,0,.5)); }
+  .car-icon-inner { width: 24px; height: 24px; border-radius: 50%; border: 1.5px solid #333; display: flex; align-items: center; justify-content: center; font-size: 13px; box-shadow: 0 1px 3px rgba(0,0,0,.4); }
   .airport-popup h4 { margin: 0 0 4px; font-family: -apple-system, sans-serif; font-size: 13.5px; color: #000; }
   .airport-popup .row { font-family: -apple-system, sans-serif; font-size: 12.5px; margin: 2px 0; color: #333; }
   .airport-label { background: rgba(20,20,20,.92); color: #fff; border: 1px solid rgba(255,196,0,.55); border-radius: 6px; padding: 3px 6px; font-family: -apple-system, sans-serif; font-size: 11px; line-height: 1.35; white-space: nowrap; box-shadow: 0 1px 3px rgba(0,0,0,.35); }
@@ -7473,9 +7474,17 @@ def map_webapp_html():
       data.positions.forEach(p => {{
         const style = CATEGORY_STYLE[p.category] || {{ color: '#888', label: p.category }};
         const popupText = (p.tariffs && p.tariffs.length) ? `${{style.label}} (${{p.tariffs.join(', ')}})` : style.label;
-        const marker = L.circleMarker([p.lat, p.lon], {{
-          radius: 9, color: '#333', weight: 1.5, fillColor: style.color, fillOpacity: 0.9,
-        }}).bindPopup(popupText).addTo(map);
+        // ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя): вместо кружка -
+        // иконка машинки 🚗, залитая цветом категории (тем же, что раньше
+        // был у кружка, см. CATEGORY_STYLE) - чтобы на карте сразу было
+        // видно, что это водитель, а не просто цветная точка.
+        const icon = L.divIcon({{
+          className: 'car-icon',
+          html: `<div class="car-icon-inner" style="background:${{style.color}}">🚗</div>`,
+          iconSize: [24, 24],
+          iconAnchor: [12, 12],
+        }});
+        const marker = L.marker([p.lat, p.lon], {{ icon }}).bindPopup(popupText).addTo(map);
         markers.push(marker);
         bounds.push([p.lat, p.lon]);
       }});
