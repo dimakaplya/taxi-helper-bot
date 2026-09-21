@@ -419,25 +419,28 @@ def notifications_enabled(state, notif_key):
 # по порядку и шлёт пуш за каждый
 # впервые пройденный уровень.
 AIRPORT_QUEUE_RADIUS_LEVELS_KM = [2.0, 1.0, 0.5]
-# ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя - "кнопка с сообщением
-# встать в очередь пока юзер не встал должна быть на главном экране пока он
-# находится в зоне аэропорта в 1.5 км, единственное исключение для внуково
-# 2.5 км"): внешний ("въехал в зону аэропорта") уровень из
-# AIRPORT_QUEUE_RADIUS_LEVELS_KM[0] теперь берётся отсюда - за пределами
-# аэропортов, обычная зона 1.5 км; для Внуково (UUWW) явно задано
-# исключение 2.5 км (прямая просьба пользователя). см.
+# ИЗМЕНЕНО 22.09.2026 (прямая, жёсткая просьба пользователя - "радиус
+# действия стояния в очереди 1 км во всех аэропортах, кроме Внуково - там
+# 2 км"): внешний ("въехал в зону аэропорта") уровень из
+# AIRPORT_QUEUE_RADIUS_LEVELS_KM[0] теперь берётся отсюда - во всех 12
+# городах бота обычная зона 1 км; для Внуково (UUWW), единственного
+# исключения из всех аэропортов, явно задано 2 км. см.
 # airport_queue_outer_radius_km() ниже - process_airport_queue_ping
 # использует именно её вместо AIRPORT_QUEUE_RADIUS_LEVELS_KM[0] для первого
-# (самого внешнего) уровня, остальные уровни (1.0/0.5 км) не меняются.
-AIRPORT_QUEUE_OUTER_RADIUS_DEFAULT_KM = 1.5
+# (самого внешнего) уровня, остальные уровни (1.0/0.5 км) не меняются - для
+# всех аэропортов, кроме Внуково, внешний уровень (1 км) теперь совпадает
+# со вторым уровнем AIRPORT_QUEUE_RADIUS_LEVELS_KM[1] (тоже 1 км), поэтому
+# фактически остаётся два различимых уровня - 1 км/500 м (см. levels_km в
+# process_airport_queue_ping - совпадающий уровень просто схлопывается).
+AIRPORT_QUEUE_OUTER_RADIUS_DEFAULT_KM = 1.0
 AIRPORT_QUEUE_OUTER_RADIUS_OVERRIDES_KM = {
-    'UUWW': 2.5,  # VKO (Внуково)
+    'UUWW': 2.0,  # VKO (Внуково) - единственное исключение, прямая просьба пользователя
 }
 
 def airport_queue_outer_radius_km(icao):
     """Радиус "зоны аэропорта" для самого внешнего уровня гео-пушей очереди
-    (см. AIRPORT_QUEUE_OUTER_RADIUS_DEFAULT_KM/_OVERRIDES_KM выше) - 1.5 км
-    для всех аэропортов, кроме Внуково (2.5 км, прямая просьба пользователя,
+    (см. AIRPORT_QUEUE_OUTER_RADIUS_DEFAULT_KM/_OVERRIDES_KM выше) - 1 км
+    для всех аэропортов, кроме Внуково (2 км, прямая просьба пользователя,
     22.09.2026)."""
     return AIRPORT_QUEUE_OUTER_RADIUS_OVERRIDES_KM.get(icao, AIRPORT_QUEUE_OUTER_RADIUS_DEFAULT_KM)
 # Пользователь также попросил убрать пуш "уже 1 час рядом" и пуш "уже 15
@@ -7180,15 +7183,30 @@ async def process_airport_queue_ping(user_id, lat, lon, live_period=None):
             # отсчёта для таймера "уже 30 минут рядом" (см. check_airport_queue_timers).
             aq['entered_outer_at'] = now.isoformat()
             aq['pushed_30'] = False
-            # ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "собирай
-            # данные о времени начала и выхода из очереди ... тариф дата
-            # время и место в очереди") - новая строка лога в отдельном
-            # файле БД (см. log_airport_queue_entered/AIRPORT_QUEUE_LOG_DB_FILE
-            # выше), дозаполняется left_at/wait_minutes при выходе ниже.
-            # row_id храним прямо в aq, чтобы найти ту же строку при выходе.
+        # ИЗМЕНЕНО 22.09.2026 (жёсткая просьба пользователя - "push
+        # уведомления и сбор данных осуществляется только после того когда
+        # человек встал в очередь, не вставая в очередь этот пуш прийти не
+        # может"): раньше лог входа (log_airport_queue_entered) создавался
+        # сразу при попадании в радиус аэропорта, ДО того как водитель
+        # реально отмечался в очереди - из-за этого позже, при выезде,
+        # всегда уходил пуш "Ты выехал(а) из зоны"/"Я ПОКИНУЛ ОЧЕРЕДЬ", даже
+        # если водитель просто проезжал мимо и в очередь вообще не вставал
+        # (жалоба пользователя, скриншот). Теперь строка лога создаётся
+        # ТОЛЬКО в момент, когда у водителя появляется СВОЯ свежая отметка
+        # по этому аэропорту/зоне (is_already_queued - т.е. он реально нажал
+        # "🚗 ВСТАТЬ В ОЧЕРЕДЬ"/"✅ УЖЕ В ОЧЕРЕДИ" или отметился через
+        # "✈️🚆 АВИА/ЖД"), и только один раз за этот заход (queue_log_id ещё
+        # не установлен). entered_at берём из entered_outer_at - реальное
+        # время появления в зоне, а не момент отметки - чтобы wait_minutes
+        # по-прежнему считал время именно ожидания у аэропорта.
+        if is_already_queued and not aq.get('queue_log_id'):
+            try:
+                entered_at_for_log = datetime.fromisoformat(aq['entered_outer_at'])
+            except Exception:
+                entered_at_for_log = now
             aq['queue_log_id'] = log_airport_queue_entered(
                 user_id, icao, zone_key, zone_label, city_for_marks,
-                (state.get('shift') or {}).get('tariffs'), now,
+                (state.get('shift') or {}).get('tariffs'), entered_at_for_log,
             )
         # ИЗМЕНЕНО 21.09.2026: раньше было только 2 фиксированных уровня
         # (outer/inner), теперь идём по levels_km (внешний уровень аэропорта +
@@ -7212,32 +7230,37 @@ async def process_airport_queue_ping(user_id, lat, lon, live_period=None):
         # Вышел за пределы внешнего радиуса - сбрасываем: при возвращении
         # отсчёт (и пуши на вход/по времени) начнётся заново.
         if aq.get('entered_outer_at'):
-            # ДОБАВЛЕНО 22.09.2026 (см. комментарий у send_airport_queue_left_push
-            # выше) - пуш о выходе из зоны, только если водитель реально
-            # заходил в неё (entered_outer_at) в ЭТОТ заход, а не на каждый
-            # пинг далеко от аэропорта.
-            # zone_label не передаём - он вычислен для ТЕКУЩЕЙ (уже дальней)
-            # точки и может не соответствовать зоне, в которой водитель
-            # реально стоял (aq['zone_key']) - обходимся названием аэропорта
-            # без уточнения терминала.
-            await send_airport_queue_left_push(user_id, aq.get('icao') or icao)
-            try:
-                entered_at = datetime.fromisoformat(aq['entered_outer_at'])
-                wait_minutes = max(0, round((now - entered_at).total_seconds() / 60))
-            except Exception:
-                wait_minutes = 0
-            # По просьбе пользователя (20.09.2026): если сейчас идёт смена -
-            # копим суммарное время простоя в аэропорту за смену
-            # (state['shift']['airport_wait_minutes']), чтобы учесть его в
-            # итоговом расчёте финансов (см. send_courier_finance_result).
-            shift = state.get('shift')
-            if shift:
-                shift = dict(shift)
-                shift['airport_wait_minutes'] = shift.get('airport_wait_minutes', 0) + wait_minutes
-                state['shift'] = shift
-            # Дозаполняем left_at/wait_minutes у строки лога, созданной при
-            # входе (см. комментарий у log_airport_queue_entered выше).
-            log_airport_queue_left(aq.get('queue_log_id'), now, wait_minutes)
+            # ИЗМЕНЕНО 22.09.2026 (см. комментарий выше у "queue_log_id ещё
+            # не установлен") - пуш "Ты выехал(а) из зоны" + "Я ПОКИНУЛ
+            # ОЧЕРЕДЬ", а также запись left_at/wait_minutes в лог и учёт
+            # времени простоя в финансах смены, теперь шлются/пишутся ТОЛЬКО
+            # если у водителя за этот заход реально есть queue_log_id - то
+            # есть он был в зоне аэропорта И успел отметиться в очереди.
+            # Просто проезжавшего мимо/не вставшего в очередь водителя эти
+            # пуш и сбор данных больше не касаются вообще.
+            if aq.get('queue_log_id'):
+                # zone_label не передаём - он вычислен для ТЕКУЩЕЙ (уже дальней)
+                # точки и может не соответствовать зоне, в которой водитель
+                # реально стоял (aq['zone_key']) - обходимся названием аэропорта
+                # без уточнения терминала.
+                await send_airport_queue_left_push(user_id, aq.get('icao') or icao)
+                try:
+                    entered_at = datetime.fromisoformat(aq['entered_outer_at'])
+                    wait_minutes = max(0, round((now - entered_at).total_seconds() / 60))
+                except Exception:
+                    wait_minutes = 0
+                # По просьбе пользователя (20.09.2026): если сейчас идёт смена -
+                # копим суммарное время простоя в аэропорту за смену
+                # (state['shift']['airport_wait_minutes']), чтобы учесть его в
+                # итоговом расчёте финансов (см. send_courier_finance_result).
+                shift = state.get('shift')
+                if shift:
+                    shift = dict(shift)
+                    shift['airport_wait_minutes'] = shift.get('airport_wait_minutes', 0) + wait_minutes
+                    state['shift'] = shift
+                # Дозаполняем left_at/wait_minutes у строки лога, созданной
+                # в момент реальной отметки в очереди (см. выше).
+                log_airport_queue_left(aq.get('queue_log_id'), now, wait_minutes)
             aq = {'icao': icao, 'zone_key': zone_key, 'last_update_at': now.isoformat()}
             if live_period:
                 aq['live_period'] = live_period
