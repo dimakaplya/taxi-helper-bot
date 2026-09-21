@@ -3141,12 +3141,34 @@ def services_keyboard(category=None, city=None, user_id=None):
         where_to_go_row.append(KeyboardButton(text="🗺 Карта водителей", web_app=WebAppInfo(url=map_url)))
     top_rows.append(where_to_go_row)
 
+    # По просьбе пользователя (21.09.2026): "надо обьеденить кнопки
+    # инструменты водителя и настройки сделать одну кнопку Личный кабинет и в
+    # нем сделать приложение где будут все функции этих кнопок" - "🧰
+    # Инструменты водителя" и "⚙️ Настройки" убраны из главного меню (сами
+    # хендлеры courier_module_keyboard/show_notification_settings и их
+    # подпункты НЕ удалены - оставлены как есть на случай, если куда-то ещё
+    # ведут внутренние переходы, просто из главного меню на них больше нет
+    # прямого пути), вместо них - одна кнопка "👤 Личный кабинет"
+    # (web_app=WebAppInfo, тот же паттерн, что у "🗺 Карта водителей" выше),
+    # открывающая расширенный /cabinet WebApp со всеми разделами обеих кнопок
+    # (включая гео-фичи "Рядом" через navigator.geolocation в браузере -
+    # см. блок "ЛИЧНЫЙ КАБИНЕТ (WebApp)"). Тот же guard PUBLIC_URL and city,
+    # что у карты - Telegram требует HTTPS для WebApp, локально такой ссылки
+    # нет. Если PUBLIC_URL/city не заданы - кнопка просто не показывается
+    # (как и у карты) - других пользователей это не оставляет без доступа,
+    # т.к. раньше (до этого изменения) сами эти функции были доступны только
+    # из главного меню без такого guard, но теперь единственный путь к ним -
+    # эта кнопка; отсутствие PUBLIC_URL - редкий локальный/дев-запуск.
+    cabinet_row = None
+    if PUBLIC_URL and city:
+        tariff_options = CATEGORIES.get(category, {}).get('tariffs', [])
+        cabinet_url = f"{PUBLIC_URL}{CABINET_WEBAPP_PATH}?tariffs={urllib.parse.quote(','.join(tariff_options))}"
+        cabinet_row = KeyboardButton(text="👤 Личный кабинет", web_app=WebAppInfo(url=cabinet_url))
+
     items = []
     if category in SHARED_ORDER_CATEGORIES:
         items.append("🔄 Отдать заказ")
     items.append("🌤 Погода")
-    if category in COURIER_MODULE_CATEGORIES:
-        items.append("🧰 Инструменты водителя")
     if category not in CATEGORIES_WITHOUT_AIRPORTS:
         items.append("✈️🚆 Авиа/ЖД")
     # "🎭 События города" и "⛔ Дорожные события" объединены в ОДНУ кнопку
@@ -3175,7 +3197,14 @@ def services_keyboard(category=None, city=None, user_id=None):
     # "События..." справа (было: "Настройки" отдельной строкой, "События..."
     # где-то в общей 2-колоночной сетке выше). "Бесплатный VPN" - следующей
     # строкой, как и раньше.
-    buttons.append([KeyboardButton(text="⚙️ Настройки"), KeyboardButton(text=events_button_text)])
+    # "⚙️ Настройки" убрана из этого ряда (см. комментарий выше про
+    # объединение в "👤 Личный кабинет") - если WebApp недоступен (нет
+    # PUBLIC_URL/city), cabinet_row будет None и в ряду останется только
+    # "События города"/"Дорожные события" одна, без второй кнопки.
+    settings_row = [KeyboardButton(text=events_button_text)]
+    if cabinet_row is not None:
+        settings_row.insert(0, cabinet_row)
+    buttons.append(settings_row)
     buttons.append([KeyboardButton(text="🔓 Бесплатный VPN TAXI HELPER")])
     # "🤝 Реферальная программа" (по просьбе пользователя, 20.09.2026) - своей
     # строкой, под VPN - см. блок "РЕФЕРАЛЬНАЯ ПРОГРАММА" ниже
@@ -6580,6 +6609,205 @@ async def handle_cabinet_profile_api(request):
         return web.json_response({'error': 'save_failed'}, status=500)
     return web.json_response({'ok': True})
 
+# ==================== ЛИЧНЫЙ КАБИНЕТ - РАСШИРЕНИЕ (21.09.2026) ====================
+# По прямой просьбе пользователя: "надо обьеденить кнопки инструменты
+# водителя и настройки сделать одну кнопку Личный кабинет и в нем сделать
+# приложение где будут все функции этих кнопок" (и явно выбранный пользователем
+# вариант "всё в приложение, включая геолокацию", когда уточняли объём) -
+# ниже 5 новых HTTP-эндпоинтов, все на том же /cabinet WebApp, каждый - тонкая
+# обёртка над УЖЕ существующей функцией/хендлером Telegram-версии (никакая
+# логика не дублируется и не переписывается заново в JS): Финансы ->
+# calculate_finance_result+save_finance_result (те же, что
+# send_courier_finance_result), Спрос сейчас/Часы пика -> те же тексты/ссылки,
+# что show_kef_bot/format_peak_hours_text, Рядом (гео) -> тот же
+# nearest_nearby_points/yandex_navi_url, что handle_nearby_location, Настройки
+# -> те же notif_prefs/enable_airport_queue_tracking, что
+# toggle_notification_setting/toggle_airport_queue_inline. Везде - строгая
+# проверка initData (401 без валидной подписи), как и у /cabinet/data выше -
+# это персональные данные/действия конкретного человека.
+def _cabinet_require_user(request):
+    """Общая проверка initData для всех новых /cabinet/* эндпоинтов ниже -
+    возвращает user_id или None (вызывающий код тогда отвечает 401)."""
+    init_data = request.headers.get('X-Telegram-Init-Data', '')
+    parsed = validate_telegram_webapp_init_data(init_data, BOT_TOKEN) if BOT_TOKEN else None
+    if not parsed:
+        return None
+    try:
+        tg_user = json.loads(parsed.get('user', '{}'))
+        return tg_user.get('id')
+    except Exception:
+        return None
+
+CABINET_FINANCE_API_PATH = '/cabinet/finance'
+
+async def handle_cabinet_finance_api(request):
+    """POST {income, km, consumption, fuel_price, car_ownership, rent,
+    expenses, tax_rate, hours} -> тот же расчёт, что и в Telegram-версии
+    (calculate_finance_result), результат сохраняется в ту же статистику
+    (save_finance_result, см. get_finance_history/handle_cabinet_data_api
+    выше - значит появится и на графике "Заработок по дням")."""
+    user_id = _cabinet_require_user(request)
+    if not user_id:
+        return web.json_response({'error': 'invalid_init_data'}, status=401)
+    try:
+        body = await request.json()
+        data = {
+            'income': float(body['income']),
+            'km': float(body['km']),
+            'consumption': float(body['consumption']),
+            'fuel_price': float(body['fuel_price']),
+            'car_ownership': body.get('car_ownership') or CAR_OWNERSHIP_OWN,
+            'rent': float(body.get('rent') or 0),
+            'expenses': float(body.get('expenses') or 0),
+            'tax_rate': float(body.get('tax_rate') or DEFAULT_TAX_RATE_PERCENT),
+            'hours': float(body['hours']),
+        }
+        if data['hours'] <= 0:
+            return web.json_response({'error': 'invalid_hours'}, status=400)
+    except Exception:
+        return web.json_response({'error': 'invalid_body'}, status=400)
+
+    r = calculate_finance_result(data)
+    save_finance_result(user_id, r['income'], r['net_profit'])
+    return web.json_response({
+        'income': round(r['income']), 'fuel_cost': round(r['fuel_cost']),
+        'wear_reserve': round(r['wear_reserve']), 'rent': round(r['rent']),
+        'expenses': round(r['expenses']), 'tax_amount': round(r['tax_amount']),
+        'tax_rate': r['tax_rate'], 'net_profit': round(r['net_profit']),
+        'per_hour': round(r['per_hour']), 'is_rented': r['is_rented'],
+    })
+
+CABINET_DEMAND_API_PATH = '/cabinet/demand'
+
+async def handle_cabinet_demand_api(request):
+    """"📈 Спрос сейчас" - в Telegram-версии (show_kef_bot) это просто ссылка
+    на стороннего бота @Yan_rus_bot (нет своих данных по кэфам, см. комментарий
+    у KEF_BOT_URL) - отдаём ту же ссылку/текст, без выдумывания новых данных."""
+    user_id = _cabinet_require_user(request)
+    if not user_id:
+        return web.json_response({'error': 'invalid_init_data'}, status=401)
+    return web.json_response({'url': KEF_BOT_URL})
+
+CABINET_PEAK_API_PATH = '/cabinet/peak'
+
+async def handle_cabinet_peak_api(request):
+    """Часы пика - переиспользует format_peak_hours_text (та же таблица
+    WEEKDAY_HOUR_LOAD/get_weekday_hour_load, что и текстовая "📅 Часы пика").
+    Опциональный query-параметр weekday=0..6 - как переключение дня в
+    switch_peak_hours_day."""
+    user_id = _cabinet_require_user(request)
+    if not user_id:
+        return web.json_response({'error': 'invalid_init_data'}, status=401)
+    state = user_state.get(user_id, {})
+    city = state.get('city')
+    category = state.get('category')
+    if not city:
+        return web.json_response({'error': 'no_city'}, status=400)
+    weekday_param = request.query.get('weekday')
+    try:
+        weekday = int(weekday_param) if weekday_param is not None else None
+    except ValueError:
+        weekday = None
+    if weekday is not None and not (0 <= weekday <= 6):
+        weekday = None
+    text = format_peak_hours_text(city, target_weekday=weekday, category=category)
+    now = get_city_now(city)
+    return web.json_response({'text': text, 'current_weekday': now.weekday()})
+
+CABINET_NEARBY_API_PATH = '/cabinet/nearby'
+
+async def handle_cabinet_nearby_api(request):
+    """"Рядом" - POST {kind, lat, lon} -> ближайшие NEARBY_RESULTS_COUNT точек,
+    та же функция nearest_nearby_points, что и в Telegram-версии
+    (handle_nearby_location), координаты берутся из браузерного
+    navigator.geolocation (по прямой просьбе пользователя - "включая
+    геолокацию" - вместо отправки геопозиции сообщением в Telegram)."""
+    user_id = _cabinet_require_user(request)
+    if not user_id:
+        return web.json_response({'error': 'invalid_init_data'}, status=401)
+    state = user_state.get(user_id, {})
+    city = state.get('city')
+    if not city:
+        return web.json_response({'error': 'no_city'}, status=400)
+    try:
+        body = await request.json()
+        kind = body.get('kind')
+        lat = float(body['lat'])
+        lon = float(body['lon'])
+    except Exception:
+        return web.json_response({'error': 'invalid_body'}, status=400)
+    if kind not in NEARBY_SERVICES:
+        return web.json_response({'error': 'invalid_kind'}, status=400)
+
+    scored = nearest_nearby_points(kind, city, lat, lon)
+    if scored is None:
+        return web.json_response({'error': 'no_data'}, status=200)
+    points = []
+    for dist_km, point in scored:
+        points.append({
+            'name': point.get('name'),
+            'kind_label': NEARBY_POINT_KIND_LABELS.get(point.get('kind')),
+            'distance': format_nearby_distance(dist_km),
+            'hours': point.get('hours'),
+            'specs': point.get('specs'),
+            'nav_url': yandex_navi_url(point['lat'], point['lon']),
+        })
+    cfg = NEARBY_SERVICES[kind]
+    return web.json_response({'label': cfg['label'], 'emoji': cfg['emoji'], 'points': points})
+
+CABINET_SETTINGS_API_PATH = '/cabinet/settings'
+
+async def handle_cabinet_settings_api(request):
+    """GET -> текущее состояние переключателей (те же notif_prefs/
+    airport_queue_active, что читает notification_settings_keyboard). POST
+    {key, value} -> тоглит РОВНО ту же логику, что и существующие Telegram-
+    колбэки: toggle_notification_setting для key в NOTIFICATION_TYPES,
+    toggle_airport_queue_inline/enable_airport_queue_tracking для
+    key == 'airport_queue' (включая отправку той же инструкции
+    airport_queue_enable_text ботом в чат при включении - в WebApp некуда
+    вписать длинный текст-инструкцию по трансляции геопозиции)."""
+    user_id = _cabinet_require_user(request)
+    if not user_id:
+        return web.json_response({'error': 'invalid_init_data'}, status=401)
+    state = user_state[user_id]
+    category = state.get('category')
+    show_airport_queue = category not in CATEGORIES_WITHOUT_AIRPORTS
+
+    if request.method == 'POST':
+        try:
+            body = await request.json()
+            key = body.get('key')
+        except Exception:
+            return web.json_response({'error': 'invalid_body'}, status=400)
+
+        if key == 'airport_queue':
+            if not show_airport_queue:
+                return web.json_response({'error': 'not_applicable'}, status=400)
+            if state.get('airport_queue_active'):
+                state['airport_queue_active'] = False
+                state['airport_queue'] = {}
+            else:
+                enable_airport_queue_tracking(user_id)
+                try:
+                    await bot.send_message(user_id, airport_queue_enable_text(), parse_mode='Markdown')
+                except Exception:
+                    logger.exception(f"❌ Не удалось отправить инструкцию по очереди у аэропорта user_id={user_id}")
+        elif key in NOTIFICATION_TYPES:
+            prefs = dict(state.get('notif_prefs') or {})
+            prefs[key] = not notifications_enabled(state, key)
+            state['notif_prefs'] = prefs
+        else:
+            return web.json_response({'error': 'invalid_key'}, status=400)
+
+    notif_types = [
+        {'key': key, 'label': info['label'], 'emoji': info['emoji'], 'enabled': notifications_enabled(state, key)}
+        for key, info in NOTIFICATION_TYPES.items()
+    ]
+    result = {'notif_types': notif_types, 'show_airport_queue': show_airport_queue}
+    if show_airport_queue:
+        result['airport_queue_active'] = bool(state.get('airport_queue_active'))
+    return web.json_response(result)
+
 def cabinet_webapp_html():
     """HTML-страница личного кабинета (Chart.js, без API-ключей - тот же
     источник CDN, что уже используется для Leaflet на карте водителей, см.
@@ -6660,10 +6888,96 @@ def cabinet_webapp_html():
   }
   #state { text-align: center; padding: 60px 16px; opacity: .6; font-size: 14px; }
   canvas { max-width: 100%; }
+
+  /* Навигация по разделам кабинета (21.09.2026) - объединение "Инструменты
+     водителя" + "Настройки" в один WebApp, см. блок "ЛИЧНЫЙ КАБИНЕТ -
+     РАСШИРЕНИЕ" в Python. Горизонтальный скролл пилюль вместо табов в ряд -
+     разделов много (9 штук), в один ряд на телефоне не влезут. */
+  .cabinet-nav {
+    display: flex; gap: 6px; overflow-x: auto; padding-bottom: 4px; margin-bottom: 14px;
+    -webkit-overflow-scrolling: touch;
+  }
+  .cabinet-nav::-webkit-scrollbar { display: none; }
+  .nav-pill {
+    flex-shrink: 0; border: none; border-radius: 999px; padding: 8px 13px; font-size: 12.5px;
+    font-weight: 600; background: var(--tg-theme-secondary-bg-color, #fff);
+    color: var(--tg-theme-text-color, #000); opacity: .65; white-space: nowrap;
+  }
+  .nav-pill.active { background: #34A853; color: #fff; opacity: 1; }
+  .tab-pane { display: none; }
+  .tab-pane.active { display: block; }
+  .card {
+    background: var(--tg-theme-secondary-bg-color, #fff); border-radius: 14px; padding: 14px;
+    margin-bottom: 12px;
+  }
+  .card p { margin: 0 0 8px; font-size: 14px; line-height: 1.5; }
+  .card p:last-child { margin-bottom: 0; }
+  .field-row { margin-bottom: 10px; }
+  .field-row label { display: block; font-size: 12px; opacity: .6; margin-bottom: 4px; }
+  .field-row input, .field-row select {
+    width: 100%; padding: 10px 11px; border-radius: 10px; border: 1px solid rgba(127,127,127,.3);
+    background: var(--tg-theme-bg-color, #f2f2f7); color: var(--tg-theme-text-color, #000); font-size: 14.5px;
+  }
+  .btn {
+    width: 100%; padding: 11px; border: none; border-radius: 10px; background: #34A853;
+    color: #fff; font-size: 14.5px; font-weight: 700; margin-top: 4px;
+  }
+  .btn.secondary { background: rgba(127,127,127,.18); color: var(--tg-theme-text-color, #000); }
+  .link-btn {
+    display: block; text-decoration: none; text-align: center; padding: 12px; border-radius: 10px;
+    background: #34A853; color: #fff !important; font-weight: 700; font-size: 14.5px; margin-bottom: 8px;
+  }
+  .pill-row { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
+  .pill-btn {
+    border: none; border-radius: 999px; padding: 8px 12px; font-size: 12.5px; font-weight: 600;
+    background: var(--tg-theme-secondary-bg-color, #fff); color: var(--tg-theme-text-color, #000);
+    opacity: .75;
+  }
+  .pill-btn.active { background: #34A853; color: #fff; opacity: 1; }
+  .point-card { background: var(--tg-theme-secondary-bg-color, #fff); border-radius: 12px; padding: 11px 12px; margin-bottom: 8px; }
+  .point-card .pc-title { font-size: 14px; font-weight: 700; margin-bottom: 3px; }
+  .point-card .pc-sub { font-size: 12px; opacity: .65; margin-bottom: 8px; }
+  .point-card .pc-go {
+    display: inline-block; text-decoration: none; background: #34A853; color: #fff !important;
+    padding: 7px 12px; border-radius: 8px; font-size: 12.5px; font-weight: 700;
+  }
+  .switch-row {
+    display: flex; align-items: center; justify-content: space-between; padding: 11px 0;
+    border-bottom: 1px solid rgba(127,127,127,.15); font-size: 14px;
+  }
+  .switch-row:last-child { border-bottom: none; }
+  .switch-toggle {
+    width: 44px; height: 26px; border-radius: 999px; border: none; position: relative; flex-shrink: 0;
+    background: rgba(127,127,127,.35);
+  }
+  .switch-toggle.on { background: #34A853; }
+  .switch-toggle::after {
+    content: ''; position: absolute; top: 3px; left: 3px; width: 20px; height: 20px; border-radius: 50%;
+    background: #fff; transition: left .15s;
+  }
+  .switch-toggle.on::after { left: 21px; }
+  .peak-line { font-size: 13.5px; padding: 6px 0; border-bottom: 1px solid rgba(127,127,127,.12); }
+  .peak-line:last-child { border-bottom: none; }
+  .muted { opacity: .6; font-size: 13px; }
 </style>
 </head>
 <body>
 <div id="state">Загружаю данные…</div>
+<div id="cabinetApp" style="display:none">
+
+<div class="cabinet-nav" id="cabinetNav">
+  <button class="nav-pill active" data-tab="profile">👤 Профиль</button>
+  <button class="nav-pill" data-tab="finance">💰 Финансы</button>
+  <button class="nav-pill" data-tab="demand">📈 Спрос</button>
+  <button class="nav-pill" data-tab="peak">📅 Часы пика</button>
+  <button class="nav-pill" data-tab="nearby">📍 Рядом</button>
+  <button class="nav-pill" data-tab="fuel">⛽ Бензин</button>
+  <button class="nav-pill" data-tab="tips">💳 Чаевые</button>
+  <button class="nav-pill" data-tab="maintenance">🛠 ТО</button>
+  <button class="nav-pill" data-tab="settings">⚙️ Настройки</button>
+</div>
+
+<div class="tab-pane active" id="tab-profile">
 <div id="content" style="display:none">
 
   <div class="profile-card">
@@ -6728,6 +7042,89 @@ def cabinet_webapp_html():
   <h2 class="section-title">Часы за рулём по дням (30 дней)</h2>
   <div class="chart-card"><canvas id="hoursChart" height="180"></canvas></div>
 </div>
+</div><!-- /tab-profile -->
+
+<!-- ==================== ФИНАНСЫ ====================
+     Тот же порядок полей/формула, что в Telegram-калькуляторе
+     (COURIER_FINANCE_STEP_PROMPTS/advance_finance_step) - но одной формой
+     сразу, а не пошагово (в WebApp это удобнее). Считает и сохраняет
+     handle_cabinet_finance_api (та же calculate_finance_result/
+     save_finance_result, что и Telegram-версия). -->
+<div class="tab-pane" id="tab-finance">
+  <div class="card">
+    <div class="field-row"><label>💰 Доход за день, ₽</label><input type="number" inputmode="decimal" id="finIncome" placeholder="2340"></div>
+    <div class="field-row"><label>🚗 Километраж за день, км</label><input type="number" inputmode="decimal" id="finKm" placeholder="87"></div>
+    <div class="field-row"><label>⛽ Расход топлива на 100 км</label><input type="number" inputmode="decimal" id="finConsumption" placeholder="6.2"></div>
+    <div class="field-row"><label>💵 Стоимость топлива/литр, ₽</label><input type="number" inputmode="decimal" id="finFuelPrice" placeholder="61.5"></div>
+    <div class="field-row">
+      <label>🚘 Машина</label>
+      <select id="finCarOwnership">
+        <option value="own">своя / кредит / лизинг</option>
+        <option value="rented">в аренде</option>
+      </select>
+    </div>
+    <div class="field-row"><label>🔑 Аренда ТС за день, ₽ (0 если своя)</label><input type="number" inputmode="decimal" id="finRent" placeholder="0"></div>
+    <div class="field-row"><label>📦 Доп. расходы за день, ₽</label><input type="number" inputmode="decimal" id="finExpenses" placeholder="0"></div>
+    <div class="field-row"><label>🧾 Ставка налога, %</label><input type="number" inputmode="decimal" id="finTaxRate" placeholder="6"></div>
+    <div class="field-row"><label>🕐 Часов за рулём</label><input type="number" inputmode="decimal" id="finHours" placeholder="5.5"></div>
+    <button class="btn" id="finCalcBtn">Рассчитать</button>
+    <div id="finResult" style="margin-top: 12px;"></div>
+  </div>
+</div>
+
+<!-- ==================== СПРОС СЕЙЧАС ==================== -->
+<div class="tab-pane" id="tab-demand">
+  <div class="card">
+    <p>Коэффициент повышенного спроса по районам считает отдельный бот - нажми кнопку ниже, чтобы открыть его.</p>
+    <a class="link-btn" id="demandLink" href="#" target="_blank">📈 Открыть бота с кэфом</a>
+  </div>
+</div>
+
+<!-- ==================== ЧАСЫ ПИКА ==================== -->
+<div class="tab-pane" id="tab-peak">
+  <div class="pill-row" id="peakDaysRow"></div>
+  <div class="card"><div id="peakText" class="muted">Загружаю…</div></div>
+</div>
+
+<!-- ==================== РЯДОМ (гео) ====================
+     navigator.geolocation вместо Telegram "поделиться геопозицией" сообщением
+     (по прямой просьбе пользователя - "включая геолокацию" в приложении). -->
+<div class="tab-pane" id="tab-nearby">
+  <div class="pill-row" id="nearbyKindsRow"></div>
+  <div id="nearbyResult"></div>
+</div>
+
+<!-- ==================== ТО ТРАНСПОРТА (заглушка, как в Telegram) ==================== -->
+<div class="tab-pane" id="tab-maintenance">
+  <div class="card"><p>🛠 Этот раздел в разработке 🚧 — скоро будет</p></div>
+</div>
+
+<!-- ==================== ГДЕ БЕНЗИН ==================== -->
+<div class="tab-pane" id="tab-fuel">
+  <div class="card">
+    <p>Народная карта наличия топлива на АЗС по России - отдельный бот. Нажми кнопку ниже, чтобы открыть его.</p>
+    <a class="link-btn" href="https://t.me/gde_benzin_rubot" target="_blank">⛽ Открыть «Где бензин»</a>
+  </div>
+</div>
+
+<!-- ==================== ЧАЕВЫЕ ==================== -->
+<div class="tab-pane" id="tab-tips">
+  <div class="card">
+    <p>Приложение «Яндекс Чаевые: на карту по QR» - покажи QR-код пассажиру, он сканирует и переводит чаевые тебе на карту.</p>
+    <a class="link-btn" href="https://apps.apple.com/us/app/%D1%8F%D0%BD%D0%B4%D0%B5%D0%BA%D1%81-%D1%87%D0%B0%D0%B5%D0%B2%D1%8B%D0%B5-%D0%BD%D0%B0-%D0%BA%D0%B0%D1%80%D1%82%D1%83-%D0%BF%D0%BE-qr/id1513175603?l=ru" target="_blank">🍎 Получить чаевые на iPhone</a>
+    <a class="link-btn" href="https://play.google.com/store/apps/details?id=com.chaevieprosto.app" target="_blank">🤖 Получить чаевые на Android</a>
+  </div>
+</div>
+
+<!-- ==================== НАСТРОЙКИ ====================
+     Те же notif_prefs/airport_queue_active, что и в Telegram "⚙️ Настройки"
+     (notification_settings_keyboard/toggle_notification_setting/
+     toggle_airport_queue_inline) - через handle_cabinet_settings_api. -->
+<div class="tab-pane" id="tab-settings">
+  <div class="card"><div id="settingsSwitches" class="muted">Загружаю…</div></div>
+</div>
+
+</div><!-- /cabinetApp -->
 <script>
   const tg = window.Telegram && window.Telegram.WebApp;
   if (tg) { tg.ready(); tg.expand(); }
@@ -6880,12 +7277,229 @@ def cabinet_webapp_html():
       });
 
       document.getElementById('state').style.display = 'none';
+      document.getElementById('cabinetApp').style.display = 'block';
       document.getElementById('content').style.display = 'block';
     } catch (e) {
       document.getElementById('state').textContent = 'Не удалось загрузить данные - попробуй закрыть и открыть кабинет ещё раз.';
     }
   }
   load();
+
+  // ==================== НАВИГАЦИЯ ПО РАЗДЕЛАМ (21.09.2026) ====================
+  // Объединение "🧰 Инструменты водителя" + "⚙️ Настройки" в "👤 Личный
+  // кабинет" (по просьбе пользователя) - переключение между разделами внутри
+  // одного WebApp, без перезагрузки страницы. Данные каждого раздела грузятся
+  // лениво (при первом открытии таба), а не все сразу при открытии кабинета.
+  const loadedTabs = {};
+  document.getElementById('cabinetNav').addEventListener('click', (e) => {
+    const btn = e.target.closest('.nav-pill');
+    if (!btn) return;
+    const tab = btn.dataset.tab;
+    document.querySelectorAll('.nav-pill').forEach(b => b.classList.toggle('active', b === btn));
+    document.querySelectorAll('.tab-pane').forEach(p => p.classList.toggle('active', p.id === 'tab-' + tab));
+    if (tg && tg.HapticFeedback) tg.HapticFeedback.selectionChanged();
+    if (!loadedTabs[tab]) {
+      loadedTabs[tab] = true;
+      if (tab === 'finance') initFinanceTab();
+      if (tab === 'demand') loadDemandTab();
+      if (tab === 'peak') loadPeakTab();
+      if (tab === 'nearby') initNearbyTab();
+      if (tab === 'settings') loadSettingsTab();
+    }
+  });
+
+  // ---- ФИНАНСЫ ----
+  function initFinanceTab() {
+    document.getElementById('finCalcBtn').addEventListener('click', async () => {
+      const resEl = document.getElementById('finResult');
+      const payload = {
+        income: parseFloat(document.getElementById('finIncome').value) || 0,
+        km: parseFloat(document.getElementById('finKm').value) || 0,
+        consumption: parseFloat(document.getElementById('finConsumption').value) || 0,
+        fuel_price: parseFloat(document.getElementById('finFuelPrice').value) || 0,
+        car_ownership: document.getElementById('finCarOwnership').value,
+        rent: parseFloat(document.getElementById('finRent').value) || 0,
+        expenses: parseFloat(document.getElementById('finExpenses').value) || 0,
+        tax_rate: parseFloat(document.getElementById('finTaxRate').value) || 6,
+        hours: parseFloat(document.getElementById('finHours').value) || 0,
+      };
+      if (payload.hours <= 0) { resEl.innerHTML = '<p class="muted">Укажи часы за рулём больше нуля.</p>'; return; }
+      resEl.innerHTML = '<p class="muted">Считаю…</p>';
+      try {
+        const resp = await fetch('""" + CABINET_FINANCE_API_PATH + """', {
+          method: 'POST',
+          headers: { 'X-Telegram-Init-Data': initData, 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        if (!resp.ok) throw new Error('http_' + resp.status);
+        const r = await resp.json();
+        resEl.innerHTML =
+          '<div class="tile accent" style="margin-bottom:8px"><div class="label">Чистыми за день</div><div class="value">' + fmtMoney(r.net_profit) + '</div>' +
+          '<div class="sub">≈ ' + fmtMoney(r.per_hour) + '/ч</div></div>' +
+          '<p class="muted">Валовый доход: ' + fmtMoney(r.income) + '<br>' +
+          '⛽ Топливо: −' + fmtMoney(r.fuel_cost) + '<br>' +
+          (r.is_rented ? '🔧 Резерв на износ: не учтён (аренда)<br>' : '🔧 Резерв на износ (10%): −' + fmtMoney(r.wear_reserve) + '<br>') +
+          (r.rent ? '🚘 Аренда ТС: −' + fmtMoney(r.rent) + '<br>' : '') +
+          (r.expenses ? '📦 Доп. расходы: −' + fmtMoney(r.expenses) + '<br>' : '') +
+          '🧾 Налог (' + r.tax_rate + '%): −' + fmtMoney(r.tax_amount) + '</p>';
+        if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
+      } catch (e) {
+        resEl.innerHTML = '<p class="muted">Не получилось посчитать, попробуй ещё раз.</p>';
+      }
+    });
+  }
+
+  // ---- СПРОС СЕЙЧАС ----
+  async function loadDemandTab() {
+    try {
+      const resp = await fetch('""" + CABINET_DEMAND_API_PATH + """', { headers: { 'X-Telegram-Init-Data': initData } });
+      if (!resp.ok) throw new Error('http_' + resp.status);
+      const data = await resp.json();
+      document.getElementById('demandLink').href = data.url;
+    } catch (e) {}
+  }
+
+  // ---- ЧАСЫ ПИКА ----
+  const weekdayNames = ['Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота', 'Воскресенье'];
+  function renderPeakText(raw) {
+    // Простая markdown->текст очистка (*жирный*, _курсив_) - в WebApp не
+    // используется Markdown-рендерер, показываем как обычный текст построчно.
+    return raw.replace(/\\*/g, '').split('\\n').filter(Boolean)
+      .map(l => '<div class="peak-line">' + l.replace(/_/g, '') + '</div>').join('');
+  }
+  async function loadPeakDay(weekday) {
+    const textEl = document.getElementById('peakText');
+    textEl.textContent = 'Загружаю…';
+    try {
+      const url = '""" + CABINET_PEAK_API_PATH + """' + (weekday != null ? ('?weekday=' + weekday) : '');
+      const resp = await fetch(url, { headers: { 'X-Telegram-Init-Data': initData } });
+      if (!resp.ok) throw new Error('http_' + resp.status);
+      const data = await resp.json();
+      textEl.innerHTML = renderPeakText(data.text);
+      const row = document.getElementById('peakDaysRow');
+      if (!row.children.length) {
+        weekdayNames.forEach((name, i) => {
+          const b = document.createElement('button');
+          b.className = 'pill-btn' + (i === data.current_weekday ? ' active' : '');
+          b.textContent = name.slice(0, 2);
+          b.dataset.weekday = i;
+          b.addEventListener('click', () => {
+            row.querySelectorAll('.pill-btn').forEach(x => x.classList.toggle('active', x === b));
+            loadPeakDay(i);
+          });
+          row.appendChild(b);
+        });
+      }
+    } catch (e) {
+      textEl.textContent = 'Не удалось загрузить - сначала выбери город в боте.';
+    }
+  }
+  function loadPeakTab() { loadPeakDay(null); }
+
+  // ---- РЯДОМ (гео) ----
+  const nearbyKinds = [
+    {key: 'toilets', emoji: '🚻', label: 'Туалеты'},
+    {key: 'parking', emoji: '🅿️', label: 'Парковка'},
+    {key: 'tires', emoji: '🔧', label: 'Шиномонтаж'},
+    {key: 'car_wash', emoji: '🚿', label: 'Мойки'},
+    {key: 'alcohol', emoji: '🍷', label: 'Алкомаркеты 24ч'},
+    {key: 'grocery24', emoji: '🛒', label: 'Магазины 24ч'},
+    {key: 'ev_charging', emoji: '🔌', label: 'Электрозарядки'},
+  ];
+  function initNearbyTab() {
+    const row = document.getElementById('nearbyKindsRow');
+    nearbyKinds.forEach(k => {
+      const b = document.createElement('button');
+      b.className = 'pill-btn';
+      b.textContent = k.emoji + ' ' + k.label;
+      b.addEventListener('click', () => {
+        row.querySelectorAll('.pill-btn').forEach(x => x.classList.toggle('active', x === b));
+        loadNearby(k.key);
+      });
+      row.appendChild(b);
+    });
+  }
+  function loadNearby(kind) {
+    const resEl = document.getElementById('nearbyResult');
+    if (!navigator.geolocation) {
+      resEl.innerHTML = '<p class="muted">Геолокация недоступна в этом браузере.</p>';
+      return;
+    }
+    resEl.innerHTML = '<p class="muted">Определяю местоположение…</p>';
+    navigator.geolocation.getCurrentPosition(async (pos) => {
+      resEl.innerHTML = '<p class="muted">Ищу ближайшие точки…</p>';
+      try {
+        const resp = await fetch('""" + CABINET_NEARBY_API_PATH + """', {
+          method: 'POST',
+          headers: { 'X-Telegram-Init-Data': initData, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ kind, lat: pos.coords.latitude, lon: pos.coords.longitude }),
+        });
+        if (!resp.ok) throw new Error('http_' + resp.status);
+        const data = await resp.json();
+        if (data.error === 'no_data' || !data.points) {
+          resEl.innerHTML = '<p class="muted">Данных по этой категории пока нет.</p>';
+          return;
+        }
+        if (!data.points.length) {
+          resEl.innerHTML = '<p class="muted">В твоём городе пока нет точек этой категории.</p>';
+          return;
+        }
+        resEl.innerHTML = data.points.map((p, i) => {
+          const title = (p.kind_label ? p.kind_label + ' ' : '') + (p.name || ('Точка ' + (i + 1)));
+          const sub = [p.distance, p.hours || 'часы работы не указаны', p.specs].filter(Boolean).join(' · ');
+          return '<div class="point-card"><div class="pc-title">' + (i + 1) + '. ' + title + '</div>' +
+            '<div class="pc-sub">' + sub + '</div>' +
+            '<a class="pc-go" href="' + p.nav_url + '" target="_blank">🚕 Поехали</a></div>';
+        }).join('');
+      } catch (e) {
+        resEl.innerHTML = '<p class="muted">Не удалось загрузить точки, попробуй ещё раз.</p>';
+      }
+    }, () => {
+      resEl.innerHTML = '<p class="muted">Не удалось получить геопозицию - разреши доступ к геолокации в браузере.</p>';
+    }, { enableHighAccuracy: true, timeout: 15000 });
+  }
+
+  // ---- НАСТРОЙКИ ----
+  async function loadSettingsTab() {
+    const wrap = document.getElementById('settingsSwitches');
+    try {
+      const resp = await fetch('""" + CABINET_SETTINGS_API_PATH + """', { headers: { 'X-Telegram-Init-Data': initData } });
+      if (!resp.ok) throw new Error('http_' + resp.status);
+      renderSettings(await resp.json());
+    } catch (e) {
+      wrap.textContent = 'Не удалось загрузить настройки.';
+    }
+  }
+  function renderSettings(data) {
+    const wrap = document.getElementById('settingsSwitches');
+    wrap.classList.remove('muted');
+    let html = data.notif_types.map(n =>
+      '<div class="switch-row"><span>' + n.emoji + ' ' + n.label + '</span>' +
+      '<button class="switch-toggle' + (n.enabled ? ' on' : '') + '" data-key="' + n.key + '"></button></div>'
+    ).join('');
+    if (data.show_airport_queue) {
+      html += '<div class="switch-row"><span>📍 Очередь у аэропорта</span>' +
+        '<button class="switch-toggle' + (data.airport_queue_active ? ' on' : '') + '" data-key="airport_queue"></button></div>';
+    }
+    wrap.innerHTML = html;
+    wrap.querySelectorAll('.switch-toggle').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        btn.disabled = true;
+        try {
+          const resp = await fetch('""" + CABINET_SETTINGS_API_PATH + """', {
+            method: 'POST',
+            headers: { 'X-Telegram-Init-Data': initData, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ key: btn.dataset.key }),
+          });
+          if (!resp.ok) throw new Error('http_' + resp.status);
+          renderSettings(await resp.json());
+          if (tg && tg.HapticFeedback) tg.HapticFeedback.selectionChanged();
+        } catch (e) {
+          btn.disabled = false;
+        }
+      });
+    });
+  }
 </script>
 </body>
 </html>"""
@@ -7525,13 +8139,17 @@ async def courier_finance_flow(message: types.Message):
         await send_courier_finance_result(message, user_id, draft['data'])
         return
 
-async def send_courier_finance_result(message: types.Message, user_id, data):
-    """Считает и показывает итог дня, сохраняет доход/чистыми в отдельную
-    таблицу статистики (см. save_finance_result/finance_history) - формула:
-    доход минус топливо минус резерв на износ (10%, только если машина СВОЯ
-    или в кредите/лизинге - см. CAR_OWNERSHIP_OWN/CAR_OWNERSHIP_RENTED)
-    минус аренда минус доп. расходы минус налог (% от ВАЛОВОГО дохода) =
-    чистыми; отдельной строкой ₽/час."""
+def calculate_finance_result(data):
+    """Чистый расчёт "ДЕНЬ - ИТОГ" без побочных эффектов (без отправки
+    сообщения/сохранения в БД) - вынесено из send_courier_finance_result
+    (21.09.2026, по просьбе пользователя "объедини Инструменты водителя и
+    Настройки в Личный кабинет... приложение где будут все функции") - нужно,
+    чтобы и Telegram-хендлер (send_courier_finance_result), и HTTP-эндпоинт
+    личного кабинета (handle_cabinet_finance_api) считали ОДИНАКОВО, одной
+    функцией, без дублирования формулы. Формула не менялась: доход минус
+    топливо минус резерв на износ (10%, только если машина СВОЯ или в
+    кредите/лизинге) минус аренда минус доп. расходы минус налог (% от
+    ВАЛОВОГО дохода) = чистыми; отдельно ₽/час."""
     income = data['income']
     km = data['km']
     consumption = data['consumption']
@@ -7543,15 +8161,30 @@ async def send_courier_finance_result(message: types.Message, user_id, data):
     airport_wait_minutes = data.get('airport_wait_minutes', 0)
     car_ownership = data.get('car_ownership', CAR_OWNERSHIP_OWN)
 
-    # По просьбе пользователя (20.09.2026): "если машина в аренде то 10% не
-    # учитывай а если личная или кредит лизинг то учитывай" - износ/ремонт
-    # арендованной машины несёт арендодатель, а не водитель.
     is_rented = car_ownership == CAR_OWNERSHIP_RENTED
     fuel_cost = (km / 100) * consumption * fuel_price
     wear_reserve = 0.0 if is_rented else income * COURIER_WEAR_RESERVE_RATE
     tax_amount = income * (tax_rate / 100)
     net_profit = income - fuel_cost - wear_reserve - rent - expenses - tax_amount
-    per_hour = net_profit / hours
+    per_hour = net_profit / hours if hours else 0.0
+    return {
+        'income': income, 'km': km, 'consumption': consumption, 'fuel_price': fuel_price,
+        'rent': rent, 'expenses': expenses, 'tax_rate': tax_rate, 'hours': hours,
+        'airport_wait_minutes': airport_wait_minutes, 'car_ownership': car_ownership,
+        'is_rented': is_rented, 'fuel_cost': fuel_cost, 'wear_reserve': wear_reserve,
+        'tax_amount': tax_amount, 'net_profit': net_profit, 'per_hour': per_hour,
+    }
+
+async def send_courier_finance_result(message: types.Message, user_id, data):
+    """Считает и показывает итог дня, сохраняет доход/чистыми в отдельную
+    таблицу статистики (см. save_finance_result/finance_history) - сама
+    формула теперь в calculate_finance_result (см. выше)."""
+    r = calculate_finance_result(data)
+    income, km, consumption, fuel_price = r['income'], r['km'], r['consumption'], r['fuel_price']
+    rent, expenses, tax_rate, hours = r['rent'], r['expenses'], r['tax_rate'], r['hours']
+    airport_wait_minutes, car_ownership = r['airport_wait_minutes'], r['car_ownership']
+    is_rented, fuel_cost, wear_reserve = r['is_rented'], r['fuel_cost'], r['wear_reserve']
+    tax_amount, net_profit, per_hour = r['tax_amount'], r['net_profit'], r['per_hour']
 
     def fmt(n):
         return f"{n:,.0f}".replace(',', ' ')
@@ -10439,6 +11072,16 @@ async def start_subscription_webhook_server():
     app.router.add_get(CABINET_WEBAPP_PATH, handle_cabinet_webapp)
     app.router.add_get(CABINET_DATA_API_PATH, handle_cabinet_data_api)
     app.router.add_post(CABINET_PROFILE_API_PATH, handle_cabinet_profile_api)
+    # Расширение личного кабинета (21.09.2026, объединение "Инструменты
+    # водителя" + "Настройки" -> "👤 Личный кабинет", см. блок "ЛИЧНЫЙ КАБИНЕТ
+    # - РАСШИРЕНИЕ" выше) - новые разделы WebApp: Финансы/Спрос сейчас/Часы
+    # пика/Рядом (гео)/Настройки.
+    app.router.add_post(CABINET_FINANCE_API_PATH, handle_cabinet_finance_api)
+    app.router.add_get(CABINET_DEMAND_API_PATH, handle_cabinet_demand_api)
+    app.router.add_get(CABINET_PEAK_API_PATH, handle_cabinet_peak_api)
+    app.router.add_post(CABINET_NEARBY_API_PATH, handle_cabinet_nearby_api)
+    app.router.add_get(CABINET_SETTINGS_API_PATH, handle_cabinet_settings_api)
+    app.router.add_post(CABINET_SETTINGS_API_PATH, handle_cabinet_settings_api)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', SUBSCRIPTION_WEBHOOK_PORT)
