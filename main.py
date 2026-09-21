@@ -839,16 +839,37 @@ else:
 QUEUE_ENTRY_TTL_MINUTES = 120
 
 # "Отдать заказ" - водитель транслирует другим водителям СВОЕГО ГОРОДА заказ,
-# который сам не может/не хочет выполнить (по просьбе пользователя). Только
-# Такси и Ultima - у формы заказа есть "класс автомобиля"/"кол-во пассажиров",
-# это про пассажирские поездки, Курьеру/Грузовому такси не подходит (решение
-# пользователя). Рассылка идёт ТЕМ ЖЕ водителям, что видят саму кнопку - тот
-# же город, та же пара категорий - через user_state, как и остальные пуши в
-# боте (см. push_airport_status_change). Первый принявший и отправитель видят
-# контакт друг друга (решение пользователя) и дальше связываются напрямую в
+# который сам не может/не хочет выполнить (по просьбе пользователя). По
+# просьбе пользователя (22.09.2026) кнопка/форма открыты ВСЕМ категориям
+# (раньше было только Такси/Ultima) - список классов авто теперь СВОЙ,
+# независимый от категории отправителя, см. SHARE_ORDER_CAR_CLASSES ниже.
+# Рассылка идёт ВСЕМ водителям того же города, кроме самого отправителя -
+# через user_state, как и остальные пуши в боте (см.
+# push_airport_status_change). Первый принявший и отправитель видят контакт
+# друг друга (решение пользователя) и дальше связываются напрямую в
 # Telegram - бот в самой сделке не участвует, только сводит.
-SHARED_ORDER_CATEGORIES = {'taxi', 'ultima'}
 SHARED_ORDER_EXPIRY_HOURS = 1  # предложение считается неактуальным через час (решение пользователя)
+
+# Классы для формы "Отдать заказ" (ОТДЕЛЬНЫЙ список от CATEGORIES[...]['tariffs'] -
+# по прямой просьбе пользователя 22.09.2026: форма должна работать для ЛЮБОГО
+# типа заказа - курьерского, грузового, легкового такси и премиум-перевозок,
+# независимо от текущей категории отправителя/получателя в боте. Порядок - как
+# попросил пользователь. 'passengers': True значит для этого класса показываем
+# поле "Пассажиров" (1-6), False - скрываем (не имеет смысла для курьера/груза).
+SHARE_ORDER_CAR_CLASSES = [
+    {'name': 'Пеший курьер', 'passengers': False},
+    {'name': 'Курьер на авто', 'passengers': False},
+    {'name': 'Грузовая машина', 'passengers': False},
+    {'name': 'Такси Эконом', 'passengers': True},
+    {'name': 'Такси Комфорт', 'passengers': True},
+    {'name': 'Такси Минивэн', 'passengers': True},
+    {'name': 'Бизнес седан', 'passengers': True},
+    {'name': 'Люкс седан', 'passengers': True},
+    {'name': 'Люкс джип', 'passengers': True},
+    {'name': 'Бизнес минивэн', 'passengers': True},
+]
+SHARE_ORDER_CAR_CLASS_NAMES = [c['name'] for c in SHARE_ORDER_CAR_CLASSES]
+SHARE_ORDER_PASSENGERS_BY_CLASS = {c['name']: c['passengers'] for c in SHARE_ORDER_CAR_CLASSES}
 
 # Человекочитаемые названия городов (ключ city - тот же, что в city_map ниже
 # и в AIRPORTS_INFO) - нужны для текста рассылки заказов и подтверждений.
@@ -3213,8 +3234,9 @@ def services_keyboard(category=None, city=None, user_id=None):
     # вокзалы в одну кнопку главного меню (короче список) - при нажатии
     # show_transport_menu показывает инлайн-подменю с двумя вариантами;
     # "🚆 ВОКЗАЛЫ" внутри него виден, только если город в TRAIN_CITIES (см.
-    # STATION_CITY) - иначе только "✈️ АЭРОПОРТЫ". "🔄 ОТДАТЬ ЗАКАЗ" - только
-    # Такси/Ultima (см. SHARED_ORDER_CATEGORIES).
+    # STATION_CITY) - иначе только "✈️ АЭРОПОРТЫ". "🔄 ОТДАТЬ ЗАКАЗ" - теперь
+    # доступна ВСЕМ категориям (по просьбе пользователя 22.09.2026, см.
+    # SHARE_ORDER_CAR_CLASSES).
     # "🧰 ИНСТРУМЕНТЫ ВОДИТЕЛЯ" - отдельный модуль (см.
     # COURIER_MODULE_CATEGORIES) с финансовым калькулятором смены +
     # заглушки под карту точек; изначально делался под курьеров, но по
@@ -3336,8 +3358,7 @@ def services_keyboard(category=None, city=None, user_id=None):
     # "🌤 ПОГОДА" ниже, которая в зависимости от PUBLIC_URL/city либо
     # обычная кнопка, либо WebApp (см. комментарий там).
     items = []
-    if category in SHARED_ORDER_CATEGORIES:
-        items.append(KeyboardButton(text="🔄 ОТДАТЬ ЗАКАЗ"))
+    items.append(KeyboardButton(text="🔄 ОТДАТЬ ЗАКАЗ"))
     # "🌤 ПОГОДА" - миниапп с анимацией (по просьбе пользователя, 21.09.2026,
     # "погоду тоже сделай миниапсом красивое анимирование") - погода не
     # персональные данные (город берётся из query-параметра URL, как у
@@ -3975,9 +3996,8 @@ async def go_back(message: types.Message):
 def shared_order_cancel_keyboard():
     return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[[KeyboardButton(text="❌ ОТМЕНА")]])
 
-def shared_order_car_class_keyboard(category):
-    tariffs = CATEGORIES.get(category, {}).get('tariffs', [])
-    buttons = [[KeyboardButton(text=t)] for t in tariffs]
+def shared_order_car_class_keyboard():
+    buttons = [[KeyboardButton(text=name)] for name in SHARE_ORDER_CAR_CLASS_NAMES]
     buttons.append([KeyboardButton(text="❌ ОТМЕНА")])
     return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=buttons)
 
@@ -3998,15 +4018,16 @@ SHARED_ORDER_STEP_PROMPTS = {
 
 async def show_shared_order_confirmation(message, data, category, city):
     city_name = CITY_DISPLAY_NAMES.get(city, city)
+    passengers_line = f"👥 Пассажиров: {data['passengers']}\n" if data.get('passengers') else ""
     text = (
         "*Проверь заказ перед отправкой:*\n\n"
         f"📍 Подача: {escape_md(data['pickup'])}\n"
         f"🏁 Прибытие: {escape_md(data['dropoff'])}\n"
         f"💰 Стоимость: {data['price']} ₽\n"
         f"🚘 Класс: {data['car_class']}\n"
-        f"👥 Пассажиров: {data['passengers']}\n"
+        f"{passengers_line}"
         f"📱 Телефон клиента: {escape_md(data['client_phone']) if data.get('client_phone') else 'не указан'}\n\n"
-        f"_Разошлём водителям Такси/Ultima города {city_name}. Предложение будет "
+        f"_Разошлём водителям города {city_name}. Предложение будет "
         f"действовать {SHARED_ORDER_EXPIRY_HOURS} час, пока кто-то не примет._"
     )
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -4035,9 +4056,10 @@ async def show_shared_order_confirmation(message, data, category, city):
 SHARE_ORDER_WEBAPP_PATH = '/share-order'
 SHARE_ORDER_SUBMIT_API_PATH = '/share-order/submit'
 
-def share_order_webapp_html(category):
-    tariffs = CATEGORIES.get(category, {}).get('tariffs', [])
-    tariffs_json = json.dumps(tariffs, ensure_ascii=False)
+def share_order_webapp_html(category=None):
+    # category больше не влияет на список классов (см. SHARE_ORDER_CAR_CLASSES) -
+    # параметр оставлен для совместимости вызовов, сейчас не используется.
+    car_classes_json = json.dumps(SHARE_ORDER_CAR_CLASSES, ensure_ascii=False)
     return """<!doctype html>
 <html lang="ru">
 <head>
@@ -4094,11 +4116,13 @@ def share_order_webapp_html(category):
   <input type="number" id="price" placeholder="1500" min="0">
   <label>🚘 Класс автомобиля</label>
   <div class="pills" id="carClassPills"></div>
-  <label>👥 Пассажиров</label>
-  <div class="stepper">
-    <button type="button" id="paxMinus">−</button>
-    <span id="paxVal">1</span>
-    <button type="button" id="paxPlus">+</button>
+  <div id="paxSection">
+    <label>👥 Пассажиров</label>
+    <div class="stepper">
+      <button type="button" id="paxMinus">−</button>
+      <span id="paxVal">1</span>
+      <button type="button" id="paxPlus">+</button>
+    </div>
   </div>
   <label>📱 Телефон клиента (необязательно)</label>
   <input type="tel" id="clientPhone" placeholder="Если есть">
@@ -4112,16 +4136,26 @@ def share_order_webapp_html(category):
 <script>
   const tg = window.Telegram && window.Telegram.WebApp;
   if (tg) { tg.ready(); tg.expand(); }
-  const tariffs = """ + tariffs_json + """;
-  let carClass = tariffs[0] || '';
+  const carClasses = """ + car_classes_json + """;
+  let carClass = (carClasses[0] || {}).name || '';
   let pax = 1;
 
+  function classHasPax(name) {
+    const c = carClasses.find(c => c.name === name);
+    return !!(c && c.passengers);
+  }
+  function updatePaxVisibility() {
+    document.getElementById('paxSection').style.display = classHasPax(carClass) ? 'block' : 'none';
+  }
+
   const pillsEl = document.getElementById('carClassPills');
-  pillsEl.innerHTML = tariffs.map(t => '<div class="pill' + (t === carClass ? ' active' : '') + '" data-t="' + t + '">' + t + '</div>').join('');
+  pillsEl.innerHTML = carClasses.map(c => '<div class="pill' + (c.name === carClass ? ' active' : '') + '" data-t="' + c.name + '">' + c.name + '</div>').join('');
   pillsEl.querySelectorAll('.pill').forEach(p => p.addEventListener('click', () => {
     carClass = p.dataset.t;
     pillsEl.querySelectorAll('.pill').forEach(x => x.classList.toggle('active', x === p));
+    updatePaxVisibility();
   }));
+  updatePaxVisibility();
 
   document.getElementById('paxMinus').addEventListener('click', () => { if (pax > 1) { pax--; document.getElementById('paxVal').textContent = pax; } });
   document.getElementById('paxPlus').addEventListener('click', () => { if (pax < 8) { pax++; document.getElementById('paxVal').textContent = pax; } });
@@ -4144,11 +4178,11 @@ def share_order_webapp_html(category):
       const resp = await fetch('""" + SHARE_ORDER_SUBMIT_API_PATH + """', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': (tg ? tg.initData : '') },
-        body: JSON.stringify({ pickup, dropoff, price, car_class: carClass, passengers: pax, client_phone: clientPhone || null }),
+        body: JSON.stringify({ pickup, dropoff, price, car_class: carClass, passengers: classHasPax(carClass) ? pax : null, client_phone: clientPhone || null }),
       });
       const data = await resp.json();
       if (!resp.ok || data.error) {
-        errEl.textContent = data.error === 'not_allowed' ? 'Отдавать заказы могут только Такси и Ultima.' : 'Не удалось отправить заказ - попробуй ещё раз.';
+        errEl.textContent = 'Не удалось отправить заказ - попробуй ещё раз.';
         btn.disabled = false;
         btn.textContent = '📤 ОТПРАВИТЬ ЗАКАЗ';
         return;
@@ -4201,8 +4235,6 @@ async def handle_share_order_submit_api(request):
         return web.json_response({'error': 'no_state'}, status=400)
     category = state['category']
     city = state['city']
-    if category not in SHARED_ORDER_CATEGORIES:
-        return web.json_response({'error': 'not_allowed'}, status=400)
 
     try:
         body = await request.json()
@@ -4210,23 +4242,26 @@ async def handle_share_order_submit_api(request):
         dropoff = str(body.get('dropoff') or '').strip()
         price_digits = re.sub(r'[^\d]', '', str(body.get('price') or ''))
         car_class = str(body.get('car_class') or '').strip()
-        passengers = int(body.get('passengers') or 0)
+        passengers_raw = body.get('passengers')
+        passengers = int(passengers_raw) if passengers_raw not in (None, '') else 0
         client_phone = body.get('client_phone')
         client_phone = str(client_phone).strip() if client_phone else None
     except Exception:
         return web.json_response({'error': 'invalid_body'}, status=400)
 
-    tariffs = CATEGORIES.get(category, {}).get('tariffs', [])
-    if not pickup or not dropoff or not price_digits or car_class not in tariffs or passengers <= 0:
+    class_requires_passengers = SHARE_ORDER_PASSENGERS_BY_CLASS.get(car_class)
+    if (not pickup or not dropoff or not price_digits or car_class not in SHARE_ORDER_CAR_CLASS_NAMES
+            or (class_requires_passengers and passengers <= 0)):
         return web.json_response({'error': 'invalid_body'}, status=400)
 
     # tg_user - тот же {id, first_name, username, ...}, что Telegram кладёт в
     # initDataUnsafe.user; собираем "контакт отправителя" в том же формате,
     # что format_user_contact(callback_query.from_user) у текстового флоу.
     sender_contact = tg_user.get('username') and f"@{tg_user['username']}" or tg_user.get('first_name') or str(user_id)
+    passengers_str = str(passengers) if class_requires_passengers else ''
     data = {'pickup': pickup, 'dropoff': dropoff, 'price': price_digits, 'car_class': car_class,
-            'passengers': str(passengers), 'client_phone': client_phone}
-    order_id = create_shared_order(user_id, sender_contact, city, category, pickup, dropoff, price_digits, car_class, passengers, client_phone)
+            'passengers': passengers_str, 'client_phone': client_phone}
+    order_id = create_shared_order(user_id, sender_contact, city, category, pickup, dropoff, price_digits, car_class, passengers_str, client_phone)
     try:
         sent = await broadcast_shared_order(order_id, data, city, category, user_id)
     except Exception:
@@ -4240,12 +4275,6 @@ async def start_shared_order(message: types.Message):
     state = user_state.get(user_id)
     if not state or 'category' not in state:
         await message.answer("Сначала выбери город и категорию!")
-        return
-    if state.get('category') not in SHARED_ORDER_CATEGORIES:
-        await message.answer(
-            "Отдавать заказы могут только категории Такси и Ultima.",
-            reply_markup=services_keyboard(state.get('category'), state.get('city'), user_id),
-        )
         return
     # По просьбе пользователя (21.09.2026) - кнопка теперь открывает WebApp-
     # форму (см. блок "ОТДАТЬ ЗАКАЗ (WebApp)" выше) вместо старого пошагового
@@ -4310,18 +4339,24 @@ async def shared_order_flow(message: types.Message):
         draft['data']['price'] = price_digits
         draft['step'] = 'car_class'
         state['order_draft'] = draft
-        await message.answer("🚘 Выбери класс автомобиля 👇", reply_markup=shared_order_car_class_keyboard(category))
+        await message.answer("🚘 Выбери класс автомобиля 👇", reply_markup=shared_order_car_class_keyboard())
         return
 
     if step == 'car_class':
-        tariffs = CATEGORIES.get(category, {}).get('tariffs', [])
-        if text not in tariffs:
-            await message.answer("Выбери класс кнопкой на клавиатуре 👇", reply_markup=shared_order_car_class_keyboard(category))
+        if text not in SHARE_ORDER_CAR_CLASS_NAMES:
+            await message.answer("Выбери класс кнопкой на клавиатуре 👇", reply_markup=shared_order_car_class_keyboard())
             return
         draft['data']['car_class'] = text
-        draft['step'] = 'passengers'
-        state['order_draft'] = draft
-        await message.answer("👥 Сколько пассажиров?", reply_markup=shared_order_passengers_keyboard())
+        if SHARE_ORDER_PASSENGERS_BY_CLASS.get(text):
+            draft['step'] = 'passengers'
+            state['order_draft'] = draft
+            await message.answer("👥 Сколько пассажиров?", reply_markup=shared_order_passengers_keyboard())
+        else:
+            # Для курьера/груза поле "Пассажиров" не имеет смысла - пропускаем шаг.
+            draft['data']['passengers'] = ''
+            draft['step'] = 'client_phone'
+            state['order_draft'] = draft
+            await message.answer(SHARED_ORDER_STEP_PROMPTS['client_phone'], reply_markup=shared_order_cancel_keyboard(), parse_mode='Markdown')
         return
 
     if step == 'passengers':
@@ -4350,26 +4385,28 @@ async def shared_order_flow(message: types.Message):
     await message.answer("Нажми «📤 Отправить заказ» или «❌ Отменить» на сообщении выше 👆")
 
 async def broadcast_shared_order(order_id, data, city, category, sender_id):
-    """Рассылает объявление о заказе ТЕМ ЖЕ водителям, что видят саму кнопку
-    "Отдать заказ" - тот же город, категории из SHARED_ORDER_CATEGORIES, кроме
+    """Рассылает объявление о заказе ВСЕМ водителям того же города (любой
+    категории - по просьбе пользователя 22.09.2026, список классов авто
+    больше не привязан к категории, см. SHARE_ORDER_CAR_CLASSES), кроме
     самого отправителя. Как и push_airport_status_change - берём СРЕЗ
     user_state (рассылка не мгновенная, список не должен "плыть" по ходу)."""
     if not bot:
         return 0
     recipients = [
         uid for uid, s in list(user_state.items())
-        if isinstance(s, dict) and uid != sender_id and s.get('city') == city and s.get('category') in SHARED_ORDER_CATEGORIES
+        if isinstance(s, dict) and uid != sender_id and s.get('city') == city
     ]
     if not recipients:
         return 0
 
+    passengers_line = f"👥 Пассажиров: {data['passengers']}\n" if data.get('passengers') else ""
     text = (
         f"🔄 *Заказ от другого водителя* (#{order_id})\n\n"
         f"📍 Подача: {escape_md(data['pickup'])}\n"
         f"🏁 Прибытие: {escape_md(data['dropoff'])}\n"
         f"💰 Стоимость: {data['price']} ₽\n"
         f"🚘 Класс: {data['car_class']}\n"
-        f"👥 Пассажиров: {data['passengers']}\n\n"
+        f"{passengers_line}\n"
         f"_Предложение действует {SHARED_ORDER_EXPIRY_HOURS} час. Кто первый примет - получит контакт отправителя._"
     )
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -4420,7 +4457,7 @@ async def confirm_send_shared_order(callback_query: types.CallbackQuery):
         await callback_query.message.edit_text(f"✅ Заказ #{order_id} отправлен {sent} водителям города {city_name}. Ждём отклика - предложение действует {SHARED_ORDER_EXPIRY_HOURS} час.")
     else:
         await callback_query.message.edit_text(
-            f"✅ Заказ #{order_id} создан, но сейчас в городе {city_name} нет других известных водителей Такси/Ultima. "
+            f"✅ Заказ #{order_id} создан, но сейчас в городе {city_name} нет других известных водителей. "
             f"Как только кто-то из них напишет боту, увидит твой заказ, пока он не истёк."
         )
     await callback_query.message.answer("Выбери действие 👇", reply_markup=services_keyboard(category, city, user_id))
@@ -4454,8 +4491,9 @@ async def accept_shared_order(callback_query: types.CallbackQuery):
         f"🏁 Прибытие: {escape_md(order['dropoff'])}\n"
         f"💰 Стоимость: {order['price']} ₽\n"
         f"🚘 Класс: {order['car_class']}\n"
-        f"👥 Пассажиров: {order['passengers']}\n"
     )
+    if order.get('passengers'):
+        text += f"👥 Пассажиров: {order['passengers']}\n"
     if order.get('client_phone'):
         # Телефон клиента - не в общей рассылке (см. broadcast_shared_order),
         # виден только тому, кто реально принял заказ.
