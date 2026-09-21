@@ -8037,6 +8037,15 @@ def map_webapp_html():
 <script src="{TG_WEBAPP_JS_PROXY_PATH}"></script>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<!-- ДОБАВЛЕНО 23.09.2026 (жалоба пользователя - "тормозит когда включаю заправки"):
+     861 отдельных L.marker в Москве без кластеризации рендерились/перерисовывались
+     все разом при каждом движении карты - на телефоне это заметно лагало. Плагин
+     кластеризует близкие точки в один значок с числом, который разбивается на
+     отдельные маркеры только при приближении - тот же приём для заправок/зарядок/
+     парковок (см. ниже loadFuelStations/loadChargingStations/loadParkingStations). -->
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.markercluster/1.5.3/MarkerCluster.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.markercluster/1.5.3/MarkerCluster.Default.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.markercluster/1.5.3/leaflet.markercluster.js"></script>
 <style>
   {MAP_CHROME_CSS}
 </style>
@@ -8349,10 +8358,12 @@ def map_webapp_html():
   // /map/fuel_report и /map/charging_report (initData на сервере проверяется
   // как и везде, см. validate_telegram_webapp_init_data).
   let fuelStations = [];
-  let fuelMarkers = [];
+  let fuelMarkerById = {{}};
+  let fuelCluster = L.markerClusterGroup({{ maxClusterRadius: 60, disableClusteringAtZoom: 16, spiderfyOnMaxZoom: false }});
   let fuelLoaded = false;
   let chargingStations = [];
-  let chargingMarkers = [];
+  let chargingMarkerById = {{}};
+  let chargingCluster = L.markerClusterGroup({{ maxClusterRadius: 60, disableClusteringAtZoom: 16, spiderfyOnMaxZoom: false }});
   let chargingLoaded = false;
 
   function buildFuelPopup(p) {{
@@ -8383,7 +8394,7 @@ def map_webapp_html():
     if (p) {{
       p.fuel = p.fuel || {{}};
       p.fuel[fuelType] = {{ available: available }};
-      const marker = fuelMarkers.find(m => m._stationId === stationId);
+      const marker = fuelMarkerById[stationId];
       if (marker) marker.setPopupContent(buildFuelPopup(p));
     }}
   }};
@@ -8394,21 +8405,23 @@ def map_webapp_html():
       if (!resp.ok) return;
       const data = await resp.json();
       fuelStations = data.stations || [];
-      fuelMarkers.forEach(m => map.removeLayer(m));
-      fuelMarkers = [];
+      fuelCluster.clearLayers();
+      fuelMarkerById = {{}};
+      const icon = L.divIcon({{ className: 'fuel-icon', html: '⛽', iconSize: [22, 22] }});
       fuelStations.forEach(p => {{
-        const icon = L.divIcon({{ className: 'fuel-icon', html: '⛽', iconSize: [22, 22] }});
-        const marker = L.marker([p.lat, p.lon], {{ icon }}).bindPopup(buildFuelPopup(p)).addTo(map);
-        marker._stationId = p.id;
-        fuelMarkers.push(marker);
+        const marker = L.marker([p.lat, p.lon], {{ icon }}).bindPopup(buildFuelPopup(p));
+        fuelMarkerById[p.id] = marker;
+        fuelCluster.addLayer(marker);
       }});
+      if (!map.hasLayer(fuelCluster)) map.addLayer(fuelCluster);
       fuelLoaded = true;
     }} catch (e) {{ /* тихо */ }}
   }}
 
   function clearFuelStations() {{
-    fuelMarkers.forEach(m => map.removeLayer(m));
-    fuelMarkers = [];
+    map.removeLayer(fuelCluster);
+    fuelCluster.clearLayers();
+    fuelMarkerById = {{}};
     fuelLoaded = false;
   }}
 
@@ -8442,7 +8455,7 @@ def map_webapp_html():
     const p = chargingStations.find(s => s.id === stationId);
     if (p) {{
       p.status = status;
-      const marker = chargingMarkers.find(m => m._stationId === stationId);
+      const marker = chargingMarkerById[stationId];
       if (marker) marker.setPopupContent(buildChargingPopup(p));
     }}
   }}
@@ -8453,21 +8466,23 @@ def map_webapp_html():
       if (!resp.ok) return;
       const data = await resp.json();
       chargingStations = data.stations || [];
-      chargingMarkers.forEach(m => map.removeLayer(m));
-      chargingMarkers = [];
+      chargingCluster.clearLayers();
+      chargingMarkerById = {{}};
+      const icon = L.divIcon({{ className: 'charging-icon', html: '🔌', iconSize: [22, 22] }});
       chargingStations.forEach(p => {{
-        const icon = L.divIcon({{ className: 'charging-icon', html: '🔌', iconSize: [22, 22] }});
-        const marker = L.marker([p.lat, p.lon], {{ icon }}).bindPopup(buildChargingPopup(p)).addTo(map);
-        marker._stationId = p.id;
-        chargingMarkers.push(marker);
+        const marker = L.marker([p.lat, p.lon], {{ icon }}).bindPopup(buildChargingPopup(p));
+        chargingMarkerById[p.id] = marker;
+        chargingCluster.addLayer(marker);
       }});
+      if (!map.hasLayer(chargingCluster)) map.addLayer(chargingCluster);
       chargingLoaded = true;
     }} catch (e) {{ /* тихо */ }}
   }}
 
   function clearChargingStations() {{
-    chargingMarkers.forEach(m => map.removeLayer(m));
-    chargingMarkers = [];
+    map.removeLayer(chargingCluster);
+    chargingCluster.clearLayers();
+    chargingMarkerById = {{}};
     chargingLoaded = false;
   }}
 
@@ -8475,7 +8490,7 @@ def map_webapp_html():
   // просьбе пользователя). Точки те же, что в текстовом списке "🅿️
   // ПАРКОВКА" в меню (parking_data.json) - без крауд-статуса занятости
   // (в отличие от зарядок), просто места бесплатной парковки из OSM.
-  let parkingMarkers = [];
+  let parkingCluster = L.markerClusterGroup({{ maxClusterRadius: 60, disableClusteringAtZoom: 16, spiderfyOnMaxZoom: false }});
   let parkingLoaded = false;
 
   async function loadParkingStations() {{
@@ -8483,21 +8498,21 @@ def map_webapp_html():
       const resp = await fetch(`{MAP_PARKING_API_PATH}?city=${{encodeURIComponent(city)}}`);
       if (!resp.ok) return;
       const data = await resp.json();
-      parkingMarkers.forEach(m => map.removeLayer(m));
-      parkingMarkers = [];
+      parkingCluster.clearLayers();
+      const icon = L.divIcon({{ className: 'parking-icon', html: '🅿️', iconSize: [20, 20] }});
       (data.stations || []).forEach(p => {{
-        const icon = L.divIcon({{ className: 'parking-icon', html: '🅿️', iconSize: [20, 20] }});
         const popup = `<div class="fuel-popup"><h4>🅿️ ${{p.name || 'Бесплатная парковка'}}</h4></div>`;
-        const marker = L.marker([p.lat, p.lon], {{ icon }}).bindPopup(popup).addTo(map);
-        parkingMarkers.push(marker);
+        const marker = L.marker([p.lat, p.lon], {{ icon }}).bindPopup(popup);
+        parkingCluster.addLayer(marker);
       }});
+      if (!map.hasLayer(parkingCluster)) map.addLayer(parkingCluster);
       parkingLoaded = true;
     }} catch (e) {{ /* тихо */ }}
   }}
 
   function clearParkingStations() {{
-    parkingMarkers.forEach(m => map.removeLayer(m));
-    parkingMarkers = [];
+    map.removeLayer(parkingCluster);
+    parkingCluster.clearLayers();
     parkingLoaded = false;
   }}
 
