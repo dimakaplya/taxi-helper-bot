@@ -3159,11 +3159,20 @@ def services_keyboard(category=None, city=None, user_id=None):
     # т.к. раньше (до этого изменения) сами эти функции были доступны только
     # из главного меню без такого guard, но теперь единственный путь к ним -
     # эта кнопка; отсутствие PUBLIC_URL - редкий локальный/дев-запуск.
-    cabinet_row = None
-    if PUBLIC_URL and city:
-        tariff_options = CATEGORIES.get(category, {}).get('tariffs', [])
-        cabinet_url = f"{PUBLIC_URL}{CABINET_WEBAPP_PATH}?tariffs={urllib.parse.quote(','.join(tariff_options))}"
-        cabinet_row = KeyboardButton(text="👤 Личный кабинет", web_app=WebAppInfo(url=cabinet_url))
+    # ВАЖНО (21.09.2026, по факту): кнопка в Reply-клавиатуре с web_app=
+    # (как у "🗺 Карта водителей" выше) НЕ передаёт Telegram initData -
+    # проверено на реальном устройстве (debug на экране кабинета показал
+    # tg=ok, platform/version распознаны из хэша, но initData.len=0 и
+    # initDataUnsafe.user=absent). Карта эту проблему не показывала, т.к.
+    # отдаёт публичные данные без проверки подписи, а личному кабинету
+    # initData обязателен (там персональные данные). Поэтому кнопка кабинета
+    # в самой Reply-клавиатуре теперь ОБЫЧНАЯ (без web_app) - по нажатию
+    # хендлер open_cabinet_from_menu ниже присылает отдельным сообщением
+    # ИНЛАЙН-кнопку с web_app (тот же паттерн, что уже работал в "💰
+    # Финансы" -> start_courier_finance) - у инлайн-кнопок initData
+    # передаётся штатно.
+    show_cabinet_row = bool(PUBLIC_URL and city)
+    cabinet_row = KeyboardButton(text="👤 Личный кабинет") if show_cabinet_row else None
 
     items = []
     if category in SHARED_ORDER_CATEGORIES:
@@ -8476,6 +8485,32 @@ def format_road_event_time(iso_time, city):
         return dt.strftime('%H:%M')
     except Exception:
         return ''
+
+@router.message(lambda message: message.text == "👤 Личный кабинет")
+async def open_cabinet_from_menu(message: types.Message):
+    """Кнопка "👤 Личный кабинет" главного меню (см. services_keyboard) -
+    сама кнопка в Reply-клавиатуре ОБЫЧНАЯ (без web_app=) - см. комментарий
+    у cabinet_row в services_keyboard про то, почему: у кнопок с web_app=
+    прямо в Reply-клавиатуре initData приходит пустым (проверено на
+    реальном устройстве). Поэтому по нажатию просто присылаем отдельным
+    сообщением инлайн-кнопку с web_app= (тот же рабочий паттерн, что и
+    "👤 Личный кабинет"/"📈 Статистика смен" внутри start_courier_finance) -
+    у инлайн-кнопок initData передаётся нормально."""
+    user_id = message.from_user.id
+    state = user_state.get(user_id, {})
+    category = state.get('category')
+    city = state.get('city')
+    if not (PUBLIC_URL and city):
+        await message.answer("Личный кабинет пока недоступен - сначала выбери город 🙂")
+        return
+    tariff_options = CATEGORIES.get(category, {}).get('tariffs', [])
+    cabinet_url = f"{PUBLIC_URL}{CABINET_WEBAPP_PATH}?tariffs={urllib.parse.quote(','.join(tariff_options))}"
+    await message.answer(
+        "👤 Личный кабинет",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="Открыть", web_app=WebAppInfo(url=cabinet_url)),
+        ]]),
+    )
 
 @router.message(lambda message: message.text == "⛔ Дорожные события")
 async def show_road_events(message: types.Message, user_id_override=None):
