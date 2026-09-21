@@ -3160,7 +3160,21 @@ def services_keyboard(category=None, city=None, user_id=None):
     # видимость НА карте включается/выключается сменой (см. "▶️ Начать
     # смену"/"⏹ Завершить смену" - блок "СМЕНА" ниже), кнопка тут просто
     # открывает карту.
-    where_to_go_row = [KeyboardButton(text="💰 КУДА ЕХАТЬ ➡️")]
+    # "💰 КУДА ЕХАТЬ ➡️" сама стала WebApp (по просьбе пользователя,
+    # 21.09.2026, "и куда ехать тоже сделай миниапс") - тот же принцип, что
+    # у "🌤 Погода" выше: город/категория не персональные данные (берутся из
+    # ?city=&category= в URL, как у карты), поэтому initData не нужен и
+    # можно вешать web_app= прямо на кнопку Reply-клавиатуры. Если
+    # PUBLIC_URL/city не заданы - остаётся старая текстовая кнопка (шлёт
+    # обычное сообщение через send_where_to_go, как раньше) - этот же
+    # текстовый хендлер (@router.message(lambda message: message.text ==
+    # "💰 КУДА ЕХАТЬ ➡️")) НЕ удалён и продолжает работать всегда, в т.ч.
+    # как фолбэк, если WebApp по какой-то причине не откроется.
+    if PUBLIC_URL and city and category:
+        where_to_go_url = f"{PUBLIC_URL}{WHERE_TO_GO_WEBAPP_PATH}?city={urllib.parse.quote(city)}&category={urllib.parse.quote(category)}"
+        where_to_go_row = [KeyboardButton(text="💰 КУДА ЕХАТЬ ➡️", web_app=WebAppInfo(url=where_to_go_url))]
+    else:
+        where_to_go_row = [KeyboardButton(text="💰 КУДА ЕХАТЬ ➡️")]
     if category in MAP_CATEGORY_STYLE and PUBLIC_URL and city:
         map_url = f"{PUBLIC_URL}{MAP_WEBAPP_PATH}?city={urllib.parse.quote(city)}&category={urllib.parse.quote(category)}"
         where_to_go_row.append(KeyboardButton(text="🗺 Карта водителей", web_app=WebAppInfo(url=map_url)))
@@ -3209,17 +3223,34 @@ def services_keyboard(category=None, city=None, user_id=None):
         cabinet_url = f"{PUBLIC_URL}{CABINET_WEBAPP_PATH}?tariffs={urllib.parse.quote(','.join(tariff_options))}"
         _fire_and_forget(set_cabinet_menu_button(user_id, cabinet_url))
 
+    # items теперь хранит готовые KeyboardButton (не текст) - нужно для
+    # "🌤 Погода" ниже, которая в зависимости от PUBLIC_URL/city либо
+    # обычная кнопка, либо WebApp (см. комментарий там).
     items = []
     if category in SHARED_ORDER_CATEGORIES:
-        items.append("🔄 Отдать заказ")
-    items.append("🌤 Погода")
+        items.append(KeyboardButton(text="🔄 Отдать заказ"))
+    # "🌤 Погода" - миниапп с анимацией (по просьбе пользователя, 21.09.2026,
+    # "погоду тоже сделай миниапсом красивое анимирование") - погода не
+    # персональные данные (город берётся из query-параметра URL, как у
+    # карты), поэтому initData не нужен и можно вешать web_app= прямо на
+    # кнопку Reply-клавиатуры (в отличие от личного кабинета - см.
+    # комментарий выше про initData.len=0 у web_app в Reply-клавиатуре,
+    # ограничение касается именно ПОДПИСАННЫХ данных, публичным данным оно
+    # не мешает - тот же принцип, что уже у "🗺 Карта водителей"). Если
+    # PUBLIC_URL/city не заданы - остаётся старая текстовая кнопка
+    # (show_weather_forecast ниже сама разберётся, если city вдруг пуст).
+    if PUBLIC_URL and city:
+        weather_url = f"{PUBLIC_URL}{WEATHER_WEBAPP_PATH}?city={urllib.parse.quote(city)}"
+        items.append(KeyboardButton(text="🌤 Погода", web_app=WebAppInfo(url=weather_url)))
+    else:
+        items.append(KeyboardButton(text="🌤 Погода"))
     # "💳 Чаевые" вынесена в главное меню (по просьбе пользователя,
     # 21.09.2026) - раньше была только внутри "🧰 Инструменты водителя"
     # (сейчас недоступной с главного меню, см. комментарий выше), тот же
     # текст статьи/ссылок, что и раньше (см. show_tips_app_main_menu ниже -
     # новый хендлер без требования in_courier_module, старый "💳 Получить
     # чаевые" внутри courier_module_keyboard не трогали).
-    items.append("💳 Чаевые")
+    items.append(KeyboardButton(text="💳 Чаевые"))
     # "✈️🚆 Авиа/ЖД" убрана отсюда (по просьбе пользователя, 21.09.2026:
     # "авиа жд и событие города в одну строчку") - раньше была в этой общей
     # 2-колоночной сетке (парой со следующей по списку кнопкой), теперь
@@ -3242,7 +3273,7 @@ def services_keyboard(category=None, city=None, user_id=None):
     buttons = []
     buttons.extend(top_rows)
     buttons.extend(
-        [KeyboardButton(text=t) for t in items[i:i + 2]]
+        items[i:i + 2]
         for i in range(0, len(items), 2)
     )
     # "✈️🚆 Авиа/ЖД" + "🚨 События города"/"⛔ Дорожные события" - один ряд
@@ -5932,6 +5963,36 @@ def validate_telegram_webapp_init_data(init_data, bot_token):
         return None
     return parsed
 
+# Цвета ХРОМА карты (легенда/переключатель/попапы/подписи) - по просьбе
+# пользователя (21.09.2026, "цвета сделай черный желтые белые серые во всех
+# аппсах") переведены в чёрно-жёлто-бело-серую (такси-чекер) палитру. НЕ
+# трогаем цвета самих маркеров/точек (CATEGORY_STYLE, STATUS_ICON 🟢/🟡/🔴,
+# фиолетовый круг повышенного спроса #9b30ff, зелёный круг вокзала
+# #2e7d32) - они несут смысловую нагрузку (открыт/по согласованию/закрыт,
+# повышенный спрос) и её ломать нельзя, рескин только "рамки" карты.
+MAP_CHROME_CSS = """
+  html, body, #map { height: 100%; margin: 0; padding: 0; }
+  .legend { position: absolute; top: 10px; right: 10px; z-index: 1000; background: #1c1c1c; color: #fff; border: 1px solid rgba(255,196,0,.4); border-radius: 8px; padding: 8px 10px; font-family: -apple-system, sans-serif; font-size: 12px; box-shadow: 0 1px 4px rgba(0,0,0,.35); }
+  .legend div { display: flex; align-items: center; gap: 6px; margin: 3px 0; }
+  .legend .dot { width: 11px; height: 11px; border-radius: 50%; border: 1px solid rgba(255,255,255,.5); display: inline-block; }
+  .filter-toggle { position: absolute; top: 10px; left: 10px; z-index: 1000; background: #FFC400; color: #000; border-radius: 8px; padding: 8px 12px; font-family: -apple-system, sans-serif; font-size: 12.5px; font-weight: 600; box-shadow: 0 1px 4px rgba(0,0,0,.35); cursor: pointer; user-select: none; }
+  .airport-icon { display: flex; align-items: center; justify-content: center; font-size: 20px; filter: drop-shadow(0 1px 2px rgba(0,0,0,.5)); }
+  .airport-popup h4 { margin: 0 0 4px; font-family: -apple-system, sans-serif; font-size: 13.5px; color: #000; }
+  .airport-popup .row { font-family: -apple-system, sans-serif; font-size: 12.5px; margin: 2px 0; color: #333; }
+  .airport-label { background: rgba(20,20,20,.92); color: #fff; border: 1px solid rgba(255,196,0,.55); border-radius: 6px; padding: 3px 6px; font-family: -apple-system, sans-serif; font-size: 11px; line-height: 1.35; white-space: nowrap; box-shadow: 0 1px 3px rgba(0,0,0,.35); }
+  .airport-label b { font-size: 11.5px; color: #FFC400; }
+  .road-icon { display: flex; align-items: center; justify-content: center; font-size: 16px; filter: drop-shadow(0 1px 2px rgba(0,0,0,.5)); }
+  .road-popup { font-family: -apple-system, sans-serif; font-size: 12.5px; max-width: 220px; color: #000; }
+  .road-popup .time { color: #777; font-size: 11px; margin-top: 4px; }
+  .road-popup a { color: #b08b00; }
+  .event-icon { display: flex; align-items: center; justify-content: center; font-size: 16px; filter: drop-shadow(0 1px 2px rgba(0,0,0,.5)); }
+  .event-popup { font-family: -apple-system, sans-serif; font-size: 12.5px; max-width: 220px; color: #000; }
+  .event-popup h4 { margin: 0 0 4px; font-size: 13px; }
+  .event-popup .place { color: #555; }
+  .event-popup .time { color: #777; font-size: 11px; margin-top: 4px; }
+  .event-popup a { color: #b08b00; }
+"""
+
 def map_webapp_html():
     """HTML-страница WebApp с интерактивной картой (Leaflet.js + OpenStreetMap
     тайлы, без API-ключей). Город и категория самого водителя берутся из
@@ -5954,26 +6015,7 @@ def map_webapp_html():
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <style>
-  html, body, #map {{ height: 100%; margin: 0; padding: 0; }}
-  .legend {{ position: absolute; top: 10px; right: 10px; z-index: 1000; background: #fff; border-radius: 8px; padding: 8px 10px; font-family: -apple-system, sans-serif; font-size: 12px; box-shadow: 0 1px 4px rgba(0,0,0,.25); }}
-  .legend div {{ display: flex; align-items: center; gap: 6px; margin: 3px 0; }}
-  .legend .dot {{ width: 11px; height: 11px; border-radius: 50%; border: 1px solid #999; display: inline-block; }}
-  .filter-toggle {{ position: absolute; top: 10px; left: 10px; z-index: 1000; background: #fff; border-radius: 8px; padding: 8px 12px; font-family: -apple-system, sans-serif; font-size: 12.5px; font-weight: 600; box-shadow: 0 1px 4px rgba(0,0,0,.25); cursor: pointer; user-select: none; }}
-  .airport-icon {{ display: flex; align-items: center; justify-content: center; font-size: 20px; filter: drop-shadow(0 1px 2px rgba(0,0,0,.5)); }}
-  .airport-popup h4 {{ margin: 0 0 4px; font-family: -apple-system, sans-serif; font-size: 13.5px; }}
-  .airport-popup .row {{ font-family: -apple-system, sans-serif; font-size: 12.5px; margin: 2px 0; }}
-  .airport-label {{ background: rgba(255,255,255,.95); border: 1px solid rgba(0,0,0,.15); border-radius: 6px; padding: 3px 6px; font-family: -apple-system, sans-serif; font-size: 11px; line-height: 1.35; white-space: nowrap; box-shadow: 0 1px 3px rgba(0,0,0,.25); }}
-  .airport-label b {{ font-size: 11.5px; }}
-  .road-icon {{ display: flex; align-items: center; justify-content: center; font-size: 16px; filter: drop-shadow(0 1px 2px rgba(0,0,0,.5)); }}
-  .road-popup {{ font-family: -apple-system, sans-serif; font-size: 12.5px; max-width: 220px; }}
-  .road-popup .time {{ color: #777; font-size: 11px; margin-top: 4px; }}
-  .road-popup a {{ color: #1a73e8; }}
-  .event-icon {{ display: flex; align-items: center; justify-content: center; font-size: 16px; filter: drop-shadow(0 1px 2px rgba(0,0,0,.5)); }}
-  .event-popup {{ font-family: -apple-system, sans-serif; font-size: 12.5px; max-width: 220px; }}
-  .event-popup h4 {{ margin: 0 0 4px; font-size: 13px; }}
-  .event-popup .place {{ color: #555; }}
-  .event-popup .time {{ color: #777; font-size: 11px; margin-top: 4px; }}
-  .event-popup a {{ color: #1a73e8; }}
+  {MAP_CHROME_CSS}
 </style>
 </head>
 <body>
@@ -6256,6 +6298,544 @@ def map_webapp_html():
 </script>
 </body>
 </html>"""
+
+# ==================== ПОГОДА (WebApp с анимацией) ====================
+# По просьбе пользователя (21.09.2026, "погоду тоже сделай миниапсом
+# красивое анимирование чтобы было") - тот же паттерн, что карта водителей
+# (aiohttp-роут + самодостаточная HTML-страница), но БЕЗ строгой проверки
+# initData (как у /map/positions выше, а не как у /cabinet/* - погода не
+# персональные данные, город приходит через ?city= в URL, initData тут
+# просто не нужен вообще, поэтому кнопка "🌤 Погода" в главном меню - самая
+# обычная web_app= прямо в Reply-клавиатуре, без ограничения, что мешало
+# личному кабинету, см. комментарий у services_keyboard). Источник данных -
+# тот же weather_data.json/get_cached_weather_forecast, что у текстовой
+# версии (show_weather_forecast) - никакого нового похода в Open-Meteo.
+# Анимация - на <canvas>, без внешних библиотек (частицы дождя/снега,
+# лучи солнца, плывущие облака, вспышки молнии для грозы) - подбирается по
+# группе weathercode (та же классификация, что описана в WEATHERCODE_INFO/
+# describe_weathercode, но огрублённая до 6 визуальных групп).
+WEATHER_WEBAPP_PATH = '/weather'
+WEATHER_DATA_API_PATH = '/weather/data'
+
+def weather_webapp_html():
+    return """<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Погода</title>
+<script src=\"""" + TG_WEBAPP_JS_PROXY_PATH + """\"></script>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    overflow: hidden; position: relative;
+    transition: background 1.2s ease;
+  }
+  #bgCanvas { position: fixed; inset: 0; width: 100%; height: 100%; z-index: 0; }
+  #content {
+    position: relative; z-index: 1; height: 100%; display: flex; flex-direction: column;
+    padding: max(18px, env(safe-area-inset-top, 0px)) 18px 18px;
+    color: #fff; text-shadow: 0 1px 6px rgba(0,0,0,.25);
+  }
+  #state { text-align: center; padding: 60px 16px; opacity: .8; font-size: 14px; }
+  .city { font-size: 15px; font-weight: 600; opacity: .85; text-align: center; }
+  .now { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+  .now .emoji { font-size: 72px; line-height: 1; filter: drop-shadow(0 4px 10px rgba(0,0,0,.2)); }
+  .now .temp { font-size: 64px; font-weight: 700; margin-top: 4px; font-variant-numeric: tabular-nums; color: #FFC400; text-shadow: 0 1px 6px rgba(0,0,0,.4); }
+  .now .cond { font-size: 16px; opacity: .9; margin-top: 2px; }
+  .hourly {
+    display: flex; gap: 6px; overflow-x: auto; padding: 10px 2px 4px; -webkit-overflow-scrolling: touch;
+  }
+  .hourly::-webkit-scrollbar { display: none; }
+  /* Хром часовых карточек - по просьбе пользователя (21.09.2026, "цвета
+     сделай черный желтые белые серые") переведён на чёрно-жёлто-серую
+     палитру (тёмная полупрозрачная плашка + жёлтая рамка/акцент на
+     "сейчас"). Сами градиенты неба (CODE_GROUPS.bg в JS ниже) НЕ трогаем -
+     они изображают реальную погоду (ясно/дождь/гроза и т.п.), красить их в
+     жёлтый было бы физически неверно; жёлтый оставлен только для чтения
+     текста/акцентов поверх неба. */
+  .hcard {
+    flex-shrink: 0; min-width: 58px; background: rgba(0,0,0,.32); backdrop-filter: blur(6px);
+    border: 1px solid rgba(255,255,255,.12); border-radius: 14px; padding: 10px 8px; text-align: center;
+  }
+  .hcard.now-hour { background: rgba(0,0,0,.5); border-color: rgba(255,196,0,.75); }
+  .hcard .t { font-size: 11px; opacity: .85; }
+  .hcard .e { font-size: 22px; margin: 4px 0; }
+  .hcard .v { font-size: 13px; font-weight: 700; font-variant-numeric: tabular-nums; color: #FFC400; }
+</style>
+</head>
+<body>
+<canvas id="bgCanvas"></canvas>
+<div id="content">
+  <div id="state" style="display:none">Загружаю погоду…</div>
+  <div id="app" style="display:none; height: 100%; display: flex; flex-direction: column;">
+    <div class="city" id="cityName"></div>
+    <div class="now">
+      <div class="emoji" id="nowEmoji">🌤</div>
+      <div class="temp" id="nowTemp">—</div>
+      <div class="cond" id="nowCond"></div>
+    </div>
+    <div class="hourly" id="hourlyRow"></div>
+  </div>
+</div>
+<script>
+  const tg = window.Telegram && window.Telegram.WebApp;
+  if (tg) { tg.ready(); tg.expand(); }
+  const params = new URLSearchParams(window.location.search);
+  const city = params.get('city') || '';
+
+  // Огрублённая классификация weathercode -> визуальная группа (см.
+  // WEATHERCODE_INFO в main.py - держать в синхроне при добавлении новых
+  // кодов). group -> {bg: [градиент], particles: тип анимации}.
+  const CODE_GROUPS = {
+    clear:  { codes: [0, 1],                      bg: ['#4facfe', '#00c2ff'], particles: 'sun' },
+    cloudy: { codes: [2, 3],                       bg: ['#7f8c9a', '#a9b6c2'], particles: 'clouds' },
+    fog:    { codes: [45, 48],                     bg: ['#8e9aab', '#c2ccd6'], particles: 'fog' },
+    rain:   { codes: [51,53,55,56,57,61,63,65,66,67,80,81], bg: ['#3a5a7a', '#5b7a99'], particles: 'rain' },
+    snow:   { codes: [71,73,75,77,85,86],          bg: ['#5c7a99', '#9fb4c9'], particles: 'snow' },
+    storm:  { codes: [82,95,96,99],                bg: ['#2b3448', '#46536b'], particles: 'storm' },
+  };
+  function groupFor(code) {
+    for (const key in CODE_GROUPS) {
+      if (CODE_GROUPS[key].codes.includes(code)) return key;
+    }
+    return 'cloudy';
+  }
+  const WEATHERCODE_NAMES = {
+    0: 'ясно', 1: 'малооблачно', 2: 'облачно с прояснениями', 3: 'пасмурно',
+    45: 'туман', 48: 'изморозь', 51: 'морось слабая', 53: 'морось', 55: 'морось сильная',
+    56: 'ледяная морось слабая', 57: 'ледяная морось сильная', 61: 'дождь слабый', 63: 'дождь',
+    65: 'сильный дождь', 66: 'ледяной дождь слабый', 67: 'ледяной дождь сильный',
+    71: 'снег слабый', 73: 'снег', 75: 'сильный снегопад', 77: 'снежная крупа',
+    80: 'ливень слабый', 81: 'ливень', 82: 'сильный ливень', 85: 'снежный заряд слабый',
+    86: 'снежный заряд сильный', 95: 'гроза', 96: 'гроза с градом слабая', 99: 'гроза с сильным градом',
+  };
+  const WEATHERCODE_EMOJI = {
+    0: '☀️', 1: '🌤', 2: '⛅', 3: '☁️', 45: '🌫', 48: '🌫',
+    51: '🌦', 53: '🌦', 55: '🌧', 56: '🌧', 57: '🌧', 61: '🌧', 63: '🌧', 65: '🌧',
+    66: '🌧', 67: '🌧', 71: '🌨', 73: '🌨', 75: '❄️', 77: '🌨',
+    80: '🌧', 81: '🌧', 82: '⛈', 85: '🌨', 86: '❄️', 95: '⛈', 96: '⛈', 99: '⛈',
+  };
+
+  // ---- Canvas-анимация фона ----
+  const canvas = document.getElementById('bgCanvas');
+  const ctx = canvas.getContext('2d');
+  let W = 0, H = 0, particles = [], currentGroup = 'clear', lightningT = 0;
+  function resize() { W = canvas.width = window.innerWidth; H = canvas.height = window.innerHeight; }
+  window.addEventListener('resize', resize);
+  resize();
+
+  function initParticles(group) {
+    currentGroup = group;
+    particles = [];
+    const kind = CODE_GROUPS[group].particles;
+    if (kind === 'rain' || kind === 'storm') {
+      const n = kind === 'storm' ? 140 : 100;
+      for (let i = 0; i < n; i++) {
+        particles.push({ x: Math.random() * W, y: Math.random() * H, len: 12 + Math.random() * 14, speed: 7 + Math.random() * 6 });
+      }
+    } else if (kind === 'snow') {
+      for (let i = 0; i < 80; i++) {
+        particles.push({ x: Math.random() * W, y: Math.random() * H, r: 1.5 + Math.random() * 2.5, speed: 0.6 + Math.random() * 1.2, drift: Math.random() * 2 - 1, phase: Math.random() * Math.PI * 2 });
+      }
+    } else if (kind === 'clouds' || kind === 'fog') {
+      const n = kind === 'fog' ? 6 : 5;
+      for (let i = 0; i < n; i++) {
+        particles.push({ x: Math.random() * W, y: H * (0.1 + Math.random() * 0.5), r: 60 + Math.random() * 90, speed: 0.15 + Math.random() * 0.25 });
+      }
+    } else if (kind === 'sun') {
+      particles.push({ x: W * 0.78, y: H * 0.22, r: 46 });
+    }
+  }
+  initParticles('clear');
+
+  function draw() {
+    const [c1, c2] = CODE_GROUPS[currentGroup].bg;
+    const grad = ctx.createLinearGradient(0, 0, 0, H);
+    grad.addColorStop(0, c1); grad.addColorStop(1, c2);
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, W, H);
+
+    const kind = CODE_GROUPS[currentGroup].particles;
+    if (kind === 'sun') {
+      const sun = particles[0];
+      const t = Date.now() / 1000;
+      ctx.save();
+      ctx.translate(sun.x, sun.y);
+      ctx.rotate(t * 0.05);
+      ctx.strokeStyle = 'rgba(255,255,255,.55)';
+      ctx.lineWidth = 3;
+      for (let i = 0; i < 12; i++) {
+        const a = (i / 12) * Math.PI * 2;
+        ctx.beginPath();
+        ctx.moveTo(Math.cos(a) * (sun.r + 14), Math.sin(a) * (sun.r + 14));
+        ctx.lineTo(Math.cos(a) * (sun.r + 30), Math.sin(a) * (sun.r + 30));
+        ctx.stroke();
+      }
+      ctx.restore();
+      ctx.beginPath();
+      ctx.fillStyle = 'rgba(255,255,255,.85)';
+      ctx.arc(sun.x, sun.y, sun.r, 0, Math.PI * 2);
+      ctx.fill();
+    } else if (kind === 'clouds' || kind === 'fog') {
+      ctx.fillStyle = kind === 'fog' ? 'rgba(255,255,255,.25)' : 'rgba(255,255,255,.35)';
+      particles.forEach(p => {
+        ctx.beginPath();
+        ctx.ellipse(p.x, p.y, p.r, p.r * 0.55, 0, 0, Math.PI * 2);
+        ctx.fill();
+        p.x += p.speed;
+        if (p.x - p.r > W) p.x = -p.r;
+      });
+    } else if (kind === 'rain' || kind === 'storm') {
+      ctx.strokeStyle = 'rgba(255,255,255,.55)';
+      ctx.lineWidth = 1.4;
+      particles.forEach(p => {
+        ctx.beginPath();
+        ctx.moveTo(p.x, p.y);
+        ctx.lineTo(p.x - 2, p.y + p.len);
+        ctx.stroke();
+        p.y += p.speed;
+        p.x -= 0.6;
+        if (p.y > H) { p.y = -p.len; p.x = Math.random() * W; }
+      });
+      if (kind === 'storm') {
+        lightningT -= 1;
+        if (lightningT <= 0 && Math.random() < 0.008) lightningT = 4;
+        if (lightningT > 0) {
+          ctx.fillStyle = 'rgba(255,255,255,.35)';
+          ctx.fillRect(0, 0, W, H);
+        }
+      }
+    } else if (kind === 'snow') {
+      ctx.fillStyle = 'rgba(255,255,255,.9)';
+      const t = Date.now() / 1000;
+      particles.forEach(p => {
+        ctx.beginPath();
+        ctx.arc(p.x + Math.sin(t + p.phase) * 12, p.y, p.r, 0, Math.PI * 2);
+        ctx.fill();
+        p.y += p.speed;
+        if (p.y > H) p.y = -4;
+      });
+    }
+    requestAnimationFrame(draw);
+  }
+  requestAnimationFrame(draw);
+
+  async function load() {
+    if (!city) {
+      document.getElementById('state').style.display = 'block';
+      document.getElementById('state').textContent = 'Город не выбран.';
+      return;
+    }
+    try {
+      const resp = await fetch('""" + WEATHER_DATA_API_PATH + """?city=' + encodeURIComponent(city));
+      if (!resp.ok) throw new Error('http_' + resp.status);
+      const data = await resp.json();
+      if (!data.current) {
+        document.getElementById('state').style.display = 'block';
+        document.getElementById('state').textContent = 'Данные о погоде пока не собраны - загляни через несколько минут.';
+        return;
+      }
+      const group = groupFor(data.current.weathercode);
+      initParticles(group);
+      document.getElementById('cityName').textContent = data.city_name || '';
+      document.getElementById('nowEmoji').textContent = WEATHERCODE_EMOJI[data.current.weathercode] || '🌤';
+      document.getElementById('nowTemp').textContent = (data.current.temperature_2m != null ? Math.round(data.current.temperature_2m) : '—') + '°';
+      document.getElementById('nowCond').textContent = WEATHERCODE_NAMES[data.current.weathercode] || '';
+
+      const row = document.getElementById('hourlyRow');
+      row.innerHTML = '';
+      const nowHour = new Date().getHours();
+      (data.hourly || []).forEach(h => {
+        const d = new Date(h.time);
+        const isNow = d.getHours() === nowHour && d.getDate() === new Date().getDate();
+        const card = document.createElement('div');
+        card.className = 'hcard' + (isNow ? ' now-hour' : '');
+        card.innerHTML =
+          '<div class="t">' + (isNow ? 'сейчас' : d.toLocaleTimeString('ru-RU', {hour: '2-digit', minute: '2-digit'})) + '</div>' +
+          '<div class="e">' + (WEATHERCODE_EMOJI[h.weathercode] || '🌤') + '</div>' +
+          '<div class="v">' + (h.temperature_2m != null ? Math.round(h.temperature_2m) + '°' : '—') + '</div>';
+        row.appendChild(card);
+      });
+
+      document.getElementById('app').style.display = 'flex';
+    } catch (e) {
+      document.getElementById('state').style.display = 'block';
+      document.getElementById('state').textContent = 'Не удалось загрузить погоду - попробуй закрыть и открыть ещё раз.';
+    }
+  }
+  load();
+</script>
+</body>
+</html>"""
+
+async def handle_weather_webapp(request):
+    return web.Response(
+        text=weather_webapp_html(), content_type='text/html',
+        headers={'Cache-Control': 'no-store, no-cache, must-revalidate', 'Pragma': 'no-cache'},
+    )
+
+async def handle_weather_data_api(request):
+    """Публичные данные погоды по городу - без проверки initData (тот же
+    принцип, что у /map/positions выше: не персональные данные, город и так
+    открыт всем). Источник - тот же кэш, что у текстовой версии
+    (get_cached_weather_forecast), просто переупакован в формат поудобнее
+    для JS (плоский список часов вместо raw Open-Meteo hourly.time[]/
+    hourly.weathercode[]/hourly.temperature_2m[] по индексам)."""
+    city = request.query.get('city', '')
+    if not city:
+        return web.json_response({'error': 'no_city'}, status=400)
+    forecast = get_cached_weather_forecast(city)
+    if not forecast:
+        return web.json_response({'city_name': CITY_DISPLAY_NAMES.get(city, city), 'current': None, 'hourly': []})
+    hourly_raw = forecast.get('hourly', {})
+    times = hourly_raw.get('time', [])
+    codes = hourly_raw.get('weathercode', [])
+    temps = hourly_raw.get('temperature_2m', [])
+    hourly = [
+        {'time': t, 'weathercode': c, 'temperature_2m': temp}
+        for t, c, temp in zip(times, codes, temps)
+    ]
+    return web.json_response({
+        'city_name': CITY_DISPLAY_NAMES.get(city, city),
+        'current': forecast.get('current'),
+        'hourly': hourly,
+    })
+
+# ==================== КУДА ЕХАТЬ (WebApp) ====================
+# По просьбе пользователя (21.09.2026, "и куда ехать тоже сделай миниапс") -
+# тот же паттерн, что и у погоды/карты выше: aiohttp-роут + самодостаточная
+# HTML-страница вместо обычного текстового сообщения (текстовая версия,
+# format_where_to_go_text/send_where_to_go, НЕ убирается - остаётся рабочим
+# фолбэком и по-прежнему используется, например, из потока утреннего
+# приветствия, см. send_where_to_go). Город и категория берутся из
+# ?city=&category= в URL (как у карты) - это НЕ персональные данные (сводка и
+# так публичная для любого водителя этого города/категории), поэтому, как и
+# у погоды, initData не проверяется строго (best-effort логирование - хотя
+# сейчас даже не логируем, т.к. это ещё более "публичные" данные, чем
+# погода). Расчёт полностью переиспользует compute_where_to_go - JS ничего
+# не пересчитывает сам, только рисует то, что вернул сервер.
+WHERE_TO_GO_WEBAPP_PATH = '/whereto'
+WHERE_TO_GO_DATA_API_PATH = '/whereto/data'
+
+def where_to_go_webapp_html():
+    return """<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Куда ехать</title>
+<script src=\"""" + TG_WEBAPP_JS_PROXY_PATH + """\"></script>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 16px; padding-bottom: max(16px, env(safe-area-inset-bottom, 0px));
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: #000; color: #fff;
+  }
+  h1 { font-size: 17px; margin: 0 0 2px; }
+  .sub { font-size: 12.5px; color: #9a9a9a; margin-bottom: 14px; }
+  #state { text-align: center; padding: 60px 16px; opacity: .7; font-size: 14px; }
+  .warn {
+    background: #1c1c1c; border: 1px solid rgba(255,196,0,.35); border-radius: 12px;
+    padding: 14px; font-size: 13.5px; line-height: 1.5; color: #ddd;
+  }
+  .best {
+    background: linear-gradient(135deg, #1c1c1c, #000); border: 1.5px solid #FFC400;
+    border-radius: 16px; padding: 16px; margin-bottom: 16px; box-shadow: 0 4px 16px rgba(255,196,0,.15);
+  }
+  .best .tag { font-size: 12px; font-weight: 700; color: #FFC400; letter-spacing: .04em; text-transform: uppercase; }
+  .best .label { font-size: 19px; font-weight: 700; margin: 4px 0 8px; }
+  .bar { font-size: 15px; letter-spacing: 2px; color: #FFC400; margin-bottom: 6px; }
+  .bar .off { color: #555; }
+  .reasons { font-size: 13.5px; color: #ccc; line-height: 1.45; }
+  .advice {
+    margin-top: 10px; background: rgba(255,196,0,.12); border-radius: 10px; padding: 9px 11px;
+    font-size: 13px; color: #FFC400; line-height: 1.45;
+  }
+  .list-title { font-size: 12.5px; font-weight: 700; color: #9a9a9a; text-transform: uppercase; letter-spacing: .04em; margin: 4px 0 8px; }
+  .cand {
+    background: #131313; border: 1px solid rgba(255,255,255,.08); border-radius: 12px;
+    padding: 12px 13px; margin-bottom: 8px; display: flex; gap: 10px; align-items: flex-start;
+  }
+  .cand .rank { font-size: 18px; flex-shrink: 0; width: 22px; text-align: center; }
+  .cand .body { min-width: 0; flex: 1; }
+  .cand .label { font-size: 14.5px; font-weight: 700; }
+  .cand .bar { font-size: 13px; margin: 3px 0; }
+  .cand .reasons { font-size: 12.5px; color: #aaa; }
+  .cand .advice { margin-top: 6px; font-size: 12px; padding: 7px 9px; }
+  .closed-box {
+    margin-top: 14px; font-size: 12.5px; color: #999; background: #131313;
+    border: 1px solid rgba(255,255,255,.08); border-radius: 10px; padding: 10px 12px;
+  }
+  .closed-box b { color: #ddd; }
+  .footnote { font-size: 11.5px; color: #777; margin-top: 16px; line-height: 1.4; }
+</style>
+</head>
+<body>
+<div id="state">Считаю варианты…</div>
+<div id="app" style="display:none">
+  <h1 id="cityTitle">🧭 Куда ехать</h1>
+  <div class="sub" id="timeSub"></div>
+  <div id="content"></div>
+</div>
+<script>
+  const tg = window.Telegram && window.Telegram.WebApp;
+  if (tg) { tg.ready(); tg.expand(); }
+  const params = new URLSearchParams(window.location.search);
+  const city = params.get('city') || '';
+  const category = params.get('category') || '';
+
+  // Ранговые эмодзи для 2/3 места - тот же принцип, что WHERE_TO_GO_RANK_EMOJI
+  // в Python (format_where_to_go_text) - держать в синхроне при правках там.
+  const RANK_EMOJI = ['🥈', '🥉'];
+
+  function scoreBar(score) {
+    const filled = Math.min(5, Math.max(0, Math.round(score / 20)));
+    let s = '';
+    for (let i = 0; i < 5; i++) s += i < filled ? '●' : '<span class="off">○</span>';
+    return s;
+  }
+
+  function renderAdvice(advice) {
+    if (!advice) return '';
+    const text = advice.charAt(0).toUpperCase() + advice.slice(1);
+    return '<div class="advice">💡 ' + text + '.</div>';
+  }
+
+  async function load() {
+    if (!city || !category) {
+      document.getElementById('state').textContent = 'Город или категория не выбраны.';
+      return;
+    }
+    try {
+      const resp = await fetch('""" + WHERE_TO_GO_DATA_API_PATH + """?city=' + encodeURIComponent(city) + '&category=' + encodeURIComponent(category));
+      if (!resp.ok) throw new Error('http_' + resp.status);
+      const data = await resp.json();
+
+      document.getElementById('cityTitle').textContent = '🧭 Куда ехать · ' + (data.city_name || '');
+      document.getElementById('timeSub').textContent = data.time_label || '';
+
+      const content = document.getElementById('content');
+      content.innerHTML = '';
+
+      if (!data.open || !data.open.length) {
+        const warn = document.createElement('div');
+        warn.className = 'warn';
+        warn.textContent = '⛔ Все аэропорты города сейчас закрыты - ориентируйся на центр города и часы пика.';
+        content.appendChild(warn);
+      } else {
+        const best = data.open[0];
+        const bestBox = document.createElement('div');
+        bestBox.className = 'best';
+        bestBox.innerHTML =
+          '<div class="tag">🏆 Сейчас лучше всего</div>' +
+          '<div class="label">' + best.label + '</div>' +
+          '<div class="bar">' + scoreBar(best.score) + '</div>' +
+          '<div class="reasons">' + best.reasons.join(', ') + '</div>' +
+          renderAdvice(best.advice);
+        content.appendChild(bestBox);
+
+        const rest = data.open.slice(1);
+        if (rest.length) {
+          const title = document.createElement('div');
+          title.className = 'list-title';
+          title.textContent = 'Остальные варианты';
+          content.appendChild(title);
+          rest.forEach((c, i) => {
+            const rank = i < RANK_EMOJI.length ? RANK_EMOJI[i] : '▫️';
+            const row = document.createElement('div');
+            row.className = 'cand';
+            row.innerHTML =
+              '<div class="rank">' + rank + '</div>' +
+              '<div class="body">' +
+                '<div class="label">' + c.label + '</div>' +
+                '<div class="bar">' + scoreBar(c.score) + '</div>' +
+                '<div class="reasons">' + c.reasons.join(', ') + '</div>' +
+                renderAdvice(c.advice) +
+              '</div>';
+            content.appendChild(row);
+          });
+        }
+      }
+
+      if (data.closed && data.closed.length) {
+        const box = document.createElement('div');
+        box.className = 'closed-box';
+        box.innerHTML = '⛔ <b>Закрыто сейчас:</b> ' + data.closed.map(c => c.label).join(', ');
+        content.appendChild(box);
+      }
+
+      const footnote = document.createElement('div');
+      footnote.className = 'footnote';
+      footnote.textContent = data.footnote || '';
+      content.appendChild(footnote);
+
+      document.getElementById('state').style.display = 'none';
+      document.getElementById('app').style.display = 'block';
+    } catch (e) {
+      document.getElementById('state').textContent = 'Не удалось посчитать варианты - попробуй закрыть и открыть ещё раз.';
+    }
+  }
+  load();
+</script>
+</body>
+</html>"""
+
+async def handle_where_to_go_webapp(request):
+    return web.Response(
+        text=where_to_go_webapp_html(), content_type='text/html',
+        headers={'Cache-Control': 'no-store, no-cache, must-revalidate', 'Pragma': 'no-cache'},
+    )
+
+async def handle_where_to_go_data_api(request):
+    """JSON для WebApp "Куда ехать" - переиспользует ТОТ ЖЕ compute_where_to_go,
+    что и текстовая версия (send_where_to_go/format_where_to_go_text), просто
+    отдаёт кандидатов как JSON вместо готового текста. Не персональные данные
+    (город/категория публичны, как и у карты/погоды) - initData не проверяется."""
+    city = request.query.get('city', '')
+    category = request.query.get('category', '')
+    if not city or not category:
+        return web.json_response({'error': 'missing_params'}, status=400)
+    try:
+        candidates = await compute_where_to_go(city, category)
+    except Exception:
+        logger.exception(f"❌ Не удалось посчитать варианты 'Куда ехать' (WebApp) для {city}/{category}")
+        return web.json_response({'error': 'compute_failed'}, status=500)
+
+    city_name = CITY_DISPLAY_NAMES.get(city, city)
+    now = get_city_now(city)
+    time_label = f"{now.strftime('%H:%M')} · {WEEKDAY_NAMES[now.weekday()]}"
+
+    open_candidates = [c for c in candidates if not c['closed']]
+    closed_candidates = [c for c in candidates if c['closed']]
+
+    if category == 'courier':
+        footnote = "Ориентир по часам активных заказов доставки еды - не гарантия заработка, реальный спрос может отличаться."
+    elif category == 'cargo':
+        footnote = "Ориентир по рабочим часам бизнеса и складов - не гарантия заработка, реальный спрос может отличаться."
+    else:
+        footnote = "Ориентир на основе прилётов, статуса аэропортов, очереди и часов пика - не гарантия заработка, реальный спрос может отличаться."
+
+    closures_count = count_active_road_closures(city)
+    if closures_count:
+        word = "перекрытие" if closures_count == 1 else ("перекрытия" if 2 <= closures_count <= 4 else "перекрытий")
+        footnote = f"🚧 Сейчас в городе {closures_count} активных {word}. " + footnote
+
+    def _pack(c):
+        return {'label': c['label'], 'score': c['score'], 'reasons': c['reasons'], 'advice': c.get('advice')}
+
+    return web.json_response({
+        'city_name': city_name,
+        'time_label': time_label,
+        'open': [_pack(c) for c in open_candidates],
+        'closed': [_pack(c) for c in closed_candidates],
+        'footnote': footnote,
+    })
 
 async def handle_map_webapp(request):
     # Telegram WebView иногда агрессивно кэширует открытую внутри мини-аппа
@@ -6904,6 +7484,14 @@ async def handle_cabinet_settings_api(request):
     return web.json_response(result)
 
 def cabinet_webapp_html():
+    # По просьбе пользователя (21.09.2026, "цвета сделай черный желтые белые
+    # серые во всех аппсах") - фирменный акцент такси-чекера вместо зелёного:
+    # везде ниже #34A853 (зелёный) заменён на #FFC400 (такси-жёлтый), с
+    # переключением текста на чёрный там, где раньше был белый по зелёному
+    # (контраст на жёлтом иначе плохой) - профильная карточка стала чёрным/
+    # тёмно-серым градиентом с тонкой жёлтой рамкой вместо зелёного градиента.
+    # Механизм var(--tg-theme-*-color, ...) и isDark-ветки в JS НЕ тронуты -
+    # меняются только сами значения цветов, не логика тёмной/светлой темы.
     """HTML-страница личного кабинета (Chart.js, без API-ключей - тот же
     источник CDN, что уже используется для Leaflet на карте водителей, см.
     map_webapp_html). Данные запрашиваются с initData в заголовке (см.
@@ -6933,8 +7521,8 @@ def cabinet_webapp_html():
   /* Карточка профиля - градиентная "визитка" вверху страницы */
   .profile-card {
     display: flex; align-items: center; gap: 12px; border-radius: 18px; padding: 16px;
-    background: linear-gradient(135deg, #34A853, #1a7f43); color: #fff; margin-bottom: 16px;
-    box-shadow: 0 4px 14px rgba(26,127,67,.3);
+    background: linear-gradient(135deg, #1c1c1c, #000); color: #fff; margin-bottom: 16px;
+    box-shadow: 0 4px 14px rgba(0,0,0,.4); border: 1px solid rgba(255,196,0,.35);
   }
   .avatar {
     width: 52px; height: 52px; border-radius: 50%; background: rgba(255,255,255,.22);
@@ -6963,7 +7551,7 @@ def cabinet_webapp_html():
   }
   .profile-form .save-btn {
     width: 100%; margin-top: 14px; padding: 11px; border: none; border-radius: 10px;
-    background: #34A853; color: #fff; font-size: 14.5px; font-weight: 700;
+    background: #FFC400; color: #000; font-size: 14.5px; font-weight: 700;
   }
   .profile-form .save-msg { text-align: center; font-size: 12.5px; margin-top: 8px; min-height: 16px; }
 
@@ -6975,7 +7563,7 @@ def cabinet_webapp_html():
   .tile .label { font-size: 11.5px; opacity: .6; margin-bottom: 4px; }
   .tile .value { font-size: 18px; font-weight: 700; font-variant-numeric: tabular-nums; }
   .tile .sub { font-size: 11.5px; opacity: .55; margin-top: 2px; }
-  .tile.accent { background: linear-gradient(135deg, rgba(52,168,83,.16), rgba(52,168,83,.05)); }
+  .tile.accent { background: linear-gradient(135deg, rgba(255,196,0,.20), rgba(255,196,0,.05)); }
   .highlight-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px; }
 
   .chart-card {
@@ -6998,7 +7586,7 @@ def cabinet_webapp_html():
     font-weight: 600; background: var(--tg-theme-secondary-bg-color, #fff);
     color: var(--tg-theme-text-color, #000); opacity: .65; white-space: nowrap;
   }
-  .nav-pill.active { background: #34A853; color: #fff; opacity: 1; }
+  .nav-pill.active { background: #FFC400; color: #000; opacity: 1; }
   .tab-pane { display: none; }
   .tab-pane.active { display: block; }
   .card {
@@ -7014,13 +7602,13 @@ def cabinet_webapp_html():
     background: var(--tg-theme-bg-color, #f2f2f7); color: var(--tg-theme-text-color, #000); font-size: 14.5px;
   }
   .btn {
-    width: 100%; padding: 11px; border: none; border-radius: 10px; background: #34A853;
-    color: #fff; font-size: 14.5px; font-weight: 700; margin-top: 4px;
+    width: 100%; padding: 11px; border: none; border-radius: 10px; background: #FFC400;
+    color: #000; font-size: 14.5px; font-weight: 700; margin-top: 4px;
   }
   .btn.secondary { background: rgba(127,127,127,.18); color: var(--tg-theme-text-color, #000); }
   .link-btn {
     display: block; text-decoration: none; text-align: center; padding: 12px; border-radius: 10px;
-    background: #34A853; color: #fff !important; font-weight: 700; font-size: 14.5px; margin-bottom: 8px;
+    background: #FFC400; color: #000 !important; font-weight: 700; font-size: 14.5px; margin-bottom: 8px;
   }
   .pill-row { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
   .pill-btn {
@@ -7028,12 +7616,12 @@ def cabinet_webapp_html():
     background: var(--tg-theme-secondary-bg-color, #fff); color: var(--tg-theme-text-color, #000);
     opacity: .75;
   }
-  .pill-btn.active { background: #34A853; color: #fff; opacity: 1; }
+  .pill-btn.active { background: #FFC400; color: #000; opacity: 1; }
   .point-card { background: var(--tg-theme-secondary-bg-color, #fff); border-radius: 12px; padding: 11px 12px; margin-bottom: 8px; }
   .point-card .pc-title { font-size: 14px; font-weight: 700; margin-bottom: 3px; }
   .point-card .pc-sub { font-size: 12px; opacity: .65; margin-bottom: 8px; }
   .point-card .pc-go {
-    display: inline-block; text-decoration: none; background: #34A853; color: #fff !important;
+    display: inline-block; text-decoration: none; background: #FFC400; color: #000 !important;
     padding: 7px 12px; border-radius: 8px; font-size: 12.5px; font-weight: 700;
   }
   .switch-row {
@@ -7045,7 +7633,7 @@ def cabinet_webapp_html():
     width: 44px; height: 26px; border-radius: 999px; border: none; position: relative; flex-shrink: 0;
     background: rgba(127,127,127,.35);
   }
-  .switch-toggle.on { background: #34A853; }
+  .switch-toggle.on { background: #FFC400; }
   .switch-toggle::after {
     content: ''; position: absolute; top: 3px; left: 3px; width: 20px; height: 20px; border-radius: 50%;
     background: #fff; transition: left .15s;
@@ -7237,8 +7825,8 @@ def cabinet_webapp_html():
   const isDark = tg ? tg.colorScheme === 'dark' : (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
   const gridColor = isDark ? 'rgba(255,255,255,.08)' : 'rgba(0,0,0,.06)';
   const textColor = isDark ? 'rgba(255,255,255,.65)' : 'rgba(0,0,0,.55)';
-  const accent = '#34A853';
-  const accentSoft = isDark ? 'rgba(52,168,83,.25)' : 'rgba(52,168,83,.15)';
+  const accent = '#FFC400';
+  const accentSoft = isDark ? 'rgba(255,196,0,.28)' : 'rgba(255,196,0,.18)';
   const params = new URLSearchParams(window.location.search);
   const tariffOptions = (params.get('tariffs') || '').split(',').filter(Boolean);
 
@@ -11248,6 +11836,10 @@ async def start_subscription_webhook_server():
     app.router.add_get('/', lambda request: web.Response(text='taxi-helper-bot OK'))
     # Карта водителей (см. блок "КАРТА ВОДИТЕЛЕЙ" выше) - страница WebApp и
     # JSON-API с позициями, на этом же лёгком aiohttp-сервере.
+    # "Куда ехать" (см. блок "КУДА ЕХАТЬ (WebApp)" выше) - по просьбе
+    # пользователя (21.09.2026), тот же роутинг-паттерн, что у карты/погоды.
+    app.router.add_get(WHERE_TO_GO_WEBAPP_PATH, handle_where_to_go_webapp)
+    app.router.add_get(WHERE_TO_GO_DATA_API_PATH, handle_where_to_go_data_api)
     app.router.add_get(MAP_WEBAPP_PATH, handle_map_webapp)
     app.router.add_get(MAP_POSITIONS_API_PATH, handle_map_positions_api)
     app.router.add_get(MAP_AIRPORTS_API_PATH, handle_map_airports_api)
@@ -11257,6 +11849,9 @@ async def start_subscription_webhook_server():
     # Локальная раздача telegram-web-app.js (21.09.2026, см. блок "ЛОКАЛЬНАЯ
     # РАЗДАЧА telegram-web-app.js" выше) - используется и картой, и кабинетом.
     app.router.add_get(TG_WEBAPP_JS_PROXY_PATH, handle_tg_webapp_js_proxy)
+    # Погода (см. блок "ПОГОДА (WebApp с анимацией)" выше)
+    app.router.add_get(WEATHER_WEBAPP_PATH, handle_weather_webapp)
+    app.router.add_get(WEATHER_DATA_API_PATH, handle_weather_data_api)
     # Личный кабинет (см. блок "ЛИЧНЫЙ КАБИНЕТ (WebApp)" выше)
     app.router.add_get(CABINET_WEBAPP_PATH, handle_cabinet_webapp)
     app.router.add_get(CABINET_DATA_API_PATH, handle_cabinet_data_api)
