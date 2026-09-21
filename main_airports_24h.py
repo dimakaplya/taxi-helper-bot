@@ -3300,11 +3300,16 @@ def services_keyboard(category=None, city=None, user_id=None):
     # убраны и продолжают работать как фолбэк.
     events_row = []
     if category not in CATEGORIES_WITHOUT_AIRPORTS:
-        if PUBLIC_URL and city:
-            transport_url = f"{PUBLIC_URL}{TRANSPORT_WEBAPP_PATH}?city={urllib.parse.quote(city)}&category={urllib.parse.quote(category)}"
-            events_row.append(KeyboardButton(text="✈️🚆 АВИА/ЖД", web_app=WebAppInfo(url=transport_url)))
-        else:
-            events_row.append(KeyboardButton(text="✈️🚆 АВИА/ЖД"))
+        # ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя - "а кнопку встать
+        # в очередь тоже надо вывести пусть будет и тут"): "✈️🚆 АВИА/ЖД"
+        # ПЕРЕСТАЛА быть прямой web_app=-кнопкой в Reply-клавиатуре - теперь
+        # мини-апп умеет ещё и ОТМЕЧАТЬ очередь (личное действие, требует
+        # initData), а у Reply-клавиатуры web_app= initData НЕ передаёт (та
+        # же проблема, что была у личного кабинета - initData.len=0,
+        # initDataUnsafe.user=absent). Кнопка снова обычная текстовая -
+        # хендлер show_transport_menu теперь сам шлёт инлайн-кнопку с
+        # web_app= (тот же рабочий паттерн, что у cabinet/share-order).
+        events_row.append(KeyboardButton(text="✈️🚆 АВИА/ЖД"))
     if PUBLIC_URL and city:
         events_url = f"{PUBLIC_URL}{EVENTS_WEBAPP_PATH}?city={urllib.parse.quote(city)}&category={urllib.parse.quote(category)}"
         if category in CATEGORIES_WITHOUT_EVENTS:
@@ -7653,6 +7658,7 @@ async def handle_events_data_api(request):
 # убираются - остаются рабочим фолбэком.
 TRANSPORT_WEBAPP_PATH = '/transport'
 TRANSPORT_DATA_API_PATH = '/transport/data'
+TRANSPORT_QUEUE_SUBMIT_API_PATH = '/transport/queue/submit'
 
 def transport_webapp_html():
     return """<!doctype html>
@@ -7704,6 +7710,33 @@ def transport_webapp_html():
   .status-closed { color: #ff6b6b; }
   .status-coordinated { color: #FFC400; }
   .status-open { color: #4caf50; }
+  /* ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "а кнопку встать в
+     очередь тоже надо вывести пусть будет и тут") - форма отметки очереди
+     прямо внутри карточки аэропорта. */
+  .queue-toggle {
+    margin-top: 8px; text-align: center; padding: 9px; border-radius: 10px;
+    background: rgba(255,196,0,.1); border: 1px solid rgba(255,196,0,.35);
+    color: #FFC400; font-size: 12.5px; font-weight: 700; cursor: pointer;
+  }
+  .queue-form { display: none; margin-top: 8px; }
+  .queue-form.open { display: block; }
+  .queue-form .lbl { font-size: 11px; color: #9a9a9a; margin: 8px 0 5px; }
+  .pills { display: flex; flex-wrap: wrap; gap: 6px; }
+  .pill {
+    padding: 6px 10px; border-radius: 8px; background: #1c1c1c; border: 1px solid rgba(255,255,255,.12);
+    color: #ccc; font-size: 12px; cursor: pointer; user-select: none;
+  }
+  .pill.sel { background: rgba(255,196,0,.16); border-color: #FFC400; color: #FFC400; font-weight: 700; }
+  .range-block { margin-top: 6px; }
+  .range-block .rt { font-size: 11.5px; color: #FFC400; margin-bottom: 4px; }
+  .queue-submit {
+    width: 100%; margin-top: 10px; padding: 10px; border: none; border-radius: 10px;
+    background: #FFC400; color: #111; font-size: 13px; font-weight: 800; cursor: pointer;
+  }
+  .queue-submit:disabled { opacity: .5; }
+  .queue-msg { font-size: 12px; margin-top: 6px; text-align: center; }
+  .queue-msg.ok { color: #4caf50; }
+  .queue-msg.err { color: #ff6b6b; }
 </style>
 </head>
 <body>
@@ -7744,6 +7777,14 @@ def transport_webapp_html():
     if (n1 === 1) return one;
     return many;
   }
+  // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "а кнопку встать в
+  // очередь тоже надо вывести пусть будет и тут") - тарифы и диапазоны
+  // очереди приходят с сервера вместе с основными данными (см.
+  // handle_transport_data_api). Выбор тарифов/диапазона по каждому аэропорту
+  // живёт только пока открыта страница, между отметками не сохраняется.
+  let TARIFFS = [];
+  let QUEUE_RANGES = [];
+  const queueSelection = {};
 
   function showTab(name) {
     document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
@@ -7788,8 +7829,15 @@ def transport_webapp_html():
           detail += '<div class="notice"><span class="nt">📢 ' + esc(n.time) + '</span>' + esc(n.text) + '</div>';
         });
         if (a.queue_text) {
-          detail += '<div class="queue-box">' + esc(a.queue_text) + '</div>';
+          detail += '<div class="queue-box" id="queueBox' + i + '">' + esc(a.queue_text) + '</div>';
+        } else {
+          detail += '<div class="queue-box" id="queueBox' + i + '"></div>';
         }
+        // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "а кнопку
+        // встать в очередь тоже надо вывести пусть будет и тут") - та же
+        // отметка длины очереди, что в чате (join_queue_.../qsub_), только
+        // все тарифы и диапазон выбираются на одном экране мини-аппа.
+        detail += renderQueueForm(i);
       }
       return '<div class="item" data-idx="' + i + '" data-kind="a">' +
         '<div class="head">' + head + '</div><div class="sub">' + sub + '</div>' +
@@ -7797,11 +7845,142 @@ def transport_webapp_html():
         '</div>';
     }).join('');
     sec.querySelectorAll('.item').forEach(el => {
-      el.addEventListener('click', () => {
+      el.addEventListener('click', (ev) => {
+        // Клики внутри формы отметки очереди не должны схлопывать карточку -
+        // сама форма/кнопки сами останавливают всплытие (см. wireQueueForm).
         const idx = el.dataset.idx;
         document.getElementById('detA' + idx).classList.toggle('open');
       });
     });
+    airports.forEach((a, i) => { if (!a.closed) wireQueueForm(i); });
+  }
+
+  // ДОБАВЛЕНО 22.09.2026 - разметка формы отметки очереди для одного
+  // аэропорта (индекс i): переключатель "Отметить очередь", чекбоксы
+  // тарифов (если у категории есть тарифы) и пилюли диапазона под каждым
+  // выбранным тарифом.
+  function renderQueueForm(i) {
+    let html = '<div class="queue-toggle" data-qtoggle="' + i + '">🚗 ОТМЕТИТЬ ОЧЕРЕДЬ</div>';
+    html += '<div class="queue-form" id="qform' + i + '">';
+    if (TARIFFS.length) {
+      html += '<div class="lbl">Выбери класс(ы) - можно несколько:</div>';
+      html += '<div class="pills" id="qtariffs' + i + '">' + TARIFFS.map(t =>
+        '<div class="pill" data-tariff="' + esc(t) + '">' + esc(t) + '</div>'
+      ).join('') + '</div>';
+    }
+    html += '<div id="qranges' + i + '"></div>';
+    html += '<button class="queue-submit" id="qsubmit' + i + '" disabled>ОТПРАВИТЬ ОТМЕТКУ</button>';
+    html += '<div class="queue-msg" id="qmsg' + i + '"></div>';
+    html += '</div>';
+    return html;
+  }
+
+  function queueRangePills(airportIdx, tariffKey) {
+    return '<div class="pills">' + QUEUE_RANGES.map(r =>
+      '<div class="pill" data-range-for="' + esc(tariffKey) + '" data-range="' + esc(r) + '">' + esc(r) + '</div>'
+    ).join('') + '</div>';
+  }
+
+  function updateQueueRangeBlocks(i) {
+    // Без тарифов у категории (пустой TARIFFS) - один общий диапазон под
+    // ключом "_"; с тарифами - свой блок диапазона под каждым выбранным.
+    const sel = queueSelection[i] || (queueSelection[i] = { tariffs: [], ranges: {} });
+    const wrap = document.getElementById('qranges' + i);
+    const keys = TARIFFS.length ? sel.tariffs : ['_'];
+    if (!keys.length) {
+      wrap.innerHTML = '';
+    } else {
+      wrap.innerHTML = keys.map(key => {
+        const title = key === '_' ? 'Сколько машин видишь в очереди?' : key + ' - сколько машин видишь?';
+        return '<div class="range-block"><div class="rt">' + esc(title) + '</div>' + queueRangePills(i, key) + '</div>';
+      }).join('');
+      wrap.querySelectorAll('.pill[data-range-for]').forEach(p => {
+        const key = p.dataset.rangeFor;
+        if (sel.ranges[key] === p.dataset.range) p.classList.add('sel');
+        p.addEventListener('click', (ev) => {
+          ev.stopPropagation();
+          sel.ranges[key] = p.dataset.range;
+          wrap.querySelectorAll('.pill[data-range-for="' + key.replace(/"/g, '\\\\"') + '"]').forEach(pp => pp.classList.toggle('sel', pp === p));
+          refreshQueueSubmitState(i);
+        });
+      });
+    }
+    refreshQueueSubmitState(i);
+  }
+
+  function refreshQueueSubmitState(i) {
+    const sel = queueSelection[i] || { tariffs: [], ranges: {} };
+    const keys = TARIFFS.length ? sel.tariffs : ['_'];
+    const ready = keys.length > 0 && keys.every(k => sel.ranges[k]);
+    document.getElementById('qsubmit' + i).disabled = !ready;
+  }
+
+  function wireQueueForm(i) {
+    queueSelection[i] = { tariffs: [], ranges: {} };
+    const toggle = document.querySelector('[data-qtoggle="' + i + '"]');
+    if (toggle) {
+      toggle.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        document.getElementById('qform' + i).classList.toggle('open');
+      });
+    }
+    const tariffWrap = document.getElementById('qtariffs' + i);
+    if (tariffWrap) {
+      tariffWrap.querySelectorAll('.pill').forEach(p => {
+        p.addEventListener('click', (ev) => {
+          ev.stopPropagation();
+          const t = p.dataset.tariff;
+          const sel = queueSelection[i];
+          const idx = sel.tariffs.indexOf(t);
+          if (idx === -1) { sel.tariffs.push(t); p.classList.add('sel'); }
+          else { sel.tariffs.splice(idx, 1); p.classList.remove('sel'); delete sel.ranges[t]; p.classList.remove('sel'); }
+          updateQueueRangeBlocks(i);
+        });
+      });
+    }
+    updateQueueRangeBlocks(i);
+    const submitBtn = document.getElementById('qsubmit' + i);
+    if (submitBtn) {
+      submitBtn.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        submitQueueForm(i);
+      });
+    }
+  }
+
+  async function submitQueueForm(i) {
+    const sel = queueSelection[i];
+    const keys = TARIFFS.length ? sel.tariffs : ['_'];
+    const entries = keys.map(k => ({ tariff: k === '_' ? null : k, range: sel.ranges[k] }));
+    const msgEl = document.getElementById('qmsg' + i);
+    const btn = document.getElementById('qsubmit' + i);
+    btn.disabled = true;
+    msgEl.textContent = '';
+    msgEl.className = 'queue-msg';
+    try {
+      const resp = await fetch('""" + TRANSPORT_QUEUE_SUBMIT_API_PATH + """', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': (tg && tg.initData) || '' },
+        body: JSON.stringify({ city: city, airport_idx: Number(i), entries: entries }),
+      });
+      const data = await resp.json();
+      if (!resp.ok || data.error) throw new Error(data.error || ('http_' + resp.status));
+      msgEl.textContent = '✅ Отметка сохранена, спасибо!';
+      msgEl.className = 'queue-msg ok';
+      if (data.queue_text) {
+        const box = document.getElementById('queueBox' + i);
+        if (box) box.textContent = data.queue_text;
+      }
+      // Сбрасываем выбор диапазонов (но оставляем выбранные тарифы - удобно
+      // отметиться ещё раз через минуту тем же набором классов).
+      sel.ranges = {};
+      updateQueueRangeBlocks(i);
+    } catch (e) {
+      msgEl.textContent = '⚠️ Не удалось отправить отметку - попробуй ещё раз.';
+      msgEl.className = 'queue-msg err';
+    } finally {
+      refreshQueueSubmitState(i);
+    }
   }
 
   function renderTrains(stations) {
@@ -7841,6 +8020,8 @@ def transport_webapp_html():
       const resp = await fetch('""" + TRANSPORT_DATA_API_PATH + """?city=' + encodeURIComponent(city) + '&category=' + encodeURIComponent(category));
       if (!resp.ok) throw new Error('http_' + resp.status);
       const data = await resp.json();
+      TARIFFS = data.tariffs || [];
+      QUEUE_RANGES = data.queue_ranges || [];
       renderAirports(data.airports || []);
       renderTrains(data.stations || []);
       if (!data.has_trains) {
@@ -7978,7 +8159,99 @@ async def handle_transport_data_api(request):
         except Exception:
             logger.exception(f"❌ Ошибка сборки вокзалов для /transport/data city={city} category={category}")
 
-    return web.json_response({'airports': airports_out, 'stations': stations_out, 'has_trains': has_trains})
+    # ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "а кнопку встать в
+    # очередь тоже надо вывести пусть будет и тут") - фронту нужны варианты
+    # тарифов ТЕКУЩЕЙ категории и список диапазонов очереди, чтобы отрисовать
+    # форму отметки прямо в WebApp (см. handle_transport_queue_submit_api
+    # ниже - тот же queue_submit_report, что и у текстового флоу
+    # join_queue_.../submit_range).
+    tariffs = CATEGORIES.get(category, {}).get('tariffs', [])
+    queue_ranges = [queue_range_label(i) for i in range(len(QUEUE_RANGES))]
+    return web.json_response({
+        'airports': airports_out, 'stations': stations_out, 'has_trains': has_trains,
+        'tariffs': tariffs, 'queue_ranges': queue_ranges,
+    })
+
+async def handle_transport_queue_submit_api(request):
+    """POST {city, airport_idx, entries: [{tariff, range}]} -> отмечает длину
+    очереди по каждому выбранному тарифу сразу (аналог пошагового
+    join_queue_.../qsub_ флоу в чате, но без шагов - водитель выбирает все
+    классы и диапазоны на одном экране мини-аппа и жмёт один раз "Отправить").
+    initData ОБЯЗАТЕЛЕН и строго проверяется (тот же helper, что у
+    /share-order/submit и /cabinet/*) - отметка привязана к конкретному
+    user_id (см. queue_submit_report), без подписи неизвестно, кто отмечается.
+    Переиспользует ТУ ЖЕ queue_submit_report, что и текстовый флоу - логика
+    записи в БД не дублируется."""
+    init_data = request.headers.get('X-Telegram-Init-Data', '')
+    parsed = validate_telegram_webapp_init_data(init_data, BOT_TOKEN) if BOT_TOKEN else None
+    if not parsed:
+        logger.warning(f"⚠️ /transport/queue/submit: невалидный initData (len={len(init_data)}) - отдаю 401")
+        return web.json_response({'error': 'invalid_init_data'}, status=401)
+    try:
+        tg_user = json.loads(parsed.get('user', '{}'))
+        user_id = tg_user.get('id')
+    except Exception:
+        user_id = None
+    if not user_id:
+        return web.json_response({'error': 'invalid_init_data'}, status=401)
+
+    state = user_state.get(user_id)
+    if not state or 'category' not in state or 'city' not in state:
+        return web.json_response({'error': 'no_state'}, status=400)
+    category = state['category']
+    city = state['city']
+
+    try:
+        body = await request.json()
+        req_city = str(body.get('city') or '')
+        airport_idx = int(body.get('airport_idx'))
+        entries = body.get('entries') or []
+    except Exception:
+        return web.json_response({'error': 'invalid_body'}, status=400)
+
+    # Город из тела запроса должен совпадать с городом пользователя в
+    # user_state - страхуемся от устаревшей открытой вкладки WebApp после
+    # смены города (та же логика, что submit_range неявно полагает через
+    # user_state, тут проверяем явно, раз город передаётся с фронта).
+    if req_city != city:
+        return web.json_response({'error': 'city_mismatch'}, status=400)
+
+    airports = AIRPORTS_INFO.get(city, [])
+    if airport_idx < 0 or airport_idx >= len(airports):
+        return web.json_response({'error': 'invalid_airport'}, status=400)
+    airport = airports[airport_idx]
+    if airport.get('closed'):
+        return web.json_response({'error': 'airport_closed'}, status=400)
+
+    tariffs = CATEGORIES.get(category, {}).get('tariffs', [])
+    valid_ranges = {queue_range_label(i) for i in range(len(QUEUE_RANGES))}
+    saved = []
+    for entry in entries:
+        tariff = entry.get('tariff')
+        range_str = entry.get('range')
+        if tariffs and tariff not in tariffs:
+            continue
+        if not tariffs:
+            tariff = None
+        if range_str not in valid_ranges:
+            continue
+        class_key = f"{category}:{tariff}" if tariff else category
+        queue_submit_report(user_id, city, airport['icao'], class_key, range_str, zone_key=airport.get('zone_key'))
+        saved.append({'tariff': tariff, 'range': range_str})
+
+    if not saved:
+        return web.json_response({'error': 'nothing_saved'}, status=400)
+
+    # Свежая сводка сразу после отметки - фронт обновляет карточку аэропорта
+    # без полной перезагрузки /transport/data (тот же формат queue_text, что
+    # и в основном ответе выше).
+    queue_text = ''
+    try:
+        raw = format_queue_breakdown(city, airport['icao'], category, zone_key=airport.get('zone_key'))
+        queue_text = (raw or '').replace('*', '').replace('_', '').strip()
+    except Exception:
+        queue_text = ''
+    return web.json_response({'ok': True, 'saved': saved, 'queue_text': queue_text})
 
 # ==================== ЛИЧНЫЙ КАБИНЕТ (WebApp) ====================
 # По просьбе пользователя (21.09.2026, "давай личный кабинет водителя") -
@@ -10298,10 +10571,19 @@ AIRPORT_MENU_KEYBOARD = InlineKeyboardMarkup(inline_keyboard=[
 async def show_transport_menu(message: types.Message):
     """Объединённая кнопка "✈️🚆 АВИА/ЖД" (было 2 отдельные кнопки -
     "✈️ АЭРОПОРТЫ" и "🚆 ВОКЗАЛЫ" - объединены в одну по просьбе
-    пользователя, чтобы короче было главное меню услуг). При нажатии -
-    инлайн-подменю с этими двумя вариантами; "🚆 ВОКЗАЛЫ" в нём показывается,
-    только если город есть в TRAIN_CITIES (см. STATION_CITY) - иначе только
-    "✈️ АЭРОПОРТЫ", без лишнего пункта "недоступно"."""
+    пользователя, чтобы короче было главное меню услуг).
+
+    ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя - "а кнопку встать в
+    очередь тоже надо вывести пусть будет и тут"): раньше при PUBLIC_URL/city
+    заданных сама кнопка в Reply-клавиатуре несла web_app= напрямую (публичные
+    данные, initData не нужен). Теперь мини-апп "Авиа/ЖД" умеет ЕЩЁ И
+    отмечать очередь - личное действие, требующее initData, а у
+    Reply-клавиатуры web_app= initData НЕ передаётся (та же проблема, что
+    была у личного кабинета). Поэтому по нажатию шлём отдельным сообщением
+    инлайн-кнопку с web_app= (тот же рабочий паттерн, что и
+    open_cabinet_from_menu/start_shared_order) - у инлайн-кнопок initData
+    передаётся нормально. Старое инлайн-подменю (АЭРОПОРТЫ/ВОКЗАЛЫ, чисто
+    текстовое) остаётся фолбэком, если PUBLIC_URL не задан."""
     user_id = message.from_user.id
     if user_id not in user_state:
         await message.answer("Сначала выбери город!")
@@ -10310,6 +10592,15 @@ async def show_transport_menu(message: types.Message):
     city = user_state[user_id].get('city')
     if category in CATEGORIES_WITHOUT_AIRPORTS:
         await message.answer("Для этой категории транспорт недоступен.", reply_markup=services_keyboard(category, city, user_id))
+        return
+    if PUBLIC_URL and city:
+        transport_url = f"{PUBLIC_URL}{TRANSPORT_WEBAPP_PATH}?city={urllib.parse.quote(city)}&category={urllib.parse.quote(category)}"
+        await message.answer(
+            "✈️🚆 АВИА/ЖД",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="ОТКРЫТЬ", web_app=WebAppInfo(url=transport_url)),
+            ]]),
+        )
         return
     buttons = [[InlineKeyboardButton(text="✈️ АЭРОПОРТЫ", callback_data="transport_airports")]]
     if city in TRAIN_CITIES:
@@ -12827,6 +13118,7 @@ async def start_subscription_webhook_server():
     # Авиа/ЖД (см. блок "АВИА/ЖД (WebApp)" выше)
     app.router.add_get(TRANSPORT_WEBAPP_PATH, handle_transport_webapp)
     app.router.add_get(TRANSPORT_DATA_API_PATH, handle_transport_data_api)
+    app.router.add_post(TRANSPORT_QUEUE_SUBMIT_API_PATH, handle_transport_queue_submit_api)
     # Отдать заказ (см. блок "ОТДАТЬ ЗАКАЗ (WebApp)" выше)
     app.router.add_get(SHARE_ORDER_WEBAPP_PATH, handle_share_order_webapp)
     app.router.add_post(SHARE_ORDER_SUBMIT_API_PATH, handle_share_order_submit_api)
