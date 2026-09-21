@@ -3291,10 +3291,27 @@ def services_keyboard(category=None, city=None, user_id=None):
     # (по прямой просьбе пользователя, 21.09.2026). Если категория без
     # аэропортов (CATEGORIES_WITHOUT_AIRPORTS), в ряду остаётся только кнопка
     # событий - без второй кнопки.
+    # Обе кнопки стали WebApp (21.09.2026, тот же публичный паттерн, что у
+    # "🌤 ПОГОДА"/"💰 КУДА ЕХАТЬ" выше - данные не персональные, берутся из
+    # ?city=&category= в URL) - при PUBLIC_URL/city заданных вешаем web_app=
+    # прямо на кнопку Reply-клавиатуры; иначе (как и везде выше) остаётся
+    # старая обычная текстовая кнопка, старые текстовые хендлеры
+    # (show_transport_menu/show_events_and_roads_menu/show_road_events) НЕ
+    # убраны и продолжают работать как фолбэк.
     events_row = []
     if category not in CATEGORIES_WITHOUT_AIRPORTS:
-        events_row.append(KeyboardButton(text="✈️🚆 АВИА/ЖД"))
-    events_row.append(KeyboardButton(text=events_button_text))
+        if PUBLIC_URL and city:
+            transport_url = f"{PUBLIC_URL}{TRANSPORT_WEBAPP_PATH}?city={urllib.parse.quote(city)}&category={urllib.parse.quote(category)}"
+            events_row.append(KeyboardButton(text="✈️🚆 АВИА/ЖД", web_app=WebAppInfo(url=transport_url)))
+        else:
+            events_row.append(KeyboardButton(text="✈️🚆 АВИА/ЖД"))
+    if PUBLIC_URL and city:
+        events_url = f"{PUBLIC_URL}{EVENTS_WEBAPP_PATH}?city={urllib.parse.quote(city)}&category={urllib.parse.quote(category)}"
+        if category in CATEGORIES_WITHOUT_EVENTS:
+            events_url += "&tab=roads"
+        events_row.append(KeyboardButton(text=events_button_text, web_app=WebAppInfo(url=events_url)))
+    else:
+        events_row.append(KeyboardButton(text=events_button_text))
     buttons.append(events_row)
     # "👤 ЛИЧНЫЙ КАБИНЕТ" здесь БОЛЬШЕ НЕТ как отдельной кнопки Reply-
     # клавиатуры (убрана по просьбе пользователя, 21.09.2026 - "удали тогда
@@ -3891,6 +3908,225 @@ async def show_shared_order_confirmation(message, data, category, city):
     ])
     await message.answer(text, reply_markup=keyboard, parse_mode='Markdown')
 
+# ==================== ОТДАТЬ ЗАКАЗ (WebApp) ====================
+# По просьбе пользователя (21.09.2026) - "🔄 ОТДАТЬ ЗАКАЗ" переведена на
+# WebApp-форму. В ОТЛИЧИЕ от погоды/куда ехать/событий/авиа-жд выше, это
+# ПЕРСОНАЛЬНОЕ действие (создание реального заказа от имени конкретного
+# отправителя), поэтому кнопка в Reply-клавиатуре WebApp НЕ несёт (у
+# web_app= прямо в Reply-клавиатуре initData приходит пустым - см. тот же
+# факт, установленный для личного кабинета, комментарий у cabinet_row в
+# services_keyboard). Вместо этого используется рабочий паттерн личного
+# кабинета (open_cabinet_from_menu): по тапу на обычную текстовую кнопку
+# бот присылает ОТДЕЛЬНОЕ сообщение с инлайн-кнопкой web_app= - у инлайн-
+# кнопок initData передаётся штатно. initData на /share-order/submit
+# проверяется СТРОГО (validate_telegram_webapp_init_data, тот же helper,
+# что у /cabinet/*) - это запись реальных данных от имени конкретного
+# человека. Старый текстовый пошаговый флоу (shared_order_flow и вся
+# машина состояний order_draft) НЕ удаляется - остаётся в коде рабочим
+# фолбэком (например, если WebApp по какой-то причине не открылся), просто
+# кнопка "🔄 ОТДАТЬ ЗАКАЗ" по умолчанию больше не запускает его напрямую.
+SHARE_ORDER_WEBAPP_PATH = '/share-order'
+SHARE_ORDER_SUBMIT_API_PATH = '/share-order/submit'
+
+def share_order_webapp_html(category):
+    tariffs = CATEGORIES.get(category, {}).get('tariffs', [])
+    tariffs_json = json.dumps(tariffs, ensure_ascii=False)
+    return """<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Отдать заказ</title>
+<script src=\"""" + TG_WEBAPP_JS_PROXY_PATH + """\"></script>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 18px; padding-bottom: max(18px, env(safe-area-inset-bottom, 0px));
+    padding-top: max(18px, env(safe-area-inset-top, 0px));
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: #000; color: #fff;
+  }
+  h1 { font-size: 17px; margin: 0 0 14px; }
+  label { display: block; font-size: 12.5px; color: #9a9a9a; margin: 14px 0 6px; }
+  input[type=text], input[type=number], input[type=tel] {
+    width: 100%; padding: 11px 12px; border-radius: 12px; border: 1px solid rgba(255,255,255,.14);
+    background: #141414; color: #fff; font-size: 15px;
+  }
+  input::placeholder { color: #666; }
+  .pills { display: flex; flex-wrap: wrap; gap: 8px; }
+  .pill {
+    padding: 8px 14px; border-radius: 20px; background: #1c1c1c; border: 1px solid rgba(255,255,255,.1);
+    color: #ccc; font-size: 13.5px; cursor: pointer;
+  }
+  .pill.active { background: rgba(255,196,0,.16); border-color: #FFC400; color: #FFC400; font-weight: 700; }
+  .stepper { display: flex; align-items: center; gap: 14px; }
+  .stepper button {
+    width: 36px; height: 36px; border-radius: 50%; border: 1px solid rgba(255,255,255,.14);
+    background: #1c1c1c; color: #FFC400; font-size: 18px; font-weight: 700;
+  }
+  .stepper span { font-size: 17px; font-weight: 700; min-width: 24px; text-align: center; }
+  #submitBtn {
+    width: 100%; margin-top: 22px; padding: 14px; border-radius: 14px; border: none;
+    background: #FFC400; color: #000; font-size: 15.5px; font-weight: 800;
+  }
+  #submitBtn:disabled { opacity: .5; }
+  #err { color: #ff6b6b; font-size: 12.5px; margin-top: 10px; min-height: 16px; }
+  #done { display: none; text-align: center; padding: 60px 16px; }
+  #done .ok { font-size: 44px; margin-bottom: 10px; }
+</style>
+</head>
+<body>
+<div id="form">
+  <h1>🔄 Отдать заказ</h1>
+  <label>📍 Адрес подачи</label>
+  <input type="text" id="pickup" placeholder="Откуда забрать пассажира">
+  <label>🏁 Адрес прибытия</label>
+  <input type="text" id="dropoff" placeholder="Куда везти">
+  <label>💰 Стоимость, ₽</label>
+  <input type="number" id="price" placeholder="1500" min="0">
+  <label>🚘 Класс автомобиля</label>
+  <div class="pills" id="carClassPills"></div>
+  <label>👥 Пассажиров</label>
+  <div class="stepper">
+    <button type="button" id="paxMinus">−</button>
+    <span id="paxVal">1</span>
+    <button type="button" id="paxPlus">+</button>
+  </div>
+  <label>📱 Телефон клиента (необязательно)</label>
+  <input type="tel" id="clientPhone" placeholder="Если есть">
+  <div id="err"></div>
+  <button id="submitBtn">📤 ОТПРАВИТЬ ЗАКАЗ</button>
+</div>
+<div id="done">
+  <div class="ok">✅</div>
+  <div id="doneText">Заказ отправлен</div>
+</div>
+<script>
+  const tg = window.Telegram && window.Telegram.WebApp;
+  if (tg) { tg.ready(); tg.expand(); }
+  const tariffs = """ + tariffs_json + """;
+  let carClass = tariffs[0] || '';
+  let pax = 1;
+
+  const pillsEl = document.getElementById('carClassPills');
+  pillsEl.innerHTML = tariffs.map(t => '<div class="pill' + (t === carClass ? ' active' : '') + '" data-t="' + t + '">' + t + '</div>').join('');
+  pillsEl.querySelectorAll('.pill').forEach(p => p.addEventListener('click', () => {
+    carClass = p.dataset.t;
+    pillsEl.querySelectorAll('.pill').forEach(x => x.classList.toggle('active', x === p));
+  }));
+
+  document.getElementById('paxMinus').addEventListener('click', () => { if (pax > 1) { pax--; document.getElementById('paxVal').textContent = pax; } });
+  document.getElementById('paxPlus').addEventListener('click', () => { if (pax < 8) { pax++; document.getElementById('paxVal').textContent = pax; } });
+
+  document.getElementById('submitBtn').addEventListener('click', async () => {
+    const errEl = document.getElementById('err');
+    errEl.textContent = '';
+    const pickup = document.getElementById('pickup').value.trim();
+    const dropoff = document.getElementById('dropoff').value.trim();
+    const price = document.getElementById('price').value.trim();
+    const clientPhone = document.getElementById('clientPhone').value.trim();
+    if (!pickup || !dropoff) { errEl.textContent = 'Заполни адреса подачи и прибытия.'; return; }
+    if (!price || Number(price) <= 0) { errEl.textContent = 'Укажи стоимость поездки.'; return; }
+    if (!carClass) { errEl.textContent = 'Выбери класс автомобиля.'; return; }
+
+    const btn = document.getElementById('submitBtn');
+    btn.disabled = true;
+    btn.textContent = 'Отправляю…';
+    try {
+      const resp = await fetch('""" + SHARE_ORDER_SUBMIT_API_PATH + """', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': (tg ? tg.initData : '') },
+        body: JSON.stringify({ pickup, dropoff, price, car_class: carClass, passengers: pax, client_phone: clientPhone || null }),
+      });
+      const data = await resp.json();
+      if (!resp.ok || data.error) {
+        errEl.textContent = data.error === 'not_allowed' ? 'Отдавать заказы могут только Такси и Ultima.' : 'Не удалось отправить заказ - попробуй ещё раз.';
+        btn.disabled = false;
+        btn.textContent = '📤 ОТПРАВИТЬ ЗАКАЗ';
+        return;
+      }
+      document.getElementById('form').style.display = 'none';
+      document.getElementById('done').style.display = 'block';
+      document.getElementById('doneText').textContent = data.sent > 0
+        ? ('Заказ #' + data.order_id + ' отправлен ' + data.sent + ' водителям. Ждём отклика ' + data.expiry_hours + ' час.')
+        : ('Заказ #' + data.order_id + ' создан, но сейчас нет других известных водителей поблизости.');
+      setTimeout(() => { if (tg) tg.close(); }, 2500);
+    } catch (e) {
+      errEl.textContent = 'Не удалось отправить заказ - проверь связь и попробуй ещё раз.';
+      btn.disabled = false;
+      btn.textContent = '📤 ОТПРАВИТЬ ЗАКАЗ';
+    }
+  });
+</script>
+</body>
+</html>"""
+
+async def handle_share_order_webapp(request):
+    return web.Response(
+        text=share_order_webapp_html(request.query.get('category', 'taxi')), content_type='text/html',
+        headers={'Cache-Control': 'no-store, no-cache, must-revalidate', 'Pragma': 'no-cache'},
+    )
+
+async def handle_share_order_submit_api(request):
+    """POST {pickup, dropoff, price, car_class, passengers, client_phone} ->
+    создаёт и рассылает заказ. initData ОБЯЗАТЕЛЕН и строго проверяется (тот
+    же helper, что у /cabinet/* - validate_telegram_webapp_init_data) - это
+    персональное действие от имени конкретного отправителя, без валидной
+    подписи неизвестно, кто отправитель. Переиспользует ТЕ ЖЕ функции, что и
+    текстовый флоу (create_shared_order/broadcast_shared_order/
+    format_user_contact) - никакая бизнес-логика не дублируется."""
+    init_data = request.headers.get('X-Telegram-Init-Data', '')
+    parsed = validate_telegram_webapp_init_data(init_data, BOT_TOKEN) if BOT_TOKEN else None
+    if not parsed:
+        logger.warning(f"⚠️ /share-order/submit: невалидный initData (len={len(init_data)}) - отдаю 401")
+        return web.json_response({'error': 'invalid_init_data'}, status=401)
+    try:
+        tg_user = json.loads(parsed.get('user', '{}'))
+        user_id = tg_user.get('id')
+    except Exception:
+        user_id = None
+    if not user_id:
+        return web.json_response({'error': 'invalid_init_data'}, status=401)
+
+    state = user_state.get(user_id)
+    if not state or 'category' not in state or 'city' not in state:
+        return web.json_response({'error': 'no_state'}, status=400)
+    category = state['category']
+    city = state['city']
+    if category not in SHARED_ORDER_CATEGORIES:
+        return web.json_response({'error': 'not_allowed'}, status=400)
+
+    try:
+        body = await request.json()
+        pickup = str(body.get('pickup') or '').strip()
+        dropoff = str(body.get('dropoff') or '').strip()
+        price_digits = re.sub(r'[^\d]', '', str(body.get('price') or ''))
+        car_class = str(body.get('car_class') or '').strip()
+        passengers = int(body.get('passengers') or 0)
+        client_phone = body.get('client_phone')
+        client_phone = str(client_phone).strip() if client_phone else None
+    except Exception:
+        return web.json_response({'error': 'invalid_body'}, status=400)
+
+    tariffs = CATEGORIES.get(category, {}).get('tariffs', [])
+    if not pickup or not dropoff or not price_digits or car_class not in tariffs or passengers <= 0:
+        return web.json_response({'error': 'invalid_body'}, status=400)
+
+    # tg_user - тот же {id, first_name, username, ...}, что Telegram кладёт в
+    # initDataUnsafe.user; собираем "контакт отправителя" в том же формате,
+    # что format_user_contact(callback_query.from_user) у текстового флоу.
+    sender_contact = tg_user.get('username') and f"@{tg_user['username']}" or tg_user.get('first_name') or str(user_id)
+    data = {'pickup': pickup, 'dropoff': dropoff, 'price': price_digits, 'car_class': car_class,
+            'passengers': str(passengers), 'client_phone': client_phone}
+    order_id = create_shared_order(user_id, sender_contact, city, category, pickup, dropoff, price_digits, car_class, passengers, client_phone)
+    try:
+        sent = await broadcast_shared_order(order_id, data, city, category, user_id)
+    except Exception:
+        logger.exception(f"❌ Ошибка рассылки заказа #{order_id} из /share-order/submit")
+        sent = 0
+    return web.json_response({'ok': True, 'order_id': order_id, 'sent': sent, 'expiry_hours': SHARED_ORDER_EXPIRY_HOURS})
+
 @router.message(lambda message: message.text == "🔄 ОТДАТЬ ЗАКАЗ")
 async def start_shared_order(message: types.Message):
     user_id = message.from_user.id
@@ -3902,6 +4138,19 @@ async def start_shared_order(message: types.Message):
         await message.answer(
             "Отдавать заказы могут только категории Такси и Ultima.",
             reply_markup=services_keyboard(state.get('category'), state.get('city'), user_id),
+        )
+        return
+    # По просьбе пользователя (21.09.2026) - кнопка теперь открывает WebApp-
+    # форму (см. блок "ОТДАТЬ ЗАКАЗ (WebApp)" выше) вместо старого пошагового
+    # текстового флоу. Если PUBLIC_URL не задан (локальный/дев-запуск) -
+    # остаётся старый текстовый флоу как есть.
+    if PUBLIC_URL:
+        share_order_url = f"{PUBLIC_URL}{SHARE_ORDER_WEBAPP_PATH}?category={urllib.parse.quote(state['category'])}"
+        await message.answer(
+            "🔄 ОТДАТЬ ЗАКАЗ",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="ОТКРЫТЬ ФОРМУ", web_app=WebAppInfo(url=share_order_url)),
+            ]]),
         )
         return
     state['order_draft'] = {'step': 'pickup', 'data': {}}
@@ -7115,6 +7364,587 @@ async def handle_map_city_events_api(request):
         logger.exception("❌ Ошибка при получении афиши для карты водителей")
         result = []
     return web.json_response({'events': result})
+
+# ==================== СОБЫТИЯ ГОРОДА / ДОРОГИ (WebApp) ====================
+# По просьбе пользователя (21.09.2026) - тот же принцип, что у погоды/
+# "куда ехать" выше: публичные, не персональные данные (афиша и дорожные
+# события города так и так видны всем водителям этого города/категории),
+# поэтому initData НЕ проверяется строго - город/категория берутся из
+# ?city=&category= в URL, и кнопка в Reply-клавиатуре может нести web_app=
+# напрямую (best-effort, без подписи). Вся логика фильтрации/подбора событий
+# ПОЛНОСТЬЮ переиспользуется из уже существующих функций
+# (get_events_for_user, get_upcoming_concert_events_for_category,
+# get_road_events_for_city) - JS только рисует то, что вернул сервер.
+# Текстовые хендлеры (show_city_events/show_road_events/
+# show_events_and_roads_menu) НЕ убираются - остаются рабочим фолбэком.
+EVENTS_WEBAPP_PATH = '/events'
+EVENTS_DATA_API_PATH = '/events/data'
+
+def events_webapp_html():
+    return """<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>События города</title>
+<script src=\"""" + TG_WEBAPP_JS_PROXY_PATH + """\"></script>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 16px; padding-bottom: max(16px, env(safe-area-inset-bottom, 0px));
+    padding-top: max(16px, env(safe-area-inset-top, 0px));
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: #000; color: #fff;
+  }
+  h1 { font-size: 17px; margin: 0 0 12px; }
+  #state { text-align: center; padding: 60px 16px; opacity: .7; font-size: 14px; }
+  .tabs { display: flex; gap: 8px; margin-bottom: 14px; }
+  .tab {
+    flex: 1; text-align: center; padding: 10px 6px; border-radius: 12px;
+    background: #1c1c1c; border: 1px solid rgba(255,255,255,.08); color: #9a9a9a;
+    font-size: 13px; font-weight: 600; cursor: pointer;
+  }
+  .tab.active { background: rgba(255,196,0,.14); border-color: rgba(255,196,0,.6); color: #FFC400; }
+  .section { display: none; }
+  .section.active { display: block; }
+  .empty { text-align: center; padding: 40px 16px; opacity: .6; font-size: 13.5px; }
+  .card {
+    background: #141414; border: 1px solid rgba(255,255,255,.08); border-radius: 14px;
+    padding: 12px 14px; margin-bottom: 10px;
+  }
+  .card .title { font-size: 14.5px; font-weight: 700; margin-bottom: 4px; }
+  .card .row { font-size: 12.5px; color: #b8b8b8; margin-top: 2px; }
+  .card .row b { color: #fff; }
+  .card .note { font-size: 11.5px; color: #FFC400; margin-top: 4px; }
+  .card a.go {
+    display: inline-block; margin-top: 8px; padding: 6px 12px; border-radius: 20px;
+    background: #FFC400; color: #000; font-size: 12.5px; font-weight: 700; text-decoration: none;
+  }
+  .closure-badge {
+    display: inline-block; background: rgba(255,68,68,.18); color: #ff6b6b;
+    border-radius: 8px; padding: 2px 8px; font-size: 11px; font-weight: 700; margin-bottom: 6px;
+  }
+  .legend { font-size: 11px; color: #8a8a8a; margin: 6px 0 14px; }
+</style>
+</head>
+<body>
+<div id="state">Загружаю…</div>
+<div id="app" style="display:none">
+  <h1 id="title">События</h1>
+  <div class="tabs" id="tabs">
+    <div class="tab" id="tabConcerts" data-tab="concerts">🎭 Афиша</div>
+    <div class="tab" id="tabRoads" data-tab="roads">⛔ Дороги</div>
+  </div>
+  <div class="section" id="secConcerts"></div>
+  <div class="section" id="secRoads"></div>
+</div>
+<script>
+  const tg = window.Telegram && window.Telegram.WebApp;
+  if (tg) { tg.ready(); tg.expand(); }
+  const params = new URLSearchParams(window.location.search);
+  const city = params.get('city') || '';
+  const category = params.get('category') || '';
+  let initialTab = params.get('tab') === 'roads' ? 'roads' : 'concerts';
+
+  function esc(s) {
+    return (s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  function showTab(name) {
+    document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
+    document.getElementById('secConcerts').classList.toggle('active', name === 'concerts');
+    document.getElementById('secRoads').classList.toggle('active', name === 'roads');
+  }
+  document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', () => showTab(t.dataset.tab)));
+
+  function renderConcerts(concerts, timepad) {
+    const sec = document.getElementById('secConcerts');
+    const all = (concerts || []).concat(timepad || []);
+    if (!all.length) {
+      sec.innerHTML = '<div class="empty">На ближайшее время подходящих событий не нашлось. Загляни позже.</div>';
+      return;
+    }
+    sec.innerHTML = all.map(ev => {
+      let html = '<div class="card">';
+      html += '<div class="title">' + esc(ev.title) + '</div>';
+      if (ev.place) html += '<div class="row">📍 ' + esc(ev.place) + '</div>';
+      if (ev.date_str) html += '<div class="row">🗓 ' + esc(ev.date_str) + '</div>';
+      if (ev.attendance) html += '<div class="row">👥 ~' + esc(ev.attendance) + ' чел.</div>';
+      if (ev.price_str) html += '<div class="row">💵 ' + esc(ev.price_str) + '</div>';
+      if (ev.note) html += '<div class="note">' + esc(ev.note) + '</div>';
+      if (ev.maps_url) html += '<a class="go" href="' + ev.maps_url + '" target="_blank">🚗 ПОЕХАЛИ</a>';
+      html += '</div>';
+      return html;
+    }).join('');
+  }
+
+  function renderRoads(data) {
+    const sec = document.getElementById('secRoads');
+    if (!data.city_supported) {
+      sec.innerHTML = '<div class="empty">Для этого города канал с ДТП пока не подключен.</div>';
+      return;
+    }
+    const closures = data.closures || [];
+    const others = data.others || [];
+    if (!closures.length && !others.length) {
+      sec.innerHTML = '<div class="empty">За последние ' + esc(data.lookback_label) + ' новых ДТП/перекрытий не было.</div>';
+      return;
+    }
+    let html = '';
+    closures.forEach(e => {
+      html += '<div class="card"><span class="closure-badge">🚧 ПЕРЕКРЫТИЕ</span>';
+      if (e.time) html += '<div class="row">🕐 ' + esc(e.time) + '</div>';
+      html += '<div class="row">' + esc(e.text) + '</div></div>';
+    });
+    others.forEach(e => {
+      html += '<div class="card">';
+      if (e.time) html += '<div class="row">🕐 ' + esc(e.time) + '</div>';
+      html += '<div class="row">' + esc(e.text) + '</div></div>';
+    });
+    sec.innerHTML = html;
+  }
+
+  async function load() {
+    if (!city) {
+      document.getElementById('state').textContent = 'Город не выбран.';
+      return;
+    }
+    try {
+      const resp = await fetch('""" + EVENTS_DATA_API_PATH + """?city=' + encodeURIComponent(city) + '&category=' + encodeURIComponent(category));
+      if (!resp.ok) throw new Error('http_' + resp.status);
+      const data = await resp.json();
+      renderConcerts(data.concerts, data.timepad);
+      renderRoads(data.road_events || {});
+      // Курьер/грузовое такси (CATEGORIES_WITHOUT_EVENTS) - афиша не
+      // актуальна, показываем только вкладку дорог, сразу открытую.
+      if (data.hide_concerts) {
+        document.getElementById('tabConcerts').style.display = 'none';
+        initialTab = 'roads';
+      }
+      showTab(initialTab);
+      document.getElementById('state').style.display = 'none';
+      document.getElementById('app').style.display = 'block';
+    } catch (e) {
+      document.getElementById('state').textContent = 'Не удалось загрузить события - попробуй ещё раз.';
+    }
+  }
+  load();
+</script>
+</body>
+</html>"""
+
+async def handle_events_webapp(request):
+    return web.Response(
+        text=events_webapp_html(), content_type='text/html',
+        headers={'Cache-Control': 'no-store, no-cache, must-revalidate', 'Pragma': 'no-cache'},
+    )
+
+async def handle_events_data_api(request):
+    """Публичный JSON для /events WebApp - без строгой проверки initData (тот
+    же принцип, что у /weather/data и /whereto/data выше). Переиспользует
+    ТЕ ЖЕ функции, что и текстовые хендлеры show_city_events/show_road_events
+    (get_events_for_user, get_upcoming_concert_events_for_category,
+    get_road_events_for_city) - никакая фильтрация/парсинг не дублируется."""
+    city = request.query.get('city', '')
+    category = request.query.get('category', 'taxi')
+    if not city:
+        return web.json_response({'error': 'no_city'}, status=400)
+
+    hide_concerts = category in CATEGORIES_WITHOUT_EVENTS
+    concerts_out = []
+    timepad_out = []
+    if not hide_concerts:
+        try:
+            concert_posts = get_upcoming_concert_events_for_category(city, category, limit=10)
+            for post in concert_posts:
+                tz = ZoneInfo(EVENT_CITY_TIMEZONE.get(city, 'Europe/Moscow'))
+                date_str = ''
+                try:
+                    start_dt = datetime.fromisoformat(post['start']).astimezone(tz)
+                    end_dt = datetime.fromisoformat(post['end']).astimezone(tz) if post.get('end') else None
+                    if end_dt and start_dt.date() == end_dt.date():
+                        date_str = f"{start_dt.strftime('%d.%m, %H:%M')}–{end_dt.strftime('%H:%M')}"
+                    else:
+                        date_str = start_dt.strftime('%d.%m, %H:%M')
+                    if not post.get('start_has_explicit_time'):
+                        date_str += ' (время не указано в афише)'
+                except Exception:
+                    pass
+                note = 'На ближайшие дни ничего не нашлось - вот что есть дальше' if post.get('is_fallback_later') else ''
+                price_str = ''
+                if post.get('price_rub'):
+                    price_str = f"{post['price_rub']} ₽"
+                elif post.get('is_free'):
+                    price_str = 'вход свободный'
+                place = post.get('place')
+                maps_url = f"https://yandex.ru/maps/?text={urllib.parse.quote(place)}" if place else None
+                concerts_out.append({
+                    'title': post.get('title') or 'Мероприятие',
+                    'place': place.capitalize() if place else '',
+                    'date_str': date_str, 'price_str': price_str, 'note': note,
+                    'maps_url': maps_url,
+                })
+
+            timepad_events, _ = get_events_for_user(city, category, limit=10)
+            for event in timepad_events:
+                date_str = format_event_datetime(event, city)
+                lo, hi = estimate_attendance(event)
+                address = event.get('place_address')
+                maps_url = f"https://yandex.ru/maps/?text={urllib.parse.quote(address)}" if address else None
+                timepad_out.append({
+                    'title': event['title'], 'place': address or '',
+                    'date_str': date_str, 'attendance': f"{lo}–{hi}",
+                    'maps_url': maps_url,
+                })
+        except Exception:
+            logger.exception(f"❌ Ошибка сборки афиши для /events/data city={city} category={category}")
+
+    road_out = {'closures': [], 'others': [], 'city_supported': False, 'lookback_label': ROAD_EVENTS_LOOKBACK_HOURS_LABEL}
+    try:
+        channel = ROAD_EVENTS_CHANNEL_LINKS.get(city)
+        if channel:
+            road_out['city_supported'] = True
+            events = get_road_events_for_city(city)
+            chat_cutoff = (datetime.now(ZoneInfo('UTC')) - timedelta(hours=ROAD_EVENTS_CHAT_LOOKBACK_HOURS)).isoformat()
+            events = [e for e in events if e.get('time', '') >= chat_cutoff]
+            closures = [e for e in events[:ROAD_EVENTS_SHOW_COUNT] if e.get('is_closure')]
+            others = [e for e in events[:ROAD_EVENTS_SHOW_COUNT] if not e.get('is_closure')]
+            for e in closures:
+                road_out['closures'].append({
+                    'time': format_road_event_time(e.get('time', ''), city),
+                    'text': strip_urls_for_display(e.get('text', '').strip()),
+                })
+            for e in others:
+                road_out['others'].append({
+                    'time': format_road_event_time(e.get('time', ''), city),
+                    'text': strip_urls_for_display(e.get('text', '').strip()),
+                })
+    except Exception:
+        logger.exception(f"❌ Ошибка сборки дорожных событий для /events/data city={city}")
+
+    return web.json_response({
+        'concerts': concerts_out, 'timepad': timepad_out,
+        'road_events': road_out, 'hide_concerts': hide_concerts,
+    })
+
+# ==================== АВИА/ЖД (WebApp) ====================
+# По просьбе пользователя (21.09.2026) - тот же публичный паттерн, что у
+# "куда ехать"/погоды/событий выше: город/категория из ?city=&category=,
+# initData не проверяется (данные о загрузке аэропортов/вокзалов и так
+# публичны для любого водителя этого города/категории). Вся расчётная
+# логика ПОЛНОСТЬЮ переиспользует существующие функции
+# (compute_current_hour_load, compute_current_availability, get_airport_status,
+# get_notices_for_airport, get_trains_for_station, compute_current_train_period_load,
+# get_train_load_symbol/get_train_load_label) - JS только рисует то, что
+# вернул сервер. Раздел "📋 ОЧЕРЕДЬ" (format_queue_breakdown) сюда НЕ
+# перенесён - это отдельный, довольно сложный крауд-механизм (отметки
+# водителей о живой очереди по тарифам, см. queue_class_key/
+# format_queue_breakdown ниже по файлу), полноценный перенос в WebApp
+# требовал бы отдельного проектирования; вместо этого карточка аэропорта
+# в WebApp просто показывает краткую сводку очереди (та же
+# format_queue_breakdown, вызываем как есть и отдаём готовый текст) со
+# ссылкой "открыть в боте" на случай, если нужно самому отметиться в
+# очереди - сама функция ОТМЕТКИ (не только просмотра) остаётся доступна
+# только из Telegram-версии (📋 ОЧЕРЕДЬ в подменю ✈️🚆 АВИА/ЖД).
+# Текстовые хендлеры (show_transport_menu/show_airport_menu/
+# show_train_stations_menu/show_airport_info/show_airport_details/
+# show_airport_availability/show_availability_details и т.д.) НЕ
+# убираются - остаются рабочим фолбэком.
+TRANSPORT_WEBAPP_PATH = '/transport'
+TRANSPORT_DATA_API_PATH = '/transport/data'
+
+def transport_webapp_html():
+    return """<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Авиа/ЖД</title>
+<script src=\"""" + TG_WEBAPP_JS_PROXY_PATH + """\"></script>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 16px; padding-bottom: max(16px, env(safe-area-inset-bottom, 0px));
+    padding-top: max(16px, env(safe-area-inset-top, 0px));
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: #000; color: #fff;
+  }
+  h1 { font-size: 17px; margin: 0 0 12px; }
+  #state { text-align: center; padding: 60px 16px; opacity: .7; font-size: 14px; }
+  .tabs { display: flex; gap: 8px; margin-bottom: 14px; }
+  .tab {
+    flex: 1; text-align: center; padding: 10px 6px; border-radius: 12px;
+    background: #1c1c1c; border: 1px solid rgba(255,255,255,.08); color: #9a9a9a;
+    font-size: 13px; font-weight: 600; cursor: pointer;
+  }
+  .tab.active { background: rgba(255,196,0,.14); border-color: rgba(255,196,0,.6); color: #FFC400; }
+  .section { display: none; }
+  .section.active { display: block; }
+  .legend { font-size: 11px; color: #8a8a8a; margin: 0 0 14px; }
+  .empty { text-align: center; padding: 40px 16px; opacity: .6; font-size: 13.5px; }
+  .item {
+    background: #141414; border: 1px solid rgba(255,255,255,.08); border-radius: 14px;
+    padding: 12px 14px; margin-bottom: 10px; cursor: pointer;
+  }
+  .item .head { display: flex; justify-content: space-between; align-items: center; font-size: 14.5px; font-weight: 700; }
+  .item .sub { font-size: 12px; color: #9a9a9a; margin-top: 3px; }
+  .item .load { font-variant-numeric: tabular-nums; color: #FFC400; font-weight: 700; }
+  .detail { display: none; margin-top: 10px; padding-top: 10px; border-top: 1px dashed rgba(255,255,255,.12); }
+  .detail.open { display: block; }
+  .hour-row { display: flex; justify-content: space-between; font-size: 12.5px; padding: 5px 0; border-bottom: 1px solid rgba(255,255,255,.05); }
+  .hour-row .t { color: #ccc; }
+  .hour-row .pct { font-variant-numeric: tabular-nums; font-weight: 700; }
+  .notice { font-size: 12px; margin-top: 8px; padding: 8px 10px; background: rgba(255,255,255,.05); border-radius: 10px; }
+  .notice .nt { color: #FFC400; font-weight: 700; margin-right: 4px; }
+  .queue-box { font-size: 12px; margin-top: 8px; padding: 8px 10px; background: rgba(255,196,0,.08); border-radius: 10px; white-space: pre-wrap; }
+  .status-closed { color: #ff6b6b; }
+  .status-coordinated { color: #FFC400; }
+  .status-open { color: #4caf50; }
+</style>
+</head>
+<body>
+<div id="state">Загружаю…</div>
+<div id="app" style="display:none">
+  <h1>✈️🚆 Авиа/ЖД</h1>
+  <div class="tabs" id="tabs">
+    <div class="tab active" id="tabAirports" data-tab="airports">✈️ Аэропорты</div>
+    <div class="tab" id="tabTrains" data-tab="trains">🚆 Вокзалы</div>
+  </div>
+  <div class="legend">🔴0-25% Не ехать | 🟡26-50% Уточни очередь | 🟢51-85% Занимай очередь | 🟣&gt;85% Срочно ехать</div>
+  <div class="section active" id="secAirports"></div>
+  <div class="section" id="secTrains"></div>
+</div>
+<script>
+  const tg = window.Telegram && window.Telegram.WebApp;
+  if (tg) { tg.ready(); tg.expand(); }
+  const params = new URLSearchParams(window.location.search);
+  const city = params.get('city') || '';
+  const category = params.get('category') || '';
+
+  function esc(s) {
+    return (s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+  function loadEmoji(load) {
+    if (load <= 25) return '🔴';
+    if (load <= 50) return '🟡';
+    if (load <= 85) return '🟢';
+    return '🟣';
+  }
+
+  function showTab(name) {
+    document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
+    document.getElementById('secAirports').classList.toggle('active', name === 'airports');
+    document.getElementById('secTrains').classList.toggle('active', name === 'trains');
+  }
+  document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', () => showTab(t.dataset.tab)));
+
+  function renderAirports(airports) {
+    const sec = document.getElementById('secAirports');
+    if (!airports.length) {
+      sec.innerHTML = '<div class="empty">Аэропортов для этого города не найдено.</div>';
+      return;
+    }
+    sec.innerHTML = airports.map((a, i) => {
+      let head, sub;
+      if (a.closed) {
+        head = esc(a.emoji) + ' ' + esc(a.name) + ' <span class="load status-closed">🔴 ЗАКРЫТ</span>';
+        sub = 'Гражданские полёты не выполняются';
+      } else {
+        head = esc(a.emoji) + ' ' + esc(a.name) + ' <span class="load">' + loadEmoji(a.load) + ' ' + a.load.toFixed(0) + '%</span>';
+        const statusCls = a.status === 'closed' ? 'status-closed' : (a.status === 'coordinated' ? 'status-coordinated' : 'status-open');
+        sub = '<span class="' + statusCls + '">' + esc(a.status_text) + '</span>';
+      }
+      let detail = '';
+      if (!a.closed) {
+        detail += (a.hourly || []).map(h =>
+          '<div class="hour-row"><span class="t">' + esc(h.label) + '</span><span class="pct">' + loadEmoji(h.load) + ' ' + h.load.toFixed(0) + '%</span></div>'
+        ).join('');
+        (a.notices || []).forEach(n => {
+          detail += '<div class="notice"><span class="nt">📢 ' + esc(n.time) + '</span>' + esc(n.text) + '</div>';
+        });
+        if (a.queue_text) {
+          detail += '<div class="queue-box">' + esc(a.queue_text) + '</div>';
+        }
+      }
+      return '<div class="item" data-idx="' + i + '" data-kind="a">' +
+        '<div class="head">' + head + '</div><div class="sub">' + sub + '</div>' +
+        '<div class="detail" id="detA' + i + '">' + detail + '</div>' +
+        '</div>';
+    }).join('');
+    sec.querySelectorAll('.item').forEach(el => {
+      el.addEventListener('click', () => {
+        const idx = el.dataset.idx;
+        document.getElementById('detA' + idx).classList.toggle('open');
+      });
+    });
+  }
+
+  function renderTrains(stations) {
+    const sec = document.getElementById('secTrains');
+    if (!stations || !stations.length) {
+      sec.innerHTML = '<div class="empty">Вокзалов для этого города нет, либо данные ещё не загружены.</div>';
+      return;
+    }
+    sec.innerHTML = stations.map((s, i) => {
+      const head = '🚆 ' + esc(s.name) + ' <span class="load">' + esc(s.symbol) + ' ' + s.load.toFixed(0) + '%</span>';
+      let detail = (s.periods || []).map(p => {
+        let row = '<div class="hour-row"><span class="t">' + esc(p.label) + '</span><span class="pct">' + esc(p.symbol) + ' ' + p.load.toFixed(0) + '%</span></div>';
+        if (p.trains && p.trains.length) {
+          row += p.trains.map(t => '<div class="hour-row"><span class="t">' + esc(t) + '</span></div>').join('');
+        }
+        return row;
+      }).join('');
+      return '<div class="item" data-idx="' + i + '" data-kind="s">' +
+        '<div class="head">' + head + '</div>' +
+        '<div class="detail" id="detS' + i + '">' + detail + '</div>' +
+        '</div>';
+    }).join('');
+    sec.querySelectorAll('.item').forEach(el => {
+      el.addEventListener('click', () => {
+        const idx = el.dataset.idx;
+        document.getElementById('detS' + idx).classList.toggle('open');
+      });
+    });
+  }
+
+  async function load() {
+    if (!city) {
+      document.getElementById('state').textContent = 'Город не выбран.';
+      return;
+    }
+    try {
+      const resp = await fetch('""" + TRANSPORT_DATA_API_PATH + """?city=' + encodeURIComponent(city) + '&category=' + encodeURIComponent(category));
+      if (!resp.ok) throw new Error('http_' + resp.status);
+      const data = await resp.json();
+      renderAirports(data.airports || []);
+      renderTrains(data.stations || []);
+      if (!data.has_trains) {
+        document.getElementById('tabTrains').style.display = 'none';
+      }
+      document.getElementById('state').style.display = 'none';
+      document.getElementById('app').style.display = 'block';
+    } catch (e) {
+      document.getElementById('state').textContent = 'Не удалось загрузить данные - попробуй ещё раз.';
+    }
+  }
+  load();
+</script>
+</body>
+</html>"""
+
+async def handle_transport_webapp(request):
+    return web.Response(
+        text=transport_webapp_html(), content_type='text/html',
+        headers={'Cache-Control': 'no-store, no-cache, must-revalidate', 'Pragma': 'no-cache'},
+    )
+
+async def handle_transport_data_api(request):
+    """Публичный JSON для /transport WebApp - без строгой проверки initData
+    (та же логика, что у /events/data и /whereto/data выше: город/категория
+    из query, данные не персональные). Переиспользует ТЕ ЖЕ функции, что и
+    текстовые хендлеры show_airport_info/show_airport_details/
+    show_train_station_arrivals - никакой расчёт не дублируется."""
+    city = request.query.get('city', '')
+    category = request.query.get('category', 'taxi')
+    if not city:
+        return web.json_response({'error': 'no_city'}, status=400)
+
+    relevant_class = CATEGORY_TO_CLASS.get(category, 'total')
+    airports_out = []
+    try:
+        for airport in AIRPORTS_INFO.get(city, []):
+            if airport.get('closed'):
+                airports_out.append({
+                    'name': airport['name'], 'emoji': airport['emoji'], 'closed': True,
+                    'load': 0, 'status': 'closed', 'status_text': 'ЗАКРЫТ',
+                    'hourly': [], 'notices': [], 'queue_text': '',
+                })
+                continue
+            icao = airport['icao']
+            zone_key = airport.get('zone_key')
+            info = compute_current_availability(icao, relevant_class, zone_key=zone_key)
+            airport_status, _ = get_airport_status(icao)
+            status_icon, status_text = AIRPORT_STATUS_DISPLAY[airport_status]
+
+            hourly = []
+            now = get_airport_now(icao)
+            for hour_offset in range(8):
+                load, _, target_hour = compute_current_hour_load(icao, relevant_class, hour_offset=hour_offset, zone_key=zone_key)
+                hour_time = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=hour_offset)
+                label = hour_time.strftime('%H:00')
+                if target_hour < now.hour:
+                    label += ' (+1д)'
+                hourly.append({'label': label, 'load': round(load, 1)})
+
+            notices_out = []
+            for n in get_notices_for_airport(icao)[:5]:
+                try:
+                    ntime = datetime.fromisoformat(n['time']).astimezone().strftime('%H:%M')
+                except Exception:
+                    ntime = '??:??'
+                notices_out.append({'time': ntime, 'text': n['text'][:200]})
+
+            queue_text = ''
+            try:
+                raw = format_queue_breakdown(city, icao, category, zone_key=zone_key)
+                # format_queue_breakdown возвращает Markdown-текст для чата
+                # (с *жирным* и т.п.) - для WebApp достаточно убрать
+                # markdown-разметку, полноценный рендер тут не нужен.
+                queue_text = (raw or '').replace('*', '').replace('_', '').strip()
+            except Exception:
+                queue_text = ''
+
+            airports_out.append({
+                'name': airport['name'], 'emoji': airport['emoji'], 'closed': False,
+                'load': round(info['load'], 1), 'status': airport_status, 'status_text': status_text,
+                'hourly': hourly, 'notices': notices_out, 'queue_text': queue_text,
+            })
+    except Exception:
+        logger.exception(f"❌ Ошибка сборки аэропортов для /transport/data city={city} category={category}")
+
+    stations_out = []
+    has_trains = city in TRAIN_CITIES
+    if has_trains:
+        try:
+            data = load_trains_data()
+            city_stations = {code: st for code, st in (data or {}).get('stations', {}).items() if STATION_CITY.get(code) == city}
+            now = datetime.now(ZoneInfo('Europe/Moscow'))
+            period_base = now.replace(minute=(now.minute // TRAIN_FORECAST_PERIOD_MINUTES) * TRAIN_FORECAST_PERIOD_MINUTES, second=0, microsecond=0)
+            total_periods = (TRAIN_FORECAST_HOURS * 60) // TRAIN_FORECAST_PERIOD_MINUTES
+            for code, station in city_stations.items():
+                load, _, _ = compute_current_train_period_load(code, category)
+                symbol = get_train_load_symbol(load)
+                periods_out = []
+                for period_offset in range(total_periods):
+                    p_load, trains_in_period, _ = compute_current_train_period_load(code, category, period_offset)
+                    block_start = period_base + timedelta(minutes=TRAIN_FORECAST_PERIOD_MINUTES * period_offset)
+                    block_end = block_start + timedelta(minutes=TRAIN_FORECAST_PERIOD_MINUTES - 1)
+                    label = f"{block_start.strftime('%H:%M')}–{block_end.strftime('%H:%M')}"
+                    if category == 'ultima':
+                        trains_in_period = sorted(trains_in_period, key=lambda t: (not t.get('is_sapsan'), not t.get('is_firmenny'), t['time']))
+                    trains_lines = []
+                    for t in trains_in_period:
+                        if t.get('is_sapsan'):
+                            tstatus = '🚄 Сапсан'
+                        elif t.get('is_firmenny'):
+                            tstatus = '⭐ Фирменный'
+                        else:
+                            tstatus = '🚆 обычный'
+                        trains_lines.append(f"{t['time']} из {t['point']} (№{t['number']}) - {tstatus}")
+                    periods_out.append({
+                        'label': label, 'load': round(p_load, 1),
+                        'symbol': get_train_load_symbol(p_load), 'trains': trains_lines,
+                    })
+                stations_out.append({
+                    'name': station['name'], 'load': round(load, 1), 'symbol': symbol,
+                    'periods': periods_out,
+                })
+        except Exception:
+            logger.exception(f"❌ Ошибка сборки вокзалов для /transport/data city={city} category={category}")
+
+    return web.json_response({'airports': airports_out, 'stations': stations_out, 'has_trains': has_trains})
 
 # ==================== ЛИЧНЫЙ КАБИНЕТ (WebApp) ====================
 # По просьбе пользователя (21.09.2026, "давай личный кабинет водителя") -
@@ -11912,6 +12742,15 @@ async def start_subscription_webhook_server():
     # Погода (см. блок "ПОГОДА (WebApp с анимацией)" выше)
     app.router.add_get(WEATHER_WEBAPP_PATH, handle_weather_webapp)
     app.router.add_get(WEATHER_DATA_API_PATH, handle_weather_data_api)
+    # События города / дороги (см. блок "СОБЫТИЯ ГОРОДА / ДОРОГИ (WebApp)" выше)
+    app.router.add_get(EVENTS_WEBAPP_PATH, handle_events_webapp)
+    app.router.add_get(EVENTS_DATA_API_PATH, handle_events_data_api)
+    # Авиа/ЖД (см. блок "АВИА/ЖД (WebApp)" выше)
+    app.router.add_get(TRANSPORT_WEBAPP_PATH, handle_transport_webapp)
+    app.router.add_get(TRANSPORT_DATA_API_PATH, handle_transport_data_api)
+    # Отдать заказ (см. блок "ОТДАТЬ ЗАКАЗ (WebApp)" выше)
+    app.router.add_get(SHARE_ORDER_WEBAPP_PATH, handle_share_order_webapp)
+    app.router.add_post(SHARE_ORDER_SUBMIT_API_PATH, handle_share_order_submit_api)
     # Личный кабинет (см. блок "ЛИЧНЫЙ КАБИНЕТ (WebApp)" выше)
     app.router.add_get(CABINET_WEBAPP_PATH, handle_cabinet_webapp)
     app.router.add_get(CABINET_DATA_API_PATH, handle_cabinet_data_api)
