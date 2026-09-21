@@ -10116,7 +10116,6 @@ def cabinet_webapp_html():
   <button class="nav-pill" data-tab="peak">📅 Часы пика</button>
   <button class="nav-pill" data-tab="nearby">📍 Рядом</button>
   <button class="nav-pill" data-tab="fuel">⛽ Бензин</button>
-  <button class="nav-pill" data-tab="tips">💳 Чаевые</button>
   <button class="nav-pill" data-tab="maintenance">🛠 ТО</button>
   <button class="nav-pill" data-tab="settings">⚙️ Настройки</button>
 </div>
@@ -10253,15 +10252,6 @@ def cabinet_webapp_html():
   </div>
 </div>
 
-<!-- ==================== ЧАЕВЫЕ ==================== -->
-<div class="tab-pane" id="tab-tips">
-  <div class="card">
-    <p>Приложение «Яндекс Чаевые: на карту по QR» - покажи QR-код пассажиру, он сканирует и переводит чаевые тебе на карту.</p>
-    <a class="link-btn" id="tipsLinkIos" href="https://apps.apple.com/us/app/%D1%8F%D0%BD%D0%B4%D0%B5%D0%BA%D1%81-%D1%87%D0%B0%D0%B5%D0%B2%D1%8B%D0%B5-%D0%BD%D0%B0-%D0%BA%D0%B0%D1%80%D1%82%D1%83-%D0%BF%D0%BE-qr/id1513175603?l=ru" target="_blank">🍎 Получить чаевые на iPhone</a>
-    <a class="link-btn" id="tipsLinkAndroid" href="https://play.google.com/store/apps/details?id=com.chaevieprosto.app" target="_blank">🤖 Получить чаевые на Android</a>
-  </div>
-</div>
-
 <!-- ==================== НАСТРОЙКИ ====================
      Те же notif_prefs/airport_queue_active, что и в Telegram "⚙️ НАСТРОЙКИ"
      (notification_settings_keyboard/toggle_notification_setting/
@@ -10275,20 +10265,9 @@ def cabinet_webapp_html():
   const tg = window.Telegram && window.Telegram.WebApp;
   if (tg) { tg.ready(); tg.expand(); }
   if (tg && tg.platform) { fetch('/platform/report', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': tg.initData || '' }, body: JSON.stringify({ platform: tg.platform }) }).catch(function(){}); }
-  // Вкладка "Чаевые" (по прямой просьбе пользователя, 22.09.2026) - здесь мы
-  // уже внутри WebApp, так что платформа известна сразу через tg.platform
-  // (без похода на сервер) - прячем нерелевантную кнопку сразу при загрузке.
-  (function() {
-    var platform = (tg && tg.platform) ? String(tg.platform).toLowerCase() : '';
-    var iosLink = document.getElementById('tipsLinkIos');
-    var androidLink = document.getElementById('tipsLinkAndroid');
-    if (platform.indexOf('ios') !== -1) {
-      if (androidLink) androidLink.hidden = true;
-    } else if (platform.indexOf('android') !== -1) {
-      if (iosLink) iosLink.hidden = true;
-    }
-    // иначе (desktop/web/macos/неизвестно) - показываем обе ссылки, как раньше.
-  })();
+  // Вкладка "Чаевые" убрана из кабинета целиком (по прямой просьбе
+  // пользователя, 22.09.2026) - раньше здесь была логика показа нужной
+  // (iOS/Android) ссылки на приложение "Яндекс Чаевые", теперь не нужна.
   const initData = tg ? tg.initData : '';
   // Временная диагностика (21.09.2026) - у пользователя initData приходит
   // пустой уже после переноса telegram-web-app.js на свой домен, непонятно,
