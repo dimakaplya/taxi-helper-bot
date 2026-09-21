@@ -3030,14 +3030,23 @@ class SingleMessageMiddleware(BaseRequestMiddleware):
     async def __call__(self, make_request, bot_instance: Bot, method: TelegramMethod[TelegramType]):
         if isinstance(method, SendMessage):
             chat_id = method.chat_id
-            has_reply_keyboard = isinstance(method.reply_markup, ReplyKeyboardMarkup)
             skip_trim = _skip_message_trim.get()
             result = await make_request(bot_instance, method)
             try:
-                if has_reply_keyboard or skip_trim:
-                    # Сообщение с нижним меню, ИЛИ сообщение, отправленное
-                    # внутри блока с отключённой чисткой (см. _skip_message_trim
-                    # выше) - не трогаем и не добавляем в очередь на удаление.
+                if skip_trim:
+                    # ИЗМЕНЕНО 21.09.2026, второй раз (прямая жалоба
+                    # пользователя со скриншотом - "Все удаляет кроме первых
+                    # сообщений после приветствия"): раньше сюда же попадали
+                    # и сообщения с ReplyKeyboardMarkup (нижнее меню) - их
+                    # никогда не удаляли, чтобы не убить меню, из-за чего
+                    # самые первые экраны с кнопками ("Выбери свой город" и
+                    # т.п.) оставались в чате навсегда, а не только
+                    # последние 2. Пользователь прямо попросил чистить
+                    # ВООБЩЕ ВСЁ до последних двух - меню при этом не
+                    # пропадает, т.к. почти каждый следующий шаг диалога
+                    # шлёт новое сообщение с тем же нижним меню, так что
+                    # старое можно спокойно удалять. Остаётся только
+                    # исключение для карточек событий (_skip_message_trim).
                     pass
                 else:
                     queue = _recent_bot_message_ids.setdefault(chat_id, [])
