@@ -3231,6 +3231,66 @@ def _build_moscow_taxi_hour_load():
 
 MOSCOW_TAXI_HOUR_LOAD = _build_moscow_taxi_hour_load()
 
+# ---- Реальные данные по спросу на Ultima в Москве (Business/Premier/Élite),
+# присланные пользователем 22.09.2026 - тот же принцип, что
+# MOSCOW_TAXI_DEMAND_PERCENT выше, но для тарифов Ultima (у Ultima 4 тарифа -
+# Business/Premier/Elite/Cruise, данных по Cruise не прислали, используем
+# только эти три). Формат: weekday -> (start_h, end_h, business%, premier%,
+# elite%).
+MOSCOW_ULTIMA_DEMAND_PERCENT = {
+    0: [  # понедельник
+        (0, 4, 25, 30, 35), (4, 7, 35, 35, 35), (7, 10, 75, 70, 55),
+        (10, 13, 80, 75, 65), (13, 16, 70, 65, 60), (16, 19, 85, 85, 75),
+        (19, 22, 75, 85, 85), (22, 24, 50, 65, 75),
+    ],
+    1: [  # вторник
+        (0, 4, 25, 30, 35), (4, 7, 35, 35, 35), (7, 10, 80, 75, 60),
+        (10, 13, 85, 80, 65), (13, 16, 70, 65, 60), (16, 19, 90, 90, 80),
+        (19, 22, 80, 90, 90), (22, 24, 55, 70, 80),
+    ],
+    2: [  # среда
+        (0, 4, 25, 30, 35), (4, 7, 35, 35, 35), (7, 10, 80, 75, 60),
+        (10, 13, 85, 80, 70), (13, 16, 75, 70, 65), (16, 19, 90, 90, 80),
+        (19, 22, 85, 95, 95), (22, 24, 60, 75, 85),
+    ],
+    3: [  # четверг
+        (0, 4, 30, 35, 40), (4, 7, 35, 35, 35), (7, 10, 80, 75, 60),
+        (10, 13, 85, 80, 70), (13, 16, 75, 70, 65), (16, 19, 95, 95, 85),
+        (19, 22, 90, 100, 100), (22, 24, 70, 90, 95),
+    ],
+    4: [  # пятница
+        (0, 4, 45, 55, 65), (4, 7, 35, 35, 40), (7, 10, 75, 70, 55),
+        (10, 13, 85, 80, 70), (13, 16, 80, 75, 70), (16, 19, 100, 100, 90),
+        (19, 22, 100, 100, 100), (22, 24, 85, 95, 100),
+    ],
+    5: [  # суббота
+        (0, 4, 70, 85, 95), (4, 7, 45, 50, 55), (7, 10, 30, 30, 30),
+        (10, 13, 45, 45, 45), (13, 16, 60, 60, 65), (16, 19, 75, 80, 85),
+        (19, 22, 90, 100, 100), (22, 24, 90, 100, 100),
+    ],
+    6: [  # воскресенье
+        (0, 4, 55, 65, 75), (4, 7, 30, 35, 40), (7, 10, 30, 30, 30),
+        (10, 13, 45, 45, 45), (13, 16, 55, 55, 60), (16, 19, 65, 70, 70),
+        (19, 22, 75, 85, 90), (22, 24, 55, 65, 75),
+    ],
+}
+
+def _build_moscow_ultima_hour_load():
+    """Строит таблицу в формате WEEKDAY_HOUR_LOAD из MOSCOW_ULTIMA_DEMAND_
+    PERCENT - level берём по Business (основной/самый массовый тариф
+    Ultima), в label показываем цифры по всем трём присланным тарифам."""
+    table = {}
+    for weekday, slots in MOSCOW_ULTIMA_DEMAND_PERCENT.items():
+        rows = []
+        for start_h, end_h, business, premier, elite in slots:
+            level = _demand_percent_to_level(business)
+            label = f"Business {business}% · Premier {premier}% · Élite {elite}%"
+            rows.append((start_h, end_h, level, label))
+        table[weekday] = rows
+    return table
+
+MOSCOW_ULTIMA_HOUR_LOAD = _build_moscow_ultima_hour_load()
+
 # ---- Свои паттерны спроса для Курьера и Грузового такси (по просьбе
 # пользователя, 20.09.2026: "дай расклад для курьеров... и для грузовых
 # такси" - уточнено через AskUserQuestion, что нужны СВОИ правила для
@@ -3317,10 +3377,15 @@ def get_weekday_hour_load(category, city=None):
     """Возвращает таблицу паттернов (WEEKDAY_HOUR_LOAD-совместимую) для
     данной категории - свою для courier/cargo, реальные данные
     MOSCOW_TAXI_HOUR_LOAD для Москвы + обычного такси (category в (None,
-    'taxi')), общую WEEKDAY_HOUR_LOAD для остальных (Ultima, другие города) -
-    см. CATEGORY_WEEKDAY_HOUR_LOAD и MOSCOW_TAXI_DEMAND_PERCENT выше."""
-    if city == 'moscow' and category in (None, 'taxi'):
-        return MOSCOW_TAXI_HOUR_LOAD
+    'taxi')), реальные данные MOSCOW_ULTIMA_HOUR_LOAD для Москвы + Ultima
+    (category == 'ultima'), общую WEEKDAY_HOUR_LOAD для остальных (другие
+    города) - см. CATEGORY_WEEKDAY_HOUR_LOAD, MOSCOW_TAXI_DEMAND_PERCENT и
+    MOSCOW_ULTIMA_DEMAND_PERCENT выше."""
+    if city == 'moscow':
+        if category in (None, 'taxi'):
+            return MOSCOW_TAXI_HOUR_LOAD
+        if category == 'ultima':
+            return MOSCOW_ULTIMA_HOUR_LOAD
     return CATEGORY_WEEKDAY_HOUR_LOAD.get(category, WEEKDAY_HOUR_LOAD)
 
 def get_city_now(city):
@@ -3354,12 +3419,14 @@ def format_peak_hours_text(city, target_weekday=None, category=None):
     now = get_city_now(city)
     weekday = target_weekday if target_weekday is not None else now.weekday()
     city_name = CITY_DISPLAY_NAMES.get(city, city)
-    is_moscow_real_data = city == 'moscow' and category in (None, 'taxi')
+    is_moscow_real_data = city == 'moscow' and category in (None, 'taxi', 'ultima')
     pattern = get_weekday_hour_load(category, city=city)[weekday]
 
     lines = [f"📅 *Часы пика — {city_name}, {WEEKDAY_NAMES[weekday]}*"]
     subtitle = CATEGORY_PEAK_HOURS_SUBTITLE.get(category)
-    if is_moscow_real_data:
+    if is_moscow_real_data and category == 'ultima':
+        lines.append('_реальные данные по спросу на Ultima (Business/Premier/Élite), % от максимума за сутки_\n')
+    elif is_moscow_real_data:
         lines.append('_реальные данные по спросу на такси (эконом/комфорт/комфорт+), % от максимума за сутки_\n')
     elif subtitle:
         lines.append(subtitle)
