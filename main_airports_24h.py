@@ -4636,7 +4636,7 @@ async def start_shared_order(message: types.Message):
         await message.answer(
             "🔄 ОТДАТЬ ЗАКАЗ",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(text="ОТКРЫТЬ ФОРМУ", web_app=WebAppInfo(url=share_order_url)),
+                InlineKeyboardButton(text="ВВЕСТИ ДАННЫЕ", web_app=WebAppInfo(url=share_order_url)),
             ]]),
         )
         return
