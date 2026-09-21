@@ -3149,6 +3149,88 @@ WEEKDAY_NAMES = ['Понедельник', 'Вторник', 'Среда', 'Че
 # используем этот список вместо name[:2].
 WEEKDAY_SHORT_NAMES = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс']
 
+# ---- Реальные данные по спросу на обычное такси в Москве (эконом/комфорт/
+# комфорт+), присланные пользователем 22.09.2026 (скрины таблиц по каждому
+# дню недели, % от максимума спроса по каждому тарифу за сутки) - ЗАМЕНЯЮТ
+# общую модель WEEKDAY_HOUR_LOAD выше (та была собрана по косвенным
+# источникам - блог Яндекс.Такси и статья про заказы по России, см.
+# комментарий у WEEKDAY_HOUR_LOAD) ТОЛЬКО для Москвы и категории 'taxi'
+# (обычное такси - Эконом/Комфорт/Комфорт+, не Ultima). Другие города и
+# Ultima по-прежнему используют WEEKDAY_HOUR_LOAD (для них таких данных нет).
+# Формат: weekday(0=Пн...6=Вс) -> список (start_h, end_h, эконом%, комфорт%,
+# комфорт+%) на все 24 часа (8 отрезков по 3 часа/4 часа, без пропусков -
+# в отличие от WEEKDAY_HOUR_LOAD здесь можно показывать каждый отрезок, т.к.
+# это не оценка "на глаз", а реальные цифры).
+MOSCOW_TAXI_DEMAND_PERCENT = {
+    0: [  # понедельник
+        (0, 4, 35, 40, 45), (4, 7, 45, 40, 40), (7, 10, 90, 80, 65),
+        (10, 13, 60, 60, 55), (13, 16, 55, 55, 55), (16, 19, 90, 90, 80),
+        (19, 22, 70, 80, 85), (22, 24, 75, 85, 90),
+    ],
+    1: [  # вторник
+        (0, 4, 35, 40, 45), (4, 7, 45, 40, 40), (7, 10, 90, 80, 65),
+        (10, 13, 60, 60, 55), (13, 16, 55, 55, 55), (16, 19, 95, 90, 80),
+        (19, 22, 70, 80, 85), (22, 24, 75, 85, 90),
+    ],
+    2: [  # среда
+        (0, 4, 35, 40, 45), (4, 7, 45, 40, 40), (7, 10, 90, 80, 65),
+        (10, 13, 60, 60, 55), (13, 16, 55, 55, 55), (16, 19, 95, 90, 80),
+        (19, 22, 75, 85, 90), (22, 24, 80, 90, 95),
+    ],
+    3: [  # четверг
+        (0, 4, 40, 45, 50), (4, 7, 45, 40, 40), (7, 10, 90, 80, 65),
+        (10, 13, 60, 60, 55), (13, 16, 55, 55, 55), (16, 19, 95, 95, 85),
+        (19, 22, 85, 95, 100), (22, 24, 90, 95, 100),
+    ],
+    4: [  # пятница
+        (0, 4, 50, 60, 70), (4, 7, 45, 45, 45), (7, 10, 85, 80, 65),
+        (10, 13, 60, 60, 60), (13, 16, 65, 65, 65), (16, 19, 100, 100, 90),
+        (19, 22, 100, 100, 100), (22, 24, 100, 100, 100),
+    ],
+    5: [  # суббота
+        (0, 4, 90, 95, 100), (4, 7, 65, 70, 75), (7, 10, 50, 50, 50),
+        (10, 13, 60, 60, 60), (13, 16, 70, 70, 70), (16, 19, 80, 85, 85),
+        (19, 22, 95, 100, 100), (22, 24, 100, 100, 100),
+    ],
+    6: [  # воскресенье
+        (0, 4, 65, 75, 85), (4, 7, 40, 45, 50), (7, 10, 45, 45, 45),
+        (10, 13, 60, 60, 60), (13, 16, 65, 65, 65), (16, 19, 75, 80, 80),
+        (19, 22, 85, 90, 90), (22, 24, 65, 75, 80),
+    ],
+}
+
+def _demand_percent_to_level(percent):
+    """Переводит % спроса из MOSCOW_TAXI_DEMAND_PERCENT в тот же 4-уровневый
+    масштаб low/mid/high/peak, что и WEEKDAY_HOUR_LOAD - чтобы переиспользовать
+    все те же PEAK_LEVEL_EMOJI/LABEL и функции форматирования/скоринга.
+    Границы подобраны по разбросу реальных цифр (35-100%): <50 - низкий,
+    50-69 - обычный, 70-89 - повышенный, 90+ - пик."""
+    if percent >= 90:
+        return 'peak'
+    if percent >= 70:
+        return 'high'
+    if percent >= 50:
+        return 'mid'
+    return 'low'
+
+def _build_moscow_taxi_hour_load():
+    """Строит таблицу в формате WEEKDAY_HOUR_LOAD (start_h, end_h, level,
+    label) из реальных данных MOSCOW_TAXI_DEMAND_PERCENT - level берём по
+    эконому (основной тариф "обычного такси"), а в label показываем цифры
+    по всем трём тарифам сразу, чтобы водитель видел реальные проценты, а не
+    только качественную метку."""
+    table = {}
+    for weekday, slots in MOSCOW_TAXI_DEMAND_PERCENT.items():
+        rows = []
+        for start_h, end_h, econom, comfort, comfort_plus in slots:
+            level = _demand_percent_to_level(econom)
+            label = f"эконом {econom}% · комфорт {comfort}% · комфорт+ {comfort_plus}%"
+            rows.append((start_h, end_h, level, label))
+        table[weekday] = rows
+    return table
+
+MOSCOW_TAXI_HOUR_LOAD = _build_moscow_taxi_hour_load()
+
 # ---- Свои паттерны спроса для Курьера и Грузового такси (по просьбе
 # пользователя, 20.09.2026: "дай расклад для курьеров... и для грузовых
 # такси" - уточнено через AskUserQuestion, что нужны СВОИ правила для
@@ -3231,10 +3313,14 @@ CATEGORY_WEEKDAY_HOUR_LOAD = {
     'cargo': CARGO_WEEKDAY_HOUR_LOAD,
 }
 
-def get_weekday_hour_load(category):
+def get_weekday_hour_load(category, city=None):
     """Возвращает таблицу паттернов (WEEKDAY_HOUR_LOAD-совместимую) для
-    данной категории - свою для courier/cargo, общую для остальных (такси/
-    Ultima) - см. CATEGORY_WEEKDAY_HOUR_LOAD."""
+    данной категории - свою для courier/cargo, реальные данные
+    MOSCOW_TAXI_HOUR_LOAD для Москвы + обычного такси (category в (None,
+    'taxi')), общую WEEKDAY_HOUR_LOAD для остальных (Ultima, другие города) -
+    см. CATEGORY_WEEKDAY_HOUR_LOAD и MOSCOW_TAXI_DEMAND_PERCENT выше."""
+    if city == 'moscow' and category in (None, 'taxi'):
+        return MOSCOW_TAXI_HOUR_LOAD
     return CATEGORY_WEEKDAY_HOUR_LOAD.get(category, WEEKDAY_HOUR_LOAD)
 
 def get_city_now(city):
@@ -3268,11 +3354,14 @@ def format_peak_hours_text(city, target_weekday=None, category=None):
     now = get_city_now(city)
     weekday = target_weekday if target_weekday is not None else now.weekday()
     city_name = CITY_DISPLAY_NAMES.get(city, city)
-    pattern = get_weekday_hour_load(category)[weekday]
+    is_moscow_real_data = city == 'moscow' and category in (None, 'taxi')
+    pattern = get_weekday_hour_load(category, city=city)[weekday]
 
     lines = [f"📅 *Часы пика — {city_name}, {WEEKDAY_NAMES[weekday]}*"]
     subtitle = CATEGORY_PEAK_HOURS_SUBTITLE.get(category)
-    if subtitle:
+    if is_moscow_real_data:
+        lines.append('_реальные данные по спросу на такси (эконом/комфорт/комфорт+), % от максимума за сутки_\n')
+    elif subtitle:
         lines.append(subtitle)
     else:
         lines.append("")
@@ -3306,6 +3395,11 @@ def format_peak_hours_text(city, target_weekday=None, category=None):
             "\n_Ориентир по рабочим часам бизнеса и складов - реальный спрос "
             "зависит от конкретных заказчиков и логистики в городе._"
         )
+    elif is_moscow_real_data:
+        lines.append(
+            "\n_Реальные данные по спросу на такси в Москве - конкретный день "
+            "может отличаться (погода, события, пробки)._"
+        )
     else:
         lines.append(
             "\n_Общая модель по данным Яндекс.Такси и статистике заказов по России - "
@@ -3322,7 +3416,7 @@ def get_current_peak_level(city, category=None):
     поиск текущего диапазона. category=None - как раньше, общая таблица
     такси."""
     now = get_city_now(city)
-    pattern = get_weekday_hour_load(category)[now.weekday()]
+    pattern = get_weekday_hour_load(category, city=city)[now.weekday()]
     for start_h, end_h, level, _label in pattern:
         if start_h <= now.hour < end_h:
             return level
@@ -3343,9 +3437,10 @@ def find_upcoming_peak_start(city, lead_minutes=PEAK_HOUR_PUSH_LEAD_MINUTES):
     с калиндарной датой/часом НАЧАЛА диапазона (а не датой "сейчас")."""
     now = get_city_now(city)
     window_end = now + timedelta(minutes=lead_minutes)
+    hour_load = get_weekday_hour_load(None, city=city)
 
     for check_date, weekday in ((now, now.weekday()), (window_end, window_end.weekday())):
-        pattern = WEEKDAY_HOUR_LOAD[weekday]
+        pattern = hour_load[weekday]
         for start_h, end_h, level, label in pattern:
             if level != 'peak':
                 continue
