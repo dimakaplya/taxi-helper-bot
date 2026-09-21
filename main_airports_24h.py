@@ -7998,8 +7998,17 @@ MAP_CHROME_CSS = """
      блок "ЗАПРАВКИ + ЭЛЕКТРОЗАРЯДКИ НА КАРТЕ" в main.py). Панель с
      чекбоксами - под жёлтой кнопкой "Показать все категории" (та стоит
      top:10px, left:56px), чтобы не наезжать друг на друга. */
-  .layer-toggle { position: absolute; top: 52px; left: 56px; z-index: 1000; background: #1c1c1c; color: #fff; border: 1px solid rgba(255,196,0,.4); border-radius: 8px; padding: 6px 10px; font-family: -apple-system, sans-serif; font-size: 12px; box-shadow: 0 1px 4px rgba(0,0,0,.35); }
-  .layer-toggle label { display: flex; align-items: center; gap: 6px; margin: 3px 0; cursor: pointer; user-select: none; white-space: nowrap; }
+  /* ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя - "заправки зарядки
+     не в столбик а в ряд и можно было скрыть"): раньше это был один блок
+     со списком чекбоксов в столбик, всегда открытый - занимал много места
+     на карте. Теперь отдельная маленькая кнопка-чип "🗂 Слои" (тот же
+     стиль, что и filter-toggle), по тапу разворачивает/сворачивает строку
+     чекбоксов (flex-wrap: wrap, в ряд, а не в столбик). */
+  .layer-toggle-wrap { position: absolute; top: 52px; left: 56px; z-index: 1000; }
+  .layer-toggle-btn { display: inline-block; background: #1c1c1c; color: #fff; border: 1px solid rgba(255,196,0,.4); border-radius: 8px; padding: 6px 10px; font-family: -apple-system, sans-serif; font-size: 12px; font-weight: 600; box-shadow: 0 1px 4px rgba(0,0,0,.35); cursor: pointer; user-select: none; white-space: nowrap; }
+  .layer-toggle { display: flex; flex-direction: row; flex-wrap: wrap; gap: 4px 10px; margin-top: 6px; background: #1c1c1c; color: #fff; border: 1px solid rgba(255,196,0,.4); border-radius: 8px; padding: 6px 10px; font-family: -apple-system, sans-serif; font-size: 12px; box-shadow: 0 1px 4px rgba(0,0,0,.35); }
+  .layer-toggle.collapsed { display: none; }
+  .layer-toggle label { display: flex; align-items: center; gap: 5px; cursor: pointer; user-select: none; white-space: nowrap; }
   /* ИЗМЕНЕНО 23.09.2026 (жалоба пользователя, скриншот - "плохо видно"
      значки заправок/зарядок на карте): раньше это были голые эмодзи с
      drop-shadow - на пёстрой тайловой подложке почти не различить.
@@ -8060,10 +8069,13 @@ def map_webapp_html():
 <div id="map"></div>
 <div class="filter-toggle" id="filterToggle">Показать все категории</div>
 <div class="legend" id="legend"></div>
-<div class="layer-toggle" id="layerToggle">
-  <label><input type="checkbox" id="fuelLayerCheckbox"> ⛽ Заправки</label>
-  <label><input type="checkbox" id="chargingLayerCheckbox"> 🔌 Зарядки</label>
-  <label><input type="checkbox" id="parkingLayerCheckbox"> 🅿️ Бесплатные парковки</label>
+<div class="layer-toggle-wrap">
+  <div class="layer-toggle-btn" id="layerToggleBtn">🗂 Слои</div>
+  <div class="layer-toggle collapsed" id="layerToggle">
+    <label><input type="checkbox" id="fuelLayerCheckbox"> ⛽ Заправки</label>
+    <label><input type="checkbox" id="chargingLayerCheckbox"> 🔌 Зарядки</label>
+    <label><input type="checkbox" id="parkingLayerCheckbox"> 🅿️ Парковки</label>
+  </div>
 </div>
 <script>
   const CATEGORY_STYLE = {style_json};
@@ -8539,6 +8551,11 @@ def map_webapp_html():
     parkingLoaded = false;
   }}
 
+  const layerToggleBtn = document.getElementById('layerToggleBtn');
+  const layerToggleRow = document.getElementById('layerToggle');
+  layerToggleBtn.addEventListener('click', () => {{
+    layerToggleRow.classList.toggle('collapsed');
+  }});
   const fuelCheckbox = document.getElementById('fuelLayerCheckbox');
   const chargingCheckbox = document.getElementById('chargingLayerCheckbox');
   const parkingCheckbox = document.getElementById('parkingLayerCheckbox');
