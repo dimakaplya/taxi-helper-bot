@@ -4362,6 +4362,7 @@ def share_order_webapp_html(category=None):
 <script>
   const tg = window.Telegram && window.Telegram.WebApp;
   if (tg) { tg.ready(); tg.expand(); }
+  if (tg && tg.platform) { fetch('/platform/report', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': tg.initData || '' }, body: JSON.stringify({ platform: tg.platform }) }).catch(function(){}); }
   const carClasses = """ + car_classes_json + """;
   let carClass = (carClasses[0] || {}).name || '';
   let pax = 1;
@@ -4584,6 +4585,40 @@ async def handle_share_order_submit_api(request):
         logger.exception(f"❌ Ошибка рассылки заказа #{order_id} из /share-order/submit")
         sent = 0
     return web.json_response({'ok': True, 'order_id': order_id, 'sent': sent, 'expiry_hours': SHARED_ORDER_EXPIRY_HOURS})
+
+PLATFORM_REPORT_API_PATH = '/platform/report'
+
+async def handle_platform_report_api(request):
+    """POST {platform: "ios"|"android"|"tdesktop"|...} - лёгкий эндпоинт,
+    вызываемый из ЛЮБОЙ WebApp-страницы этого бота сразу после tg.ready() (по
+    прямой просьбе пользователя, 22.09.2026 - "определять платформу
+    водителя, чтобы не показывать обе кнопки iOS/Android сразу"). initData
+    ОБЯЗАТЕЛЕН и строго проверяется (тот же helper, что у /cabinet/* и
+    /share-order/submit) - это персональное действие для конкретного
+    пользователя. Сохраняет tg.platform в user_state[user_id]['tg_platform'],
+    откуда его потом читает driver_platform_hint() при отправке обычных
+    (не-WebApp) сообщений (чаевые, парковка). Не требует наличия
+    category/city в state - пользователь может открыть WebApp раньше, чем
+    выберет город/категорию."""
+    init_data = request.headers.get('X-Telegram-Init-Data', '')
+    parsed = validate_telegram_webapp_init_data(init_data, BOT_TOKEN) if BOT_TOKEN else None
+    if not parsed:
+        return web.json_response({'error': 'invalid_init_data'}, status=401)
+    try:
+        tg_user = json.loads(parsed.get('user', '{}'))
+        user_id = tg_user.get('id')
+    except Exception:
+        user_id = None
+    if not user_id:
+        return web.json_response({'error': 'invalid_init_data'}, status=401)
+    try:
+        body = await request.json()
+        platform = str(body.get('platform') or '').strip()
+    except Exception:
+        platform = ''
+    if platform:
+        user_state.setdefault(user_id, {})['tg_platform'] = platform
+    return web.json_response({'ok': True})
 
 @router.message(lambda message: message.text == "🔄 ОТДАТЬ ЗАКАЗ")
 async def start_shared_order(message: types.Message):
@@ -5081,6 +5116,20 @@ async def courier_stub_section(message: types.Message):
 TIPS_APP_URL_IOS = "https://apps.apple.com/us/app/%D1%8F%D0%BD%D0%B4%D0%B5%D0%BA%D1%81-%D1%87%D0%B0%D0%B5%D0%B2%D1%8B%D0%B5-%D0%BD%D0%B0-%D0%BA%D0%B0%D1%80%D1%82%D1%83-%D0%BF%D0%BE-qr/id1513175603?l=ru"
 TIPS_APP_URL_ANDROID = "https://play.google.com/store/apps/details?id=com.chaevieprosto.app"
 
+def build_tips_keyboard(user_id):
+    """Строит клавиатуру для сообщения "Получить чаевые" - показывает
+    только релевантную платформе кнопку (iOS/Android), если она известна
+    (см. driver_platform_hint), иначе - обе, как раньше (безопасный
+    дефолт). По прямой просьбе пользователя (22.09.2026). Общий helper для
+    show_tips_app и show_tips_app_main_menu, чтобы не дублировать логику."""
+    hint = driver_platform_hint(user_id)
+    rows = []
+    if hint in (None, 'ios'):
+        rows.append([InlineKeyboardButton(text="🍎 ПОЛУЧИТЬ ЧАЕВЫЕ НА IPHONE", url=TIPS_APP_URL_IOS)])
+    if hint in (None, 'android'):
+        rows.append([InlineKeyboardButton(text="🤖 ПОЛУЧИТЬ ЧАЕВЫЕ НА ANDROID", url=TIPS_APP_URL_ANDROID)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
 @router.message(lambda message: message.text == "💳 ПОЛУЧИТЬ ЧАЕВЫЕ" and user_state.get(message.from_user.id, {}).get('in_courier_module'))
 async def show_tips_app(message: types.Message):
     """"💳 ПОЛУЧИТЬ ЧАЕВЫЕ" - по просьбе пользователя (20.09.2026), ссылки
@@ -5098,10 +5147,7 @@ async def show_tips_app(message: types.Message):
     # нейтрального "Скачать в App Store/Google Play" на конкретное действие
     # применительно к самой задаче (получить чаевые), с явным указанием
     # платформы, а не общее "скачать".
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🍎 ПОЛУЧИТЬ ЧАЕВЫЕ НА IPHONE", url=TIPS_APP_URL_IOS)],
-        [InlineKeyboardButton(text="🤖 ПОЛУЧИТЬ ЧАЕВЫЕ НА ANDROID", url=TIPS_APP_URL_ANDROID)],
-    ])
+    keyboard = build_tips_keyboard(message.from_user.id)
     await message.answer(text, reply_markup=keyboard, parse_mode='Markdown')
     await message.answer("Выбери, что нужно дальше 👇", reply_markup=courier_module_keyboard(category))
 
@@ -5119,10 +5165,7 @@ async def show_tips_app_main_menu(message: types.Message):
         "Приложение «Яндекс Чаевые: на карту по QR» - покажи QR-код пассажиру, "
         "он сканирует и переводит чаевые тебе на карту."
     )
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🍎 ПОЛУЧИТЬ ЧАЕВЫЕ НА IPHONE", url=TIPS_APP_URL_IOS)],
-        [InlineKeyboardButton(text="🤖 ПОЛУЧИТЬ ЧАЕВЫЕ НА ANDROID", url=TIPS_APP_URL_ANDROID)],
-    ])
+    keyboard = build_tips_keyboard(user_id)
     await message.answer(text, reply_markup=keyboard, parse_mode='Markdown')
     await message.answer(
         "Выбери, что нужно дальше 👇",
@@ -6680,9 +6723,13 @@ async def send_parking_push(user_id, city):
     # покрывает все города).
     city_links = PARKING_APP_LINKS.get(city) or {}
     links = {**PARKING_APP_LINK_FALLBACK, **city_links}
-    if links.get('ios'):
+    # По прямой просьбе пользователя (22.09.2026) - если платформа водителя
+    # известна (см. driver_platform_hint), показываем только его кнопку;
+    # иначе (платформа неизвестна или desktop/web/macos) - обе, как раньше.
+    platform_hint = driver_platform_hint(user_id)
+    if links.get('ios') and platform_hint in (None, 'ios'):
         buttons.append([InlineKeyboardButton(text="💳 Оплатить парковку (iOS)", url=links['ios'])])
-    if links.get('android'):
+    if links.get('android') and platform_hint in (None, 'android'):
         buttons.append([InlineKeyboardButton(text="💳 Оплатить парковку (Android)", url=links['android'])])
     buttons.append([InlineKeyboardButton(text="🅿️ Стою на бесплатной парковке", callback_data="parking_free_ack")])
     reply_markup = InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -6722,6 +6769,21 @@ def _location_tracking_active(user_id):
 # нигде в файле не считаем остановившейся, так что логично не считать её
 # остановившейся и здесь.
 LIVE_LOCATION_FRESH_MINUTES = AIRPORT_QUEUE_STALE_TIMEOUT_MINUTES
+
+def driver_platform_hint(user_id):
+    """Возвращает 'ios'/'android'/None - см. tg.platform, сохранённый в
+    user_state[uid]['tg_platform'] при открытии любого WebApp этого бота
+    (см. PLATFORM_REPORT_API_PATH). None - платформа ещё не известна (ни
+    разу не открывал WebApp) ИЛИ это desktop/web/macos - в обоих случаях
+    безопаснее предложить обе кнопки, чем угадать неверно (по прямой
+    просьбе пользователя, 22.09.2026)."""
+    state = user_state.get(user_id) or {}
+    platform = (state.get('tg_platform') or '').lower()
+    if 'ios' in platform:
+        return 'ios'
+    if 'android' in platform:
+        return 'android'
+    return None
 
 def remember_live_location(user_id, lat, lon):
     state = user_state.get(user_id)
@@ -7160,6 +7222,7 @@ def map_webapp_html():
   const STATUS_ICON = {{ open: '🟢', coordinated: '🟡', closed: '🔴' }};
   const tg = window.Telegram && window.Telegram.WebApp;
   if (tg) {{ tg.ready(); tg.expand(); }}
+  if (tg && tg.platform) {{ fetch('/platform/report', {{ method: 'POST', headers: {{ 'Content-Type': 'application/json', 'X-Telegram-Init-Data': tg.initData || '' }}, body: JSON.stringify({{ platform: tg.platform }}) }}).catch(function(){{}}); }}
   const params = new URLSearchParams(window.location.search);
   const city = params.get('city') || '';
   const myCategory = params.get('category') || '';
@@ -7516,6 +7579,7 @@ def weather_webapp_html():
 <script>
   const tg = window.Telegram && window.Telegram.WebApp;
   if (tg) { tg.ready(); tg.expand(); }
+  if (tg && tg.platform) { fetch('/platform/report', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': tg.initData || '' }, body: JSON.stringify({ platform: tg.platform }) }).catch(function(){}); }
   const params = new URLSearchParams(window.location.search);
   const city = params.get('city') || '';
 
@@ -7818,6 +7882,7 @@ def where_to_go_webapp_html():
 <script>
   const tg = window.Telegram && window.Telegram.WebApp;
   if (tg) { tg.ready(); tg.expand(); }
+  if (tg && tg.platform) { fetch('/platform/report', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': tg.initData || '' }, body: JSON.stringify({ platform: tg.platform }) }).catch(function(){}); }
   const params = new URLSearchParams(window.location.search);
   const city = params.get('city') || '';
   const category = params.get('category') || '';
@@ -8310,6 +8375,7 @@ def events_webapp_html():
 <script>
   const tg = window.Telegram && window.Telegram.WebApp;
   if (tg) { tg.ready(); tg.expand(); }
+  if (tg && tg.platform) { fetch('/platform/report', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': tg.initData || '' }, body: JSON.stringify({ platform: tg.platform }) }).catch(function(){}); }
   const params = new URLSearchParams(window.location.search);
   const city = params.get('city') || '';
   const category = params.get('category') || '';
@@ -8621,6 +8687,7 @@ def transport_webapp_html():
 <script>
   const tg = window.Telegram && window.Telegram.WebApp;
   if (tg) { tg.ready(); tg.expand(); }
+  if (tg && tg.platform) { fetch('/platform/report', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': tg.initData || '' }, body: JSON.stringify({ platform: tg.platform }) }).catch(function(){}); }
   const params = new URLSearchParams(window.location.search);
   const city = params.get('city') || '';
   const category = params.get('category') || '';
@@ -9806,8 +9873,8 @@ def cabinet_webapp_html():
 <div class="tab-pane" id="tab-tips">
   <div class="card">
     <p>Приложение «Яндекс Чаевые: на карту по QR» - покажи QR-код пассажиру, он сканирует и переводит чаевые тебе на карту.</p>
-    <a class="link-btn" href="https://apps.apple.com/us/app/%D1%8F%D0%BD%D0%B4%D0%B5%D0%BA%D1%81-%D1%87%D0%B0%D0%B5%D0%B2%D1%8B%D0%B5-%D0%BD%D0%B0-%D0%BA%D0%B0%D1%80%D1%82%D1%83-%D0%BF%D0%BE-qr/id1513175603?l=ru" target="_blank">🍎 Получить чаевые на iPhone</a>
-    <a class="link-btn" href="https://play.google.com/store/apps/details?id=com.chaevieprosto.app" target="_blank">🤖 Получить чаевые на Android</a>
+    <a class="link-btn" id="tipsLinkIos" href="https://apps.apple.com/us/app/%D1%8F%D0%BD%D0%B4%D0%B5%D0%BA%D1%81-%D1%87%D0%B0%D0%B5%D0%B2%D1%8B%D0%B5-%D0%BD%D0%B0-%D0%BA%D0%B0%D1%80%D1%82%D1%83-%D0%BF%D0%BE-qr/id1513175603?l=ru" target="_blank">🍎 Получить чаевые на iPhone</a>
+    <a class="link-btn" id="tipsLinkAndroid" href="https://play.google.com/store/apps/details?id=com.chaevieprosto.app" target="_blank">🤖 Получить чаевые на Android</a>
   </div>
 </div>
 
@@ -9823,6 +9890,21 @@ def cabinet_webapp_html():
 <script>
   const tg = window.Telegram && window.Telegram.WebApp;
   if (tg) { tg.ready(); tg.expand(); }
+  if (tg && tg.platform) { fetch('/platform/report', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': tg.initData || '' }, body: JSON.stringify({ platform: tg.platform }) }).catch(function(){}); }
+  // Вкладка "Чаевые" (по прямой просьбе пользователя, 22.09.2026) - здесь мы
+  // уже внутри WebApp, так что платформа известна сразу через tg.platform
+  // (без похода на сервер) - прячем нерелевантную кнопку сразу при загрузке.
+  (function() {
+    var platform = (tg && tg.platform) ? String(tg.platform).toLowerCase() : '';
+    var iosLink = document.getElementById('tipsLinkIos');
+    var androidLink = document.getElementById('tipsLinkAndroid');
+    if (platform.indexOf('ios') !== -1) {
+      if (androidLink) androidLink.hidden = true;
+    } else if (platform.indexOf('android') !== -1) {
+      if (iosLink) iosLink.hidden = true;
+    }
+    // иначе (desktop/web/macos/неизвестно) - показываем обе ссылки, как раньше.
+  })();
   const initData = tg ? tg.initData : '';
   // Временная диагностика (21.09.2026) - у пользователя initData приходит
   // пустой уже после переноса telegram-web-app.js на свой домен, непонятно,
@@ -14065,6 +14147,7 @@ async def start_subscription_webhook_server():
     # Отдать заказ (см. блок "ОТДАТЬ ЗАКАЗ (WebApp)" выше)
     app.router.add_get(SHARE_ORDER_WEBAPP_PATH, handle_share_order_webapp)
     app.router.add_post(SHARE_ORDER_SUBMIT_API_PATH, handle_share_order_submit_api)
+    app.router.add_post(PLATFORM_REPORT_API_PATH, handle_platform_report_api)
     # Личный кабинет (см. блок "ЛИЧНЫЙ КАБИНЕТ (WebApp)" выше)
     app.router.add_get(CABINET_WEBAPP_PATH, handle_cabinet_webapp)
     app.router.add_get(CABINET_DATA_API_PATH, handle_cabinet_data_api)
