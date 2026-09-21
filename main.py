@@ -7473,63 +7473,19 @@ def map_webapp_html():
   renderLegend();
   renderToggle();
   const map = L.map('map').setView([55.7558, 37.6173], 11);
-  // ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя - подложка Яндекс.Карт):
-  // НЕОФИЦИАЛЬНЫЕ тайлы Яндекса без API-ключа (обычный слепой XYZ-эндпоинт,
-  // совместимый с системой координат Leaflet "из коробки") - пользователь
-  // осознанно выбрал этот вариант вместо официального JS API (нужен ключ и
-  // полная переделка карты под ymaps) или CartoDB (без рисков). Яндекс может
-  // в любой момент поменять версию тайлов ("v=...") или начать резать такие
-  // запросы - на этот случай ниже есть fallback: если тайлы Яндекса массово
-  // не грузятся (tileerror), автоматически переключаемся на OpenStreetMap,
-  // чтобы карта не осталась пустой.
-  const YANDEX_TILE_URL = 'https://vec0{{s}}.maps.yandex.net/tiles?l=map&v=24.06.02-0&x={{x}}&y={{y}}&z={{z}}&scale=1&lang=ru_RU';
-  const OSM_TILE_URL = 'https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png';
-  // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "если отвалится, то
-  // заново переподключится к Яндексу"): после падения на OSM карта не
-  // остаётся на нём навсегда - раз в YANDEX_RETRY_MINUTES пробуем снова
-  // переключиться на Яндекс (вдруг подложка отошла и снова работает). Если
-  // Яндекс опять посыпался ошибками - тот же порог tileErrorCount снова
-  // роняет карту на OSM, и цикл повторяется. baseLayer - текущий активный
-  // тайловый слой (Яндекс или OSM), чтобы было что убирать при переключении
-  // в любую сторону.
-  const YANDEX_RETRY_MINUTES = 5;
-  const YANDEX_ERROR_THRESHOLD = 8;
-  let baseLayer = null;
-  let tileErrorCount = 0;
-  let onYandex = false;
-
-  function switchToOsm() {{
-    if (baseLayer) map.removeLayer(baseLayer);
-    baseLayer = L.tileLayer(OSM_TILE_URL, {{ attribution: '© OpenStreetMap', maxZoom: 19 }}).addTo(map);
-    onYandex = false;
-  }}
-
-  function switchToYandex() {{
-    if (baseLayer) map.removeLayer(baseLayer);
-    tileErrorCount = 0;
-    onYandex = true;
-    const layer = L.tileLayer(YANDEX_TILE_URL, {{
-      subdomains: ['01', '02', '03', '04'],
-      attribution: '© Яндекс.Карты',
-      maxZoom: 19,
-    }});
-    layer.on('tileerror', () => {{
-      if (!onYandex) return;
-      tileErrorCount += 1;
-      // Порог с запасом - несколько тайлов по краям могут не загрузиться и
-      // в норме (нет данных за пределами покрытия), падать на OSM должны
-      // только при массовых ошибках (сама подложка недоступна).
-      if (tileErrorCount > YANDEX_ERROR_THRESHOLD) {{
-        switchToOsm();
-      }}
-    }});
-    baseLayer = layer.addTo(map);
-  }}
-
-  switchToYandex();
-  setInterval(() => {{
-    if (!onYandex) switchToYandex();
-  }}, YANDEX_RETRY_MINUTES * 60 * 1000);
+  // ИЗМЕНЕНО 22.09.2026: неофициальные тайлы Яндекса без API-ключа оказались
+  // нерабочими на практике (пользователь прислал скриншот - подложка не
+  // грузится вообще, серый фон) - по просьбе пользователя вернулись к
+  // надёжному варианту без ключей и юридических рисков: тёмная подложка
+  // CartoDB Dark Matter, в цвет чёрно-жёлтого интерфейса бота (см.
+  // MAP_CHROME_CSS выше). Официальный Яндекс.JS API (с ключом) не ставили -
+  // пользователь не выбрал этот вариант, он означает полную переделку карты
+  // под ymaps.
+  L.tileLayer('https://{{s}}.basemaps.cartocdn.com/dark_all/{{z}}/{{x}}/{{y}}{{r}}.png', {{
+    attribution: '© OpenStreetMap © CARTO',
+    subdomains: 'abcd',
+    maxZoom: 19,
+  }}).addTo(map);
   let markers = [];
   let airportMarkers = [];
   let airportsLoaded = false;
