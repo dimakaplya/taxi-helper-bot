@@ -7977,7 +7977,7 @@ MAP_CHROME_CSS = """
      top:10px, left:56px), чтобы не наезжать друг на друга. */
   .layer-toggle { position: absolute; top: 52px; left: 56px; z-index: 1000; background: #1c1c1c; color: #fff; border: 1px solid rgba(255,196,0,.4); border-radius: 8px; padding: 6px 10px; font-family: -apple-system, sans-serif; font-size: 12px; box-shadow: 0 1px 4px rgba(0,0,0,.35); }
   .layer-toggle label { display: flex; align-items: center; gap: 6px; margin: 3px 0; cursor: pointer; user-select: none; white-space: nowrap; }
-  .fuel-icon, .charging-icon { display: flex; align-items: center; justify-content: center; font-size: 18px; filter: drop-shadow(0 1px 2px rgba(0,0,0,.5)); }
+  .fuel-icon, .charging-icon, .parking-icon { display: flex; align-items: center; justify-content: center; font-size: 18px; filter: drop-shadow(0 1px 2px rgba(0,0,0,.5)); }
   .fuel-popup, .charging-popup { font-family: -apple-system, sans-serif; font-size: 12.5px; max-width: 230px; color: #000; }
   .fuel-popup h4, .charging-popup h4 { margin: 0 0 6px; font-size: 13.5px; }
   .fuel-popup .sub, .charging-popup .sub { color: #666; font-size: 11.5px; margin-bottom: 6px; }
@@ -8025,6 +8025,7 @@ def map_webapp_html():
 <div class="layer-toggle" id="layerToggle">
   <label><input type="checkbox" id="fuelLayerCheckbox"> ⛽ Заправки</label>
   <label><input type="checkbox" id="chargingLayerCheckbox"> 🔌 Зарядки</label>
+  <label><input type="checkbox" id="parkingLayerCheckbox"> 🅿️ Бесплатные парковки</label>
 </div>
 <script>
   const CATEGORY_STYLE = {style_json};
@@ -8447,16 +8448,51 @@ def map_webapp_html():
     chargingLoaded = false;
   }}
 
+  // Бесплатные парковки - третий слой рядом с заправками/зарядками (по
+  // просьбе пользователя). Точки те же, что в текстовом списке "🅿️
+  // ПАРКОВКА" в меню (parking_data.json) - без крауд-статуса занятости
+  // (в отличие от зарядок), просто места бесплатной парковки из OSM.
+  let parkingMarkers = [];
+  let parkingLoaded = false;
+
+  async function loadParkingStations() {{
+    try {{
+      const resp = await fetch(`{MAP_PARKING_API_PATH}?city=${{encodeURIComponent(city)}}`);
+      if (!resp.ok) return;
+      const data = await resp.json();
+      parkingMarkers.forEach(m => map.removeLayer(m));
+      parkingMarkers = [];
+      (data.stations || []).forEach(p => {{
+        const icon = L.divIcon({{ className: 'parking-icon', html: '🅿️', iconSize: [20, 20] }});
+        const popup = `<div class="fuel-popup"><h4>🅿️ ${{p.name || 'Бесплатная парковка'}}</h4></div>`;
+        const marker = L.marker([p.lat, p.lon], {{ icon }}).bindPopup(popup).addTo(map);
+        parkingMarkers.push(marker);
+      }});
+      parkingLoaded = true;
+    }} catch (e) {{ /* тихо */ }}
+  }}
+
+  function clearParkingStations() {{
+    parkingMarkers.forEach(m => map.removeLayer(m));
+    parkingMarkers = [];
+    parkingLoaded = false;
+  }}
+
   const fuelCheckbox = document.getElementById('fuelLayerCheckbox');
   const chargingCheckbox = document.getElementById('chargingLayerCheckbox');
+  const parkingCheckbox = document.getElementById('parkingLayerCheckbox');
   fuelCheckbox.addEventListener('change', () => {{
     if (fuelCheckbox.checked) loadFuelStations(); else clearFuelStations();
   }});
   chargingCheckbox.addEventListener('change', () => {{
     if (chargingCheckbox.checked) loadChargingStations(); else clearChargingStations();
   }});
+  parkingCheckbox.addEventListener('change', () => {{
+    if (parkingCheckbox.checked) loadParkingStations(); else clearParkingStations();
+  }});
   setInterval(() => {{ if (fuelCheckbox.checked) loadFuelStations(); }}, 60000);
   setInterval(() => {{ if (chargingCheckbox.checked) loadChargingStations(); }}, 60000);
+  setInterval(() => {{ if (parkingCheckbox.checked) loadParkingStations(); }}, 60000);
 
   loadPositions();
   loadAirports();
@@ -9267,6 +9303,27 @@ async def handle_map_charging_report_api(request):
         return web.json_response({'error': 'invalid_params'}, status=400)
     set_charging_status(station_id, status, user_id)
     return web.json_response({'ok': True})
+
+MAP_PARKING_API_PATH = '/map/parking'
+
+async def handle_map_parking_api(request):
+    """Бесплатные парковки на карте водителей - по просьбе пользователя,
+    третий слой со своим фильтром рядом с заправками/зарядками. Точки те
+    же, что уже используются для текстового списка "🅿️ ПАРКОВКА" в меню
+    (parking_data.json, см. NEARBY_SERVICES/load_nearby_data) - без крауд-
+    отметок, это просто бесплатные парковки из OpenStreetMap, статус
+    занятости не отслеживается (в отличие от зарядок)."""
+    city = request.query.get('city', '')
+    result = []
+    try:
+        data = load_nearby_data('parking') or {}
+        points = (data.get('cities', {}).get(city) or [])
+        for p in points:
+            result.append({'lat': p['lat'], 'lon': p['lon'], 'name': p.get('name')})
+    except Exception:
+        logger.exception("❌ Ошибка при получении парковок для карты водителей")
+        result = []
+    return web.json_response({'stations': result})
 
 MAP_ROAD_EVENTS_API_PATH = '/map/road_events'
 
@@ -15536,6 +15593,7 @@ async def start_subscription_webhook_server():
     app.router.add_get(MAP_STATIONS_API_PATH, handle_map_stations_api)
     app.router.add_get(MAP_FUEL_STATIONS_API_PATH, handle_map_fuel_stations_api)
     app.router.add_get(MAP_CHARGING_STATIONS_API_PATH, handle_map_charging_stations_api)
+    app.router.add_get(MAP_PARKING_API_PATH, handle_map_parking_api)
     app.router.add_post(MAP_FUEL_REPORT_API_PATH, handle_map_fuel_report_api)
     app.router.add_post(MAP_CHARGING_REPORT_API_PATH, handle_map_charging_report_api)
     app.router.add_get(MAP_ROAD_EVENTS_API_PATH, handle_map_road_events_api)
