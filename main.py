@@ -872,6 +872,17 @@ def _resolve_db_file():
     return 'taxi_queue.db'
 
 DB_FILE = _resolve_db_file()
+
+# ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "собирай данные о
+# времени начала и выхода из очереди в отдельный файл базы важно"):
+# статистика по очередям у аэропорта (время входа/выхода, тариф, место)
+# сознательно пишется в ОТДЕЛЬНЫЙ файл SQLite, а не в основную таблицу
+# taxi_queue.db - чтобы не смешивать сырые данные для будущей аналитики с
+# рабочим состоянием бота. Тот же принцип устойчивости к редеплою Railway,
+# что и у _resolve_db_file() выше - файл кладём в ту же директорию, что и
+# основную БД (Persistent Volume /data, если он есть, иначе рабочая
+# директория контейнера).
+AIRPORT_QUEUE_LOG_DB_FILE = os.path.join(os.path.dirname(DB_FILE), 'airport_queue_log.db') if os.path.dirname(DB_FILE) else 'airport_queue_log.db'
 # По повторной жалобе пользователя (22.09.2026): "при редеплое всё слетает -
 # город, категория, смена" - несмотря на фикс выше (_resolve_db_file), если
 # в Railway НЕ подключён Persistent Volume (Settings -> Volumes -> Add Volume,
@@ -1901,6 +1912,90 @@ def get_db_connection():
     conn.execute('PRAGMA journal_mode=WAL')
     conn.execute('PRAGMA busy_timeout=10000')
     return conn
+
+_airport_queue_log_db_initialized = False
+
+def get_airport_queue_log_db_connection():
+    """Отдельное подключение к AIRPORT_QUEUE_LOG_DB_FILE (см. комментарий у
+    константы выше) - тот же WAL/busy_timeout паттерн, что и у основной
+    БД (get_db_connection)."""
+    conn = sqlite3.connect(AIRPORT_QUEUE_LOG_DB_FILE, timeout=10)
+    conn.execute('PRAGMA journal_mode=WAL')
+    conn.execute('PRAGMA busy_timeout=10000')
+    return conn
+
+def init_airport_queue_log_db():
+    global _airport_queue_log_db_initialized
+    if _airport_queue_log_db_initialized:
+        return
+    conn = get_airport_queue_log_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS airport_queue_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            icao TEXT NOT NULL,
+            zone_key TEXT,
+            zone_label TEXT,
+            airport_name TEXT,
+            city TEXT,
+            tariffs TEXT,
+            entered_at DATETIME NOT NULL,
+            left_at DATETIME,
+            wait_minutes INTEGER,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_airport_queue_log_user ON airport_queue_log (user_id, entered_at)')
+    conn.commit()
+    conn.close()
+    _airport_queue_log_db_initialized = True
+
+def log_airport_queue_entered(user_id, icao, zone_key, zone_label, city, tariffs, entered_at):
+    """Новая запись при входе в зону аэропорта (см. process_airport_queue_ping) -
+    возвращает id строки, чтобы потом дозаполнить left_at/wait_minutes при
+    выходе (log_airport_queue_left). tariffs - список человекочитаемых строк
+    (state['shift']['tariffs']), сохраняем через запятую тем же форматом,
+    что и format_shift_tariffs_label."""
+    init_airport_queue_log_db()
+    airport = ICAO_TO_AIRPORT.get(icao)
+    airport_name = airport['name'] if airport else icao
+    tariffs_label = ", ".join(tariffs) if tariffs else None
+    try:
+        conn = get_airport_queue_log_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            'INSERT INTO airport_queue_log (user_id, icao, zone_key, zone_label, airport_name, city, tariffs, entered_at) '
+            'VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+            (user_id, icao, zone_key, zone_label, airport_name, city, tariffs_label, entered_at.isoformat())
+        )
+        row_id = cursor.lastrowid
+        conn.commit()
+        conn.close()
+        return row_id
+    except Exception as e:
+        logger.warning(f"⚠️ Не удалось записать вход в очередь аэропорта (лог) для {user_id}: {e}")
+        return None
+
+def log_airport_queue_left(row_id, left_at, wait_minutes):
+    """Дозаполняет left_at/wait_minutes у строки, созданной
+    log_airport_queue_entered, при выходе из зоны аэропорта. row_id может
+    быть None (например, лог не удалось записать при входе) - тогда просто
+    ничего не делаем."""
+    if row_id is None:
+        return
+    init_airport_queue_log_db()
+    try:
+        conn = get_airport_queue_log_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            'UPDATE airport_queue_log SET left_at = ?, wait_minutes = ? WHERE id = ?',
+            (left_at.isoformat(), wait_minutes, row_id)
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.warning(f"⚠️ Не удалось записать выход из очереди аэропорта (лог) для строки {row_id}: {e}")
 
 _db_initialized = False
 
@@ -6982,6 +7077,16 @@ async def process_airport_queue_ping(user_id, lat, lon, live_period=None):
             # отсчёта для таймера "уже 30 минут рядом" (см. check_airport_queue_timers).
             aq['entered_outer_at'] = now.isoformat()
             aq['pushed_30'] = False
+            # ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "собирай
+            # данные о времени начала и выхода из очереди ... тариф дата
+            # время и место в очереди") - новая строка лога в отдельном
+            # файле БД (см. log_airport_queue_entered/AIRPORT_QUEUE_LOG_DB_FILE
+            # выше), дозаполняется left_at/wait_minutes при выходе ниже.
+            # row_id храним прямо в aq, чтобы найти ту же строку при выходе.
+            aq['queue_log_id'] = log_airport_queue_entered(
+                user_id, icao, zone_key, zone_label, city_for_marks,
+                (state.get('shift') or {}).get('tariffs'), now,
+            )
         # ИЗМЕНЕНО 21.09.2026: раньше было только 2 фиксированных уровня
         # (outer/inner), теперь идём по levels_km (внешний уровень аэропорта +
         # оставшиеся более узкие уровни) по порядку - шлём пуш за каждый
@@ -7013,20 +7118,23 @@ async def process_airport_queue_ping(user_id, lat, lon, live_period=None):
             # реально стоял (aq['zone_key']) - обходимся названием аэропорта
             # без уточнения терминала.
             await send_airport_queue_left_push(user_id, aq.get('icao') or icao)
+            try:
+                entered_at = datetime.fromisoformat(aq['entered_outer_at'])
+                wait_minutes = max(0, round((now - entered_at).total_seconds() / 60))
+            except Exception:
+                wait_minutes = 0
             # По просьбе пользователя (20.09.2026): если сейчас идёт смена -
             # копим суммарное время простоя в аэропорту за смену
             # (state['shift']['airport_wait_minutes']), чтобы учесть его в
             # итоговом расчёте финансов (см. send_courier_finance_result).
             shift = state.get('shift')
             if shift:
-                try:
-                    entered_at = datetime.fromisoformat(aq['entered_outer_at'])
-                    wait_minutes = max(0, round((now - entered_at).total_seconds() / 60))
-                except Exception:
-                    wait_minutes = 0
                 shift = dict(shift)
                 shift['airport_wait_minutes'] = shift.get('airport_wait_minutes', 0) + wait_minutes
                 state['shift'] = shift
+            # Дозаполняем left_at/wait_minutes у строки лога, созданной при
+            # входе (см. комментарий у log_airport_queue_entered выше).
+            log_airport_queue_left(aq.get('queue_log_id'), now, wait_minutes)
             aq = {'icao': icao, 'zone_key': zone_key, 'last_update_at': now.isoformat()}
             if live_period:
                 aq['live_period'] = live_period
