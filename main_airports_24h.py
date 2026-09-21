@@ -7441,6 +7441,15 @@ def validate_telegram_webapp_init_data(init_data, bot_token):
 # повышенный спрос) и её ломать нельзя, рескин только "рамки" карты.
 MAP_CHROME_CSS = """
   html, body, #map { height: 100%; margin: 0; padding: 0; }
+  /* ИЗМЕНЕНО 22.09.2026: CartoDB (basemaps.cartocdn.com) закрыли бесплатный
+     анонимный доступ без API-ключа - тайлы перестали грузиться ("API key
+     required", см. скриншот пользователя). Вернулись к обычным тайлам
+     OpenStreetMap (гарантированно без ключей и рисков), а тёмный вид
+     держим CSS-фильтром инверсии цветов поверх тайлового слоя - тот же
+     трюк, что используют многие карты без своего тёмного сервера тайлов.
+     Маркеры/попапы/легенду фильтр не трогает - он навешен только на
+     .leaflet-tile-pane, а не на весь #map. */
+  .leaflet-tile-pane { filter: invert(1) hue-rotate(180deg) brightness(0.95) contrast(0.9); }
   .legend { position: absolute; top: 10px; right: 10px; z-index: 1000; background: #1c1c1c; color: #fff; border: 1px solid rgba(255,196,0,.4); border-radius: 8px; padding: 8px 10px; font-family: -apple-system, sans-serif; font-size: 12px; box-shadow: 0 1px 4px rgba(0,0,0,.35); }
   .legend div { display: flex; align-items: center; gap: 6px; margin: 3px 0; }
   .legend .dot { width: 11px; height: 11px; border-radius: 50%; border: 1px solid rgba(255,255,255,.5); display: inline-block; }
@@ -7529,17 +7538,16 @@ def map_webapp_html():
   renderLegend();
   renderToggle();
   const map = L.map('map').setView([55.7558, 37.6173], 11);
-  // ИЗМЕНЕНО 22.09.2026: неофициальные тайлы Яндекса без API-ключа оказались
-  // нерабочими на практике (пользователь прислал скриншот - подложка не
-  // грузится вообще, серый фон) - по просьбе пользователя вернулись к
-  // надёжному варианту без ключей и юридических рисков: тёмная подложка
-  // CartoDB Dark Matter, в цвет чёрно-жёлтого интерфейса бота (см.
-  // MAP_CHROME_CSS выше). Официальный Яндекс.JS API (с ключом) не ставили -
-  // пользователь не выбрал этот вариант, он означает полную переделку карты
-  // под ymaps.
-  L.tileLayer('https://{{s}}.basemaps.cartocdn.com/dark_all/{{z}}/{{x}}/{{y}}{{r}}.png', {{
-    attribution: '© OpenStreetMap © CARTO',
-    subdomains: 'abcd',
+  // ИЗМЕНЕНО 22.09.2026 (второй раз): CartoDB тоже оказался нерабочим без
+  // ключа - закрыли анонимный доступ к basemaps.cartocdn.com ("API key
+  // required", см. скриншот пользователя). Оба "бесплатных без ключа"
+  // варианта (Яндекс неофициально и CartoDB) на практике не сработали,
+  // поэтому вернулись к единственному гарантированно надёжному источнику -
+  // обычным тайлам OpenStreetMap, а тёмный вид даёт CSS-фильтр инверсии на
+  // .leaflet-tile-pane (см. MAP_CHROME_CSS выше) - тайлы всегда светлые
+  // (стандартный OSM), но на экране выглядят тёмными.
+  L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
+    attribution: '© OpenStreetMap',
     maxZoom: 19,
   }}).addTo(map);
   let markers = [];
