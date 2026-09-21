@@ -399,9 +399,22 @@ AIRPORT_QUEUE_TIME_PUSHES_MIN = (30,)  # "уже 30 минут рядом"
 # эффект - водитель едет с заказом/не планирует вставать в очередь, либо
 # GPS ошибочно показал близость к аэропорту из-за глушения сигнала в РФ).
 # Снимает ВСЕ пуши очереди (по расстоянию и по времени) для этого
-# аэропорта/зоны на AIRPORT_QUEUE_SNOOZE_MINUTES минут - см.
+# аэропорта на AIRPORT_QUEUE_SNOOZE_MINUTES минут - см.
 # process_airport_queue_ping/check_airport_queue_timers ('is_snoozed') и
 # handle_airport_queue_snooze.
+#
+# ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя - у Шереметьево GPS в
+# зоне глушения "скачет" между терминалами B/C/D по несколько раз за
+# минуту, из-за чего snooze раньше НЕ работал как надо): раньше snooze
+# хранился ВНУТРИ user_state[uid]['airport_queue'] (aq), который целиком
+# пересоздаётся при смене (icao, zone_key) - то есть каждый скачок GPS
+# между зонами B/C/D считался "новым заходом" и обнулял/обходил snooze,
+# и кнопка "Ошибка GPS", нажатая на пуше про зону B, не действовала на
+# зону D. Теперь snooze хранится ОТДЕЛЬНО, per-АЭРОПОРТ (не per-зона) - в
+# user_state[uid]['airport_queue_snooze'][icao] - переживает смену зоны
+# внутри того же аэропорта и одним нажатием глушит пуши по ВСЕМ его
+# зонам сразу. См. get_airport_queue_snoozed_until/set_airport_queue_snooze
+# ниже.
 AIRPORT_QUEUE_SNOOZE_MINUTES = 30
 # Как часто (минуты) фоновый чекер досылает пуши по времени - пуши по
 # расстоянию (AIRPORT_QUEUE_RADIUS_LEVELS_KM) шлются сразу по факту нового
@@ -5821,6 +5834,25 @@ def find_airport_queue_join_target(icao, zone_key=None):
             return (city, i)
     return None
 
+def get_airport_queue_snoozed_until(state, icao):
+    """Читает snooze для АЭРОПОРТА целиком (не зоны) - см. комментарий у
+    AIRPORT_QUEUE_SNOOZE_MINUTES. Возвращает datetime или None."""
+    store = state.get('airport_queue_snooze') or {}
+    until_str = store.get(icao)
+    if not until_str:
+        return None
+    try:
+        return datetime.fromisoformat(until_str)
+    except Exception:
+        return None
+
+def set_airport_queue_snooze(state, icao, minutes):
+    """Ставит snooze для АЭРОПОРТА целиком на `minutes` от текущего момента -
+    действует сразу на все его терминальные зоны (B/C/D у Шереметьево),
+    см. handle_airport_queue_snooze."""
+    store = dict(state.get('airport_queue_snooze') or {})
+    store[icao] = (datetime.now(ZoneInfo('UTC')) + timedelta(minutes=minutes)).isoformat()
+    state['airport_queue_snooze'] = store
 
 async def send_airport_queue_push(user_id, icao, kind, dist_km=None, zone_label=None, zone_key=None):
     if not bot:
@@ -5852,10 +5884,12 @@ async def send_airport_queue_push(user_id, icao, kind, dist_km=None, zone_label=
         # ДОБАВЛЕНО 21.09.2026 (прямая просьба пользователя): водитель может
         # ехать с заказом/без намерения вставать в очередь этого аэропорта -
         # кнопка снимает пуши очереди на AIRPORT_QUEUE_SNOOZE_MINUTES минут
-        # для ЭТОГО аэропорта/зоны, "чтобы человека лишний раз не тревожить".
-        # На ВСЕХ пушах очереди (по прямой просьбе пользователя), не только
-        # на первом.
-        buttons.append([InlineKeyboardButton(text="📍❌ ОШИБКА GPS / ОЧЕРЕДЬ НЕ ТРЕБУЕТСЯ", callback_data=f"aqsnooze_{icao}_{zone_key or '-'}")])
+        # для ЭТОГО аэропорта (все его зоны сразу, см. комментарий у
+        # AIRPORT_QUEUE_SNOOZE_MINUTES), "чтобы человека лишний раз не
+        # тревожить". На ВСЕХ пушах очереди (по прямой просьбе
+        # пользователя), не только на первом. callback_data - просто icao
+        # (без зоны, с 22.09.2026 - см. get_airport_queue_snoozed_until).
+        buttons.append([InlineKeyboardButton(text="📍❌ ОШИБКА GPS / ОЧЕРЕДЬ НЕ ТРЕБУЕТСЯ", callback_data=f"aqsnooze_{icao}")])
         reply_markup = InlineKeyboardMarkup(inline_keyboard=buttons)
     try:
         await bot.send_message(user_id, text, reply_markup=reply_markup, parse_mode='Markdown')
@@ -5905,20 +5939,17 @@ async def process_airport_queue_ping(user_id, lat, lon, live_period=None):
     now = datetime.now(ZoneInfo('UTC'))
     aq = dict(state.get('airport_queue') or {})
     # ДОБАВЛЕНО 21.09.2026 (прямая просьба пользователя - кнопка "не буду
-    # вставать в очередь" на пуше, "чтобы человека лишний раз не тревожить"):
-    # если водитель нажал эту кнопку для ТЕКУЩЕГО аэропорта/зоны недавно
-    # (см. AIRPORT_QUEUE_SNOOZE_MINUTES/handle_airport_queue_snooze) - не
-    # шлём никаких пушей вообще, пока snooze не истёк. Координаты/время
+    # вставать в очередь" на пуше, "чтобы человека лишний раз не тревожить"),
+    # ИЗМЕНЕНО 22.09.2026 (см. комментарий у AIRPORT_QUEUE_SNOOZE_MINUTES) -
+    # snooze теперь хранится per-АЭРОПОРТ отдельно от aq (get_airport_queue_
+    # snoozed_until), поэтому переживает скачки GPS между терминальными
+    # зонами B/C/D одного аэропорта и не завязан на точное совпадение
+    # (icao, zone_key) с моментом нажатия кнопки. Координаты/время
     # последнего пинга (aq['last_update_at']) всё равно обновляются ниже -
     # snooze не должен путать check_airport_queue_timers's "трансляция
     # прервалась" со снятой отметкой "не хочу пушей".
-    snoozed_until_str = aq.get('snoozed_until')
-    is_snoozed = False
-    if snoozed_until_str and (aq.get('icao'), aq.get('zone_key')) == (icao, zone_key):
-        try:
-            is_snoozed = now < datetime.fromisoformat(snoozed_until_str)
-        except Exception:
-            is_snoozed = False
+    snoozed_until = get_airport_queue_snoozed_until(state, icao)
+    is_snoozed = bool(snoozed_until and now < snoozed_until)
     # ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "и пропадает если
     # человек уже встал в очередь"): если у водителя уже есть СВОЯ свежая
     # отметка (за QUEUE_ENTRY_TTL_MINUTES) по этому аэропорту/зоне - он уже
@@ -5935,17 +5966,17 @@ async def process_airport_queue_ping(user_id, lat, lon, live_period=None):
     # листа. У однозонных аэропортов zone_key всегда None, so сравнение
     # (icao, zone_key) для них эквивалентно старому сравнению icao.
     if (aq.get('icao'), aq.get('zone_key')) != (icao, zone_key):
+        # Аэропорт/зона сменились - начинаем отслеживание уровней/таймера
+        # заново (новый заход в радиус). is_snoozed НЕ трогаем и не гасим -
+        # с 22.09.2026 он привязан к аэропорту целиком (см. комментарий у
+        # AIRPORT_QUEUE_SNOOZE_MINUTES), а не к этой (icao, zone_key)-паре,
+        # так что смена терминальной зоны того же аэропорта больше не
+        # обходит snooze (именно это раньше ломалось при скачках GPS между
+        # B/C/D у Шереметьево).
         aq = {'icao': icao, 'zone_key': zone_key}
-        # Аэропорт/зона сменились - is_snoozed уже вычислен выше ДО этого
-        # сброса и относился к СТАРОЙ паре (icao, zone_key), поэтому здесь
-        # больше не действует (новый заход = новый снуз с нуля, если
-        # понадобится). Явно гасим, чтобы не унести устаревшее значение.
-        is_snoozed = False
     aq['last_update_at'] = now.isoformat()
     if live_period:
         aq['live_period'] = live_period
-    if snoozed_until_str:
-        aq['snoozed_until'] = snoozed_until_str  # переносим snooze дальше, пока не истёк (см. is_snoozed выше)
 
     # ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя - "зона аэропорта в
     # 1.5 км, исключение для внуково 2.5 км"): самый внешний уровень больше
@@ -11870,34 +11901,27 @@ async def handle_airport_queue_snooze(callback_query: types.CallbackQuery):
     останавливает само
     отслеживание геопозиции (airport_queue_active остаётся включённым, счётчик
     км смены и т.п. продолжают работать) - только ставит snooze на
-    AIRPORT_QUEUE_SNOOZE_MINUTES минут для ТЕКУЩЕГО аэропорта/зоны: пуши по
+    AIRPORT_QUEUE_SNOOZE_MINUTES минут для ТЕКУЩЕГО аэропорта: пуши по
     расстоянию (process_airport_queue_ping) и таймерный пуш 30 минут
-    (check_airport_queue_timers) не шлются, пока snooze не истечёт или пока
-    водитель не сменит аэропорт/зону (тогда начнётся новый заход с нуля,
-    без унаследованного snooze - см. process_airport_queue_ping)."""
+    (check_airport_queue_timers) не шлются, пока snooze не истечёт.
+
+    ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя - у Шереметьево GPS в
+    зоне глушения "скачет" между терминалами B/C/D, из-за чего раньше
+    snooze для зоны B не действовал на зону D и наоборот, и пуши сыпались
+    заново при каждом скачке): callback_data теперь просто icao (без
+    зоны) и snooze хранится per-АЭРОПОРТ (get_airport_queue_snoozed_until/
+    set_airport_queue_snooze) - одно нажатие глушит пуши по ВСЕМ зонам
+    этого аэропорта сразу и переживает скачки GPS между ними."""
     user_id = callback_query.from_user.id
-    data = callback_query.data[len('aqsnooze_'):]
-    parts = data.split('_')
-    if len(parts) < 2:
+    icao = callback_query.data[len('aqsnooze_'):]
+    if not icao:
         await callback_query.answer("Ошибка!", show_alert=True)
         return
-    icao, zone_raw = parts[0], '_'.join(parts[1:])
-    zone_key = None if zone_raw == '-' else zone_raw
     state = user_state.get(user_id)
     if not state:
         await callback_query.answer("Начни заново с /start", show_alert=True)
         return
-    aq = dict(state.get('airport_queue') or {})
-    now = datetime.now(ZoneInfo('UTC'))
-    if (aq.get('icao'), aq.get('zone_key')) == (icao, zone_key):
-        # Всё ещё у того же аэропорта/зоны, для которых пришёл этот пуш -
-        # ставим snooze поверх текущего состояния (entered_levels и т.п. не
-        # трогаем, они не должны сбрасываться этой кнопкой).
-        aq['snoozed_until'] = (now + timedelta(minutes=AIRPORT_QUEUE_SNOOZE_MINUTES)).isoformat()
-        state['airport_queue'] = aq
-    # Если аэропорт/зона УЖЕ сменились с момента отправки этого пуша (водитель
-    # уехал и подъехал к другому терминалу/аэропорту, пока пуш висел
-    # непрочитанным) - snooze ставить некуда и незачем, тихо игнорируем.
+    set_airport_queue_snooze(state, icao, AIRPORT_QUEUE_SNOOZE_MINUTES)
     await callback_query.answer(f"Хорошо, не буду напоминать про очередь этого аэропорта ближайшие {AIRPORT_QUEUE_SNOOZE_MINUTES} минут 📍")
     try:
         await callback_query.message.edit_reply_markup(reply_markup=None)
@@ -12840,18 +12864,14 @@ async def check_airport_queue_timers():
                 zone_label = zone_data['label']
 
         # ДОБАВЛЕНО 21.09.2026: если водитель нажал "не буду вставать в
-        # очередь" для этого аэропорта/зоны и snooze ещё не истёк - не шлём
-        # и таймерный пуш 30 минут тоже (см. process_airport_queue_ping,
-        # тот же принцип). aq.get('pushed_30') при этом НЕ проставляем -
-        # чтобы пуш 30 минут всё-таки пришёл ПОСЛЕ истечения snooze, если
-        # 30 минут к тому моменту уже прошли.
-        snoozed_until_str = aq.get('snoozed_until')
-        is_snoozed = False
-        if snoozed_until_str:
-            try:
-                is_snoozed = now < datetime.fromisoformat(snoozed_until_str)
-            except Exception:
-                is_snoozed = False
+        # очередь" для этого аэропорта и snooze ещё не истёк - не шлём и
+        # таймерный пуш 30 минут тоже (см. process_airport_queue_ping, тот
+        # же принцип; snooze - per-аэропорт с 22.09.2026, см. комментарий у
+        # AIRPORT_QUEUE_SNOOZE_MINUTES). aq.get('pushed_30') при этом НЕ
+        # проставляем - чтобы пуш 30 минут всё-таки пришёл ПОСЛЕ истечения
+        # snooze, если 30 минут к тому моменту уже прошли.
+        snoozed_until = get_airport_queue_snoozed_until(state, icao)
+        is_snoozed = bool(snoozed_until and now < snoozed_until)
         # ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "и пропадает
         # если человек уже встал в очередь") - тот же принцип, что в
         # process_airport_queue_ping: если у водителя уже есть своя свежая
