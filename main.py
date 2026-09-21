@@ -856,20 +856,33 @@ SHARED_ORDER_EXPIRY_HOURS = 1  # предложение считается не�
 # независимо от текущей категории отправителя/получателя в боте. Порядок - как
 # попросил пользователь. 'passengers': True значит для этого класса показываем
 # поле "Пассажиров" (1-6), False - скрываем (не имеет смысла для курьера/груза).
+# 'max_passengers' - по прямой просьбе пользователя (22.09.2026): "в тарифах
+# минивэн ... сделать выбор до семи пассажиров а в остальных тарифах не более
+# пяти пассажиров" - у минивэнов лимит 7, у остальных пассажирских классов - 5,
+# для непассажирских классов поле не имеет смысла (None).
+# 'cargo_dims' - по прямой просьбе пользователя (22.09.2026): "в грузовых
+# вариантах исполнения указать размеры груза" - ТОЛЬКО у "Грузовая машина".
+# 'loader_choice' - по прямой просьбе пользователя (22.09.2026): "для пеших
+# курьеров и грузового авто ... сделать обязательно выбор нужен ли грузчик" -
+# у всех трёх непассажирских классов вопрос "Нужен грузчик?" ОБЯЗАТЕЛЕН.
 SHARE_ORDER_CAR_CLASSES = [
-    {'name': 'Пеший курьер', 'passengers': False},
-    {'name': 'Курьер на авто', 'passengers': False},
-    {'name': 'Грузовая машина', 'passengers': False},
-    {'name': 'Такси Эконом', 'passengers': True},
-    {'name': 'Такси Комфорт', 'passengers': True},
-    {'name': 'Такси Минивэн', 'passengers': True},
-    {'name': 'Бизнес седан', 'passengers': True},
-    {'name': 'Люкс седан', 'passengers': True},
-    {'name': 'Люкс джип', 'passengers': True},
-    {'name': 'Бизнес минивэн', 'passengers': True},
+    {'name': 'Пеший курьер', 'passengers': False, 'loader_choice': True},
+    {'name': 'Курьер на авто', 'passengers': False, 'loader_choice': True},
+    {'name': 'Грузовая машина', 'passengers': False, 'loader_choice': True, 'cargo_dims': True},
+    {'name': 'Такси Эконом', 'passengers': True, 'max_passengers': 5},
+    {'name': 'Такси Комфорт', 'passengers': True, 'max_passengers': 5},
+    {'name': 'Такси Минивэн', 'passengers': True, 'max_passengers': 7},
+    {'name': 'Бизнес седан', 'passengers': True, 'max_passengers': 5},
+    {'name': 'Люкс седан', 'passengers': True, 'max_passengers': 5},
+    {'name': 'Люкс джип', 'passengers': True, 'max_passengers': 5},
+    {'name': 'Бизнес минивэн', 'passengers': True, 'max_passengers': 7},
 ]
 SHARE_ORDER_CAR_CLASS_NAMES = [c['name'] for c in SHARE_ORDER_CAR_CLASSES]
 SHARE_ORDER_PASSENGERS_BY_CLASS = {c['name']: c['passengers'] for c in SHARE_ORDER_CAR_CLASSES}
+SHARE_ORDER_MAX_PASSENGERS_BY_CLASS = {c['name']: c.get('max_passengers') for c in SHARE_ORDER_CAR_CLASSES}
+SHARE_ORDER_LOADER_CHOICE_BY_CLASS = {c['name']: bool(c.get('loader_choice')) for c in SHARE_ORDER_CAR_CLASSES}
+SHARE_ORDER_CARGO_DIMS_BY_CLASS = {c['name']: bool(c.get('cargo_dims')) for c in SHARE_ORDER_CAR_CLASSES}
+SHARE_ORDER_CARGO_CLASS_NAME = 'Грузовая машина'  # единственный класс с полями размеров/объёма/веса груза
 
 # Человекочитаемые названия городов (ключ city - тот же, что в city_map ниже
 # и в AIRPORTS_INFO) - нужны для текста рассылки заказов и подтверждений.
@@ -1954,6 +1967,26 @@ def init_db():
     existing_columns = {row[1] for row in cursor.fetchall()}
     if 'client_phone' not in existing_columns:
         cursor.execute('ALTER TABLE shared_orders ADD COLUMN client_phone TEXT')
+    # Миграция (22.09.2026, по прямой просьбе пользователя): размеры/объём/вес
+    # груза - ТОЛЬКО для класса "Грузовая машина" (см. SHARE_ORDER_CARGO_CLASS_NAME),
+    # у остальных классов остаются NULL. "Нужен грузчик?" - обязательный
+    # выбор Да/Нет для трёх непассажирских классов (см.
+    # SHARE_ORDER_LOADER_CHOICE_BY_CLASS), храним как 'yes'/'no'. Тот же
+    # PRAGMA table_info + ADD COLUMN паттерн, что у client_phone выше -
+    # таблица shared_orders на Railway уже существует.
+    for col, coltype in (
+        ('cargo_length_cm', 'REAL'), ('cargo_width_cm', 'REAL'), ('cargo_height_cm', 'REAL'),
+        ('cargo_volume_m3', 'REAL'), ('cargo_weight_kg', 'REAL'),
+        ('loader_needed', 'TEXT'),
+        # Взаимное подтверждение выполнения заказа (по прямой просьбе
+        # пользователя, 22.09.2026: "чтобы было что оба приняли ...
+        # верификация обоих подтверждения прошла") - счётчик у принявшего
+        # увеличивается только когда ОБА поля не NULL, см.
+        # confirm_shared_order_done ниже.
+        ('sender_confirmed_at', 'DATETIME'), ('accepter_confirmed_at', 'DATETIME'),
+    ):
+        if col not in existing_columns:
+            cursor.execute(f'ALTER TABLE shared_orders ADD COLUMN {col} {coltype}')
     # "▶️ НАЧАТЬ СМЕНУ"/"⏹ Завершить смену" (по просьбе пользователя,
     # 20.09.2026) - история смен водителя: дата, длительность, км. Хранится
     # ОТДЕЛЬНОЙ таблицей (а не в user_states JSON), чтобы не перезаписывать
@@ -2012,6 +2045,15 @@ def init_db():
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    # Миграция (22.09.2026, по прямой просьбе пользователя) - счётчик
+    # выполненных заказов у водителя, который ПРИНЯЛ заказ (accepted_by в
+    # shared_orders), увеличивается только после взаимного подтверждения
+    # обеих сторон (см. confirm_shared_order_done/increment_completed_orders
+    # ниже). Тот же PRAGMA table_info + ADD COLUMN паттерн.
+    cursor.execute('PRAGMA table_info(driver_profiles)')
+    existing_columns = {row[1] for row in cursor.fetchall()}
+    if 'completed_orders_count' not in existing_columns:
+        cursor.execute('ALTER TABLE driver_profiles ADD COLUMN completed_orders_count INTEGER DEFAULT 0')
     # Миграция (20.09.2026): на уже существующей БД таблица shift_history
     # могла быть создана раньше без этой колонки - CREATE TABLE IF NOT
     # EXISTS её не добавит, поэтому добавляем отдельно, игнорируя ошибку
@@ -2240,13 +2282,14 @@ def get_driver_profile(user_id):
         init_db()
         conn = get_db_connection()
         cursor = conn.execute(
-            'SELECT full_name, tariff, car_model, car_plate FROM driver_profiles WHERE user_id = ?', (user_id,)
+            'SELECT full_name, tariff, car_model, car_plate, completed_orders_count FROM driver_profiles WHERE user_id = ?', (user_id,)
         )
         row = cursor.fetchone()
         conn.close()
         if not row:
             return None
-        return {'full_name': row[0] or '', 'tariff': row[1] or '', 'car_model': row[2] or '', 'car_plate': row[3] or ''}
+        return {'full_name': row[0] or '', 'tariff': row[1] or '', 'car_model': row[2] or '', 'car_plate': row[3] or '',
+                'completed_orders_count': row[4] or 0}
     except Exception as e:
         logger.error(f"❌ Не удалось прочитать профиль водителя {user_id}: {e}")
         return None
@@ -2366,13 +2409,17 @@ def format_user_contact(user):
     name = escape_md(user.full_name or 'без имени')
     return f"{name} (ник не задан, ID: {user.id})"
 
-def create_shared_order(sender_id, sender_contact, city, category, pickup, dropoff, price, car_class, passengers, client_phone=None):
+def create_shared_order(sender_id, sender_contact, city, category, pickup, dropoff, price, car_class, passengers,
+                         client_phone=None, loader_needed=None, cargo_length_cm=None, cargo_width_cm=None,
+                         cargo_height_cm=None, cargo_volume_m3=None, cargo_weight_kg=None):
     init_db()
     conn = get_db_connection()
     cursor = conn.execute(
-        'INSERT INTO shared_orders (sender_id, sender_contact, city, category, pickup, dropoff, price, car_class, passengers, client_phone) '
-        'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-        (sender_id, sender_contact, city, category, pickup, dropoff, price, car_class, passengers, client_phone)
+        'INSERT INTO shared_orders (sender_id, sender_contact, city, category, pickup, dropoff, price, car_class, '
+        'passengers, client_phone, loader_needed, cargo_length_cm, cargo_width_cm, cargo_height_cm, cargo_volume_m3, cargo_weight_kg) '
+        'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        (sender_id, sender_contact, city, category, pickup, dropoff, price, car_class, passengers, client_phone,
+         loader_needed, cargo_length_cm, cargo_width_cm, cargo_height_cm, cargo_volume_m3, cargo_weight_kg)
     )
     order_id = cursor.lastrowid
     conn.commit()
@@ -2381,7 +2428,9 @@ def create_shared_order(sender_id, sender_contact, city, category, pickup, dropo
 
 _SHARED_ORDER_FIELDS = ['order_id', 'sender_id', 'sender_contact', 'city', 'category', 'pickup', 'dropoff',
                          'price', 'car_class', 'passengers', 'status', 'accepted_by', 'accepted_by_contact',
-                         'created_at', 'accepted_at', 'client_phone']
+                         'created_at', 'accepted_at', 'client_phone', 'cargo_length_cm', 'cargo_width_cm',
+                         'cargo_height_cm', 'cargo_volume_m3', 'cargo_weight_kg', 'loader_needed',
+                         'sender_confirmed_at', 'accepter_confirmed_at']
 
 def get_shared_order(order_id):
     init_db()
@@ -2428,6 +2477,54 @@ def expire_shared_order(order_id):
     conn.execute("UPDATE shared_orders SET status='expired' WHERE order_id=? AND status='open'", (order_id,))
     conn.commit()
     conn.close()
+
+def increment_completed_orders(user_id):
+    """Счётчик выполненных заказов у ПРИНЯВШЕГО заказ водителя (по прямой
+    просьбе пользователя, 22.09.2026 - "пока без системы оценивания", просто
+    число). driver_profiles может ещё не иметь строки для этого user_id
+    (профиль не заполнялся) - ON CONFLICT ... DO UPDATE (тот же паттерн, что
+    save_driver_profile выше) создаёт строку с 1 или увеличивает существующую."""
+    try:
+        init_db()
+        conn = get_db_connection()
+        conn.execute(
+            'INSERT INTO driver_profiles (user_id, completed_orders_count) VALUES (?, 1) '
+            'ON CONFLICT(user_id) DO UPDATE SET completed_orders_count = COALESCE(completed_orders_count, 0) + 1',
+            (user_id,)
+        )
+        conn.commit()
+        cursor = conn.execute('SELECT completed_orders_count FROM driver_profiles WHERE user_id=?', (user_id,))
+        row = cursor.fetchone()
+        conn.close()
+        return row[0] if row else None
+    except Exception as e:
+        logger.error(f"❌ Не удалось увеличить счётчик выполненных заказов для {user_id}: {e}")
+        return None
+
+def confirm_shared_order_done(order_id, is_sender):
+    """Отмечает подтверждение ОДНОЙ стороны (sender_confirmed_at или
+    accepter_confirmed_at) - см. order_done_{order_id} ниже. Возвращает
+    (order_after, just_completed) - just_completed=True ТОЛЬКО когда это
+    подтверждение было ВТОРЫМ (обе колонки теперь не NULL) - взаимное
+    подтверждение по прямой просьбе пользователя (22.09.2026), защита от
+    накрутки счётчика одной стороной."""
+    init_db()
+    conn = get_db_connection()
+    now = datetime.now(ZoneInfo('UTC')).strftime('%Y-%m-%d %H:%M:%S')
+    col = 'sender_confirmed_at' if is_sender else 'accepter_confirmed_at'
+    cursor = conn.execute(f"UPDATE shared_orders SET {col}=? WHERE order_id=? AND {col} IS NULL", (now, order_id))
+    conn.commit()
+    newly_set = cursor.rowcount == 1  # False, если эта сторона уже подтверждала раньше (повторный тап на кнопку)
+    conn.close()
+    order = get_shared_order(order_id)
+    just_completed = bool(newly_set and order and order['sender_confirmed_at'] and order['accepter_confirmed_at'])
+    if just_completed and order['status'] != 'completed':
+        conn = get_db_connection()
+        conn.execute("UPDATE shared_orders SET status='completed' WHERE order_id=?", (order_id,))
+        conn.commit()
+        conn.close()
+        order = get_shared_order(order_id)
+    return order, just_completed
 
 def was_high_demand_alert_sent(icao, relevant_class, target_date, target_hour):
     """Проверяет, уже отправляли ли пуш про повышенный спрос именно для этого
@@ -4001,24 +4098,50 @@ def shared_order_car_class_keyboard():
     buttons.append([KeyboardButton(text="❌ ОТМЕНА")])
     return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=buttons)
 
-def shared_order_passengers_keyboard():
-    buttons = [
-        [KeyboardButton(text="1"), KeyboardButton(text="2"), KeyboardButton(text="3")],
-        [KeyboardButton(text="4"), KeyboardButton(text="5"), KeyboardButton(text="6")],
-        [KeyboardButton(text="❌ ОТМЕНА")],
-    ]
+def shared_order_passengers_keyboard(car_class=None):
+    # Лимит пассажиров зависит от класса - по прямой просьбе пользователя
+    # (22.09.2026): у минивэнов до 7, у остальных пассажирских классов до 5
+    # (см. SHARE_ORDER_MAX_PASSENGERS_BY_CLASS).
+    max_pax = SHARE_ORDER_MAX_PASSENGERS_BY_CLASS.get(car_class) or 5
+    nums = list(range(1, max_pax + 1))
+    rows = [nums[i:i + 3] for i in range(0, len(nums), 3)]
+    buttons = [[KeyboardButton(text=str(n)) for n in row] for row in rows]
+    buttons.append([KeyboardButton(text="❌ ОТМЕНА")])
     return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=buttons)
+
+def shared_order_yes_no_keyboard():
+    return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[
+        [KeyboardButton(text="Да"), KeyboardButton(text="Нет")],
+        [KeyboardButton(text="❌ ОТМЕНА")],
+    ])
 
 SHARED_ORDER_STEP_PROMPTS = {
     'pickup': "📍 Введи адрес *подачи* (точка А):",
     'dropoff': "🏁 Введи адрес *прибытия* (точка Б):",
     'price': "💰 Введи стоимость поездки в рублях (только число):",
     'client_phone': "📱 Введи номер телефона клиента (его передадим водителю, который примет заказ). Если номера нет - пришли *-*:",
+    'loader_needed': "🧑‍🔧 Нужен грузчик? Выбери *Да* или *Нет*:",
+    'cargo_length': "📏 Введи длину груза в сантиметрах (только число), или *-*, если неизвестно:",
+    'cargo_width': "📏 Введи ширину груза в сантиметрах (только число), или *-*, если неизвестно:",
+    'cargo_height': "📏 Введи высоту груза в сантиметрах (только число), или *-*, если неизвестно:",
+    'cargo_volume': "📦 Введи объём груза в м³ (только число), или *-*, если неизвестно:",
+    'cargo_weight': "⚖️ Введи вес груза в кг (только число), или *-*, если неизвестно:",
 }
 
 async def show_shared_order_confirmation(message, data, category, city):
     city_name = CITY_DISPLAY_NAMES.get(city, city)
     passengers_line = f"👥 Пассажиров: {data['passengers']}\n" if data.get('passengers') else ""
+    loader_line = ""
+    if data.get('loader_needed') is not None:
+        loader_line = f"🧑‍🔧 Нужен грузчик: {'Да' if data['loader_needed'] == 'yes' else 'Нет'}\n"
+    cargo_line = ""
+    if any(data.get(k) for k in ('cargo_length_cm', 'cargo_width_cm', 'cargo_height_cm', 'cargo_volume_m3', 'cargo_weight_kg')):
+        dims = ''
+        if data.get('cargo_length_cm') or data.get('cargo_width_cm') or data.get('cargo_height_cm'):
+            dims = f"{data.get('cargo_length_cm') or '?'}×{data.get('cargo_width_cm') or '?'}×{data.get('cargo_height_cm') or '?'} см"
+        parts = [p for p in [dims, f"{data['cargo_volume_m3']} м³" if data.get('cargo_volume_m3') else '',
+                              f"{data['cargo_weight_kg']} кг" if data.get('cargo_weight_kg') else ''] if p]
+        cargo_line = f"📦 Груз: {', '.join(parts)}\n"
     text = (
         "*Проверь заказ перед отправкой:*\n\n"
         f"📍 Подача: {escape_md(data['pickup'])}\n"
@@ -4026,6 +4149,8 @@ async def show_shared_order_confirmation(message, data, category, city):
         f"💰 Стоимость: {data['price']} ₽\n"
         f"🚘 Класс: {data['car_class']}\n"
         f"{passengers_line}"
+        f"{loader_line}"
+        f"{cargo_line}"
         f"📱 Телефон клиента: {escape_md(data['client_phone']) if data.get('client_phone') else 'не указан'}\n\n"
         f"_Разошлём водителям города {city_name}. Предложение будет "
         f"действовать {SHARED_ORDER_EXPIRY_HOURS} час, пока кто-то не примет._"
@@ -4117,12 +4242,31 @@ def share_order_webapp_html(category=None):
   <label>🚘 Класс автомобиля</label>
   <div class="pills" id="carClassPills"></div>
   <div id="paxSection">
-    <label>👥 Пассажиров</label>
+    <label>👥 Пассажиров (максимум <span id="paxMax">5</span>)</label>
     <div class="stepper">
       <button type="button" id="paxMinus">−</button>
       <span id="paxVal">1</span>
       <button type="button" id="paxPlus">+</button>
     </div>
+  </div>
+  <div id="loaderSection">
+    <label>🧑‍🔧 Нужен грузчик?</label>
+    <div class="pills" id="loaderPills">
+      <div class="pill" data-v="yes">Да</div>
+      <div class="pill" data-v="no">Нет</div>
+    </div>
+  </div>
+  <div id="cargoSection">
+    <label>📏 Размеры груза, см (длина / ширина / высота)</label>
+    <div style="display:flex; gap:8px;">
+      <input type="number" id="cargoLength" placeholder="Длина" min="0">
+      <input type="number" id="cargoWidth" placeholder="Ширина" min="0">
+      <input type="number" id="cargoHeight" placeholder="Высота" min="0">
+    </div>
+    <label>📦 Объём груза, м³</label>
+    <input type="number" id="cargoVolume" placeholder="Необязательно" min="0" step="0.01">
+    <label>⚖️ Вес груза, кг</label>
+    <input type="number" id="cargoWeight" placeholder="Необязательно" min="0" step="0.1">
   </div>
   <label>📱 Телефон клиента (необязательно)</label>
   <input type="tel" id="clientPhone" placeholder="Если есть">
@@ -4139,13 +4283,29 @@ def share_order_webapp_html(category=None):
   const carClasses = """ + car_classes_json + """;
   let carClass = (carClasses[0] || {}).name || '';
   let pax = 1;
+  let loaderNeeded = null;  // 'yes' | 'no' | null - обязателен для классов с loader_choice
 
-  function classHasPax(name) {
-    const c = carClasses.find(c => c.name === name);
-    return !!(c && c.passengers);
+  function classInfo(name) {
+    return carClasses.find(c => c.name === name) || {};
   }
-  function updatePaxVisibility() {
+  function classHasPax(name) { return !!classInfo(name).passengers; }
+  function classMaxPax(name) { return classInfo(name).max_passengers || 5; }
+  function classNeedsLoader(name) { return !!classInfo(name).loader_choice; }
+  function classHasCargo(name) { return !!classInfo(name).cargo_dims; }
+
+  function updateSectionsVisibility() {
     document.getElementById('paxSection').style.display = classHasPax(carClass) ? 'block' : 'none';
+    document.getElementById('loaderSection').style.display = classNeedsLoader(carClass) ? 'block' : 'none';
+    document.getElementById('cargoSection').style.display = classHasCargo(carClass) ? 'block' : 'none';
+    if (classHasPax(carClass)) {
+      const maxPax = classMaxPax(carClass);
+      document.getElementById('paxMax').textContent = maxPax;
+      // По прямой просьбе пользователя (22.09.2026) - при переключении с
+      // класса на 7 мест на класс с лимитом 5, если текущее значение больше
+      // нового максимума, подрезаем его.
+      if (pax > maxPax) { pax = maxPax; document.getElementById('paxVal').textContent = pax; }
+    }
+    if (!classNeedsLoader(carClass)) loaderNeeded = null;
   }
 
   const pillsEl = document.getElementById('carClassPills');
@@ -4153,12 +4313,18 @@ def share_order_webapp_html(category=None):
   pillsEl.querySelectorAll('.pill').forEach(p => p.addEventListener('click', () => {
     carClass = p.dataset.t;
     pillsEl.querySelectorAll('.pill').forEach(x => x.classList.toggle('active', x === p));
-    updatePaxVisibility();
+    updateSectionsVisibility();
   }));
-  updatePaxVisibility();
+  updateSectionsVisibility();
+
+  const loaderPillsEl = document.getElementById('loaderPills');
+  loaderPillsEl.querySelectorAll('.pill').forEach(p => p.addEventListener('click', () => {
+    loaderNeeded = p.dataset.v;
+    loaderPillsEl.querySelectorAll('.pill').forEach(x => x.classList.toggle('active', x === p));
+  }));
 
   document.getElementById('paxMinus').addEventListener('click', () => { if (pax > 1) { pax--; document.getElementById('paxVal').textContent = pax; } });
-  document.getElementById('paxPlus').addEventListener('click', () => { if (pax < 8) { pax++; document.getElementById('paxVal').textContent = pax; } });
+  document.getElementById('paxPlus').addEventListener('click', () => { const maxPax = classMaxPax(carClass); if (pax < maxPax) { pax++; document.getElementById('paxVal').textContent = pax; } });
 
   document.getElementById('submitBtn').addEventListener('click', async () => {
     const errEl = document.getElementById('err');
@@ -4170,6 +4336,16 @@ def share_order_webapp_html(category=None):
     if (!pickup || !dropoff) { errEl.textContent = 'Заполни адреса подачи и прибытия.'; return; }
     if (!price || Number(price) <= 0) { errEl.textContent = 'Укажи стоимость поездки.'; return; }
     if (!carClass) { errEl.textContent = 'Выбери класс автомобиля.'; return; }
+    // "Нужен грузчик?" ОБЯЗАТЕЛЕН для классов с loader_choice (по прямой
+    // просьбе пользователя, 22.09.2026) - блокируем отправку без ответа.
+    if (classNeedsLoader(carClass) && !loaderNeeded) { errEl.textContent = 'Укажи, нужен ли грузчик.'; return; }
+
+    const cargoLength = document.getElementById('cargoLength').value.trim();
+    const cargoWidth = document.getElementById('cargoWidth').value.trim();
+    const cargoHeight = document.getElementById('cargoHeight').value.trim();
+    const cargoVolume = document.getElementById('cargoVolume').value.trim();
+    const cargoWeight = document.getElementById('cargoWeight').value.trim();
+    const hasCargo = classHasCargo(carClass);
 
     const btn = document.getElementById('submitBtn');
     btn.disabled = true;
@@ -4178,7 +4354,16 @@ def share_order_webapp_html(category=None):
       const resp = await fetch('""" + SHARE_ORDER_SUBMIT_API_PATH + """', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': (tg ? tg.initData : '') },
-        body: JSON.stringify({ pickup, dropoff, price, car_class: carClass, passengers: classHasPax(carClass) ? pax : null, client_phone: clientPhone || null }),
+        body: JSON.stringify({
+          pickup, dropoff, price, car_class: carClass, passengers: classHasPax(carClass) ? pax : null,
+          client_phone: clientPhone || null,
+          loader_needed: classNeedsLoader(carClass) ? loaderNeeded : null,
+          cargo_length_cm: hasCargo && cargoLength ? cargoLength : null,
+          cargo_width_cm: hasCargo && cargoWidth ? cargoWidth : null,
+          cargo_height_cm: hasCargo && cargoHeight ? cargoHeight : null,
+          cargo_volume_m3: hasCargo && cargoVolume ? cargoVolume : null,
+          cargo_weight_kg: hasCargo && cargoWeight ? cargoWeight : null,
+        }),
       });
       const data = await resp.json();
       if (!resp.ok || data.error) {
@@ -4236,6 +4421,12 @@ async def handle_share_order_submit_api(request):
     category = state['category']
     city = state['city']
 
+    def parse_float(v):
+        try:
+            return float(v) if v not in (None, '') else None
+        except (TypeError, ValueError):
+            return None
+
     try:
         body = await request.json()
         pickup = str(body.get('pickup') or '').strip()
@@ -4246,12 +4437,26 @@ async def handle_share_order_submit_api(request):
         passengers = int(passengers_raw) if passengers_raw not in (None, '') else 0
         client_phone = body.get('client_phone')
         client_phone = str(client_phone).strip() if client_phone else None
+        loader_needed = body.get('loader_needed')
+        loader_needed = loader_needed if loader_needed in ('yes', 'no') else None
+        cargo_length_cm = parse_float(body.get('cargo_length_cm'))
+        cargo_width_cm = parse_float(body.get('cargo_width_cm'))
+        cargo_height_cm = parse_float(body.get('cargo_height_cm'))
+        cargo_volume_m3 = parse_float(body.get('cargo_volume_m3'))
+        cargo_weight_kg = parse_float(body.get('cargo_weight_kg'))
     except Exception:
         return web.json_response({'error': 'invalid_body'}, status=400)
 
     class_requires_passengers = SHARE_ORDER_PASSENGERS_BY_CLASS.get(car_class)
+    max_pax = SHARE_ORDER_MAX_PASSENGERS_BY_CLASS.get(car_class) or 5
+    class_requires_loader = SHARE_ORDER_LOADER_CHOICE_BY_CLASS.get(car_class)
+    # Серверная валидация (дублирует клиентскую в share_order_webapp_html,
+    # но НИКОГДА не доверяем только клиенту) - по прямой просьбе пользователя
+    # (22.09.2026): лимит пассажиров по классу и обязательный "Нужен грузчик?"
+    # для непассажирских классов.
     if (not pickup or not dropoff or not price_digits or car_class not in SHARE_ORDER_CAR_CLASS_NAMES
-            or (class_requires_passengers and passengers <= 0)):
+            or (class_requires_passengers and (passengers <= 0 or passengers > max_pax))
+            or (class_requires_loader and not loader_needed)):
         return web.json_response({'error': 'invalid_body'}, status=400)
 
     # tg_user - тот же {id, first_name, username, ...}, что Telegram кладёт в
@@ -4259,9 +4464,19 @@ async def handle_share_order_submit_api(request):
     # что format_user_contact(callback_query.from_user) у текстового флоу.
     sender_contact = tg_user.get('username') and f"@{tg_user['username']}" or tg_user.get('first_name') or str(user_id)
     passengers_str = str(passengers) if class_requires_passengers else ''
+    if not SHARE_ORDER_CARGO_DIMS_BY_CLASS.get(car_class):
+        # Размеры/объём/вес - только у "Грузовая машина" (по прямой просьбе
+        # пользователя, 22.09.2026), у остальных классов игнорируем, даже
+        # если клиент вдруг их прислал.
+        cargo_length_cm = cargo_width_cm = cargo_height_cm = cargo_volume_m3 = cargo_weight_kg = None
     data = {'pickup': pickup, 'dropoff': dropoff, 'price': price_digits, 'car_class': car_class,
-            'passengers': passengers_str, 'client_phone': client_phone}
-    order_id = create_shared_order(user_id, sender_contact, city, category, pickup, dropoff, price_digits, car_class, passengers_str, client_phone)
+            'passengers': passengers_str, 'client_phone': client_phone, 'loader_needed': loader_needed,
+            'cargo_length_cm': cargo_length_cm, 'cargo_width_cm': cargo_width_cm, 'cargo_height_cm': cargo_height_cm,
+            'cargo_volume_m3': cargo_volume_m3, 'cargo_weight_kg': cargo_weight_kg}
+    order_id = create_shared_order(
+        user_id, sender_contact, city, category, pickup, dropoff, price_digits, car_class, passengers_str,
+        client_phone, loader_needed, cargo_length_cm, cargo_width_cm, cargo_height_cm, cargo_volume_m3, cargo_weight_kg,
+    )
     try:
         sent = await broadcast_shared_order(order_id, data, city, category, user_id)
     except Exception:
@@ -4350,9 +4565,17 @@ async def shared_order_flow(message: types.Message):
         if SHARE_ORDER_PASSENGERS_BY_CLASS.get(text):
             draft['step'] = 'passengers'
             state['order_draft'] = draft
-            await message.answer("👥 Сколько пассажиров?", reply_markup=shared_order_passengers_keyboard())
+            max_pax = SHARE_ORDER_MAX_PASSENGERS_BY_CLASS.get(text) or 5
+            await message.answer(f"👥 Сколько пассажиров? (максимум {max_pax})", reply_markup=shared_order_passengers_keyboard(text))
+        elif SHARE_ORDER_LOADER_CHOICE_BY_CLASS.get(text):
+            # Пеший курьер/Курьер на авто/Грузовая машина - "Пассажиров" не
+            # имеет смысла, но "Нужен грузчик?" ОБЯЗАТЕЛЕН (по прямой просьбе
+            # пользователя, 22.09.2026).
+            draft['data']['passengers'] = ''
+            draft['step'] = 'loader_needed'
+            state['order_draft'] = draft
+            await message.answer(SHARED_ORDER_STEP_PROMPTS['loader_needed'], reply_markup=shared_order_yes_no_keyboard(), parse_mode='Markdown')
         else:
-            # Для курьера/груза поле "Пассажиров" не имеет смысла - пропускаем шаг.
             draft['data']['passengers'] = ''
             draft['step'] = 'client_phone'
             state['order_draft'] = draft
@@ -4361,14 +4584,60 @@ async def shared_order_flow(message: types.Message):
 
     if step == 'passengers':
         digits = re.sub(r'[^\d]', '', text)
-        if not digits or int(digits) <= 0:
-            await message.answer("Введи число пассажиров (например 2) или выбери кнопкой 👇", reply_markup=shared_order_passengers_keyboard())
+        max_pax = SHARE_ORDER_MAX_PASSENGERS_BY_CLASS.get(draft['data'].get('car_class')) or 5
+        if not digits or int(digits) <= 0 or int(digits) > max_pax:
+            await message.answer(f"Введи число пассажиров от 1 до {max_pax} или выбери кнопкой 👇", reply_markup=shared_order_passengers_keyboard(draft['data'].get('car_class')))
             return
         draft['data']['passengers'] = digits
         draft['step'] = 'client_phone'
         state['order_draft'] = draft
         await message.answer(SHARED_ORDER_STEP_PROMPTS['client_phone'], reply_markup=shared_order_cancel_keyboard(), parse_mode='Markdown')
         return
+
+    if step == 'loader_needed':
+        if text not in ('Да', 'Нет'):
+            await message.answer("Выбери кнопкой «Да» или «Нет» 👇", reply_markup=shared_order_yes_no_keyboard())
+            return
+        draft['data']['loader_needed'] = 'yes' if text == 'Да' else 'no'
+        if SHARE_ORDER_CARGO_DIMS_BY_CLASS.get(draft['data'].get('car_class')):
+            draft['step'] = 'cargo_length'
+            state['order_draft'] = draft
+            await message.answer(SHARED_ORDER_STEP_PROMPTS['cargo_length'], reply_markup=shared_order_cancel_keyboard(), parse_mode='Markdown')
+        else:
+            draft['step'] = 'client_phone'
+            state['order_draft'] = draft
+            await message.answer(SHARED_ORDER_STEP_PROMPTS['client_phone'], reply_markup=shared_order_cancel_keyboard(), parse_mode='Markdown')
+        return
+
+    # Шаги размеров/объёма/веса груза - ТОЛЬКО для "Грузовая машина" (см.
+    # SHARE_ORDER_CARGO_DIMS_BY_CLASS), необязательные (можно прислать "-").
+    cargo_step_chain = [
+        ('cargo_length', 'cargo_length_cm', 'cargo_width'),
+        ('cargo_width', 'cargo_width_cm', 'cargo_height'),
+        ('cargo_height', 'cargo_height_cm', 'cargo_volume'),
+        ('cargo_volume', 'cargo_volume_m3', 'cargo_weight'),
+        ('cargo_weight', 'cargo_weight_kg', 'client_phone'),
+    ]
+    for cur_step, field, next_step in cargo_step_chain:
+        if step == cur_step:
+            if text == '-':
+                draft['data'][field] = None
+            else:
+                normalized = text.replace(',', '.')
+                try:
+                    draft['data'][field] = float(re.sub(r'[^\d.]', '', normalized)) if re.sub(r'[^\d.]', '', normalized) else None
+                except ValueError:
+                    draft['data'][field] = None
+                if draft['data'][field] is None:
+                    await message.answer("Не понял число - пришли просто цифры (например 120.5) или *-*, если неизвестно:", parse_mode='Markdown')
+                    return
+            draft['step'] = next_step
+            state['order_draft'] = draft
+            if next_step == 'client_phone':
+                await message.answer(SHARED_ORDER_STEP_PROMPTS['client_phone'], reply_markup=shared_order_cancel_keyboard(), parse_mode='Markdown')
+            else:
+                await message.answer(SHARED_ORDER_STEP_PROMPTS[next_step], reply_markup=shared_order_cancel_keyboard(), parse_mode='Markdown')
+            return
 
     if step == 'client_phone':
         if not text:
@@ -4383,6 +4652,21 @@ async def shared_order_flow(message: types.Message):
     # step == 'confirm' - здесь ждём нажатия инлайн-кнопок на сообщении выше,
     # а не текста; "❌ ОТМЕНА" обработана в самом начале функции.
     await message.answer("Нажми «📤 Отправить заказ» или «❌ Отменить» на сообщении выше 👆")
+
+def format_shared_order_cargo_line(data):
+    """Строка "📦 Груз: ..." для confirm/broadcast/accept-текстов (по прямой
+    просьбе пользователя, 22.09.2026: размеры/объём/вес - ТОЛЬКО у
+    "Грузовая машина") - показывается, только если хоть одно из полей задано;
+    работает и со словарём черновика (order_draft['data']), и с
+    dict-представлением строки БД (get_shared_order), т.к. ключи одинаковые."""
+    if not any(data.get(k) for k in ('cargo_length_cm', 'cargo_width_cm', 'cargo_height_cm', 'cargo_volume_m3', 'cargo_weight_kg')):
+        return ""
+    dims = ''
+    if data.get('cargo_length_cm') or data.get('cargo_width_cm') or data.get('cargo_height_cm'):
+        dims = f"{data.get('cargo_length_cm') or '?'}×{data.get('cargo_width_cm') or '?'}×{data.get('cargo_height_cm') or '?'} см"
+    parts = [p for p in [dims, f"{data['cargo_volume_m3']} м³" if data.get('cargo_volume_m3') else '',
+                          f"{data['cargo_weight_kg']} кг" if data.get('cargo_weight_kg') else ''] if p]
+    return f"📦 Груз: {', '.join(parts)}\n"
 
 async def broadcast_shared_order(order_id, data, city, category, sender_id):
     """Рассылает объявление о заказе ВСЕМ водителям того же города (любой
@@ -4400,13 +4684,17 @@ async def broadcast_shared_order(order_id, data, city, category, sender_id):
         return 0
 
     passengers_line = f"👥 Пассажиров: {data['passengers']}\n" if data.get('passengers') else ""
+    loader_line = f"🧑‍🔧 Нужен грузчик: {'Да' if data.get('loader_needed') == 'yes' else 'Нет'}\n" if data.get('loader_needed') else ""
+    cargo_line = format_shared_order_cargo_line(data)
     text = (
         f"🔄 *Заказ от другого водителя* (#{order_id})\n\n"
         f"📍 Подача: {escape_md(data['pickup'])}\n"
         f"🏁 Прибытие: {escape_md(data['dropoff'])}\n"
         f"💰 Стоимость: {data['price']} ₽\n"
         f"🚘 Класс: {data['car_class']}\n"
-        f"{passengers_line}\n"
+        f"{passengers_line}"
+        f"{loader_line}"
+        f"{cargo_line}\n"
         f"_Предложение действует {SHARED_ORDER_EXPIRY_HOURS} час. Кто первый примет - получит контакт отправителя._"
     )
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -4446,7 +4734,12 @@ async def confirm_send_shared_order(callback_query: types.CallbackQuery):
     city_name = CITY_DISPLAY_NAMES.get(city, city)
 
     sender_contact = format_user_contact(callback_query.from_user)
-    order_id = create_shared_order(user_id, sender_contact, city, category, data['pickup'], data['dropoff'], data['price'], data['car_class'], data['passengers'], data.get('client_phone'))
+    order_id = create_shared_order(
+        user_id, sender_contact, city, category, data['pickup'], data['dropoff'], data['price'], data['car_class'],
+        data['passengers'], data.get('client_phone'), data.get('loader_needed'),
+        data.get('cargo_length_cm'), data.get('cargo_width_cm'), data.get('cargo_height_cm'),
+        data.get('cargo_volume_m3'), data.get('cargo_weight_kg'),
+    )
     state.pop('order_draft', None)
 
     await callback_query.message.edit_text(f"⏳ Отправляю заказ #{order_id} водителям города {city_name}...")
@@ -4494,12 +4787,21 @@ async def accept_shared_order(callback_query: types.CallbackQuery):
     )
     if order.get('passengers'):
         text += f"👥 Пассажиров: {order['passengers']}\n"
+    if order.get('loader_needed'):
+        text += f"🧑‍🔧 Нужен грузчик: {'Да' if order['loader_needed'] == 'yes' else 'Нет'}\n"
+    text += format_shared_order_cargo_line(order)
     if order.get('client_phone'):
         # Телефон клиента - не в общей рассылке (см. broadcast_shared_order),
         # виден только тому, кто реально принял заказ.
         text += f"📱 Телефон клиента: {escape_md(order['client_phone'])}\n"
     text += f"\n📞 Свяжитесь с отправителем: {order['sender_contact']}"
-    await callback_query.message.edit_text(text, parse_mode='Markdown')
+    # "✅ ЗАКАЗ ВЫПОЛНЕН" - по прямой просьбе пользователя (22.09.2026),
+    # взаимное подтверждение выполнения (см. order_done_{order_id} ниже) -
+    # кнопка есть и здесь (у принявшего), и в уведомлении отправителя ниже.
+    done_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ ЗАКАЗ ВЫПОЛНЕН", callback_data=f"order_done_{order_id}")]
+    ])
+    await callback_query.message.edit_text(text, reply_markup=done_keyboard, parse_mode='Markdown')
     await callback_query.answer("Заказ принят!")
 
     if bot:
@@ -4507,7 +4809,7 @@ async def accept_shared_order(callback_query: types.CallbackQuery):
             await bot.send_message(
                 order['sender_id'],
                 f"🎉 *Ваш заказ #{order_id} принят!*\n\n📞 Свяжитесь с водителем: {accepted_by_contact}",
-                parse_mode='Markdown'
+                reply_markup=done_keyboard, parse_mode='Markdown'
             )
         except Exception as e:
             logger.warning(f"⚠️ Не удалось уведомить отправителя {order['sender_id']} о принятии заказа #{order_id}: {e}")
@@ -4516,6 +4818,50 @@ async def accept_shared_order(callback_query: types.CallbackQuery):
 async def decline_shared_order(callback_query: types.CallbackQuery):
     await callback_query.message.edit_text("Вы отказались от этого заказа.")
     await callback_query.answer()
+
+@router.callback_query(lambda c: c.data.startswith('order_done_'))
+async def order_done_callback(callback_query: types.CallbackQuery):
+    """"✅ ЗАКАЗ ВЫПОЛНЕН" - по прямой просьбе пользователя (22.09.2026):
+    "чтобы было что оба приняли ... верификация обоих подтверждения прошла" -
+    счётчик у ПРИНЯВШЕГО (accepted_by) увеличивается только когда ОБЕ
+    стороны нажали эту кнопку (см. confirm_shared_order_done/
+    increment_completed_orders). Кнопка есть и у отправителя, и у принявшего
+    (см. accept_shared_order) - определяем, кто именно нажал, по
+    from_user.id относительно order['sender_id']/order['accepted_by']."""
+    order_id = int(callback_query.data[len('order_done_'):])
+    order = get_shared_order(order_id)
+    if not order or not order.get('accepted_by'):
+        await callback_query.answer("Заказ не найден", show_alert=True)
+        return
+    clicker_id = callback_query.from_user.id
+    if clicker_id == order['sender_id']:
+        is_sender = True
+    elif clicker_id == order['accepted_by']:
+        is_sender = False
+    else:
+        await callback_query.answer("Это не ваш заказ", show_alert=True)
+        return
+
+    order_after, just_completed = confirm_shared_order_done(order_id, is_sender)
+    other_confirmed = bool(order_after['accepter_confirmed_at'] if is_sender else order_after['sender_confirmed_at'])
+
+    if just_completed or other_confirmed:
+        await callback_query.message.edit_text(f"✅ Заказ #{order_id} завершён! Обе стороны подтвердили выполнение.")
+    else:
+        await callback_query.message.edit_text("✅ Отмечено, ждём подтверждения второй стороны.")
+    await callback_query.answer("Отмечено!")
+
+    if just_completed and bot:
+        new_count = increment_completed_orders(order['accepted_by'])
+        count_text = f" Выполненных заказов: {new_count}" if new_count is not None else ""
+        try:
+            await bot.send_message(order['accepted_by'], f"🎉 Заказ засчитан!{count_text}")
+        except Exception as e:
+            logger.warning(f"⚠️ Не удалось уведомить принявшего {order['accepted_by']} о засчитанном заказе #{order_id}: {e}")
+        try:
+            await bot.send_message(order['sender_id'], f"✅ Обе стороны подтвердили выполнение заказа #{order_id}.")
+        except Exception as e:
+            logger.warning(f"⚠️ Не удалось уведомить отправителя {order['sender_id']} о завершении заказа #{order_id}: {e}")
 
 # ==================== МОДУЛЬ "ИНСТРУМЕНТЫ ВОДИТЕЛЯ" - хендлеры ====================
 
@@ -8712,7 +9058,7 @@ async def handle_cabinet_data_api(request):
         hours_series = [round(shifts_by_day.get(d, {}).get('minutes', 0) / 60, 1) for d in days_axis]
 
         result = {
-            'profile': get_driver_profile(user_id) or {'full_name': '', 'tariff': '', 'car_model': '', 'car_plate': ''},
+            'profile': get_driver_profile(user_id) or {'full_name': '', 'tariff': '', 'car_model': '', 'car_plate': '', 'completed_orders_count': 0},
             'totals': {
                 'today_hours': round(today_minutes / 60, 1), 'today_km': round(today_km),
                 'today_net_profit': round(today_net_profit),
@@ -9387,6 +9733,11 @@ def cabinet_webapp_html():
     if (profile.tariff) subParts.push(profile.tariff);
     if (profile.car_model) subParts.push(profile.car_model);
     if (profile.car_plate) subParts.push(profile.car_plate);
+    // Счётчик выполненных заказов (см. increment_completed_orders/
+    // order_done_{order_id} - по прямой просьбе пользователя, 22.09.2026,
+    // "пока без системы оценивания", просто число, растёт только после
+    // взаимного подтверждения обеих сторон).
+    if (profile.completed_orders_count) subParts.push('Выполнено заказов: ' + profile.completed_orders_count);
     const sub = document.getElementById('profileSub');
     sub.innerHTML = subParts.length ? subParts.map(p => `<span>${p}</span>`).join('') : '<span>Заполни анкету →</span>';
 
