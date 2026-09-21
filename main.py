@@ -14483,61 +14483,181 @@ SUPPORT_FAQ_ITEMS = [
     ),
 ]
 
-def support_faq_menu_keyboard():
+# ДОБАВЛЕНО 22.09.2026 (по просьбе пользователя - "давай базово подготовим
+# вопросы и ответы, с этого сайта ответы на вопросы", ссылка на
+# pro.yandex.ru) - ВТОРАЯ категория FAQ, общие вопросы про работу в такси
+# через Яндекс Про (а не про сам бот Taxi Helper) - собраны по открытой
+# информации с pro.yandex.ru (лендинг + "Центр для водителей: FAQ"). Это
+# СПРАВОЧНАЯ информация общего характера, НЕ привязанная к конкретному
+# аккаунту/парку водителя - может отличаться в деталях по городам/паркам и
+# меняться со временем на стороне Яндекса, поэтому у каждого ответа
+# отдельная пометка с источником и рекомендацией уточнять в самом Яндекс Про
+# по вопросам, специфичным для конкретного аккаунта (бонусы/выплаты/доступ).
+YANDEX_PRO_FAQ_SOURCE_NOTE = "\n\n_Общая информация с pro.yandex.ru - по вопросам своего аккаунта (бонусы, выплаты, доступ) обращайся в поддержку Яндекс Про прямо в приложении._"
+YANDEX_PRO_FAQ_ITEMS = [
+    (
+        "🚕 Как устроиться в такси через Яндекс Про?",
+        "Как устроиться в такси через Яндекс Про?",
+        "Два варианта: прямое партнёрство с сервисом как самозанятый/ИП, либо трудоустройство "
+        "через один из партнёрских таксопарков. График свободный - сам решаешь, сколько работать, "
+        "от пары часов в день до полной занятости." + YANDEX_PRO_FAQ_SOURCE_NOTE
+    ),
+    (
+        "📄 Какие документы нужны?",
+        "Какие документы нужны для работы?",
+        "Водительское удостоверение и свидетельство о регистрации транспортного средства - "
+        "обязательно иметь при себе на очных проверках/визитах. Для оформления партнёрства "
+        "дополнительно нужен статус самозанятого или ИП." + YANDEX_PRO_FAQ_SOURCE_NOTE
+    ),
+    (
+        "🔓 Пропал доступ к заказам, что делать?",
+        "Пропал доступ к заказам, что делать?",
+        "Ехать в офис необязательно - в приложении Яндекс Про: «Профиль» → «Тарифы» → выбери нужный "
+        "тариф и пройди курс/тестирование заново, доступ восстановится." + YANDEX_PRO_FAQ_SOURCE_NOTE
+    ),
+    (
+        "💰 Когда начисляются бонусы?",
+        "Когда начисляются бонусы и что делать, если выплата задерживается?",
+        "Действует система бонусов для активных партнёров сверх обычных выплат за заказы, но точные "
+        "сроки начисления зависят от условий конкретной акции/парка. Если бонус или выплата "
+        "задерживается - это вопрос к поддержке Яндекс Про (в приложении) или личному визиту в Центр "
+        "для водителей, самостоятельно тут не решить." + YANDEX_PRO_FAQ_SOURCE_NOTE
+    ),
+    (
+        "🚗 Как получить/арендовать машину?",
+        "Как получить или арендовать машину для работы?",
+        "Через партнёрскую сеть «Яндекс Гараж» - аренда от 1 дня, скидки до 26%." + YANDEX_PRO_FAQ_SOURCE_NOTE
+    ),
+    (
+        "📦 Какие виды подработки доступны?",
+        "Какие виды подработки доступны в Яндекс Про?",
+        "Такси, Доставка, Еда, Лавка и Самокаты - всё в одном приложении, можно переключаться между "
+        "ними." + YANDEX_PRO_FAQ_SOURCE_NOTE
+    ),
+    # ДОБАВЛЕНО 22.09.2026 (по просьбе пользователя - "надо вытащить тарифы
+    # такси - Ultima, курьера и грузовое такси, чтобы прям в этом были на
+    # все вопросы ответы") - требования и условия по трём конкретным
+    # тарифам, тоже с pro.yandex.ru (страницы базы знаний по каждому
+    # тарифу). У этих страниц часть контента подгружается динамически и не
+    # всегда полностью доступна для автоматического разбора - то, что не
+    # удалось достать (например точный минимальный рейтинг или требуемый
+    # стаж), в ответах не выдумано, а явно помечено как "уточняется в самом
+    # Яндекс Про".
+    (
+        "🚘 Что нужно для тарифа Ultima?",
+        "Что нужно, чтобы подключиться к тарифу Ultima?",
+        "Ultima и Business - седан бизнес-класса (список подходящих моделей - в самом приложении "
+        "Яндекс Про). Дополнительно нужны: дресс-код для водителя, зарядки для iOS/Android/Type-C с "
+        "кабелем не короче метра, запечатанная вода без газа и салфетки в салоне. Для подключения "
+        "нужно пройти тестирование и интервью на знание правил тарифа - запись через профиль в "
+        "Яндекс Про. Точные требования к рейтингу и стажу там же уточняются индивидуально."
+        + YANDEX_PRO_FAQ_SOURCE_NOTE
+    ),
+    (
+        "📦 Что нужно для тарифа Курьер?",
+        "Что нужно, чтобы работать в тарифе Курьер/Экспресс?",
+        "Для доставки еды и продуктов нужен термокороб. По ходу заказа важно нажимать статусы "
+        "«На месте» / «Посылка получена» / «Посылка вручена». Если не достучаться до отправителя - "
+        "жди 6 минут и сделай минимум 3 звонка; если не достучаться до получателя перед возвратом - "
+        "10 минут и тоже минимум 3 звонка. Нельзя перевозить животных, деньги, драгоценности, оружие, "
+        "наркотики и всё, что требует спецусловий перевозки." + YANDEX_PRO_FAQ_SOURCE_NOTE
+    ),
+    (
+        "🚛 Что нужно для грузового такси?",
+        "Что нужно, чтобы подключиться к тарифу «Грузовой» (грузовое такси)?",
+        "Машина - каблук, тент, автофургон или цельнометаллический фургон, грузоподъёмностью до 10 "
+        "тонн (подходят ГАЗель NEXT, ГАЗ 3302, Ford Transit, Mercedes Sprinter, Volkswagen Crafter и "
+        "похожие). Размер кузова считается по классам от S (170×100×90 см) до XXL (500×200×200 см). "
+        "Нельзя перевозить мусор, сейфы, пианино, антиквариат, деньги и драгоценности, оружие, "
+        "наркотики, животных и людей в кузове. Хамить клиентам и поддержке, начинать конфликты, "
+        "просить отменить заказ или вскрывать упаковку - тоже нельзя." + YANDEX_PRO_FAQ_SOURCE_NOTE
+    ),
+]
+
+SUPPORT_FAQ_CATEGORIES = {
+    'bot': ("🤖 Вопросы о боте Taxi Helper", SUPPORT_FAQ_ITEMS),
+    'yandex': ("🚕 Вопросы о работе в такси", YANDEX_PRO_FAQ_ITEMS),
+}
+
+def support_faq_top_keyboard():
     buttons = [
-        [InlineKeyboardButton(text=short_text, callback_data=f"faq_{idx}")]
-        for idx, (short_text, _, _) in enumerate(SUPPORT_FAQ_ITEMS)
+        [InlineKeyboardButton(text=label, callback_data=f"faqcat_{key}")]
+        for key, (label, _) in SUPPORT_FAQ_CATEGORIES.items()
     ]
     buttons.append([InlineKeyboardButton(text="📞 Написать в поддержку", url=SUPPORT_CONTACT_URL)])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-def support_faq_answer_keyboard():
+def support_faq_category_keyboard(cat_key):
+    _, items = SUPPORT_FAQ_CATEGORIES[cat_key]
+    buttons = [
+        [InlineKeyboardButton(text=short_text, callback_data=f"faq_{cat_key}_{idx}")]
+        for idx, (short_text, _, _) in enumerate(items)
+    ]
+    buttons.append([InlineKeyboardButton(text="⬅️ К категориям", callback_data="faq_top")])
+    buttons.append([InlineKeyboardButton(text="📞 Написать в поддержку", url=SUPPORT_CONTACT_URL)])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+def support_faq_answer_keyboard(cat_key):
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⬅️ К списку вопросов", callback_data="faq_back")],
+        [InlineKeyboardButton(text="⬅️ К списку вопросов", callback_data=f"faqcat_{cat_key}")],
         [InlineKeyboardButton(text="📞 Написать в поддержку", url=SUPPORT_CONTACT_URL)],
     ])
 
+SUPPORT_MENU_TEXT = (
+    "❓ *Поддержка*\n"
+    f"{WHERE_TO_GO_DIVIDER}\n\n"
+    "Выбери раздел - или сразу напиши в поддержку 👇"
+)
+
 @router.message(lambda message: message.text == "❓ ПОДДЕРЖКА")
 async def show_support_menu(message: types.Message):
-    text = (
-        "❓ *Поддержка*\n"
-        f"{WHERE_TO_GO_DIVIDER}\n\n"
-        "Выбери вопрос из списка - или сразу напиши в поддержку 👇"
-    )
-    await message.answer(text, reply_markup=support_faq_menu_keyboard(), parse_mode='Markdown')
+    await message.answer(SUPPORT_MENU_TEXT, reply_markup=support_faq_top_keyboard(), parse_mode='Markdown')
 
-@router.callback_query(lambda c: c.data.startswith("faq_") and c.data != "faq_back")
+@router.callback_query(lambda c: c.data.startswith("faqcat_"))
+async def faq_category_show(callback_query: types.CallbackQuery):
+    try:
+        await callback_query.answer()
+    except Exception:
+        pass
+    cat_key = callback_query.data[len("faqcat_"):]
+    if cat_key not in SUPPORT_FAQ_CATEGORIES:
+        return
+    label, _ = SUPPORT_FAQ_CATEGORIES[cat_key]
+    text = f"{label}\n{WHERE_TO_GO_DIVIDER}\n\nВыбери вопрос из списка 👇"
+    try:
+        await callback_query.message.edit_text(text, reply_markup=support_faq_category_keyboard(cat_key), parse_mode='Markdown')
+    except Exception:
+        await callback_query.message.answer(text, reply_markup=support_faq_category_keyboard(cat_key), parse_mode='Markdown')
+
+@router.callback_query(lambda c: c.data.startswith("faq_") and not c.data.startswith("faqcat_") and c.data != "faq_top")
 async def faq_answer_show(callback_query: types.CallbackQuery):
     try:
         await callback_query.answer()
     except Exception:
         pass
     try:
-        idx = int(callback_query.data[len("faq_"):])
-        _, question, answer = SUPPORT_FAQ_ITEMS[idx]
-    except (ValueError, IndexError):
+        cat_key, idx_str = callback_query.data[len("faq_"):].split("_", 1)
+        idx = int(idx_str)
+        _, items = SUPPORT_FAQ_CATEGORIES[cat_key]
+        _, question, answer = items[idx]
+    except (ValueError, IndexError, KeyError):
         return
     text = f"❓ *{question}*\n{WHERE_TO_GO_DIVIDER}\n\n{answer}"
     try:
-        await callback_query.message.edit_text(text, reply_markup=support_faq_answer_keyboard(), parse_mode='Markdown')
+        await callback_query.message.edit_text(text, reply_markup=support_faq_answer_keyboard(cat_key), parse_mode='Markdown')
     except Exception:
-        await callback_query.message.answer(text, reply_markup=support_faq_answer_keyboard(), parse_mode='Markdown')
+        await callback_query.message.answer(text, reply_markup=support_faq_answer_keyboard(cat_key), parse_mode='Markdown')
 
-@router.callback_query(lambda c: c.data == "faq_back")
-async def faq_back_to_menu(callback_query: types.CallbackQuery):
+@router.callback_query(lambda c: c.data == "faq_top")
+async def faq_back_to_top(callback_query: types.CallbackQuery):
     try:
         await callback_query.answer()
     except Exception:
         pass
-    text = (
-        "❓ *Поддержка*\n"
-        f"{WHERE_TO_GO_DIVIDER}\n\n"
-        "Выбери вопрос из списка - или сразу напиши в поддержку 👇"
-    )
     try:
-        await callback_query.message.edit_text(text, reply_markup=support_faq_menu_keyboard(), parse_mode='Markdown')
+        await callback_query.message.edit_text(SUPPORT_MENU_TEXT, reply_markup=support_faq_top_keyboard(), parse_mode='Markdown')
     except Exception:
-        await callback_query.message.answer(text, reply_markup=support_faq_menu_keyboard(), parse_mode='Markdown')
+        await callback_query.message.answer(SUPPORT_MENU_TEXT, reply_markup=support_faq_top_keyboard(), parse_mode='Markdown')
 
 TINKOFF_TERMINAL_KEY = os.getenv('TINKOFF_TERMINAL_KEY')
 TINKOFF_PASSWORD = os.getenv('TINKOFF_PASSWORD')
@@ -15965,6 +16085,74 @@ async def mos_road_data_updater():
         except Exception as e:
             logger.error(f"❌ Ошибка фонового обновления mos_road_data.json: {e}")
         await asyncio.sleep(MOS_ROAD_DATA_UPDATE_INTERVAL_MINUTES * 60)
+
+# ДОБАВЛЕНО 22.09.2026 (по прямой просьбе пользователя - "не кнопка
+# поддержки, а чтобы прям в чат писал вопрос - и бот сам отвечал") - поиск
+# по FAQ ПРЯМО в свободном тексте чата, без ИИ: если сообщение похоже на
+# один из вопросов SUPPORT_FAQ_ITEMS/YANDEX_PRO_FAQ_ITEMS (см. выше, в
+# блоке "ПОДДЕРЖКА (FAQ)"), отвечаем тем же готовым ответом, что и через
+# кнопку "❓ ПОДДЕРЖКА". Кнопка/меню НЕ убраны - остались как есть, просто
+# теперь то же самое ловится и просто текстом в чате.
+#
+# Специально стоит САМЫМ ПОСЛЕДНИМ текстовым хендлером в файле - по той же
+# причине, что и у order_draft/courier_finance_draft/referral_withdraw
+# хендлеров выше: aiogram проверяет @router.message по порядку регистрации
+# и останавливается на первом подошедшем, так что все кнопки и шаги
+# черновиков должны успеть перехватить "свой" текст раньше, чем он долетит
+# досюда. Если ключевых слов не нашлось - хендлер тихо ничего не делает
+# (не отвечает), чтобы не встревать в случайные сообщения в чате.
+FAQ_TEXT_TRIGGERS = {
+    ('bot', 0): ["подписк", "пробный период", "триал", "оплата бота", "сколько стоит бот"],
+    ('bot', 1): ["встать в очеред", "очередь у аэропорта", "очередь в аэропорту"],
+    ('bot', 2): ["куда ехать", "куда поехать", "куда сейчас ехать"],
+    ('bot', 3): ["vpn", "впн"],
+    ('bot', 4): ["реферал", "рефер", "пригласи друга", "пригласить водител"],
+    ('bot', 5): ["удаляет сообщени", "чистит чат", "пропадают сообщени", "стирает сообщени", "почему сообщения удаляются"],
+    ('bot', 6): ["не приходят пуш", "пуши не приходят", "нет уведомлен", "не приходят уведомлен"],
+    ('yandex', 0): ["устроиться в такси", "как начать работать в такси", "стать водителем такси", "как попасть в такси"],
+    ('yandex', 1): ["какие документы", "нужны документы", "какие докум"],
+    ('yandex', 2): ["пропал доступ", "заблокировали доступ", "не пускает в заказы", "нет доступа к заказам"],
+    ('yandex', 3): ["когда бонус", "бонусы начисля", "выплата задерж", "задержива бонус", "задержива выплат"],
+    ('yandex', 4): ["арендовать машину", "яндекс гараж", "где взять машину", "аренда авто"],
+    ('yandex', 5): ["виды подработки", "доставка лавка", "самокат", "какие подработки"],
+    ('yandex', 6): ["ultima", "ультима", "бизнес класс", "тариф ultima", "тариф бизнес"],
+    ('yandex', 7): ["тариф курьер", "термокороб", "тариф экспресс", "доставка еды требования"],
+    ('yandex', 8): ["грузовое такси", "тариф грузовой", "грузоподъемность", "грузоподъёмность", "газель тариф"],
+}
+
+def _find_faq_text_match(text: str):
+    """Возвращает (cat_key, idx) лучшего совпадения по FAQ_TEXT_TRIGGERS
+    (у кого сработало больше ключевых фраз; при равенстве - первый найденный
+    по порядку словаря), или None, если ничего не подошло."""
+    text_lower = text.lower()
+    best_key = None
+    best_score = 0
+    for key, triggers in FAQ_TEXT_TRIGGERS.items():
+        score = sum(1 for trig in triggers if trig in text_lower)
+        if score > best_score:
+            best_score = score
+            best_key = key
+    return best_key
+
+@router.message(lambda message: bool((message.text or '').strip()) and not (message.text or '').startswith('/'))
+async def faq_free_text_responder(message: types.Message):
+    """Ловит свободный текст в чате и, если он похож на один из вопросов
+    FAQ, сразу отвечает тем же ответом, что и через кнопку "❓ ПОДДЕРЖКА" -
+    без единого нажатия. Без ИИ, просто поиск по ключевым словам (см.
+    FAQ_TEXT_TRIGGERS выше). Если совпадения нет - ничего не отвечает, чтобы
+    не мешать обычным сообщениям в чате (этот хендлер стоит последним, так
+    что до него доходит только то, что не поймал ни один другой хендлер)."""
+    text = (message.text or '').strip()
+    if len(text) < 4:
+        return
+    match = _find_faq_text_match(text)
+    if not match:
+        return
+    cat_key, idx = match
+    _, items = SUPPORT_FAQ_CATEGORIES[cat_key]
+    _, question, answer = items[idx]
+    reply_text = f"❓ *{question}*\n{WHERE_TO_GO_DIVIDER}\n\n{answer}"
+    await message.answer(reply_text, reply_markup=support_faq_answer_keyboard(cat_key), parse_mode='Markdown')
 
 async def main():
     global bot
