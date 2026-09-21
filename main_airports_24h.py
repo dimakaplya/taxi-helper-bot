@@ -4313,32 +4313,29 @@ async def send_welcome_pitch(message: types.Message):
     найден (например, ещё не закоммичен на Railway), не роняем /start -
     просто шлём текст без фото.
 
-    ИЗМЕНЕНО 22.09.2026 (жалоба пользователя - инструкцию про геолокацию
-    "Включи геолокацию — и забудь об этом" общая чистка чата (см.
-    SingleMessageMiddleware/ChatCleanupIncomingMiddleware, KEEP_LAST_N_
-    MESSAGES=2) стирала вместе со всеми остальными сообщениями почти
-    сразу же, хотя это важная инструкция с настройками iPhone/Android,
-    которую пользователю может понадобиться перечитать позже. Оба
-    сообщения питча (картинка+текст и текст про геолокацию) теперь
-    отправляются внутри _skip_message_trim - как и карточки событий -
-    и не попадают в очередь на автоудаление."""
+    ИЗМЕНЕНО 22.09.2026, затем уточнено тем же днём (жалоба пользователя,
+    потом "Только приветственное" - т.е. защищать от автоудаления
+    (см. SingleMessageMiddleware/ChatCleanupIncomingMiddleware,
+    KEEP_LAST_N_MESSAGES=2) только сам приветственный питч
+    (картинка+текст), а НЕ текст про геолокацию - его чистить как
+    обычно. Только питч отправляется внутри _skip_message_trim - как
+    и карточки событий - и не попадает в очередь на автоудаление."""
     token = _skip_message_trim.set(True)
     try:
-        try:
-            if os.path.isfile(WELCOME_PHOTO_PATH):
-                await message.answer_photo(
-                    FSInputFile(WELCOME_PHOTO_PATH),
-                    caption=WELCOME_PITCH_TEXT,
-                    parse_mode='Markdown'
-                )
-            else:
-                await message.answer(WELCOME_PITCH_TEXT, parse_mode='Markdown')
-        except Exception as e:
-            logger.error(f"❌ Не удалось отправить приветственную картинку: {e}")
+        if os.path.isfile(WELCOME_PHOTO_PATH):
+            await message.answer_photo(
+                FSInputFile(WELCOME_PHOTO_PATH),
+                caption=WELCOME_PITCH_TEXT,
+                parse_mode='Markdown'
+            )
+        else:
             await message.answer(WELCOME_PITCH_TEXT, parse_mode='Markdown')
-        await message.answer(WELCOME_GEO_TEXT, parse_mode='Markdown')
+    except Exception as e:
+        logger.error(f"❌ Не удалось отправить приветственную картинку: {e}")
+        await message.answer(WELCOME_PITCH_TEXT, parse_mode='Markdown')
     finally:
         _skip_message_trim.reset(token)
+    await message.answer(WELCOME_GEO_TEXT, parse_mode='Markdown')
 
 async def send_start_screen(message: types.Message):
     """Общий код /start и кнопки "🏙 ВЫБОР ГОРОДА" - сбрасывает весь user_state
