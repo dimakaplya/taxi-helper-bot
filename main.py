@@ -4030,6 +4030,10 @@ def services_keyboard(category=None, city=None, user_id=None):
     # строкой, под VPN - см. блок "РЕФЕРАЛЬНАЯ ПРОГРАММА" ниже
     # (show_referral_program и остальные хендлеры referral_*).
     buttons.append([KeyboardButton(text="🤝 РЕФЕРАЛЬНАЯ ПРОГРАММА")])
+    # "❓ ПОДДЕРЖКА" (по просьбе пользователя, 22.09.2026 - "поддержка,
+    # которая сама будет отвечать в боте") - простой FAQ без ИИ, см.
+    # SUPPORT_FAQ_ITEMS/show_support_menu выше.
+    buttons.append([KeyboardButton(text="❓ ПОДДЕРЖКА")])
     buttons.append([KeyboardButton(text="← НАЗАД"), KeyboardButton(text="🏙 ВЫБОР ГОРОДА")])
     return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=buttons)
 
@@ -14408,6 +14412,132 @@ SUBSCRIPTION_PRICE_RUB = 149
 SUBSCRIPTION_PRICE_KOPECKS = SUBSCRIPTION_PRICE_RUB * 100
 SUBSCRIPTION_PERIOD_DAYS = 30
 SUBSCRIPTION_CHECK_INTERVAL_MINUTES = 60
+
+# ==================== ПОДДЕРЖКА (FAQ) ====================
+# ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "запихнуть условно
+# поддержку которая сама будет отвечать в боте"), по уточнению - простой
+# FAQ БЕЗ ИИ: заранее заданный список вопрос/ответ, без внешних API и
+# ключей. "📞 Написать в поддержку" в конце списка - живой человек (см.
+# SUPPORT_CONTACT_URL ниже, ссылка-заглушка, нужно заменить на реальный
+# аккаунт/канал поддержки). Блок специально размещён ПОСЛЕ констант
+# подписки (SUBSCRIPTION_TRIAL_DAYS/SUBSCRIPTION_PRICE_RUB выше) - первый
+# пункт FAQ ссылается на них, а этот список строится на уровне модуля (при
+# импорте), так что константы должны быть уже определены к этому месту.
+#
+# ВАЖНО: замени SUPPORT_CONTACT_URL на реальную ссылку (личка/канал
+# поддержки) перед тем как показывать эту кнопку водителям - сейчас здесь
+# плейсхолдер.
+SUPPORT_CONTACT_URL = "https://t.me/taxihelper_support"
+
+# Каждый пункт: (короткий текст кнопки, полный текст вопроса в заголовке
+# ответа, сам ответ). short_text используется и в инлайн-кнопке списка, и
+# как callback_data-индекс (по позиции в списке, см. faq_answer_show ниже).
+SUPPORT_FAQ_ITEMS = [
+    (
+        "💳 Как работает подписка?",
+        "Как работает подписка?",
+        f"Первые {SUBSCRIPTION_TRIAL_DAYS} дней бот бесплатный (пробный период). Дальше - "
+        f"{SUBSCRIPTION_PRICE_RUB}₽/мес, оплата картой прямо в боте (кнопка «💳 ОПЛАТИТЬ», "
+        "появляется автоматически, когда пробный период заканчивается). После оплаты доступ "
+        "открывается в течение пары минут."
+    ),
+    (
+        "📍 Как встать в очередь у аэропорта?",
+        "Как встать в очередь у аэропорта?",
+        "Включи «⚙️ НАСТРОЙКИ» → «📍 ОЧЕРЕДЬ У АЭРОПОРТА», затем запусти трансляцию геопозиции в "
+        "Telegram: скрепка 📎 → Геопозиция → «Транслировать геопозицию» → «Пока не отключу». Бот сам "
+        "пришлёт пуш, когда ты подъедешь к зоне аэропорта, с кнопкой «Встать в очередь»."
+    ),
+    (
+        "💰 Что такое «Куда ехать»?",
+        "Что такое «Куда ехать»?",
+        "Подсказка, в какую точку города сейчас выгоднее всего ехать - учитывает загрузку "
+        "аэропортов/вокзалов, часы пик по дням недели и текущую погоду (дождь поднимает спрос). "
+        "Это ориентир на основе открытых данных, а не гарантия заказов."
+    ),
+    (
+        "🔓 Как получить бесплатный VPN?",
+        "Как получить бесплатный VPN?",
+        "Кнопка «🔓 БЕСПЛАТНЫЙ VPN TAXI HELPER» в главном меню открывает отдельного VPN-бота - "
+        "дальше просто следуй инструкциям в нём."
+    ),
+    (
+        "🤝 Как работает реферальная программа?",
+        "Как работает реферальная программа?",
+        "Приглашаешь водителя по своей ссылке (кнопка «🤝 РЕФЕРАЛЬНАЯ ПРОГРАММА») - пока он платит "
+        "подписку, тебе капает процент с каждого его платежа. Подробности и текущий баланс - там же."
+    ),
+    (
+        "🗑 Почему бот удаляет мои сообщения?",
+        "Почему бот удаляет мои сообщения в чате?",
+        "Чтобы в чате не копился мусор, бот держит только последние сообщения (и свои, и твои) - "
+        "старые удаляются автоматически примерно через полминуты. Нижнее меню и важные карточки "
+        "(например, приветствие) при этом не трогаются."
+    ),
+    (
+        "🔔 Не приходят пуши, что делать?",
+        "Не приходят пуши, что делать?",
+        "Проверь «⚙️ НАСТРОЙКИ» - там можно включать/выключать каждый тип пушей отдельно. Если "
+        "нужны пуши про очередь у аэропорта - там же должна быть активна трансляция геопозиции "
+        "(см. вопрос выше)."
+    ),
+]
+
+def support_faq_menu_keyboard():
+    buttons = [
+        [InlineKeyboardButton(text=short_text, callback_data=f"faq_{idx}")]
+        for idx, (short_text, _, _) in enumerate(SUPPORT_FAQ_ITEMS)
+    ]
+    buttons.append([InlineKeyboardButton(text="📞 Написать в поддержку", url=SUPPORT_CONTACT_URL)])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+def support_faq_answer_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ К списку вопросов", callback_data="faq_back")],
+        [InlineKeyboardButton(text="📞 Написать в поддержку", url=SUPPORT_CONTACT_URL)],
+    ])
+
+@router.message(lambda message: message.text == "❓ ПОДДЕРЖКА")
+async def show_support_menu(message: types.Message):
+    text = (
+        "❓ *Поддержка*\n"
+        f"{WHERE_TO_GO_DIVIDER}\n\n"
+        "Выбери вопрос из списка - или сразу напиши в поддержку 👇"
+    )
+    await message.answer(text, reply_markup=support_faq_menu_keyboard(), parse_mode='Markdown')
+
+@router.callback_query(lambda c: c.data.startswith("faq_") and c.data != "faq_back")
+async def faq_answer_show(callback_query: types.CallbackQuery):
+    try:
+        await callback_query.answer()
+    except Exception:
+        pass
+    try:
+        idx = int(callback_query.data[len("faq_"):])
+        _, question, answer = SUPPORT_FAQ_ITEMS[idx]
+    except (ValueError, IndexError):
+        return
+    text = f"❓ *{question}*\n{WHERE_TO_GO_DIVIDER}\n\n{answer}"
+    try:
+        await callback_query.message.edit_text(text, reply_markup=support_faq_answer_keyboard(), parse_mode='Markdown')
+    except Exception:
+        await callback_query.message.answer(text, reply_markup=support_faq_answer_keyboard(), parse_mode='Markdown')
+
+@router.callback_query(lambda c: c.data == "faq_back")
+async def faq_back_to_menu(callback_query: types.CallbackQuery):
+    try:
+        await callback_query.answer()
+    except Exception:
+        pass
+    text = (
+        "❓ *Поддержка*\n"
+        f"{WHERE_TO_GO_DIVIDER}\n\n"
+        "Выбери вопрос из списка - или сразу напиши в поддержку 👇"
+    )
+    try:
+        await callback_query.message.edit_text(text, reply_markup=support_faq_menu_keyboard(), parse_mode='Markdown')
+    except Exception:
+        await callback_query.message.answer(text, reply_markup=support_faq_menu_keyboard(), parse_mode='Markdown')
 
 TINKOFF_TERMINAL_KEY = os.getenv('TINKOFF_TERMINAL_KEY')
 TINKOFF_PASSWORD = os.getenv('TINKOFF_PASSWORD')
