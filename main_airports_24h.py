@@ -3056,6 +3056,55 @@ class SingleMessageMiddleware(BaseRequestMiddleware):
             return result
         return await make_request(bot_instance, method)
 
+# ДОБАВЛЕНО 21.09.2026 (просьба пользователя - "надо чтобы бот всегда чистил
+# все сообщения в чате оставлял тока два последних"): SingleMessageMiddleware
+# выше чистит только СОБСТВЕННЫЕ исходящие сообщения бота - входящие
+# сообщения пользователя (нажатия reply-кнопок вроде "ОТДАТЬ ЗАКАЗ"/"ЧАЕВЫЕ",
+# любой текст, который человек сам печатает боту) этой логикой не
+# затрагивались и копились в чате бесконечно. Этот outer middleware
+# добавляет id ВХОДЯЩЕГО сообщения пользователя в ТУ ЖЕ общую очередь
+# _recent_bot_message_ids[chat_id], что и SingleMessageMiddleware, - так
+# бот и пользователь считаются вместе, и в чате гарантированно остаются
+# только последние KEEP_LAST_N_MESSAGES сообщений суммарно, независимо от
+# того, кто их отправил.
+#
+# Исключение: сообщения с активной трансляцией геопозиции
+# (message.location is not None, live_period) - Telegram привязывает саму
+# трансляцию к этому сообщению, удаление оборвёт "Трансляция геопозиции" у
+# пользователя (водитель встал в очередь аэропорта/едет на карте). Такие
+# сообщения не добавляются в очередь на удаление и не удаляются.
+#
+# Зарегистрирован как dp.message.outer_middleware (см. main(), рядом с
+# SubscriptionMiddleware) - отрабатывает на каждое входящее сообщение
+# ДО хендлера, после чего хендлер отрабатывает как обычно.
+class ChatCleanupIncomingMiddleware(BaseMiddleware):
+    async def __call__(self, handler, event, data):
+        message = event if isinstance(event, types.Message) else None
+        if message is None or message.location is not None:
+            return await handler(event, data)
+        chat_id = message.chat.id
+        try:
+            queue = _recent_bot_message_ids.setdefault(chat_id, [])
+            queue.append(message.message_id)
+            _fire_and_forget(asyncio.to_thread(save_recent_bot_message, chat_id, message.message_id))
+            while len(queue) > KEEP_LAST_N_MESSAGES:
+                old_id = queue.pop(0)
+                _fire_and_forget(asyncio.to_thread(delete_recent_bot_message_row, chat_id, old_id))
+                if old_id == message.message_id:
+                    # Само это входящее сообщение уже выпало за пределы
+                    # очереди (KEEP_LAST_N_MESSAGES=1 или похожая ситуация) -
+                    # удалять его ДО обработки хендлером нельзя, хендлер
+                    # ещё должен на него отреагировать. Просто пропускаем
+                    # удаление в этом единственном случае.
+                    continue
+                try:
+                    await bot.delete_message(chat_id=chat_id, message_id=old_id)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return await handler(event, data)
+
 async def initialize_bot():
     global bot
     try:
@@ -15563,6 +15612,7 @@ async def main():
     # фоновой задачей, независимо от long polling.
     dp.message.outer_middleware(SubscriptionMiddleware())
     dp.callback_query.outer_middleware(SubscriptionMiddleware())
+    dp.message.outer_middleware(ChatCleanupIncomingMiddleware())
     asyncio.create_task(start_subscription_webhook_server())
     asyncio.create_task(subscription_expiry_checker())
     dp.include_router(router)
