@@ -5461,6 +5461,11 @@ async def toggle_shift(message: types.Message):
                 reply_markup=shift_tariffs_keyboard(category, set()),
             )
             return
+        # ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "надо сделать
+        # так чтобы начать смену нельзя было без включённой геолокации") -
+        # см. require_live_location_for_shift_start ниже.
+        if await require_live_location_for_shift_start(message, user_id, state, tariffs=[]):
+            return
         await start_shift_and_notify(message.answer, user_id, category, city, tariffs=[])
         return
 
@@ -5569,6 +5574,12 @@ async def shift_tariff_confirm(callback_query: types.CallbackQuery):
     city = state.get('city')
     if not city:
         await callback_query.message.answer("Сначала выбери город!")
+        return
+    # ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "начать смену
+    # нельзя было без включённой геолокации") - см.
+    # require_live_location_for_shift_start ниже.
+    if await require_live_location_for_shift_start(callback_query.message, user_id, state, tariffs=tariffs):
+        await callback_query.message.edit_reply_markup(reply_markup=None)
         return
     await callback_query.message.edit_reply_markup(reply_markup=None)
     await start_shift_and_notify(callback_query.message.answer, user_id, category, city, tariffs)
@@ -5987,6 +5998,66 @@ def get_fresh_live_location(user_id):
     if age_minutes > LIVE_LOCATION_FRESH_MINUTES:
         return None
     return loc['lat'], loc['lon']
+
+# ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "надо сделать так
+# чтобы начать смену нельзя было без включённой геолокации чтобы трансляция
+# была постоянной... это очень важно"): раньше "Начать смену" запускалась
+# сразу, а напоминание про трансляцию геопозиции было просто строкой ПОСЛЕ
+# старта ("Без трансляции секундомер идёт как обычно, но км и показ на карте
+# не сработают") - водитель мог легко проигнорировать её и работать смену
+# вообще без геопозиции. Теперь старт смены БЛОКИРУЕТСЯ, пока у бота нет
+# свежей точки живой геопозиции (см. get_fresh_live_location/
+# LIVE_LOCATION_FRESH_MINUTES) - технически бот не может ЗАСТАВИТЬ Telegram
+# транслировать геопозицию постоянно (это решение самого пользователя в
+# приложении), поэтому "постоянная трансляция" обеспечивается тем, что (1)
+# смена не стартует без хотя бы одного свежего пинга геопозиции, и (2) все
+# хендлеры геопозиции (см. maybe_start_pending_shift ниже) продолжают
+# получать пинги, пока трансляция идёт - если она прервётся, это уже
+# отдельно ловит check_airport_queue_timers/AIRPORT_QUEUE_STALE_TIMEOUT_MINUTES
+# для функций, которые от неё зависят.
+def shift_geolocation_required_text():
+    return (
+        "📍 *Для старта смены нужна геопозиция.*\n\n"
+        "Без неё бот не может считать километраж, показывать тебя на карте "
+        "водителей и следить за очередью у аэропорта. Включи трансляцию: "
+        "скрепка 📎 → Геопозиция → *«Транслировать геопозицию»* → "
+        "*«Пока не отключу»*.\n\n"
+        "Как только геопозиция придёт - смена стартует автоматически, "
+        "повторно нажимать «Начать смену» не нужно."
+    )
+
+async def require_live_location_for_shift_start(message, user_id, state, tariffs):
+    """Проверяет, есть ли свежая геопозиция (get_fresh_live_location) перед
+    реальным стартом смены. Если её нет - откладывает старт в
+    state['shift_start_pending'] (список тарифов, уже выбранных на
+    предыдущем экране, если он был) и просит включить трансляцию; как
+    только придёт первый пинг геопозиции - maybe_start_pending_shift ниже
+    запускает смену автоматически с этими же тарифами. Возвращает True,
+    если старт был заблокирован (вызывающий код должен остановиться и НЕ
+    стартовать смену сейчас), False - если геопозиция уже есть и можно
+    стартовать сразу."""
+    if get_fresh_live_location(user_id):
+        return False
+    state['shift_start_pending'] = list(tariffs) if tariffs else []
+    await message.answer(shift_geolocation_required_text(), parse_mode='Markdown')
+    return True
+
+async def maybe_start_pending_shift(message, user_id):
+    """Вызывается из всех хендлеров геопозиции (живой и разовой) сразу после
+    remember_live_location - если у пользователя есть отложенный старт смены
+    (см. require_live_location_for_shift_start), запускает её теперь, с
+    сохранёнными тарифами, без повторного нажатия "Начать смену"."""
+    state = user_state.get(user_id)
+    if not state or 'shift_start_pending' not in state:
+        return
+    tariffs = state.pop('shift_start_pending')
+    if is_shift_active(state):
+        return  # смена уже стартовала другим путём, отложенный старт больше не нужен
+    category = state.get('category')
+    city = state.get('city')
+    if not city:
+        return
+    await start_shift_and_notify(message.answer, user_id, category, city, tariffs=tariffs)
 
 # ==================== КАРТА ВОДИТЕЛЕЙ ====================
 # По прямой просьбе пользователя (21.09.2026): "карта водителей все те кто
@@ -9392,14 +9463,21 @@ async def handle_passive_live_location(message: types.Message):
     аэропорта" или найти ближайшие точки - чтобы не спрашивать геопозицию
     повторно, раз она и так уже транслируется. Ничего не отвечает - не хотим
     присылать лишнее сообщение на каждый пинг трансляции, о которой бот
-    формально не просил."""
+    формально не просил.
+
+    ДОБАВЛЕНО 22.09.2026: после remember_live_location проверяем
+    maybe_start_pending_shift - если водитель нажал "Начать смену", но она
+    была отложена из-за отсутствия геопозиции (см.
+    require_live_location_for_shift_start), этот самый пинг её и запускает."""
     remember_live_location(message.from_user.id, message.location.latitude, message.location.longitude)
+    await maybe_start_pending_shift(message, message.from_user.id)
 
 @router.edited_message(lambda message: getattr(message, 'location', None) is not None and not _location_tracking_active(message.from_user.id))
 async def handle_passive_live_location_update(message: types.Message):
     """Обновления той же самостоятельно включённой трансляции - см.
-    handle_passive_live_location."""
+    handle_passive_live_location (включая maybe_start_pending_shift)."""
     remember_live_location(message.from_user.id, message.location.latitude, message.location.longitude)
+    await maybe_start_pending_shift(message, message.from_user.id)
 
 @router.message(lambda message: getattr(message, 'location', None) is not None and _location_tracking_active(message.from_user.id) and not user_state.get(message.from_user.id, {}).get('nearby_pending'))
 async def handle_airport_queue_location(message: types.Message):
@@ -9435,6 +9513,7 @@ async def handle_airport_queue_location(message: types.Message):
     km_counter_ping(user_id, lat, lon)
     remember_live_location(user_id, lat, lon)
     maybe_update_map_position(user_id, lat, lon)
+    await maybe_start_pending_shift(message, user_id)
     state = user_state.get(user_id) or {}
     if state.get('airport_queue_active') and is_shift_active(state):
         status_text = "📍 Геопозиция получена, слежу за очередью и считаю километраж смены."
@@ -9457,6 +9536,7 @@ async def handle_airport_queue_location_update(message: types.Message):
     km_counter_ping(user_id, lat, lon)
     remember_live_location(user_id, lat, lon)
     maybe_update_map_position(user_id, lat, lon)
+    await maybe_start_pending_shift(message, user_id)
 
 @router.message(lambda message: message.text in NEARBY_BUTTON_TO_KIND and user_state.get(message.from_user.id, {}).get('in_courier_module'))
 async def show_nearby_prompt(message: types.Message):
