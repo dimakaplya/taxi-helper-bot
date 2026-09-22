@@ -2152,6 +2152,26 @@ def init_db():
             PRIMARY KEY (city, target_date, target_hour)
         )
     ''')
+    # ДОБАВЛЕНО 23.09.2026 (см. комментарий у find_upcoming_peak_start -
+    # исправление пуша "час пик" для Ultima): старая таблица выше не
+    # различала категорию, поэтому дедуп по (city, date, hour) у такси и
+    # Ultima мог случайно "занять" друг друга, если пик по обеим таблицам
+    # приходится на один и тот же час - INSERT OR IGNORE тихо не создал бы
+    # вторую отметку из-за конфликта PRIMARY KEY, и вторая категория
+    # решила бы, что пуш ей тоже уже отправлен, хотя это не так. Новая
+    # таблица с category в первичном ключе - отдельный дедуп на каждую
+    # категорию, старая больше не используется (не удаляем ради простоты
+    # миграции).
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS peak_hour_alerts_sent_v2 (
+            city TEXT,
+            category TEXT,
+            target_date TEXT,
+            target_hour INTEGER,
+            sent_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (city, category, target_date, target_hour)
+        )
+    ''')
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS green_demand_alerts_sent (
             icao TEXT,
@@ -2913,27 +2933,27 @@ def cleanup_old_green_demand_alerts():
     except Exception as e:
         logger.error(f"❌ Не удалось почистить green_demand_alerts_sent: {e}")
 
-def was_peak_hour_alert_sent(city, target_date, target_hour):
-    """Тот же дедуп-паттерн, что was_high_demand_alert_sent, но по (город,
-    дата, час начала пика) - пик один на весь город, не привязан к
-    конкретному аэропорту/классу, поэтому таблица/ключ проще."""
+def was_peak_hour_alert_sent(city, category, target_date, target_hour):
+    """ИЗМЕНЕНО 23.09.2026 (см. комментарий у peak_hour_alerts_sent_v2 в
+    init_db) - дедуп теперь по (город, КАТЕГОРИЯ, дата, час начала пика),
+    таблица/ключ прежние (city, date, hour) больше не используются."""
     init_db()
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute(
-        'SELECT 1 FROM peak_hour_alerts_sent WHERE city=? AND target_date=? AND target_hour=?',
-        (city, target_date, target_hour)
+        'SELECT 1 FROM peak_hour_alerts_sent_v2 WHERE city=? AND category=? AND target_date=? AND target_hour=?',
+        (city, category, target_date, target_hour)
     )
     row = cursor.fetchone()
     conn.close()
     return row is not None
 
-def mark_peak_hour_alert_sent(city, target_date, target_hour):
+def mark_peak_hour_alert_sent(city, category, target_date, target_hour):
     init_db()
     conn = get_db_connection()
     conn.execute(
-        'INSERT OR IGNORE INTO peak_hour_alerts_sent (city, target_date, target_hour, sent_at) VALUES (?, ?, ?, ?)',
-        (city, target_date, target_hour, datetime.now(ZoneInfo('UTC')).strftime('%Y-%m-%d %H:%M:%S'))
+        'INSERT OR IGNORE INTO peak_hour_alerts_sent_v2 (city, category, target_date, target_hour, sent_at) VALUES (?, ?, ?, ?, ?)',
+        (city, category, target_date, target_hour, datetime.now(ZoneInfo('UTC')).strftime('%Y-%m-%d %H:%M:%S'))
     )
     conn.commit()
     conn.close()
@@ -2944,11 +2964,11 @@ def cleanup_old_peak_hour_alerts():
         init_db()
         conn = get_db_connection()
         cutoff = (datetime.now(ZoneInfo('UTC')) - timedelta(days=2)).strftime('%Y-%m-%d')
-        conn.execute('DELETE FROM peak_hour_alerts_sent WHERE target_date < ?', (cutoff,))
+        conn.execute('DELETE FROM peak_hour_alerts_sent_v2 WHERE target_date < ?', (cutoff,))
         conn.commit()
         conn.close()
     except Exception as e:
-        logger.error(f"❌ Не удалось почистить peak_hour_alerts_sent: {e}")
+        logger.error(f"❌ Не удалось почистить peak_hour_alerts_sent_v2: {e}")
 
 def road_event_key(notice):
     """Стабильный ключ дедупа для одного поста дорожных событий - ссылка на
@@ -3831,7 +3851,7 @@ def get_current_peak_level(city, category=None):
 
 PEAK_HOUR_PUSH_LEAD_MINUTES = 30  # за сколько минут до начала уведомляем - см. peak_hour_alert_checker ниже
 
-def find_upcoming_peak_start(city, lead_minutes=PEAK_HOUR_PUSH_LEAD_MINUTES):
+def find_upcoming_peak_start(city, category=None, lead_minutes=PEAK_HOUR_PUSH_LEAD_MINUTES):
     """Ищет ближайшее НАЧАЛО диапазона уровня 'peak' (час пик, не просто
     high/mid) в пределах lead_minutes от текущего момента - для пуша "через
     30 минут начинается час пик". Проверяет только СЕГОДНЯШНИЙ день недели
@@ -3839,12 +3859,21 @@ def find_upcoming_peak_start(city, lead_minutes=PEAK_HOUR_PUSH_LEAD_MINUTES):
     например суббота 00:00 - конец пятницы) - lead_minutes всегда меньше
     часа, этого достаточно, дальше можно не смотреть.
 
+    ИСПРАВЛЕНО 23.09.2026 (жалоба пользователя, скриншот - "я выбрал
+    Ultima, зачем мне эконом/комфорт"): раньше всегда бралась таблица такси
+    (get_weekday_hour_load(None, ...)), даже для водителей Ultima - в
+    Москве у такси и Ultima РАЗНЫЕ реальные данные (MOSCOW_TAXI_HOUR_LOAD/
+    MOSCOW_ULTIMA_HOUR_LOAD, см. get_weekday_hour_load), из-за чего Ultima
+    получала пуш с эконом/комфорт/комфорт+ вместо Business/Premier/Elite.
+    Теперь category передаётся явно - см. check_peak_hour_alerts ниже,
+    который теперь проверяет 'taxi' и 'ultima' раздельно.
+
     Возвращает dict {target_date, target_hour, label} или None. target_date/
     target_hour - для дедупа (see was_peak_hour_alert_sent), должны совпадать
     с калиндарной датой/часом НАЧАЛА диапазона (а не датой "сейчас")."""
     now = get_city_now(city)
     window_end = now + timedelta(minutes=lead_minutes)
-    hour_load = get_weekday_hour_load(None, city=city)
+    hour_load = get_weekday_hour_load(category, city=city)
 
     for check_date, weekday in ((now, now.weekday()), (window_end, window_end.weekday())):
         pattern = hour_load[weekday]
@@ -7965,7 +7994,11 @@ MAP_CHROME_CSS = """
      трюк, что используют многие карты без своего тёмного сервера тайлов.
      Маркеры/попапы/легенду фильтр не трогает - он навешен только на
      .leaflet-tile-pane, а не на весь #map. */
-  .leaflet-tile-pane { filter: invert(1) hue-rotate(180deg) brightness(0.95) contrast(0.9); }
+  /* ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя - "подложку карты
+     сделай посветлее"): brightness поднят с 0.95 до 1.25 - тайлы светлее,
+     детали дорог/подписей читаются лучше (особенно новые значки заправок/
+     зарядок/парковок на них), инверсия и общая тёмная тема карты сохранены. */
+  .leaflet-tile-pane { filter: invert(1) hue-rotate(180deg) brightness(1.25) contrast(0.9); }
   .legend { position: absolute; top: 10px; right: 10px; z-index: 1000; background: #1c1c1c; color: #fff; border: 1px solid rgba(255,196,0,.4); border-radius: 8px; padding: 8px 10px; font-family: -apple-system, sans-serif; font-size: 12px; box-shadow: 0 1px 4px rgba(0,0,0,.35); }
   .legend div { display: flex; align-items: center; gap: 6px; margin: 3px 0; }
   .legend .dot { width: 11px; height: 11px; border-radius: 50%; border: 1px solid rgba(255,255,255,.5); display: inline-block; }
@@ -16599,10 +16632,18 @@ async def green_demand_alert_checker():
 # же порядок частоты, что и у остальных фоновых проверок бота).
 PEAK_HOUR_CHECK_INTERVAL_MINUTES = 10
 
-async def push_peak_hour_alert(city, target_date, target_hour, label, start_dt):
-    """Рассылает пуш "через 30 минут начинается час пик" водителям такси/
-    Ultima в этом городе (курьеру/грузовому такси не актуально - та же
-    логика, что у "🧭 Куда ехать", см. CATEGORIES_WITHOUT_AIRPORTS)."""
+async def push_peak_hour_alert(city, category, target_date, target_hour, label, start_dt):
+    """Рассылает пуш "через 30 минут начинается час пик" водителям ОДНОЙ
+    конкретной категории (такси ИЛИ Ultima) в этом городе (курьеру/
+    грузовому такси не актуально - та же логика, что у "🧭 Куда ехать", см.
+    CATEGORIES_WITHOUT_AIRPORTS).
+
+    ИСПРАВЛЕНО 23.09.2026 (жалоба пользователя - выбрал Ultima, а пуш
+    показывал расклад по эконом/комфорт/комфорт+): раньше один и тот же
+    текст (с таблицей такси, см. комментарий у find_upcoming_peak_start)
+    уходил ОБЕИМ категориям сразу. Теперь category обязателен - вызывающий
+    код (check_peak_hour_alerts) считает пик и текст ОТДЕЛЬНО для 'taxi' и
+    'ultima', и рассылает только своей категории водителей."""
     if not bot:
         return
     city_name = CITY_DISPLAY_NAMES.get(city, city)
@@ -16614,13 +16655,13 @@ async def push_peak_hour_alert(city, target_date, target_hour, label, start_dt):
     recipients = [
         uid for uid, state in list(user_state.items())
         if isinstance(state, dict) and state.get('city') == city
-        and state.get('category') not in CATEGORIES_WITHOUT_AIRPORTS
+        and state.get('category') == category
         and notifications_enabled(state, 'peak_hours')
     ]
     if not recipients:
-        logger.info(f"📅 Час пика через {PEAK_HOUR_PUSH_LEAD_MINUTES} мин в городе {city} ({target_date} {target_hour:02d}:00), но нет известных водителей такси/Ultima (либо все отключили эти пуши)")
+        logger.info(f"📅 Час пика через {PEAK_HOUR_PUSH_LEAD_MINUTES} мин в городе {city} ({target_date} {target_hour:02d}:00) для категории {category}, но нет известных водителей этой категории (либо все отключили эти пуши)")
         return
-    logger.info(f"📅 Час пика через {PEAK_HOUR_PUSH_LEAD_MINUTES} мин в городе {city} ({target_date} {target_hour:02d}:00) - рассылаю {len(recipients)} водителям")
+    logger.info(f"📅 Час пика через {PEAK_HOUR_PUSH_LEAD_MINUTES} мин в городе {city} ({target_date} {target_hour:02d}:00) для категории {category} - рассылаю {len(recipients)} водителям")
     sent, failed = 0, 0
     for user_id in recipients:
         try:
@@ -16635,20 +16676,29 @@ async def push_peak_hour_alert(city, target_date, target_hour, label, start_dt):
 async def check_peak_hour_alerts():
     """Проверяет каждый город бота на предмет "час пик начинается через
     PEAK_HOUR_PUSH_LEAD_MINUTES минут" - тот же дедуп-паттерн, что и у
-    check_high_demand_alerts (не шлём повторно один и тот же слот)."""
+    check_high_demand_alerts (не шлём повторно один и тот же слот).
+
+    ИСПРАВЛЕНО 23.09.2026 (см. комментарий у find_upcoming_peak_start/
+    push_peak_hour_alert): раньше пик считался ОДИН раз на город по общей
+    таблице такси и рассылался всем такси+Ultima сразу - Ultima получала
+    чужой расклад (эконом/комфорт вместо Business/Premier/Elite). Теперь
+    'taxi' и 'ultima' проверяются РАЗДЕЛЬНО (в Москве у них реальные и
+    разные данные, см. get_weekday_hour_load) - каждая категория получает
+    свой текст и своих получателей, дедуп тоже отдельный по категории."""
     cleanup_old_peak_hour_alerts()
     for city in AIRPORTS_INFO:
-        try:
-            upcoming = find_upcoming_peak_start(city)
-        except Exception as e:
-            logger.error(f"❌ Не удалось проверить час пика для города {city}: {e}")
-            continue
-        if not upcoming:
-            continue
-        if was_peak_hour_alert_sent(city, upcoming['target_date'], upcoming['target_hour']):
-            continue
-        await push_peak_hour_alert(city, upcoming['target_date'], upcoming['target_hour'], upcoming['label'], upcoming['start_dt'])
-        mark_peak_hour_alert_sent(city, upcoming['target_date'], upcoming['target_hour'])
+        for category in ('taxi', 'ultima'):
+            try:
+                upcoming = find_upcoming_peak_start(city, category)
+            except Exception as e:
+                logger.error(f"❌ Не удалось проверить час пика для города {city} ({category}): {e}")
+                continue
+            if not upcoming:
+                continue
+            if was_peak_hour_alert_sent(city, category, upcoming['target_date'], upcoming['target_hour']):
+                continue
+            await push_peak_hour_alert(city, category, upcoming['target_date'], upcoming['target_hour'], upcoming['label'], upcoming['start_dt'])
+            mark_peak_hour_alert_sent(city, category, upcoming['target_date'], upcoming['target_hour'])
 
 async def peak_hour_alert_checker():
     """Фоновая задача: раз в PEAK_HOUR_CHECK_INTERVAL_MINUTES минут проверяет
