@@ -8690,22 +8690,35 @@ def map_webapp_html():
   }}
   function selfIconHtml(heading) {{
     const st = SELF_MARKER_STYLE[myCategory] || SELF_MARKER_STYLE['taxi'];
-    const top = lightenColor(st.fill, 40);
-    const bottom = darkenColor(st.fill, 20);
     // ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя - "смайлики только
     // оставляем на других юзерах остальные убираем", "на себе смайлики
     // убираем", "только стрелка") - эмодзи-иконку категории (🚕/🤵🏽/🚶🏽‍♂️/🚚)
-    // убрали ИМЕННО у своего маркера - теперь это просто треугольник-стрелка
+    // убрали ИМЕННО у своего маркера - теперь это просто стрелка-навигатор
     // без начинки, поворачивается по heading. У кружков остальных водителей
     // (.car-icon-inner ниже) эмодзи осталась без изменений.
+    // ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя, со скриншотом
+    // навигационной стрелки - "форма не просто треугольника ... как там
+    // сделано 3д ... с переходом посередине как будто сложено") - вместо
+    // ровного треугольника с вертикальным градиентом теперь форма "дротика"
+    // (kite): вершина вверху, два боковых угла пошире у основания и ВОГНУТАЯ
+    // выемка посередине основания (та самая характерная форма нав.стрелки
+    // из скриншота) - см. точки apex/rightCorner/notch/leftCorner ниже.
+    // Форма разбита ровно пополам ребром apex->notch на два треугольника -
+    // левая грань темнее, правая светлее ОДНИМ и тем же базовым цветом
+    // категории (st.fill не меняется - только пользователь просил "цвета
+    // остаются те же") - имитация сложенной бумаги/грани, как на референсе.
+    const apex = '21,3';
+    const rightCorner = '38,37';
+    const notch = '21,27';
+    const leftCorner = '4,37';
+    const leftShade = darkenColor(st.fill, 18);
+    const rightShade = lightenColor(st.fill, 12);
     return `<div class="self-icon-wrap">` +
       `<div class="self-icon-rotate" style="transform:rotate(${{heading}}deg)">` +
       `<svg width="42" height="42" viewBox="0 0 42 42" style="filter:drop-shadow(0 3px 4px rgba(0,0,0,.55))">` +
-      `<defs><linearGradient id="selfTriGrad" x1="0" y1="0" x2="0" y2="1">` +
-      `<stop offset="0%" stop-color="${{top}}"/><stop offset="55%" stop-color="${{st.fill}}"/><stop offset="100%" stop-color="${{bottom}}"/>` +
-      `</linearGradient></defs>` +
-      `<polygon points="21,2 4,38 38,38" fill="url(#selfTriGrad)" stroke="${{st.stroke}}" stroke-width="2.5" stroke-linejoin="round"/>` +
-      `<polygon points="21,5 15,19 27,19" fill="rgba(255,255,255,0.30)"/>` +
+      `<polygon points="${{apex}} ${{leftCorner}} ${{notch}}" fill="${{leftShade}}" stroke="${{st.stroke}}" stroke-width="2" stroke-linejoin="round"/>` +
+      `<polygon points="${{apex}} ${{notch}} ${{rightCorner}}" fill="${{rightShade}}" stroke="${{st.stroke}}" stroke-width="2" stroke-linejoin="round"/>` +
+      `<line x1="21" y1="3" x2="21" y2="27" stroke="rgba(0,0,0,.25)" stroke-width="1.2"/>` +
       `</svg></div></div>`;
   }}
   // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "пусть по нажатию
@@ -15073,8 +15086,23 @@ async def push_rain_alert(city, event):
         f"Через {RAIN_LEAD_MINUTES} минут в городе ожидается больше заказов - "
         f"хорошее время быть на линии."
     )
+    # ИЗМЕНЕНО 22.09.2026 (жалоба пользователя со скриншотом - "кнопки нет,
+    # поломалось после рестарта") - нужен state каждого получателя (была
+    # только uid), чтобы приложить его текущую Reply-клавиатуру к пушу (см.
+    # reply_markup=services_keyboard ниже и общий комментарий-разбор у
+    # BOT_UPDATED_REFRESH_KEYBOARD выше по файлу: Telegram кэширует
+    # клавиатуру на телефоне и не перерисовывает её сама по себе, пока бот
+    # не пришлёт НОВОЕ сообщение с новым reply_markup - после рестарта
+    # контейнера ПЕРВЫМ сообщением пользователю нередко оказывается именно
+    # фоновый пуш вроде этого, а не /start, поэтому если пуш идёт без
+    # клавиатуры - меню у пользователя пропадает, пока он не напишет боту
+    # что-то сам). Раньше этот и остальные фоновые пуши (аэропорты/спрос/
+    # праздники/дорожные события/час пик) слались БЕЗ reply_markup вовсе -
+    # теперь каждый прикладывает актуальный services_keyboard, так что меню
+    # само "чинится" на первом же пуше после любого рестарта, а не только
+    # после НАСТОЯЩЕГО редеплоя (тот чинится через BOT_UPDATED_REFRESH_KEYBOARD).
     recipients = [
-        uid for uid, state in list(user_state.items())
+        (uid, state) for uid, state in list(user_state.items())
         if isinstance(state, dict) and state.get('city') == city and notifications_enabled(state, 'weather')
     ]
     if not recipients:
@@ -15082,9 +15110,12 @@ async def push_rain_alert(city, event):
         return
     logger.info(f"{event['emoji']} В городе {city} ожидаются осадки ({event['name']}) - рассылаю {len(recipients)} пользователям")
     sent, failed = 0, 0
-    for user_id in recipients:
+    for user_id, state in recipients:
         try:
-            await bot.send_message(user_id, text, parse_mode='Markdown')
+            await bot.send_message(
+                user_id, text, parse_mode='Markdown',
+                reply_markup=services_keyboard(state.get('category'), city, user_id),
+            )
             sent += 1
         except Exception as e:
             failed += 1
@@ -15354,9 +15385,13 @@ async def push_holiday_alert(holiday, kind):
     только пользователям этого конкретного города."""
     if not bot:
         return
+    # ИЗМЕНЕНО 22.09.2026 (см. комментарий у reply_markup в push_rain_alert
+    # выше - "кнопки нет, поломалось после рестарта") - recipients теперь
+    # хранит (uid, state), чтобы приложить актуальную Reply-клавиатуру
+    # каждому получателю пуша.
     if holiday.get('is_national'):
         recipients = [
-            uid for uid, state in list(user_state.items())
+            (uid, state) for uid, state in list(user_state.items())
             if isinstance(state, dict) and notifications_enabled(state, 'holidays')
         ]
         where = "по всем городам"
@@ -15364,7 +15399,7 @@ async def push_holiday_alert(holiday, kind):
         city = holiday.get('city')
         city_name = CITY_DISPLAY_NAMES.get(city, city)
         recipients = [
-            uid for uid, state in list(user_state.items())
+            (uid, state) for uid, state in list(user_state.items())
             if isinstance(state, dict) and state.get('city') == city and notifications_enabled(state, 'holidays')
         ]
         where = f"в городе {city_name}"
@@ -15384,9 +15419,12 @@ async def push_holiday_alert(holiday, kind):
         return
     logger.info(f"{holiday['emoji']} {holiday['name']} ({kind}) - рассылаю {len(recipients)} пользователям {where}")
     sent, failed = 0, 0
-    for user_id in recipients:
+    for user_id, state in recipients:
         try:
-            await bot.send_message(user_id, text, parse_mode='Markdown')
+            await bot.send_message(
+                user_id, text, parse_mode='Markdown',
+                reply_markup=services_keyboard(state.get('category'), state.get('city'), user_id),
+            )
             sent += 1
         except Exception as e:
             failed += 1
@@ -15569,7 +15607,13 @@ async def push_airport_status_change(icao, airport, old_status, new_status, noti
         text = base_text + format_queue_breakdown(city, icao, category)
         text += "\n\n_Подробности во вкладке «Доступность»._"
         try:
-            await bot.send_message(user_id, text, parse_mode='Markdown')
+            # ИЗМЕНЕНО 22.09.2026 (см. комментарий в push_rain_alert - "кнопки
+            # нет, поломалось после рестарта") - приложена актуальная Reply-
+            # клавиатура, чтобы пуш сам "чинил" пропавшее меню.
+            await bot.send_message(
+                user_id, text, parse_mode='Markdown',
+                reply_markup=services_keyboard(category, city, user_id),
+            )
             sent += 1
         except Exception as e:
             failed += 1
@@ -18317,17 +18361,23 @@ async def push_road_incident_alert(city, notice):
         "_Подробности и остальные новости - «⛔ Дорожные события»._"
     )
 
+    # (uid, state) вместо просто uid - см. комментарий в push_rain_alert
+    # ("кнопки нет, поломалось после рестарта") - нужен state.get('category')
+    # для reply_markup ниже.
     recipients = [
-        uid for uid, state in list(user_state.items())
+        (uid, state) for uid, state in list(user_state.items())
         if isinstance(state, dict) and state.get('city') == city and notifications_enabled(state, 'road_events')
     ]
     if not recipients:
         return
     logger.info(f"⛔ Пуш о дорожном событии в {city} - рассылаю {len(recipients)} водителям")
     sent, failed = 0, 0
-    for user_id in recipients:
+    for user_id, state in recipients:
         try:
-            await bot.send_message(user_id, text, parse_mode='Markdown', disable_web_page_preview=True)
+            await bot.send_message(
+                user_id, text, parse_mode='Markdown', disable_web_page_preview=True,
+                reply_markup=services_keyboard(state.get('category'), city, user_id),
+            )
             sent += 1
         except Exception as e:
             failed += 1
@@ -18444,7 +18494,12 @@ async def push_high_demand_alert(icao, airport, relevant_class, hour_from, hour_
         text = base_text + format_queue_breakdown(city, icao, driver_category)
         text += "\n\n_Подробности во вкладке «Доступность»._"
         try:
-            await bot.send_message(user_id, text, parse_mode='Markdown')
+            # см. комментарий в push_rain_alert - "кнопки нет, поломалось
+            # после рестарта" - reply_markup самовосстанавливает меню.
+            await bot.send_message(
+                user_id, text, parse_mode='Markdown',
+                reply_markup=services_keyboard(driver_category, city, user_id),
+            )
             sent += 1
         except Exception as e:
             failed += 1
@@ -18551,7 +18606,12 @@ async def push_green_demand_alert(icao, airport, relevant_class, hour_from, hour
         text = base_text + format_queue_breakdown(city, icao, driver_category)
         text += "\n\n_Подробности во вкладке «Доступность»._"
         try:
-            await bot.send_message(user_id, text, parse_mode='Markdown')
+            # см. комментарий в push_rain_alert - "кнопки нет, поломалось
+            # после рестарта".
+            await bot.send_message(
+                user_id, text, parse_mode='Markdown',
+                reply_markup=services_keyboard(driver_category, city, user_id),
+            )
             sent += 1
         except Exception as e:
             failed += 1
@@ -18642,7 +18702,12 @@ async def push_peak_hour_alert(city, category, target_date, target_hour, label, 
     sent, failed = 0, 0
     for user_id in recipients:
         try:
-            await bot.send_message(user_id, text, parse_mode='Markdown')
+            # см. комментарий в push_rain_alert - "кнопки нет, поломалось
+            # после рестарта".
+            await bot.send_message(
+                user_id, text, parse_mode='Markdown',
+                reply_markup=services_keyboard(category, city, user_id),
+            )
             sent += 1
         except Exception as e:
             failed += 1
