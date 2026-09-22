@@ -447,16 +447,38 @@ AIRPORT_QUEUE_RADIUS_LEVELS_KM = [2.0, 1.0, 0.5]
 # со вторым уровнем AIRPORT_QUEUE_RADIUS_LEVELS_KM[1] (тоже 1 км), поэтому
 # фактически остаётся два различимых уровня - 1 км/500 м (см. levels_km в
 # process_airport_queue_ping - совпадающий уровень просто схлопывается).
-AIRPORT_QUEUE_OUTER_RADIUS_DEFAULT_KM = 1.0
+# ИЗМЕНЕНО 22.09.2026 (жалоба пользователя - "стою в пределах аэропорта, бот
+# не прислал встать в очередь" - водитель стоял на дальней парковке "встречающих"
+# у Шереметьево, за пределами прежнего узкого радиуса 1 км/2 км, хотя это
+# явно "территория аэропорта"): дефолтный внешний радиус расширен с 1 км до
+# 2 км для всех аэропортов, Внуково расширено с 2 км до 3.5 км - прямая
+# просьба пользователя ("остальные 2 км а внуково 3.5 км").
+AIRPORT_QUEUE_OUTER_RADIUS_DEFAULT_KM = 2.0
 AIRPORT_QUEUE_OUTER_RADIUS_OVERRIDES_KM = {
-    'UUWW': 2.0,  # VKO (Внуково) - единственное исключение, прямая просьба пользователя
+    'UUWW': 3.5,  # VKO (Внуково) - единственное исключение по ICAO, прямая просьба пользователя
+}
+# Для аэропортов с терминальными зонами (см. AIRPORT_TERMINAL_ZONES) можно
+# задать радиус ПОУЖЕ/ПОШИРЕ дефолтного отдельно на каждую зону - имеет
+# приоритет и над AIRPORT_QUEUE_OUTER_RADIUS_DEFAULT_KM, и над
+# AIRPORT_QUEUE_OUTER_RADIUS_OVERRIDES_KM по icao. Сейчас задано только для
+# Шереметьево (UUEE) - прямая просьба пользователя 22.09.2026: у зоны B/C
+# координаты сдвинуты на реальную точку парковки встречающих (см.
+# AIRPORT_TERMINAL_ZONES), радиус 1 км; у зоны D координаты уточнены,
+# радиус узкий - 300 м.
+AIRPORT_QUEUE_ZONE_RADIUS_OVERRIDES_KM = {
+    'UUEE': {'bc': 1.0, 'd': 0.3},
 }
 
-def airport_queue_outer_radius_km(icao):
-    """Радиус "зоны аэропорта" для самого внешнего уровня гео-пушей очереди
-    (см. AIRPORT_QUEUE_OUTER_RADIUS_DEFAULT_KM/_OVERRIDES_KM выше) - 1 км
-    для всех аэропортов, кроме Внуково (2 км, прямая просьба пользователя,
-    22.09.2026)."""
+def airport_queue_outer_radius_km(icao, zone_key=None):
+    """Радиус "зоны аэропорта" для самого внешнего уровня гео-пушей очереди.
+    Приоритет: зональный override (AIRPORT_QUEUE_ZONE_RADIUS_OVERRIDES_KM,
+    по icao+zone_key) -> override по icao целиком (AIRPORT_QUEUE_OUTER_RADIUS_OVERRIDES_KM,
+    сейчас только Внуково, 3.5 км) -> общий дефолт (AIRPORT_QUEUE_OUTER_RADIUS_DEFAULT_KM,
+    2 км). Изменено 22.09.2026 по прямой просьбе пользователя."""
+    if zone_key:
+        zone_overrides = AIRPORT_QUEUE_ZONE_RADIUS_OVERRIDES_KM.get(icao)
+        if zone_overrides and zone_key in zone_overrides:
+            return zone_overrides[zone_key]
     return AIRPORT_QUEUE_OUTER_RADIUS_OVERRIDES_KM.get(icao, AIRPORT_QUEUE_OUTER_RADIUS_DEFAULT_KM)
 # Пользователь также попросил убрать пуш "уже 1 час рядом" и пуш "уже 15
 # минут рядом" (последнего на самом деле и не было - только 30/60), оставив
@@ -756,10 +778,15 @@ for _city_key, _airports_list in AIRPORTS_INFO.items():
 #   - D: сначала 2500 пасс./ч, ИСПРАВЛЕНО в тот же день на 1490 пасс./ч по
 #     прямому указанию пользователя.
 # 'capacity' ниже - в пассажирах/час, та же единица, что AIRPORT_CAPACITY.
+# Координаты bc/d ИЗМЕНЕНЫ 22.09.2026 (прямая просьба пользователя) - взяты
+# точки реальных парковок ("встречающих"/высадки), а не усреднённые точки
+# терминалов как раньше, так как именно там реально стоят водители. Радиус
+# для каждой зоны - см. AIRPORT_QUEUE_ZONE_RADIUS_OVERRIDES_KM выше (bc - 1
+# км, d - 300 м, тоже прямая просьба пользователя).
 AIRPORT_TERMINAL_ZONES = {
     'UUEE': {
-        'bc': {'coords': (55.980925, 37.4118815), 'label': 'Терминалы B/C', 'capacity': 3477},
-        'd': {'coords': (55.962927, 37.406064), 'label': 'Терминал D', 'capacity': 1490},
+        'bc': {'coords': (55.979372, 37.396460), 'label': 'Терминалы B/C', 'capacity': 3477},
+        'd': {'coords': (55.961664, 37.409636), 'label': 'Терминал D', 'capacity': 1490},
     },
 }
 
@@ -7568,7 +7595,7 @@ async def process_airport_queue_ping(user_id, lat, lon, live_period=None):
     # берётся из airport_queue_outer_radius_km(icao), у Внуково это 2.5 км,
     # у остальных 1.5 км. Уровни ПОУЖЕ (1 км/500 м) не меняются - идут следом
     # за внешним, как и раньше.
-    outer_radius_km = airport_queue_outer_radius_km(icao)
+    outer_radius_km = airport_queue_outer_radius_km(icao, zone_key)
     levels_km = [outer_radius_km] + [lvl for lvl in AIRPORT_QUEUE_RADIUS_LEVELS_KM[1:] if lvl < outer_radius_km]
     if dist_km <= outer_radius_km:
         if not aq.get('entered_outer_at'):
