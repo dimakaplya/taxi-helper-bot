@@ -14727,9 +14727,26 @@ def find_upcoming_precip_event(forecast, city):
     смысл предупредить водителя сейчас". Возвращает None, если в этом окне
     осадков нет, иначе dict {hour_offset, time, code, weight, name, emoji}.
     hour_offset и time.index() всегда отсчитываются от РЕАЛЬНОГО текущего
-    часа (см. _current_hour_index), а не от начала массива hourly."""
+    часа (см. _current_hour_index), а не от начала массива hourly.
+
+    ИСПРАВЛЕНО 23.09.2026 (повторная жалоба пользователя - "сейчас идёт
+    дождь, а бот в прогнозе показывает через 1 [час]", уже после фикса
+    индекса выше): дело было не только в индексации. hourly[] - это
+    ПОЧАСОВОЙ ПРОГНОЗ модели, снятый в момент последнего обновления снепшота
+    (раз в WEATHER_UPDATE_INTERVAL_MINUTES=20 минут) - если дождь начался
+    ПОСЛЕ этого снятия, код текущего часа в hourly[] мог остаться "без
+    осадков" (таким он был на момент запроса), хотя по факту уже идёт
+    дождь. Поле forecast['current'] - это ОТДЕЛЬНЫЙ, более точный
+    "текущий" замер Open-Meteo (ближе к nowcast, а не модельному прогнозу
+    на час вперёд) - используем его как источник истины для "дождь СЕЙЧАС",
+    и только если там осадков нет - смотрим в hourly[] на "скоро начнётся"."""
     if not forecast:
         return None
+    current = forecast.get('current', {})
+    current_code = current.get('weathercode')
+    if current_code in PRECIP_WEATHERCODES:
+        name, weight, emoji = describe_weathercode(current_code)
+        return {'hour_offset': 0, 'time': current.get('time'), 'code': current_code, 'weight': weight, 'name': name, 'emoji': emoji, '_array_index': _current_hour_index(forecast, city)}
     hourly = forecast.get('hourly', {})
     times = hourly.get('time', [])
     codes = hourly.get('weathercode', [])
