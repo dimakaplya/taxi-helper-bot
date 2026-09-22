@@ -8223,6 +8223,19 @@ MAP_CHROME_CSS = """
   .layer-toggle { display: flex; flex-direction: row; flex-wrap: wrap; gap: 4px 10px; margin-top: 6px; background: #1c1c1c; color: #fff; border: 1px solid rgba(255,196,0,.4); border-radius: 8px; padding: 6px 10px; font-family: -apple-system, sans-serif; font-size: 12px; box-shadow: 0 1px 4px rgba(0,0,0,.35); }
   .layer-toggle.collapsed { display: none; }
   .layer-toggle label { display: flex; align-items: center; gap: 5px; cursor: pointer; user-select: none; white-space: nowrap; }
+  /* ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - замена сломанного
+     бинарного тумблера "Показать все категории" на панель чекбоксов по
+     каждому тарифу) - тот же визуальный стиль, что и у панели "Слои" выше
+     (layer-toggle-btn/layer-toggle), но на месте старой жёлтой кнопки
+     filter-toggle (top:10px, left:56px), а панель "Слои" ниже (top:52px) не
+     трогали - при одновременном раскрытии обеих панелей возможно небольшое
+     наложение, это не критично (панели используются по очереди). Внутри -
+     подзаголовки по категориям (жирным) и чекбоксы по тарифам с отступом. */
+  .tariff-toggle-wrap { position: absolute; top: 10px; left: 56px; z-index: 1000; }
+  .tariff-toggle { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; max-width: 240px; max-height: 60vh; overflow-y: auto; background: #1c1c1c; color: #fff; border: 1px solid rgba(255,196,0,.4); border-radius: 8px; padding: 8px 10px; font-family: -apple-system, sans-serif; font-size: 12px; box-shadow: 0 1px 4px rgba(0,0,0,.35); }
+  .tariff-toggle.collapsed { display: none; }
+  .tariff-toggle .tariff-group-title { display: flex; align-items: center; gap: 5px; font-weight: 600; cursor: pointer; user-select: none; }
+  .tariff-toggle .tariff-item { display: flex; align-items: center; gap: 5px; margin-left: 18px; cursor: pointer; user-select: none; white-space: nowrap; }
   /* ИЗМЕНЕНО 23.09.2026 (жалоба пользователя, скриншот - "плохо видно"
      значки заправок/зарядок на карте): раньше это были голые эмодзи с
      drop-shadow - на пёстрой тайловой подложке почти не различить.
@@ -8257,6 +8270,22 @@ def map_webapp_html():
     style_json = json.dumps(MAP_CATEGORY_STYLE, ensure_ascii=False)
     fuel_type_labels_json = json.dumps(FUEL_TYPE_LABELS, ensure_ascii=False)
     charging_status_labels_json = json.dumps(CHARGING_STATUS_LABELS, ensure_ascii=False)
+    # ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "тумблер
+    # переключение отображения других тарифов не работает, надо сделать
+    # чтобы пользователь мог выбрать кого отображать на экране какие
+    # тарифы") - раньше был один бинарный переключатель "моя категория / все
+    # категории" (filterToggle), без выбора КОНКРЕТНЫХ тарифов внутри
+    # категории. Теперь панель с чекбоксами на каждый тариф каждой категории
+    # (те же тарифы, что при старте смены - см. CATEGORIES[cat]['tariffs']/
+    # shift_tariff_options) - тот же принцип, что и у панели "Слои"
+    # (заправки/зарядки), см. loadTariffPanel ниже.
+    tariff_options_json = json.dumps({
+        cat: {
+            'label': info['label'], 'icon': info['icon'],
+            'tariffs': CATEGORIES.get(cat, {}).get('tariffs', []),
+        }
+        for cat, info in MAP_CATEGORY_STYLE.items()
+    }, ensure_ascii=False)
     return f"""<!doctype html>
 <html lang="ru">
 <head>
@@ -8281,7 +8310,10 @@ def map_webapp_html():
 </head>
 <body>
 <div id="map"></div>
-<div class="filter-toggle" id="filterToggle">Показать все категории</div>
+<div class="tariff-toggle-wrap">
+  <div class="layer-toggle-btn" id="tariffToggleBtn">🚕 Тарифы</div>
+  <div class="tariff-toggle collapsed" id="tariffToggle"></div>
+</div>
 <div class="legend" id="legend"></div>
 <div class="layer-toggle-wrap">
   <div class="layer-toggle-btn" id="layerToggleBtn">🗂 Слои</div>
@@ -8293,7 +8325,7 @@ def map_webapp_html():
 </div>
 <script>
   const CATEGORY_STYLE = {style_json};
-  const CATEGORY_LABEL = {{ taxi: 'Такси', ultima: 'Ultima' }};
+  const TARIFF_OPTIONS = {tariff_options_json};
   const FUEL_TYPE_LABELS = {fuel_type_labels_json};
   const CHARGING_STATUS_LABELS = {charging_status_labels_json};
   const STATUS_ICON = {{ open: '🟢', coordinated: '🟡', closed: '🔴' }};
@@ -8303,30 +8335,74 @@ def map_webapp_html():
   const params = new URLSearchParams(window.location.search);
   const city = params.get('city') || '';
   const myCategory = params.get('category') || '';
-  let showAll = !myCategory;
   const legend = document.getElementById('legend');
-  const toggle = document.getElementById('filterToggle');
+  // ДОБАВЛЕНО 23.09.2026 (см. TARIFF_OPTIONS/tariff-toggle-wrap выше) -
+  // замена сломанного бинарного тумблера "Показать все категории" на
+  // мультивыбор конкретных тарифов. selectedTariffs - Set строк вида
+  // "category::tariff" (например "taxi::Комфорт") - водитель отмечает,
+  // ЧТО именно показывать на карте, а не просто "свою категорию или все".
+  // По умолчанию - как и раньше: если своя категория известна (myCategory
+  // из URL), отмечены только ЕЁ тарифы; иначе (категория не передана) -
+  // отмечены все тарифы всех категорий.
+  const tariffKey = (cat, t) => `${{cat}}::${{t}}`;
+  const selectedTariffs = new Set();
+  Object.keys(TARIFF_OPTIONS).forEach(cat => {{
+    if (myCategory && cat !== myCategory) return;
+    (TARIFF_OPTIONS[cat].tariffs || []).forEach(t => selectedTariffs.add(tariffKey(cat, t)));
+  }});
+  const tariffPanel = document.getElementById('tariffToggle');
+  const tariffBtn = document.getElementById('tariffToggleBtn');
+  function categoryFullySelected(cat) {{
+    const tariffs = TARIFF_OPTIONS[cat].tariffs || [];
+    return tariffs.length > 0 && tariffs.every(t => selectedTariffs.has(tariffKey(cat, t)));
+  }}
+  function renderTariffPanel() {{
+    tariffPanel.innerHTML = '';
+    Object.keys(TARIFF_OPTIONS).forEach(cat => {{
+      const info = TARIFF_OPTIONS[cat];
+      const tariffs = info.tariffs || [];
+      if (!tariffs.length) return;
+      const groupChecked = categoryFullySelected(cat);
+      const groupTitle = document.createElement('div');
+      groupTitle.className = 'tariff-group-title';
+      groupTitle.innerHTML = `<input type="checkbox" data-cat="${{cat}}" ${{groupChecked ? 'checked' : ''}}> ${{info.icon || ''}} ${{info.label}}`;
+      groupTitle.querySelector('input').addEventListener('change', (e) => {{
+        tariffs.forEach(t => {{
+          if (e.target.checked) selectedTariffs.add(tariffKey(cat, t));
+          else selectedTariffs.delete(tariffKey(cat, t));
+        }});
+        renderTariffPanel();
+        loadPositions();
+      }});
+      tariffPanel.appendChild(groupTitle);
+      tariffs.forEach(t => {{
+        const row = document.createElement('div');
+        row.className = 'tariff-item';
+        const checked = selectedTariffs.has(tariffKey(cat, t));
+        row.innerHTML = `<input type="checkbox" data-cat="${{cat}}" data-tariff="${{t}}" ${{checked ? 'checked' : ''}}> ${{t}}`;
+        row.querySelector('input').addEventListener('change', (e) => {{
+          if (e.target.checked) selectedTariffs.add(tariffKey(cat, t));
+          else selectedTariffs.delete(tariffKey(cat, t));
+          renderTariffPanel();
+          loadPositions();
+        }});
+        tariffPanel.appendChild(row);
+      }});
+    }});
+  }}
+  tariffBtn.addEventListener('click', () => {{
+    tariffPanel.classList.toggle('collapsed');
+  }});
   function renderLegend() {{
     legend.innerHTML = '';
-    const keys = showAll ? Object.keys(CATEGORY_STYLE) : [myCategory];
-    keys.forEach(key => {{
+    Object.keys(CATEGORY_STYLE).forEach(key => {{
+      if (!categoryFullySelected(key) && !(TARIFF_OPTIONS[key].tariffs || []).some(t => selectedTariffs.has(tariffKey(key, t)))) return;
       const s = CATEGORY_STYLE[key];
-      if (!s) return;
       legend.innerHTML += `<div><span class="dot" style="background:${{s.color}}"></span>${{s.label}}</div>`;
     }});
   }}
-  function renderToggle() {{
-    if (!myCategory) {{ toggle.style.display = 'none'; return; }}
-    toggle.textContent = showAll ? 'Только моя категория' : 'Показать все категории';
-  }}
-  toggle.addEventListener('click', () => {{
-    showAll = !showAll;
-    renderLegend();
-    renderToggle();
-    loadPositions();
-  }});
+  renderTariffPanel();
   renderLegend();
-  renderToggle();
   const map = L.map('map').setView([55.7558, 37.6173], 11);
   // ИЗМЕНЕНО 22.09.2026: пробовали переключиться на Wikimedia
   // (maps.wikimedia.org) как альтернативный бесплатный источник, но перед
@@ -8343,11 +8419,25 @@ def map_webapp_html():
   let markers = [];
   let airportMarkers = [];
   let airportsLoaded = false;
+  // ДОБАВЛЕНО 23.09.2026 (см. selectedTariffs выше) - водитель показывается
+  // на карте, если хотя бы один из ЕГО тарифов отмечен в панели "Тарифы";
+  // если у позиции тарифов нет вовсе (p.tariffs пуст - старые записи до
+  // введения выбора тарифов, либо категория без тарифов), fallback - смотрим,
+  // отмечена ли категория целиком (хотя бы один тариф этой категории отмечен).
+  function isPositionVisible(p) {{
+    if (p.tariffs && p.tariffs.length) {{
+      return p.tariffs.some(t => selectedTariffs.has(tariffKey(p.category, t)));
+    }}
+    const opts = TARIFF_OPTIONS[p.category];
+    return !!(opts && (opts.tariffs || []).some(t => selectedTariffs.has(tariffKey(p.category, t))));
+  }}
   async function loadPositions() {{
     try {{
       const initData = tg ? tg.initData : '';
-      const categoryParam = showAll ? '' : myCategory;
-      const resp = await fetch(`/map/positions?city=${{encodeURIComponent(city)}}&category=${{encodeURIComponent(categoryParam)}}`, {{
+      // Категорию у сервера больше не фильтруем (всегда запрашиваем все) -
+      // отбор ПО ТАРИФАМ теперь делаем на клиенте (isPositionVisible), т.к.
+      // выбор может охватывать несколько категорий сразу в любой комбинации.
+      const resp = await fetch(`/map/positions?city=${{encodeURIComponent(city)}}&category=`, {{
         headers: {{ 'X-Telegram-Init-Data': initData }},
       }});
       if (!resp.ok) return;
@@ -8355,7 +8445,7 @@ def map_webapp_html():
       markers.forEach(m => map.removeLayer(m));
       markers = [];
       let bounds = [];
-      data.positions.forEach(p => {{
+      data.positions.filter(isPositionVisible).forEach(p => {{
         const style = CATEGORY_STYLE[p.category] || {{ color: '#888', label: p.category, icon: '🚗' }};
         const popupText = (p.tariffs && p.tariffs.length) ? `${{style.label}} (${{p.tariffs.join(', ')}})` : style.label;
         // ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя): вместо кружка -
@@ -8436,7 +8526,7 @@ def map_webapp_html():
         let queueLines = [];
         queueKeys.forEach(key => {{
           const q = a.queue[key];
-          const label = CATEGORY_LABEL[key] || key;
+          const label = (CATEGORY_STYLE[key] && CATEGORY_STYLE[key].label) || key;
           if (q.by_tariff) {{
             Object.keys(q.by_tariff).forEach(tariff => {{
               const t = q.by_tariff[tariff];
