@@ -2395,6 +2395,24 @@ def init_db():
             confirmed_at DATETIME
         )
     ''')
+    # ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "подготовь так же
+    # пуши 3 2 1 день 1 час и 10 мин до окончания подписки чтобы приходили с
+    # кнопкой оплатить подписку") - по одной строке на пользователя+порог
+    # (см. SUBSCRIPTION_REMINDER_THRESHOLDS/check_subscription_reminders
+    # ниже), чтобы каждый порог слался РОВНО один раз за текущий оплаченный
+    # период - как только paid_until продлевается новым платежом, старые
+    # строки за прошлый период больше не совпадают ни с одним будущим
+    # порогом (см. active_until в самой проверке), а после продления мы их
+    # явно чистим (см. confirm_subscription_payment/grant_free_month), чтобы
+    # они не мешали посчитать пороги для НОВОГО periода.
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS subscription_expiry_reminders (
+            user_id INTEGER NOT NULL,
+            threshold TEXT NOT NULL,
+            sent_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (user_id, threshold)
+        )
+    ''')
     # Реферальная программа (по просьбе пользователя, 20.09.2026: "нужно
     # будет продумать в основном меню реферальная программа кнопка...") -
     # 2 уровня, привязка при первом /start?ref_<id> у НОВОГО пользователя
@@ -16196,6 +16214,21 @@ async def subscription_check_payment(callback_query: types.CallbackQuery):
             pass
 
 
+def _clear_subscription_expiry_reminders(user_id):
+    """См. CREATE TABLE subscription_expiry_reminders/SUBSCRIPTION_REMINDER_
+    THRESHOLDS - вызывается при КАЖДОМ продлении подписки (платном или через
+    "Фантом"), чтобы пороги 3д/2д/1д/1ч/10мин посчитались заново для нового
+    paid_until, а не молча пропустились как "уже отправленные" в прошлом
+    периоде."""
+    try:
+        conn = get_db_connection()
+        conn.execute('DELETE FROM subscription_expiry_reminders WHERE user_id = ?', (user_id,))
+        conn.commit()
+        conn.close()
+    except Exception:
+        logger.exception(f"❌ Не удалось сбросить напоминания об окончании подписки для user_id={user_id}")
+
+
 def grant_free_month(user_id):
     """См. PHANTOM_SUBSCRIPTION_PASSWORD выше - продлевает подписку на
     SUBSCRIPTION_PERIOD_DAYS дней БЕСПЛАТНО, от текущего paid_until (если он
@@ -16220,6 +16253,7 @@ def grant_free_month(user_id):
     )
     conn.commit()
     conn.close()
+    _clear_subscription_expiry_reminders(user_id)
     return new_paid_until
 
 
@@ -16262,6 +16296,7 @@ def confirm_subscription_payment(order_id):
     )
     conn.commit()
     conn.close()
+    _clear_subscription_expiry_reminders(user_id)
     referral_notifications = distribute_referral_earnings(user_id, amount_kopecks, order_id)
     return {'user_id': user_id, 'already_processed': False, 'referral_notifications': referral_notifications}
 
@@ -16411,6 +16446,103 @@ async def subscription_expiry_checker():
         except Exception:
             logger.exception("❌ Ошибка в subscription_expiry_checker")
         await asyncio.sleep(SUBSCRIPTION_CHECK_INTERVAL_MINUTES * 60)
+
+
+# ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "подготовь так же пуши
+# 3 2 1 день 1 час и 10 мин до окончания подписки чтобы приходили с кнопкой
+# оплатить подписку") - в отличие от check_subscription_expirations выше
+# (которая шлёт ПОСЛЕ того, как доступ уже пропал), эти пуши ЗАРАНЕЕ
+# предупреждают о скором окончании - и триала, и оплаченного периода (те же
+# active_until/subscription_active_until, что и во всём остальном боте), с
+# кнопкой "ОПЛАТИТЬ ПОДПИСКУ" прямо в сообщении. Отдельная, более частая
+# проверка (SUBSCRIPTION_REMINDER_CHECK_INTERVAL_MINUTES=5, а не 60, как у
+# check_subscription_expirations) - иначе порог "за 10 минут" мог бы вообще
+# не попасть в проверяемое окно.
+SUBSCRIPTION_REMINDER_CHECK_INTERVAL_MINUTES = 5
+
+# Отсортированы от САМОГО БЛИЗКОГО срока к самому дальнему - см. порядок
+# обхода в check_subscription_expiry_reminders (в рамках одного прогона
+# отправляем САМОЕ срочное непосланное напоминание, а более дальние, которые
+# тоже уже "проехали" - например, если бот был выключен несколько часов -
+# просто отмечаем отправленными задним числом, отдельным сообщением не шлём).
+SUBSCRIPTION_REMINDER_THRESHOLDS = [
+    ('10m', timedelta(minutes=10), "🚨 *Подписка закончится через 10 минут!*\n\nПродли, чтобы не потерять доступ к боту."),
+    ('1h', timedelta(hours=1), "⏰ *Подписка закончится через 1 час.*\n\nПродли, чтобы не потерять доступ к боту."),
+    ('1d', timedelta(days=1), "⏳ *Подписка закончится через 1 день.*\n\nПродли заранее, чтобы не остаться без бота."),
+    ('2d', timedelta(days=2), "⏳ *Подписка закончится через 2 дня.*\n\nПродли заранее, чтобы не остаться без бота."),
+    ('3d', timedelta(days=3), "⏳ *Подписка закончится через 3 дня.*\n\nПродли заранее, чтобы не остаться без бота."),
+]
+
+def subscription_reminder_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="💳 ОПЛАТИТЬ ПОДПИСКУ", callback_data="sub_reminder_pay"),
+    ]])
+
+@router.callback_query(lambda c: c.data == "sub_reminder_pay")
+async def sub_reminder_pay(callback_query: types.CallbackQuery):
+    """Кнопка "ОПЛАТИТЬ ПОДПИСКУ" на пуше-напоминании (см.
+    SUBSCRIPTION_REMINDER_THRESHOLDS выше) - ведёт в тот же экран оплаты, что
+    и обычная кнопка меню (send_subscription_paywall сама запросит email,
+    если он ещё не собран, и сама создаст ссылку Tinkoff)."""
+    try:
+        await callback_query.answer()
+    except Exception:
+        pass
+    await send_subscription_paywall(callback_query)
+
+async def check_subscription_expiry_reminders():
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT user_id FROM subscriptions')
+    user_ids = [row[0] for row in cursor.fetchall()]
+    conn.close()
+    now = _sub_now()
+    for user_id in user_ids:
+        active_until = subscription_active_until(user_id)
+        if active_until is None or now >= active_until:
+            continue  # уже истекло - это зона check_subscription_expirations, не дублируем
+        time_left = active_until - now
+        conn2 = get_db_connection()
+        cursor2 = conn2.cursor()
+        cursor2.execute('SELECT threshold FROM subscription_expiry_reminders WHERE user_id = ?', (user_id,))
+        sent_thresholds = {row[0] for row in cursor2.fetchall()}
+        conn2.close()
+        send_idx = None
+        for idx, (key, threshold, text) in enumerate(SUBSCRIPTION_REMINDER_THRESHOLDS):
+            if time_left <= threshold and key not in sent_thresholds:
+                send_idx = idx
+                break
+        if send_idx is None:
+            continue
+        key, threshold, text = SUBSCRIPTION_REMINDER_THRESHOLDS[send_idx]
+        try:
+            if bot:
+                await bot.send_message(user_id, text, reply_markup=subscription_reminder_keyboard(), parse_mode='Markdown')
+        except Exception:
+            logger.warning(f"⚠️ Не удалось отправить напоминание ({key}) об окончании подписки user_id={user_id}")
+        # Отмечаем отправленным ЭТОТ порог и все более дальние (они по списку
+        # идут следом, т.к. отсортированы от ближнего к дальнему) - раз более
+        # срочный порог уже наступил, дальние тоже фактически "проехали" и
+        # отдельного сообщения для них слать не нужно.
+        try:
+            conn3 = get_db_connection()
+            conn3.executemany(
+                'INSERT OR IGNORE INTO subscription_expiry_reminders (user_id, threshold) VALUES (?, ?)',
+                [(user_id, k) for k, _, _ in SUBSCRIPTION_REMINDER_THRESHOLDS[send_idx:]]
+            )
+            conn3.commit()
+            conn3.close()
+        except Exception:
+            logger.exception(f"❌ Не удалось сохранить отметку о напоминании ({key}) для user_id={user_id}")
+        await asyncio.sleep(0.05)
+
+async def subscription_expiry_reminder_checker():
+    while True:
+        try:
+            await check_subscription_expiry_reminders()
+        except Exception:
+            logger.exception("❌ Ошибка в subscription_expiry_reminder_checker")
+        await asyncio.sleep(SUBSCRIPTION_REMINDER_CHECK_INTERVAL_MINUTES * 60)
 
 # ==================== РЕФЕРАЛЬНАЯ ПРОГРАММА ====================
 # По просьбе пользователя (20.09.2026): кнопка "Реферальная программа" в
@@ -18070,6 +18202,7 @@ async def main():
     dp.message.outer_middleware(ChatCleanupIncomingMiddleware())
     asyncio.create_task(start_subscription_webhook_server())
     asyncio.create_task(subscription_expiry_checker())
+    asyncio.create_task(subscription_expiry_reminder_checker())
     dp.include_router(router)
     if os.getenv('YANDEX_RASP_API_KEY'):
         asyncio.create_task(airports_data_updater())
