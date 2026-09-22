@@ -15570,10 +15570,26 @@ def tinkoff_generate_token(params: dict) -> str:
     """Подпись запроса к Tinkoff Kassa: берутся только плоские (не
     вложенные) поля запроса + Password из личного кабинета, сортируются по
     ключу, значения конкатенируются и хешируются SHA-256 - см.
-    https://www.tbank.ru/kassa/dev/payments/#section/Podpis-zaprosa"""
+    https://www.tbank.ru/kassa/dev/payments/#section/Podpis-zaprosa
+
+    ИСПРАВЛЕНО 23.09.2026 (по факту - webhook стабильно приходил с "неверный
+    Token", хотя PUBLIC_URL/пароль были верными): в теле webhook Tinkoff
+    присылает булевы поля (например "Success": true/false) как настоящий
+    JSON-boolean, aiohttp разбирает его в Python True/False, а Python
+    str(True) даёт "True" с заглавной буквы - Tinkoff же при вычислении
+    подписи на своей стороне использует lowercase "true"/"false". Из-за
+    этого пересчитанный токен не совпадал с присланным НИКОГДА, для ЛЮБОГО
+    входящего webhook (не только фейковых) - легко принять эту постоянную
+    ошибку за проблему с ключами, хотя дело было только в регистре bool."""
     values = {k: v for k, v in params.items() if not isinstance(v, (dict, list))}
     values['Password'] = TINKOFF_PASSWORD
-    concat = ''.join(str(values[k]) for k in sorted(values.keys()))
+
+    def _tinkoff_str(v):
+        if isinstance(v, bool):
+            return 'true' if v else 'false'
+        return str(v)
+
+    concat = ''.join(_tinkoff_str(values[k]) for k in sorted(values.keys()))
     return hashlib.sha256(concat.encode('utf-8')).hexdigest()
 
 
