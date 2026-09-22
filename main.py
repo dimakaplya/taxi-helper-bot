@@ -8889,6 +8889,16 @@ def map_webapp_html():
   fuelCheckbox.addEventListener('change', () => {{
     if (fuelCheckbox.checked) loadFuelStations(); else clearFuelStations();
   }});
+  // ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "где бензин сделай
+  // две кнопки... и на карту нашу там с включенным фильтром топливо") -
+  // ?layer=fuel в URL (см. show_fuel_bot/FUEL_MAP_URL ниже) сразу включает
+  // слой заправок и разворачивает панель "Слои", чтобы не заставлять
+  // водителя самого искать и включать чекбокс после перехода с кнопки.
+  if (params.get('layer') === 'fuel') {{
+    fuelCheckbox.checked = true;
+    layerToggleRow.classList.remove('collapsed');
+    loadFuelStations();
+  }}
   chargingCheckbox.addEventListener('change', () => {{
     if (chargingCheckbox.checked) loadChargingStations(); else clearChargingStations();
   }});
@@ -12750,14 +12760,31 @@ async def show_weather_forecast(message: types.Message):
 async def show_fuel_bot(message: types.Message):
     """Ссылка на отдельного стороннего бота @gde_benzin_rubot (народная карта
     наличия топлива на АЗС по России) - не встроенные в Taxi Helper данные,
-    а прямой переход в его собственный чат."""
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⛽ ОТКРЫТЬ «ГДЕ БЕНЗИН»", url=FUEL_BOT_URL)]
-    ])
+    а прямой переход в его собственный чат.
+
+    ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "где бензин сделай
+    две кнопки внутри это путь на бота и на карту нашу там с включенным
+    фильтром топливо") - вторая кнопка открывает СВОЮ карту (тот же
+    MAP_WEBAPP_PATH, что и "🗺 КАРТА" в меню), с уже включённым слоем
+    заправок (?layer=fuel - см. обработку params.get('layer') в
+    map_webapp_html) - водителю не нужно самому находить и включать чекбокс
+    "⛽ Заправки" в панели "Слои" после перехода."""
+    user_id = message.from_user.id
+    state = user_state.get(user_id, {})
+    city = state.get('city')
+    category = state.get('category')
+    buttons = [[InlineKeyboardButton(text="⛽ ОТКРЫТЬ «ГДЕ БЕНЗИН»", url=FUEL_BOT_URL)]]
+    if PUBLIC_URL and city and category:
+        fuel_map_url = (
+            f"{PUBLIC_URL}{MAP_WEBAPP_PATH}?city={urllib.parse.quote(city)}"
+            f"&category={urllib.parse.quote(category)}&layer=fuel"
+        )
+        buttons.append([InlineKeyboardButton(text="🗺 ЗАПРАВКИ НА НАШЕЙ КАРТЕ", web_app=WebAppInfo(url=fuel_map_url))])
+    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
     text = (
         "⛽ *Где бензин*\n\n"
         "Народная карта наличия топлива на АЗС по России - отдельный бот. "
-        "Нажми кнопку ниже, чтобы открыть его."
+        "Или посмотри заправки прямо на нашей карте."
     )
     await message.answer(text, reply_markup=keyboard, parse_mode='Markdown')
 
