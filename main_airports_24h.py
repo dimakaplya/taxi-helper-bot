@@ -7948,6 +7948,14 @@ SELF_MARKER_STYLE = {
 MAP_WEBAPP_PATH = '/map'
 MAP_POSITIONS_API_PATH = '/map/positions'
 MAP_AIRPORTS_API_PATH = '/map/airports'
+# ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "пусть по нажатию на
+# стрелку на карте он берет данные тарифа машина и номера из кабинета если
+# есть данные") - в отличие от /map/positions (анонимные ЧУЖИЕ позиции,
+# initData не обязателен) это ЛИЧНЫЕ данные самого водителя из его же
+# кабинета (driver_profiles/get_driver_profile), поэтому initData здесь
+# ОБЯЗАТЕЛЕН и должен пройти проверку подписи - без валидной подписи не
+# отдаём ничего (см. handle_map_my_profile_api).
+MAP_MY_PROFILE_API_PATH = '/map/my_profile'
 
 # ==================== ЗАПРАВКИ + ЭЛЕКТРОЗАРЯДКИ НА КАРТЕ ====================
 # ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "вынеси на карту все
@@ -8700,6 +8708,37 @@ def map_webapp_html():
       `<polygon points="21,5 15,19 27,19" fill="rgba(255,255,255,0.30)"/>` +
       `</svg></div></div>`;
   }}
+  // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "пусть по нажатию
+  // на стрелку на карте он берет данные тарифа машина и номера из кабинета
+  // если есть данные") - по нажатию на свою стрелку показываем попап с
+  // тарифом/машиной/номером из кабинета (см. handle_map_my_profile_api/
+  // MAP_MY_PROFILE_API_PATH). Данные подгружаются один раз при открытии
+  // карты (loadMyProfile) и кэшируются в myProfilePopupHtml - если в
+  // кабинете ничего не заполнено, попап не привязываем вовсе (по нажатию
+  // ничего не откроется, как и раньше).
+  let myProfilePopupHtml = '';
+  async function loadMyProfile() {{
+    try {{
+      const initData = tg ? tg.initData : '';
+      if (!initData) return;
+      const resp = await fetch('/map/my_profile', {{ headers: {{ 'X-Telegram-Init-Data': initData }} }});
+      if (!resp.ok) return;
+      const data = await resp.json();
+      const p = data.profile;
+      if (!p) return;
+      const rows = [];
+      if (p.tariff) rows.push(`🚕 Тариф: ${{p.tariff}}`);
+      if (p.car_model) rows.push(`🚗 Машина: ${{p.car_model}}`);
+      if (p.car_plate) rows.push(`🔢 Номер: ${{p.car_plate}}`);
+      if (!rows.length) return;
+      myProfilePopupHtml = rows.join('<br>');
+      if (selfMarker) {{
+        if (selfMarker.getPopup()) selfMarker.setPopupContent(myProfilePopupHtml);
+        else selfMarker.bindPopup(myProfilePopupHtml);
+      }}
+    }} catch (e) {{ /* тихо - карта просто останется без попапа у своей стрелки */ }}
+  }}
+  loadMyProfile();
   function updateSelfMarker(lat, lon, heading) {{
     const h = (heading === null || heading === undefined || isNaN(heading)) ? selfHeading : heading;
     selfHeading = h;
@@ -8708,7 +8747,8 @@ def map_webapp_html():
       selfMarker.setLatLng([lat, lon]);
       selfMarker.setIcon(icon);
     }} else {{
-      selfMarker = L.marker([lat, lon], {{ icon, zIndexOffset: 1000 }}).bindPopup('Ты').addTo(map);
+      selfMarker = L.marker([lat, lon], {{ icon, zIndexOffset: 1000 }}).addTo(map);
+      if (myProfilePopupHtml) selfMarker.bindPopup(myProfilePopupHtml);
       map.setView([lat, lon], 13);
     }}
   }}
@@ -9788,6 +9828,33 @@ async def handle_map_positions_api(request):
         logger.exception("❌ Ошибка при получении позиций для карты водителей")
         positions = []
     return web.json_response({'positions': positions})
+
+async def handle_map_my_profile_api(request):
+    """JSON API для СВОЕГО маркера на карте (см. MAP_MY_PROFILE_API_PATH выше) -
+    отдаёт тариф/марку машины/госномер из кабинета водителя (get_driver_profile),
+    чтобы показать их в попапе своего маркера-стрелки по нажатию. В отличие от
+    /map/positions это личные данные, поэтому initData ОБЯЗАТЕЛЕН и должен
+    пройти проверку подписи - без неё или без BOT_TOKEN отдаём пустой profile."""
+    init_data = request.headers.get('X-Telegram-Init-Data', '')
+    if not BOT_TOKEN or not init_data:
+        return web.json_response({'profile': None})
+    parsed = validate_telegram_webapp_init_data(init_data, BOT_TOKEN)
+    if parsed is None:
+        logger.warning("⚠️ /map/my_profile: не прошла проверка initData")
+        return web.json_response({'profile': None})
+    try:
+        user_json = json.loads(parsed.get('user', '{}'))
+        user_id = user_json.get('id')
+    except Exception:
+        user_id = None
+    if not user_id:
+        return web.json_response({'profile': None})
+    try:
+        profile = get_driver_profile(user_id)
+    except Exception:
+        logger.exception("❌ Ошибка при получении профиля для карты (my_profile)")
+        profile = None
+    return web.json_response({'profile': profile})
 
 async def handle_map_airports_api(request):
     """JSON API для меток аэропортов на карте (по просьбе пользователя,
@@ -16746,6 +16813,7 @@ async def start_subscription_webhook_server():
     app.router.add_get(WHERE_TO_GO_DATA_API_PATH, handle_where_to_go_data_api)
     app.router.add_get(MAP_WEBAPP_PATH, handle_map_webapp)
     app.router.add_get(MAP_POSITIONS_API_PATH, handle_map_positions_api)
+    app.router.add_get(MAP_MY_PROFILE_API_PATH, handle_map_my_profile_api)
     app.router.add_get(MAP_AIRPORTS_API_PATH, handle_map_airports_api)
     app.router.add_get(MAP_STATIONS_API_PATH, handle_map_stations_api)
     app.router.add_get(MAP_FUEL_STATIONS_API_PATH, handle_map_fuel_stations_api)
