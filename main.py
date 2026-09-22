@@ -17212,28 +17212,35 @@ def _sub_format(value):
     return value.strftime('%Y-%m-%d %H:%M:%S')
 
 
-def ensure_subscription(user_id):
-    """Создаёт запись о подписке при первом обращении пользователя к боту -
-    именно с этого момента отсчитываются SUBSCRIPTION_TRIAL_DAYS бесплатных
-    дней. Если запись уже есть - ничего не делает (триал не продлевается
-    повторно)."""
+def ensure_subscription(user_id, sub_group=None):
+    """Создаёт запись о подписке для (user_id, sub_group) при первом
+    обращении - именно с этого момента отсчитываются SUBSCRIPTION_TRIAL_DAYS
+    бесплатных дней ДЛЯ ЭТОЙ ГРУППЫ. Если запись уже есть - ничего не
+    делает (триал не продлевается повторно). sub_group=None - берём текущую
+    категорию пользователя (get_user_subscription_group) - см. коммент у
+    SUBSCRIPTION_GROUP_TAXI_ULTIMA выше: такси/Ultima и курьер/грузовое
+    такси теперь СВОЙ, независимый триал/оплата."""
+    if sub_group is None:
+        sub_group = get_user_subscription_group(user_id)
     init_db()
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute('SELECT 1 FROM subscriptions WHERE user_id = ?', (user_id,))
+    cursor.execute('SELECT 1 FROM subscription_state WHERE user_id = ? AND sub_group = ?', (user_id, sub_group))
     if cursor.fetchone() is None:
         cursor.execute(
-            'INSERT INTO subscriptions (user_id, trial_started_at) VALUES (?, ?)',
-            (user_id, _sub_format(_sub_now()))
+            'INSERT INTO subscription_state (user_id, sub_group, trial_started_at) VALUES (?, ?, ?)',
+            (user_id, sub_group, _sub_format(_sub_now()))
         )
         conn.commit()
     conn.close()
 
 
-def get_subscription(user_id):
+def get_subscription(user_id, sub_group=None):
+    if sub_group is None:
+        sub_group = get_user_subscription_group(user_id)
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute('SELECT trial_started_at, paid_until FROM subscriptions WHERE user_id = ?', (user_id,))
+    cursor.execute('SELECT trial_started_at, paid_until FROM subscription_state WHERE user_id = ? AND sub_group = ?', (user_id, sub_group))
     row = cursor.fetchone()
     conn.close()
     if not row:
@@ -17246,8 +17253,24 @@ def get_subscription(user_id):
 # законодательно нужен контакт покупателя). Собираем email ОДИН раз перед
 # первой оплатой (см. show_subscription_status/send_subscription_paywall/
 # subscription_email_flow ниже) и переиспользуем для всех следующих
-# платежей этого пользователя.
+# платежей этого пользователя. Email - ОБЩИЙ на пользователя (не зависит от
+# sub_group, это просто контакт для чека), поэтому по-прежнему хранится в
+# старой таблице subscriptions (см. _ensure_receipt_email_row ниже) -
+# независимо от переезда триала/оплаты в subscription_state.
 SUBSCRIPTION_EMAIL_REGEX = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
+
+
+def _ensure_receipt_email_row(user_id):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT 1 FROM subscriptions WHERE user_id = ?', (user_id,))
+    if cursor.fetchone() is None:
+        cursor.execute(
+            'INSERT INTO subscriptions (user_id, trial_started_at) VALUES (?, ?)',
+            (user_id, _sub_format(_sub_now()))
+        )
+        conn.commit()
+    conn.close()
 
 
 def get_receipt_email(user_id):
@@ -17260,17 +17283,20 @@ def get_receipt_email(user_id):
 
 
 def set_receipt_email(user_id, email):
-    ensure_subscription(user_id)
+    _ensure_receipt_email_row(user_id)
     conn = get_db_connection()
     conn.execute('UPDATE subscriptions SET receipt_email = ? WHERE user_id = ?', (email, user_id))
     conn.commit()
     conn.close()
 
 
-def subscription_active_until(user_id):
-    """Возвращает datetime, до какого момента доступ открыт (конец триала
-    либо paid_until, что позже), или None если записи ещё нет вообще."""
-    sub = get_subscription(user_id)
+def subscription_active_until(user_id, sub_group=None):
+    """Возвращает datetime, до какого момента доступ открыт для этой группы
+    (конец триала либо paid_until, что позже), или None если записи ещё
+    нет вообще."""
+    if sub_group is None:
+        sub_group = get_user_subscription_group(user_id)
+    sub = get_subscription(user_id, sub_group)
     if not sub:
         return None
     active_until = _sub_parse(sub['trial_started_at']) + timedelta(days=SUBSCRIPTION_TRIAL_DAYS)
@@ -17281,8 +17307,8 @@ def subscription_active_until(user_id):
     return active_until
 
 
-def is_subscription_active(user_id):
-    active_until = subscription_active_until(user_id)
+def is_subscription_active(user_id, sub_group=None):
+    active_until = subscription_active_until(user_id, sub_group)
     if active_until is None:
         return True  # запись ещё не создана (не должно происходить, ensure_subscription вызывается раньше) - не блокируем на всякий случай
     return _sub_now() < active_until
@@ -17298,12 +17324,15 @@ SUBSCRIPTION_MENU_BUTTON_DEFAULT_TEXT = "💳 ОПЛАТИТЬ ПОДПИСКУ"
 # до конца триала - т.е. был хотя бы один платёж), а не просто идёт триал.
 # ВАЖНО: текст кнопки - это "ключ", по которому её ищут обработчики (см.
 # show_subscription_status ниже) - при изменении формата нужно поменять и
-# лямбду там же.
+# лямбду там же. Считается по ТЕКУЩЕЙ группе пользователя (см.
+# get_user_subscription_group) - если он сейчас в такси, кнопка показывает
+# статус подписки такси/Ultima, а не курьерской.
 def subscription_menu_button_text(user_id):
     if user_id is None:
         return SUBSCRIPTION_MENU_BUTTON_DEFAULT_TEXT
-    sub = get_subscription(user_id)
-    active_until = subscription_active_until(user_id)
+    sub_group = get_user_subscription_group(user_id)
+    sub = get_subscription(user_id, sub_group)
+    active_until = subscription_active_until(user_id, sub_group)
     is_paid = bool(sub and sub['paid_until'] and active_until and _sub_parse(sub['paid_until']) >= active_until)
     if not is_paid:
         return SUBSCRIPTION_MENU_BUTTON_DEFAULT_TEXT
@@ -17338,13 +17367,13 @@ def tinkoff_generate_token(params: dict) -> str:
     return hashlib.sha256(concat.encode('utf-8')).hexdigest()
 
 
-def save_subscription_order(user_id, order_id, amount_kopecks):
+def save_subscription_order(user_id, sub_group, order_id, amount_kopecks):
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute('UPDATE subscriptions SET last_order_id = ? WHERE user_id = ?', (order_id, user_id))
+    cursor.execute('UPDATE subscription_state SET last_order_id = ? WHERE user_id = ? AND sub_group = ?', (order_id, user_id, sub_group))
     cursor.execute(
-        'INSERT OR REPLACE INTO subscription_payments (order_id, user_id, amount_kopecks, status) VALUES (?, ?, ?, ?)',
-        (order_id, user_id, amount_kopecks, 'NEW')
+        'INSERT OR REPLACE INTO subscription_payments (order_id, user_id, sub_group, amount_kopecks, status) VALUES (?, ?, ?, ?, ?)',
+        (order_id, user_id, sub_group, amount_kopecks, 'NEW')
     )
     conn.commit()
     conn.close()
@@ -17361,7 +17390,13 @@ async def create_tinkoff_payment(user_id: int):
     send_subscription_paywall) обязан СНАЧАЛА собрать email через
     get_receipt_email/subscription_email_flow, прежде чем звать эту
     функцию - если email всё ещё не задан, возвращаем None с предупреждением
-    в лог, чтобы не отправлять в Tinkoff заведомо невалидный запрос."""
+    в лог, чтобы не отправлять в Tinkoff заведомо невалидный запрос.
+
+    ИЗМЕНЕНО 22.09.2026 (см. get_subscription_group выше) - платёж теперь
+    ВСЕГДА за ТЕКУЩУЮ группу пользователя (sub_group), сумма и заказ
+    привязаны именно к ней - оплата такси/Ultima не продлевает курьерскую
+    подписку и наоборот."""
+    sub_group = get_user_subscription_group(user_id)
     if not TINKOFF_TERMINAL_KEY or not TINKOFF_PASSWORD:
         logger.warning(f"⚠️ TINKOFF_TERMINAL_KEY/TINKOFF_PASSWORD не заданы - не могу создать ссылку на оплату для user_id={user_id}")
         return None
@@ -17370,7 +17405,7 @@ async def create_tinkoff_payment(user_id: int):
         logger.warning(f"⚠️ Email для чека ещё не собран - не могу создать ссылку на оплату для user_id={user_id}")
         return None
     order_id = f"sub_{user_id}_{int(time.time())}"
-    price_kopecks = get_subscription_price_kopecks(user_id)
+    price_kopecks = get_subscription_group_price_rub(sub_group) * 100
     params = {
         'TerminalKey': TINKOFF_TERMINAL_KEY,
         'Amount': price_kopecks,
@@ -17421,7 +17456,7 @@ async def create_tinkoff_payment(user_id: int):
     if not data.get('Success'):
         logger.error(f"❌ Tinkoff Init отказал для user_id={user_id}: {data}")
         return None
-    save_subscription_order(user_id, order_id, price_kopecks)
+    save_subscription_order(user_id, sub_group, order_id, price_kopecks)
     return data.get('PaymentURL')
 
 
@@ -17683,7 +17718,7 @@ async def subscription_check_payment(callback_query: types.CallbackQuery):
             pass
 
 
-def _clear_subscription_expiry_reminders(user_id):
+def _clear_subscription_expiry_reminders(user_id, sub_group):
     """См. CREATE TABLE subscription_expiry_reminders/SUBSCRIPTION_REMINDER_
     THRESHOLDS - вызывается при КАЖДОМ продлении подписки (платном или через
     "Фантом"), чтобы пороги 3д/2д/1д/1ч/10мин посчитались заново для нового
@@ -17691,11 +17726,11 @@ def _clear_subscription_expiry_reminders(user_id):
     периоде."""
     try:
         conn = get_db_connection()
-        conn.execute('DELETE FROM subscription_expiry_reminders WHERE user_id = ?', (user_id,))
+        conn.execute('DELETE FROM subscription_expiry_reminders WHERE user_id = ? AND sub_group = ?', (user_id, sub_group))
         conn.commit()
         conn.close()
     except Exception:
-        logger.exception(f"❌ Не удалось сбросить напоминания об окончании подписки для user_id={user_id}")
+        logger.exception(f"❌ Не удалось сбросить напоминания об окончании подписки для user_id={user_id}/{sub_group}")
 
 
 def grant_free_month(user_id):
@@ -17704,11 +17739,15 @@ def grant_free_month(user_id):
     ещё не истёк) или от текущего момента - та же логика продления, что и в
     confirm_subscription_payment, но БЕЗ записи в subscription_payments и
     БЕЗ начисления реферальных процентов (это не реальный платёж, а
-    ручная/скрытая выдача доступа). Возвращает новую дату paid_until."""
-    ensure_subscription(user_id)
+    ручная/скрытая выдача доступа). Продлевает ТЕКУЩУЮ группу пользователя
+    (см. get_user_subscription_group) - "Фантом" даёт бесплатный месяц
+    именно того тарифа, в котором водитель сейчас работает. Возвращает
+    новую дату paid_until."""
+    sub_group = get_user_subscription_group(user_id)
+    ensure_subscription(user_id, sub_group)
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute('SELECT paid_until FROM subscriptions WHERE user_id = ?', (user_id,))
+    cursor.execute('SELECT paid_until FROM subscription_state WHERE user_id = ? AND sub_group = ?', (user_id, sub_group))
     sub_row = cursor.fetchone()
     base = _sub_now()
     if sub_row and sub_row[0]:
@@ -17717,32 +17756,35 @@ def grant_free_month(user_id):
             base = current_paid_until
     new_paid_until = base + timedelta(days=SUBSCRIPTION_PERIOD_DAYS)
     cursor.execute(
-        'UPDATE subscriptions SET paid_until = ?, expired_notified = 0 WHERE user_id = ?',
-        (_sub_format(new_paid_until), user_id)
+        'UPDATE subscription_state SET paid_until = ?, expired_notified = 0 WHERE user_id = ? AND sub_group = ?',
+        (_sub_format(new_paid_until), user_id, sub_group)
     )
     conn.commit()
     conn.close()
-    _clear_subscription_expiry_reminders(user_id)
+    _clear_subscription_expiry_reminders(user_id, sub_group)
     return new_paid_until
 
 
 def confirm_subscription_payment(order_id):
     """Вызывается из webhook-хендлера Tinkoff при статусе CONFIRMED -
     продлевает подписку на SUBSCRIPTION_PERIOD_DAYS от текущего paid_until
-    (если он ещё не истёк) или от текущего момента. Идемпотентна - повторный
-    webhook с тем же order_id (Tinkoff может слать статус несколько раз) не
-    продлит подписку дважды, а реферальные проценты (см. блок "РЕФЕРАЛЬНАЯ
-    ПРОГРАММА" ниже) не начислятся повторно. Возвращает dict
-    {'user_id', 'already_processed', 'referral_notifications'} при успехе,
-    иначе None."""
+    (если он ещё не истёк) или от текущего момента - ДЛЯ ТОЙ ГРУППЫ
+    (sub_group), за которую был создан именно этот заказ (см.
+    save_subscription_order/create_tinkoff_payment) - не текущей категории
+    пользователя, она к моменту webhook'а могла уже смениться. Идемпотентна -
+    повторный webhook с тем же order_id (Tinkoff может слать статус
+    несколько раз) не продлит подписку дважды, а реферальные проценты (см.
+    блок "РЕФЕРАЛЬНАЯ ПРОГРАММА" ниже) не начислятся повторно. Возвращает
+    dict {'user_id', 'already_processed', 'referral_notifications'} при
+    успехе, иначе None."""
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute('SELECT user_id, status, amount_kopecks FROM subscription_payments WHERE order_id = ?', (order_id,))
+    cursor.execute('SELECT user_id, sub_group, status, amount_kopecks FROM subscription_payments WHERE order_id = ?', (order_id,))
     row = cursor.fetchone()
     if not row:
         conn.close()
         return None
-    user_id, status, amount_kopecks = row
+    user_id, sub_group, status, amount_kopecks = row
     if status == 'CONFIRMED':
         conn.close()
         return {'user_id': user_id, 'already_processed': True, 'referral_notifications': []}
@@ -17751,7 +17793,7 @@ def confirm_subscription_payment(order_id):
         "UPDATE subscription_payments SET status = 'CONFIRMED', confirmed_at = ? WHERE order_id = ?",
         (_sub_format(now), order_id)
     )
-    cursor.execute('SELECT paid_until FROM subscriptions WHERE user_id = ?', (user_id,))
+    cursor.execute('SELECT paid_until FROM subscription_state WHERE user_id = ? AND sub_group = ?', (user_id, sub_group))
     sub_row = cursor.fetchone()
     base = now
     if sub_row and sub_row[0]:
@@ -17760,12 +17802,12 @@ def confirm_subscription_payment(order_id):
             base = current_paid_until
     new_paid_until = base + timedelta(days=SUBSCRIPTION_PERIOD_DAYS)
     cursor.execute(
-        'UPDATE subscriptions SET paid_until = ?, expired_notified = 0 WHERE user_id = ?',
-        (_sub_format(new_paid_until), user_id)
+        'UPDATE subscription_state SET paid_until = ?, expired_notified = 0 WHERE user_id = ? AND sub_group = ?',
+        (_sub_format(new_paid_until), user_id, sub_group)
     )
     conn.commit()
     conn.close()
-    _clear_subscription_expiry_reminders(user_id)
+    _clear_subscription_expiry_reminders(user_id, sub_group)
     referral_notifications = distribute_referral_earnings(user_id, amount_kopecks, order_id)
     return {'user_id': user_id, 'already_processed': False, 'referral_notifications': referral_notifications}
 
@@ -17884,14 +17926,22 @@ async def check_subscription_expirations():
     которые с этого момента ещё не заходили в бота (иначе они и так упрутся
     в SubscriptionMiddleware при следующем обращении) - раз в
     SUBSCRIPTION_CHECK_INTERVAL_MINUTES минут."""
+    # ИЗМЕНЕНО 22.09.2026 (см. subscription_state/get_subscription_group
+    # выше) - источник теперь subscription_state (по группе), а не старая
+    # subscriptions. Проверяем и шлём ТОЛЬКО если истекла группа, в которой
+    # пользователь СЕЙЧАС (get_user_subscription_group) - если он в этот
+    # момент работает в другой группе, у которой доступ ещё есть, пуш о
+    # "своей" (неактуальной прямо сейчас) группе только сбивал бы с толку.
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute('SELECT user_id FROM subscriptions WHERE expired_notified = 0')
-    user_ids = [row[0] for row in cursor.fetchall()]
+    cursor.execute('SELECT user_id, sub_group FROM subscription_state WHERE expired_notified = 0')
+    rows = cursor.fetchall()
     conn.close()
     now = _sub_now()
-    for user_id in user_ids:
-        active_until = subscription_active_until(user_id)
+    for user_id, sub_group in rows:
+        if get_user_subscription_group(user_id) != sub_group:
+            continue
+        active_until = subscription_active_until(user_id, sub_group)
         if active_until is None or now < active_until:
             continue
         pay_url = await create_tinkoff_payment(user_id)
@@ -17905,7 +17955,7 @@ async def check_subscription_expirations():
             logger.warning(f"⚠️ Не удалось отправить пуш об окончании подписки user_id={user_id}")
         conn2 = get_db_connection()
         cursor2 = conn2.cursor()
-        cursor2.execute('UPDATE subscriptions SET expired_notified = 1 WHERE user_id = ?', (user_id,))
+        cursor2.execute('UPDATE subscription_state SET expired_notified = 1 WHERE user_id = ? AND sub_group = ?', (user_id, sub_group))
         conn2.commit()
         conn2.close()
         await asyncio.sleep(0.05)
@@ -17963,20 +18013,26 @@ async def sub_reminder_pay(callback_query: types.CallbackQuery):
     await send_subscription_paywall(callback_query)
 
 async def check_subscription_expiry_reminders():
+    # ИЗМЕНЕНО 22.09.2026 (см. subscription_state/get_subscription_group
+    # выше) - источник теперь subscription_state (по группе), и напоминание
+    # шлём только про ТЕКУЩУЮ группу пользователя (get_user_subscription_
+    # group) - так же, как в check_subscription_expirations.
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute('SELECT user_id FROM subscriptions')
-    user_ids = [row[0] for row in cursor.fetchall()]
+    cursor.execute('SELECT DISTINCT user_id, sub_group FROM subscription_state')
+    rows = cursor.fetchall()
     conn.close()
     now = _sub_now()
-    for user_id in user_ids:
-        active_until = subscription_active_until(user_id)
+    for user_id, sub_group in rows:
+        if get_user_subscription_group(user_id) != sub_group:
+            continue
+        active_until = subscription_active_until(user_id, sub_group)
         if active_until is None or now >= active_until:
             continue  # уже истекло - это зона check_subscription_expirations, не дублируем
         time_left = active_until - now
         conn2 = get_db_connection()
         cursor2 = conn2.cursor()
-        cursor2.execute('SELECT threshold FROM subscription_expiry_reminders WHERE user_id = ?', (user_id,))
+        cursor2.execute('SELECT threshold FROM subscription_expiry_reminders WHERE user_id = ? AND sub_group = ?', (user_id, sub_group))
         sent_thresholds = {row[0] for row in cursor2.fetchall()}
         conn2.close()
         send_idx = None
@@ -17999,8 +18055,8 @@ async def check_subscription_expiry_reminders():
         try:
             conn3 = get_db_connection()
             conn3.executemany(
-                'INSERT OR IGNORE INTO subscription_expiry_reminders (user_id, threshold) VALUES (?, ?)',
-                [(user_id, k) for k, _, _ in SUBSCRIPTION_REMINDER_THRESHOLDS[send_idx:]]
+                'INSERT OR IGNORE INTO subscription_expiry_reminders (user_id, threshold, sub_group) VALUES (?, ?, ?)',
+                [(user_id, k, sub_group) for k, _, _ in SUBSCRIPTION_REMINDER_THRESHOLDS[send_idx:]]
             )
             conn3.commit()
             conn3.close()
@@ -19177,10 +19233,11 @@ def compute_admin_subscription_counts():
     """Сколько пользователей прямо сейчас платно подписаны / на бесплатном
     триале / с истёкшим доступом - та же логика, что subscription_active_
     until/is_subscription_active, посчитанная разом по всей таблице
-    subscriptions."""
+    subscription_state (см. get_subscription_group выше - ПО ГРУППАМ, одна
+    строка = одна (user_id, sub_group) подписка, а не один user_id)."""
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute('SELECT trial_started_at, paid_until FROM subscriptions')
+    cursor.execute('SELECT trial_started_at, paid_until FROM subscription_state')
     rows = cursor.fetchall()
     conn.close()
     now = _sub_now()
