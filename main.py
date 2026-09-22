@@ -204,6 +204,20 @@ CONCERT_EVENTS_UPDATE_INTERVAL_MINUTES = 180
 MOS_ROAD_DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'mos_road_data.json')
 MOS_ROAD_DATA_UPDATE_INTERVAL_MINUTES = 10
 
+# ДОБАВЛЕНО 22.09.2026 (пользователь прислал API-ключ JS API Яндекс.Карт,
+# 2.1 - "ключ яндекса подложка ключ апи", прямая просьба "перейти на
+# Яндекс Карты полностью" на карте водителя вместо OpenStreetMap): тот же
+# принцип, что у MOS_DATA_API_KEY/YANDEX_RASP_API_KEY выше - ключ НЕ
+# хранится в коде, передаётся через переменную окружения на Railway.
+# Используется в handle_map_webapp (подставляется в
+# https://api-maps.yandex.ru/2.1/?apikey=...) вместе с плагином
+# leaflet-plugins L.Yandex - подложка (тайлы) карты становится Яндекс.Карты,
+# вся остальная логика (маркеры/полигоны/попапы) остаётся на Leaflet без
+# изменений, т.к. L.Yandex - это just ещё один L.tileLayer-совместимый слой.
+# Если переменная не задана - карта тихо остаётся на OpenStreetMap (см.
+# handle_map_webapp).
+YANDEX_MAPS_API_KEY = os.getenv('YANDEX_MAPS_API_KEY')
+
 # Афиша города (TimePad, см. fetch_timepad_data.py) - события меняются
 # медленно (не по минутам, как рейсы/статусы). Обновляется ЛОКАЛЬНО (см.
 # fetch_timepad_data.py - Railway не может дотянуться до TimePad, Cloudflare
@@ -8884,6 +8898,16 @@ def map_webapp_html():
         }
         for cat, info in MAP_CATEGORY_STYLE.items()
     }, ensure_ascii=False)
+    # ДОБАВЛЕНО 22.09.2026 (см. YANDEX_MAPS_API_KEY выше) - подключаем JS API
+    # Яндекс.Карт и Leaflet-плагин L.Yandex ТОЛЬКО если ключ реально задан на
+    # Railway; иначе эти два тега просто не попадают в HTML, и карта, как и
+    # раньше, работает на OpenStreetMap (см. переключение подложки ниже).
+    yandex_maps_scripts = ""
+    if YANDEX_MAPS_API_KEY:
+        yandex_maps_scripts = (
+            f'<script src="https://api-maps.yandex.ru/2.1/?lang=ru_RU&apikey={YANDEX_MAPS_API_KEY}"></script>\n'
+            '<script src="https://cdn.jsdelivr.net/npm/leaflet-plugins@3.4.0/layer/tile/Yandex.js"></script>'
+        )
     return f"""<!doctype html>
 <html lang="ru">
 <head>
@@ -8893,6 +8917,7 @@ def map_webapp_html():
 <script src="{TG_WEBAPP_JS_PROXY_PATH}"></script>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+{yandex_maps_scripts}
 <!-- ДОБАВЛЕНО 23.09.2026 (жалоба пользователя - "тормозит когда включаю заправки"):
      861 отдельных L.marker в Москве без кластеризации рендерились/перерисовывались
      все разом при каждом движении карты - на телефоне это заметно лагало. Плагин
@@ -9012,19 +9037,24 @@ def map_webapp_html():
   renderTariffPanel();
   renderLegend();
   const map = L.map('map').setView([55.7558, 37.6173], 11);
-  // ИЗМЕНЕНО 22.09.2026: пробовали переключиться на Wikimedia
-  // (maps.wikimedia.org) как альтернативный бесплатный источник, но перед
-  // выкладкой проверили curl'ом - Wikimedia требует Referer со своего же
-  // домена (хотлинк-защита), без него отдаёт 403. Для WebApp бота (Referer
-  // будет с PUBLIC_URL, не с wikimedia.org) это сломалось бы точно так же,
-  // как раньше CartoDB - поэтому остались на единственном проверенном
-  // рабочем источнике, tile.openstreetmap.org. Тайлы теперь в стандартных
-  // цветах OSM, без CSS-инверсии (см. MAP_CHROME_CSS выше - убрана
-  // 22.09.2026 по прямой просьбе пользователя).
-  L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
-    attribution: '© OpenStreetMap',
-    maxZoom: 19,
-  }}).addTo(map);
+  // ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя, прислал API-ключ
+  // Яндекс.Карт - "ключ яндекса подложка ключ апи" / "перейти на Яндекс
+  // Карты полностью"): подложка (тайлы) карты теперь Яндекс.Карты через
+  // L.Yandex (leaflet-plugins) - тот же Leaflet, что и раньше, только
+  // тайловый слой другой, вся остальная логика (маркеры/полигоны/попапы)
+  // не трогалась. YANDEX_MAPS_API_KEY_SET - флаг из Python (true, только
+  // если ключ реально задан на Railway, см. YANDEX_MAPS_API_KEY/
+  // yandex_maps_scripts в handle_map_webapp) - если ключа нет, тихо
+  // остаёмся на OpenStreetMap (tile.openstreetmap.org), как раньше.
+  const YANDEX_MAPS_API_KEY_SET = {('true' if YANDEX_MAPS_API_KEY else 'false')};
+  if (YANDEX_MAPS_API_KEY_SET && typeof L.Yandex === 'function') {{
+    new L.Yandex().addTo(map);
+  }} else {{
+    L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
+      attribution: '© OpenStreetMap',
+      maxZoom: 19,
+    }}).addTo(map);
+  }}
   let markers = [];
   let airportMarkers = [];
   let airportsLoaded = false;
