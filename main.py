@@ -2480,6 +2480,45 @@ def init_db():
         cursor.execute('ALTER TABLE shift_history ADD COLUMN airport_wait_minutes INTEGER NOT NULL DEFAULT 0')
     except sqlite3.OperationalError:
         pass
+    # ==================== ТО (ТЕХОБСЛУЖИВАНИЕ) - ДОБАВЛЕНО 22.09.2026 ====================
+    # По прямой просьбе пользователя ("сделаем возможность отмечать пройдённое
+    # то авто... марку автомобиля, пробег... замена масла/салонного фильтра/
+    # воздушного фильтра/масляного фильтра/свечей зажигания/топливного
+    # фильтра... уведомления о замене масла... считать по пройденному пробегу
+    # при открытых сменах с того момента когда он нажмёт что масло поменял...
+    # менять масло каждые 5000/6000/.../10000 км") - раздел "🛠 ТО" в личном
+    # кабинете (раньше был заглушкой "в разработке", см. cabinet_webapp_html).
+    # cumulative_km - внутренний счётчик пробега, копится ТОЛЬКО во время
+    # открытых смен (тот же пинг живой геопозиции, что у km_counter_ping для
+    # секундомера смены, см. car_maintenance_km_ping) и НЕ сбрасывается между
+    # сменами (в отличие от shift['total_km']) - это лента для расчёта "сколько
+    # проехано с последней замены" по каждому пункту ТО. *_last_km у каждого
+    # пункта - значение cumulative_km в момент, когда водитель нажал "Заменил"
+    # (NULL - ещё ни разу не отмечал, считаем от 0, т.е. от момента, когда
+    # включил трекер). mileage_km - пробег по одометру, который водитель сам
+    # вписывает вручную - чисто информационная витрина ("фактически пробег"),
+    # в расчёте интервалов ТО не участвует (там используется cumulative_km).
+    # oil_interval_km/oil_notify_enabled/oil_notified - только у масла есть
+    # настраиваемое уведомление (явная просьба пользователя - остальные пункты
+    # просто отмечаются, без пушей).
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS car_maintenance (
+            user_id INTEGER PRIMARY KEY,
+            car_make TEXT,
+            mileage_km REAL,
+            cumulative_km REAL NOT NULL DEFAULT 0,
+            oil_last_km REAL,
+            oil_interval_km INTEGER NOT NULL DEFAULT 8000,
+            oil_notify_enabled INTEGER NOT NULL DEFAULT 0,
+            oil_notified INTEGER NOT NULL DEFAULT 0,
+            oil_filter_last_km REAL,
+            air_filter_last_km REAL,
+            cabin_filter_last_km REAL,
+            spark_plugs_last_km REAL,
+            fuel_filter_last_km REAL,
+            updated_at TEXT
+        )
+    ''')
     # Дедуп пушей о перекрытиях/крупных ДТП (по просьбе пользователя,
     # 20.09.2026: "делай пуши перекрытий... и крупные ДТП") - event_key
     # уникален на пост (ссылка на сообщение, если есть, иначе время+текст,
@@ -11519,6 +11558,27 @@ def where_to_go_webapp_html():
     border: 1px solid rgba(255,196,0,.25); border-radius: 10px; padding: 10px 12px;
     margin-bottom: 14px; line-height: 1.45;
   }
+  /* ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "перенеси
+     перекрытия наверх повыше, чтобы было видно, что это перекрытие") -
+     заметный красноватый блок сразу под шапкой, вместо мелкой серой строки
+     внизу экрана (см. .footnote). */
+  .closures-notice {
+    font-size: 13px; color: #ff8a80; background: rgba(255,82,82,.1);
+    border: 1px solid rgba(255,82,82,.3); border-radius: 10px; padding: 9px 12px;
+    margin-bottom: 12px; line-height: 1.4;
+  }
+  /* ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "по другому
+     аэропорту тоже нужна краткая информация - статус, количество
+     прилётов") - строка под датой/погодой с коротким статусом КАЖДОГО
+     аэропорта города, не только рекомендованного. */
+  .weather-line { font-size: 12.5px; color: #9a9a9a; margin-bottom: 10px; }
+  .airports-mini {
+    display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px;
+  }
+  .airports-mini .chip {
+    font-size: 11.5px; color: #ccc; background: #131313; border: 1px solid rgba(255,255,255,.08);
+    border-radius: 999px; padding: 5px 10px; white-space: nowrap;
+  }
   .cand {
     background: #131313; border: 1px solid rgba(255,255,255,.08); border-radius: 12px;
     padding: 12px 13px; margin-bottom: 8px; display: flex; gap: 10px; align-items: flex-start;
@@ -11640,6 +11700,45 @@ def where_to_go_webapp_html():
       const content = document.getElementById('content');
       content.innerHTML = '';
 
+      // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "вверху где
+      // пишешь время дату надо писать... температуру с осадками") - строка
+      // погоды сразу под шапкой (data.weather_label из
+      // handle_where_to_go_data_api, тот же снепшот, что у "🌤 ПОГОДА").
+      if (data.weather_label) {
+        const weatherLine = document.createElement('div');
+        weatherLine.className = 'weather-line';
+        weatherLine.textContent = data.weather_label;
+        content.appendChild(weatherLine);
+      }
+
+      // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "перенеси
+      // перекрытия наверх повыше, чтобы было видно, что это перекрытие") -
+      // раньше это было приклеено к footnote внизу экрана мелким серым
+      // текстом, теперь заметный блок сразу под шапкой/погодой.
+      if (data.closures_notice) {
+        const closuresBox = document.createElement('div');
+        closuresBox.className = 'closures-notice';
+        closuresBox.textContent = data.closures_notice;
+        content.appendChild(closuresBox);
+      }
+
+      // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "по другому
+      // аэропорту тоже нужна краткая информация") - чипы со статусом/
+      // числом прилётов КАЖДОГО аэропорта города (data.airports_summary),
+      // не только рекомендованного в карточке ниже.
+      if (data.airports_summary && data.airports_summary.length) {
+        const airportsRow = document.createElement('div');
+        airportsRow.className = 'airports-mini';
+        data.airports_summary.forEach(a => {
+          const chip = document.createElement('div');
+          chip.className = 'chip';
+          const flightsText = a.flights > 0 ? (a.flights + ' ' + (a.flights === 1 ? 'рейс' : (a.flights < 5 ? 'рейса' : 'рейсов'))) : 'рейсов нет';
+          chip.textContent = '✈️ ' + a.name + ' · ' + flightsText + ' · ' + a.status_emoji + ' ' + a.status_label.toLowerCase();
+          airportsRow.appendChild(chip);
+        });
+        content.appendChild(airportsRow);
+      }
+
       // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "рекомендации
       // для водителя на ближайший день сверху") - короткий совет-баннер
       // ПЕРЕД призовыми местами (см. banner в handle_where_to_go_data_api).
@@ -11753,6 +11852,44 @@ async def handle_where_to_go_webapp(request):
         headers={'Cache-Control': 'no-store, no-cache, must-revalidate', 'Pragma': 'no-cache'},
     )
 
+def build_airports_status_summary(city, category):
+    """Краткая сводка по ВСЕМ аэропортам города (не только по тому, который
+    сводка сейчас рекомендует) - ДОБАВЛЕНО 22.09.2026 (прямая просьба
+    пользователя: когда "Куда ехать" советует, скажем, только Внуково,
+    водитель не видит вообще никакой информации по Шереметьево/Домодедово -
+    "чтобы какая-то информация была в этом окошке под другим аэропортом
+    тоже"). Число прилётов в этот час + статус (открыт/по согласованию/
+    закрыт) по каждой зоне - та же логика, что и в score_airport_candidate
+    (get_airport_status/compute_current_availability), но БЕЗ штрафов за
+    расстояние/приоритет/время суток - это не ранжирование, а витрина
+    "что вообще происходит по каждому аэропорту прямо сейчас"."""
+    if category in CATEGORIES_WITHOUT_AIRPORTS:
+        return []
+    relevant_class = CATEGORY_TO_CLASS.get(category, 'total')
+    summary = []
+    for airport in AIRPORTS_INFO.get(city, []):
+        icao = airport['icao']
+        zone_key = airport.get('zone_key')
+        try:
+            status, _notice = get_airport_status(icao)
+            if airport.get('closed'):
+                status = 'closed'
+        except Exception:
+            status = 'open'
+        emoji, status_label = AIRPORT_STATUS_DISPLAY.get(status, AIRPORT_STATUS_DISPLAY['open'])
+        n_flights = 0
+        if status != 'closed':
+            try:
+                avail = compute_current_availability(icao, relevant_class, zone_key=zone_key)
+                n_flights = len(avail['arrivals_now'])
+            except Exception:
+                n_flights = 0
+        summary.append({
+            'name': airport['name'], 'flights': n_flights,
+            'status_emoji': emoji, 'status_label': status_label,
+        })
+    return summary
+
 async def handle_where_to_go_data_api(request):
     """JSON для WebApp "Куда ехать" - переиспользует ТОТ ЖЕ compute_where_to_go,
     что и текстовая версия (send_where_to_go/format_where_to_go_text), просто
@@ -11783,7 +11920,27 @@ async def handle_where_to_go_data_api(request):
 
     city_name = CITY_DISPLAY_NAMES.get(city, city)
     now = get_city_now(city)
-    time_label = f"{now.strftime('%H:%M')} · {WEEKDAY_NAMES[now.weekday()]}"
+    # ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя - "вверху где пишешь
+    # время дату надо писать время день недели время день недели дату и
+    # температуру с осадками") - к времени/дню недели добавлена дата, плюс
+    # отдельное weather_label (温度+осадки) для строки под шапкой (см.
+    # describe_weathercode/get_cached_weather_forecast, тот же источник, что
+    # у кнопки "🌤 ПОГОДА").
+    date_label = f"{now.day} {RU_MONTHS_GENITIVE[now.month - 1]}"
+    time_label = f"{now.strftime('%H:%M')} · {WEEKDAY_NAMES[now.weekday()]} · {date_label}"
+    weather_label = None
+    try:
+        forecast = get_cached_weather_forecast(city)
+        current = (forecast or {}).get('current', {})
+        cur_temp = current.get('temperature_2m')
+        if cur_temp is not None:
+            cur_code = current.get('weathercode')
+            _name, _lvl, emoji = describe_weathercode(cur_code) if cur_code is not None else (None, None, '🌤')
+            cur_precip = current.get('precipitation')
+            precip_part = f" · {cur_precip:.1f} мм осадков" if cur_precip else ""
+            weather_label = f"{emoji} {round(cur_temp)}°C{precip_part}"
+    except Exception:
+        weather_label = None
 
     open_candidates = [c for c in candidates if not c['closed']]
     closed_candidates = [c for c in candidates if c['closed']]
@@ -11795,10 +11952,26 @@ async def handle_where_to_go_data_api(request):
     else:
         footnote = "Ориентир на основе прилётов, статуса аэропортов, очереди и часов пика - не гарантия заработка, реальный спрос может отличаться."
 
+    # ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя - "перенеси
+    # перекрытия наверх повыше, чтобы было видно, что это перекрытие") -
+    # раньше эта строка была приклеена ВПЕРЕДИ общего footnote внизу
+    # экрана (мелким серым текстом, малозаметно). Теперь отдаётся ОТДЕЛЬНЫМ
+    # полем closures_notice - WebApp показывает его отдельным заметным
+    # блоком сразу под шапкой (см. where_to_go_webapp_html), а footnote
+    # остаётся только общей дисклеймер-подписью внизу, без перекрытий.
     closures_count = count_active_road_closures(city)
+    closures_notice = None
     if closures_count:
         word = "перекрытие" if closures_count == 1 else ("перекрытия" if 2 <= closures_count <= 4 else "перекрытий")
-        footnote = f"🚧 Сейчас в городе {closures_count} активных {word}. " + footnote
+        closures_notice = f"🚧 Сейчас в городе {closures_count} активных {word} - см. «⛔ Дорожные события»."
+
+    # ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "где вкладка
+    # аэропорт советует ехать во Внуково, надо прописать краткую информацию
+    # по статусу/количеству прилётов Шереметьево и Домодедово тоже, чтобы
+    # была информация по ДРУГИМ аэропортам") - краткая сводка по ВСЕМ
+    # аэропортам города (не только по рекомендованному), см.
+    # build_airports_status_summary.
+    airports_summary = build_airports_status_summary(city, category)
 
     def _pack(c):
         return {
@@ -11822,6 +11995,9 @@ async def handle_where_to_go_data_api(request):
     return web.json_response({
         'city_name': city_name,
         'time_label': time_label,
+        'weather_label': weather_label,
+        'closures_notice': closures_notice,
+        'airports_summary': airports_summary,
         'banner': banner,
         'podium': [_pack(c) for c in podium],
         'districts': [_pack(c) for c in district_candidates],
