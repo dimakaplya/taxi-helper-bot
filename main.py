@@ -8375,7 +8375,17 @@ MAP_CHROME_CSS = """
      на карте. Теперь отдельная маленькая кнопка-чип "🗂 Слои" (тот же
      стиль, что и filter-toggle), по тапу разворачивает/сворачивает строку
      чекбоксов (flex-wrap: wrap, в ряд, а не в столбик). */
-  .layer-toggle-wrap { position: absolute; top: 52px; left: 56px; z-index: 1000; }
+  /* ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя - "на карте сразу
+     сделай рядом слои и тарифы в одну строчку сверху так будет приятнее
+     глазу"): раньше "🚕 Тарифы" и "🗂 Слои" были двумя отдельными
+     position:absolute блоками друг под другом (top:10px и top:52px) - на
+     скриншоте с открытой панелью тарифов кнопка "Слои" наезжала на текст
+     внутри неё. Теперь обе кнопки - flex-элементы одного общего
+     .map-toggles-row (см. ниже), стоят рядом в один ряд у левого края
+     карты; каждая раскрывающаяся панель по-прежнему выпадает вниз ПОД
+     своей кнопкой (margin-top на .tariff-toggle/.layer-toggle, обычный
+     document flow внутри своего wrap - здесь не менялось). */
+  .map-toggles-row { position: absolute; top: 10px; left: 56px; z-index: 1000; display: flex; flex-direction: row; align-items: flex-start; gap: 8px; }
   .layer-toggle-btn { display: inline-block; background: #1c1c1c; color: #fff; border: 1px solid rgba(255,196,0,.4); border-radius: 8px; padding: 6px 10px; font-family: -apple-system, sans-serif; font-size: 12px; font-weight: 600; box-shadow: 0 1px 4px rgba(0,0,0,.35); cursor: pointer; user-select: none; white-space: nowrap; }
   .layer-toggle { display: flex; flex-direction: row; flex-wrap: wrap; gap: 4px 10px; margin-top: 6px; background: #1c1c1c; color: #fff; border: 1px solid rgba(255,196,0,.4); border-radius: 8px; padding: 6px 10px; font-family: -apple-system, sans-serif; font-size: 12px; box-shadow: 0 1px 4px rgba(0,0,0,.35); }
   .layer-toggle.collapsed { display: none; }
@@ -8388,7 +8398,7 @@ MAP_CHROME_CSS = """
      трогали - при одновременном раскрытии обеих панелей возможно небольшое
      наложение, это не критично (панели используются по очереди). Внутри -
      подзаголовки по категориям (жирным) и чекбоксы по тарифам с отступом. */
-  .tariff-toggle-wrap { position: absolute; top: 10px; left: 56px; z-index: 1000; }
+  .tariff-toggle-wrap { position: relative; z-index: 1000; }
   .tariff-toggle { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; max-width: 240px; max-height: 60vh; overflow-y: auto; background: #1c1c1c; color: #fff; border: 1px solid rgba(255,196,0,.4); border-radius: 8px; padding: 8px 10px; font-family: -apple-system, sans-serif; font-size: 12px; box-shadow: 0 1px 4px rgba(0,0,0,.35); }
   .tariff-toggle.collapsed { display: none; }
   .tariff-toggle .tariff-group-title { display: flex; align-items: center; gap: 5px; font-weight: 600; cursor: pointer; user-select: none; }
@@ -8467,19 +8477,21 @@ def map_webapp_html():
 </head>
 <body>
 <div id="map"></div>
-<div class="tariff-toggle-wrap">
-  <div class="layer-toggle-btn" id="tariffToggleBtn">🚕 Тарифы</div>
-  <div class="tariff-toggle collapsed" id="tariffToggle"></div>
-</div>
-<div class="legend" id="legend"></div>
-<div class="layer-toggle-wrap">
-  <div class="layer-toggle-btn" id="layerToggleBtn">🗂 Слои</div>
-  <div class="layer-toggle collapsed" id="layerToggle">
-    <label><input type="checkbox" id="fuelLayerCheckbox"> ⛽ Заправки</label>
-    <label><input type="checkbox" id="chargingLayerCheckbox"> 🔌 Зарядки</label>
-    <label><input type="checkbox" id="parkingLayerCheckbox"> 🅿️ Парковки</label>
+<div class="map-toggles-row">
+  <div class="tariff-toggle-wrap">
+    <div class="layer-toggle-btn" id="tariffToggleBtn">🚕 Тарифы</div>
+    <div class="tariff-toggle collapsed" id="tariffToggle"></div>
+  </div>
+  <div class="layer-toggle-wrap">
+    <div class="layer-toggle-btn" id="layerToggleBtn">🗂 Слои</div>
+    <div class="layer-toggle collapsed" id="layerToggle">
+      <label><input type="checkbox" id="fuelLayerCheckbox"> ⛽ Заправки</label>
+      <label><input type="checkbox" id="chargingLayerCheckbox"> 🔌 Зарядки</label>
+      <label><input type="checkbox" id="parkingLayerCheckbox"> 🅿️ Парковки</label>
+    </div>
   </div>
 </div>
+<div class="legend" id="legend"></div>
 <script>
   const CATEGORY_STYLE = {style_json};
   const TARIFF_OPTIONS = {tariff_options_json};
