@@ -19747,7 +19747,7 @@ async def high_demand_alert_checker():
 GREEN_DEMAND_LEAD_HOURS = 2
 # По условию пользователя - "3 часа подряд" (не 2, как у фиолетового уровня).
 GREEN_DEMAND_STREAK_HOURS = 3
-GREEN_DEMAND_THRESHOLD_LOW = 70   # ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя - "смотри такие сообщения присылай когда загрузка в аэропортах более 70% менее не присылай такое уведомление"; было 50, до этого 70)
+GREEN_DEMAND_THRESHOLD_LOW = 70   # ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя - "от 70 и выше он шлёт уже пуши", т.е. включительно, не строго больше) - порог ВКЛЮЧИТЕЛЬНО (см. check_green_demand_alerts: load < LOW, а не <=)
 GREEN_DEMAND_THRESHOLD_HIGH = 85  # верхняя граница - выше уже фиолетовый, это отдельный пуш - ИЗМЕНЕНО 21.09.2026 (было 100)
 GREEN_DEMAND_CHECK_INTERVAL_MINUTES = 15
 
@@ -19767,7 +19767,7 @@ async def push_green_demand_alert(icao, airport, relevant_class, hour_from, hour
         f"🟢 *{airport['emoji']} {airport['name']}*\n\n"
         f"Через {GREEN_DEMAND_LEAD_HOURS} часа (~{hour_from:02d}:00-{hour_to_end:02d}:00) ожидается "
         f"*повышенный спрос* на прилёты ({class_name}) - "
-        f"{GREEN_DEMAND_STREAK_HOURS} часа подряд прогноз загрузки {GREEN_DEMAND_THRESHOLD_LOW+1}-{GREEN_DEMAND_THRESHOLD_HIGH}% ({loads_str}). "
+        f"{GREEN_DEMAND_STREAK_HOURS} часа подряд прогноз загрузки {GREEN_DEMAND_THRESHOLD_LOW}-{GREEN_DEMAND_THRESHOLD_HIGH}% ({loads_str}). "
         f"*Занимай очередь* заранее - к началу окна освободится место."
     )
 
@@ -19821,7 +19821,7 @@ async def check_green_demand_alerts():
             # Все часы окна должны быть строго в зелёном диапазоне (51-85%) -
             # если хоть один час выходит за пределы (ниже 71% или выше 100%,
             # т.е. уже фиолетовый уровень), это не устойчивый зелёный период.
-            if any(load <= GREEN_DEMAND_THRESHOLD_LOW or load > GREEN_DEMAND_THRESHOLD_HIGH for load in loads):
+            if any(load < GREEN_DEMAND_THRESHOLD_LOW or load > GREEN_DEMAND_THRESHOLD_HIGH for load in loads):
                 continue
             hour_from = streak[0][2]
             hour_to = streak[-1][2]
