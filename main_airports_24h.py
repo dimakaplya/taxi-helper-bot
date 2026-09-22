@@ -10187,10 +10187,29 @@ def weather_webapp_html():
   }
   #state { text-align: center; padding: 60px 16px; opacity: .8; font-size: 14px; }
   .city { font-size: 15px; font-weight: 600; opacity: .85; text-align: center; }
+  /* ДОБАВЛЕНО 22.09.2026 (просьба пользователя - "дату и текущее время") -
+     строка под названием города, обновляется раз в минуту (см. tickClock
+     в JS ниже), показывает локальное время/дату УСТРОЙСТВА пользователя
+     (не города - бот и так подписан на конкретный город пользователя, а
+     календарной даты/времени сервера у клиента нет смысла спрашивать). */
+  .datetime { font-size: 12.5px; opacity: .75; text-align: center; margin-top: 2px; font-variant-numeric: tabular-nums; }
   .now { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; }
   .now .emoji { font-size: 72px; line-height: 1; filter: drop-shadow(0 4px 10px rgba(0,0,0,.2)); }
   .now .temp { font-size: 64px; font-weight: 700; margin-top: 4px; font-variant-numeric: tabular-nums; color: #FFC400; text-shadow: 0 1px 6px rgba(0,0,0,.4); }
   .now .cond { font-size: 16px; opacity: .9; margin-top: 2px; }
+  /* ДОБАВЛЕНО 22.09.2026 (просьба пользователя - "сила ветра направления
+     ветра давления") - три плашки под "сейчас": ветер (скорость+направление
+     компасом), давление (переведено в мм рт.ст. - привычнее, чем гПа от
+     Open-Meteo) и осадки за текущий час (мм). Тот же чёрно-жёлто-серой
+     стиль, что и у .hcard ниже (см. комментарий там). */
+  .details { display: flex; gap: 8px; margin-top: 14px; }
+  .dcard {
+    flex: 1; background: rgba(0,0,0,.32); backdrop-filter: blur(6px);
+    border: 1px solid rgba(255,255,255,.12); border-radius: 14px; padding: 10px 6px; text-align: center;
+  }
+  .dcard .l { font-size: 10.5px; opacity: .8; }
+  .dcard .e { font-size: 18px; margin: 3px 0; }
+  .dcard .v { font-size: 13px; font-weight: 700; font-variant-numeric: tabular-nums; color: #FFC400; }
   .hourly {
     display: flex; gap: 6px; overflow-x: auto; padding: 10px 2px 4px; -webkit-overflow-scrolling: touch;
   }
@@ -10218,10 +10237,16 @@ def weather_webapp_html():
   <div id="state" style="display:none">Загружаю погоду…</div>
   <div id="app" style="display:none; height: 100%; display: flex; flex-direction: column;">
     <div class="city" id="cityName"></div>
+    <div class="datetime" id="dateTime"></div>
     <div class="now">
       <div class="emoji" id="nowEmoji">🌤</div>
       <div class="temp" id="nowTemp">—</div>
       <div class="cond" id="nowCond"></div>
+      <div class="details">
+        <div class="dcard"><div class="l">Ветер</div><div class="e">💨</div><div class="v" id="nowWind">—</div></div>
+        <div class="dcard"><div class="l">Давление</div><div class="e">🧭</div><div class="v" id="nowPressure">—</div></div>
+        <div class="dcard"><div class="l">Осадки</div><div class="e">💧</div><div class="v" id="nowPrecip">—</div></div>
+      </div>
     </div>
     <div class="hourly" id="hourlyRow"></div>
   </div>
@@ -10265,6 +10290,36 @@ def weather_webapp_html():
     66: '🌧', 67: '🌧', 71: '🌨', 73: '🌨', 75: '❄️', 77: '🌨',
     80: '🌧', 81: '🌧', 82: '⛈', 85: '🌨', 86: '❄️', 95: '⛈', 96: '⛈', 99: '⛈',
   };
+
+  // ДОБАВЛЕНО 22.09.2026 (просьба пользователя - "дату и текущее время") -
+  // часы/дата под названием города, локальное время устройства, тикают раз
+  // в минуту (секунды пользователю тут не нужны, не хочет лишний реднрер).
+  const WEEKDAYS = ['воскресенье', 'понедельник', 'вторник', 'среда', 'четверг', 'пятница', 'суббота'];
+  const MONTHS = ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря'];
+  function tickClock() {
+    const now = new Date();
+    const hh = String(now.getHours()).padStart(2, '0');
+    const mm = String(now.getMinutes()).padStart(2, '0');
+    const el = document.getElementById('dateTime');
+    if (el) el.textContent = `${now.getDate()} ${MONTHS[now.getMonth()]}, ${WEEKDAYS[now.getDay()]} · ${hh}:${mm}`;
+  }
+  tickClock();
+  setInterval(tickClock, 30000);
+
+  // ДОБАВЛЕНО 22.09.2026 (просьба пользователя - "силу ветра направления
+  // ветра") - градусы Open-Meteo (0-360, откуда дует) в 8-румбовый компас.
+  const WIND_DIRS = ['С', 'СВ', 'В', 'ЮВ', 'Ю', 'ЮЗ', 'З', 'СЗ'];
+  function windDirLabel(deg) {
+    if (deg == null) return '';
+    const idx = Math.round(deg / 45) % 8;
+    return WIND_DIRS[idx];
+  }
+  // Open-Meteo отдаёт surface_pressure в гПа - переводим в мм рт.ст.
+  // (привычнее для РФ), 1 гПа = 0.750062 мм рт.ст.
+  function hpaToMmHg(hpa) {
+    if (hpa == null) return null;
+    return Math.round(hpa * 0.750062);
+  }
 
   // ---- Canvas-анимация фона ----
   const canvas = document.getElementById('bgCanvas');
@@ -10392,6 +10447,16 @@ def weather_webapp_html():
       document.getElementById('nowTemp').textContent = (data.current.temperature_2m != null ? Math.round(data.current.temperature_2m) : '—') + '°';
       document.getElementById('nowCond').textContent = WEATHERCODE_NAMES[data.current.weathercode] || '';
 
+      // ДОБАВЛЕНО 22.09.2026 - ветер/давление/осадки (см. .details выше).
+      const windSpeed = data.current.windspeed_10m;
+      const windDir = windDirLabel(data.current.winddirection_10m);
+      document.getElementById('nowWind').textContent =
+        windSpeed != null ? Math.round(windSpeed) + ' м/с' + (windDir ? ' ' + windDir : '') : '—';
+      const mmHg = hpaToMmHg(data.current.surface_pressure);
+      document.getElementById('nowPressure').textContent = mmHg != null ? mmHg + ' мм' : '—';
+      const precip = data.current.precipitation;
+      document.getElementById('nowPrecip').textContent = precip != null ? (precip > 0 ? precip.toFixed(1) + ' мм' : 'нет') : '—';
+
       const row = document.getElementById('hourlyRow');
       row.innerHTML = '';
       const nowHour = new Date().getHours();
@@ -10441,9 +10506,21 @@ async def handle_weather_data_api(request):
     times = hourly_raw.get('time', [])
     codes = hourly_raw.get('weathercode', [])
     temps = hourly_raw.get('temperature_2m', [])
+    # РАСШИРЕНО 22.09.2026 - ветер/давление/осадки теперь и в почасовом
+    # разбое (не только в 'current'), см. fetch_rain_forecast.
+    winds = hourly_raw.get('windspeed_10m', [])
+    wind_dirs = hourly_raw.get('winddirection_10m', [])
+    pressures = hourly_raw.get('surface_pressure', [])
+    precips = hourly_raw.get('precipitation', [])
     hourly = [
-        {'time': t, 'weathercode': c, 'temperature_2m': temp}
-        for t, c, temp in zip(times, codes, temps)
+        {
+            'time': t, 'weathercode': c, 'temperature_2m': temp,
+            'windspeed_10m': winds[i] if i < len(winds) else None,
+            'winddirection_10m': wind_dirs[i] if i < len(wind_dirs) else None,
+            'surface_pressure': pressures[i] if i < len(pressures) else None,
+            'precipitation': precips[i] if i < len(precips) else None,
+        }
+        for i, (t, c, temp) in enumerate(zip(times, codes, temps))
     ]
     return web.json_response({
         'city_name': CITY_DISPLAY_NAMES.get(city, city),
@@ -15905,8 +15982,16 @@ async def fetch_rain_forecast(city):
     params = {
         'latitude': lat,
         'longitude': lon,
-        'current': 'weathercode,temperature_2m',
-        'hourly': 'weathercode,temperature_2m',
+        # РАСШИРЕНО 22.09.2026 (прямая просьба пользователя - "не только
+        # температуру и осадки а ещё и силу ветра направления ветра давление") -
+        # добавлены windspeed_10m/winddirection_10m (сила и направление ветра),
+        # surface_pressure (атмосферное давление) и precipitation (осадки в мм,
+        # раньше был только weathercode - тип осадков без количества) и в
+        # current, и в hourly. Дата/время текущего момента в само API не
+        # входят - берутся из forecast['current']['time'] (Open-Meteo отдаёт
+        # его всегда с timezone=auto) на стороне клиента (JS)/format-функции.
+        'current': 'weathercode,temperature_2m,windspeed_10m,winddirection_10m,surface_pressure,precipitation',
+        'hourly': 'weathercode,temperature_2m,windspeed_10m,winddirection_10m,surface_pressure,precipitation',
         'forecast_hours': RAIN_FORECAST_HOURS,
         'timezone': 'auto',
     }
@@ -16149,21 +16234,27 @@ async def push_rain_alert(city, event):
         f"Через {RAIN_LEAD_MINUTES} минут в городе ожидается больше заказов - "
         f"хорошее время быть на линии."
     )
-    # ИЗМЕНЕНО 22.09.2026 (жалоба пользователя со скриншотом - "кнопки нет,
-    # поломалось после рестарта") - нужен state каждого получателя (была
-    # только uid), чтобы приложить его текущую Reply-клавиатуру к пушу (см.
-    # reply_markup=services_keyboard ниже и общий комментарий-разбор у
-    # BOT_UPDATED_REFRESH_KEYBOARD выше по файлу: Telegram кэширует
-    # клавиатуру на телефоне и не перерисовывает её сама по себе, пока бот
-    # не пришлёт НОВОЕ сообщение с новым reply_markup - после рестарта
-    # контейнера ПЕРВЫМ сообщением пользователю нередко оказывается именно
-    # фоновый пуш вроде этого, а не /start, поэтому если пуш идёт без
-    # клавиатуры - меню у пользователя пропадает, пока он не напишет боту
-    # что-то сам). Раньше этот и остальные фоновые пуши (аэропорты/спрос/
-    # праздники/дорожные события/час пик) слались БЕЗ reply_markup вовсе -
-    # теперь каждый прикладывает актуальный services_keyboard, так что меню
-    # само "чинится" на первом же пуше после любого рестарта, а не только
-    # после НАСТОЯЩЕГО редеплоя (тот чинится через BOT_UPDATED_REFRESH_KEYBOARD).
+    # ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя - "к этому сообщению
+    # переделаем кнопку посмотреть погоду, по этой кнопке он будет попадать
+    # в раздел Погода") - у этого пуша теперь инлайн-кнопка "🌤 Посмотреть
+    # погоду" (открывает WebApp /weather?city=... - тот же миниапп, что и у
+    # кнопки "🌤 ПОГОДА" в нижнем меню). Раньше сюда прикладывался
+    # reply_markup=services_keyboard (Reply-клавиатура) как страховка от
+    # пропажи нижнего меню после рестарта (см. историю ниже) - но у Telegram
+    # нельзя одновременно ReplyKeyboardMarkup и InlineKeyboardMarkup на одном
+    # сообщении, а инлайн-кнопка с погодой важнее. Эта страховка больше не
+    # нужна: с 23.09.2026 её полностью закрывает SingleMessageMiddleware
+    # (см. _with_main_menu_button/MAIN_MENU_INLINE_BUTTON_TEXT выше по
+    # файлу) - она сама дописывает инлайн-кнопку "🚕 МЕНЮ TAXI HELPER" снизу
+    # ЛЮБОГО сообщения без Reply-клавиатуры, если нижнее меню давно не
+    # обновлялось (see REPLY_KEYBOARD_STALE_HOURS), так что доступ к меню не
+    # теряется и здесь - просто добавляется middleware'ом автоматически.
+    weather_button = None
+    if PUBLIC_URL:
+        weather_url = f"{PUBLIC_URL}{WEATHER_WEBAPP_PATH}?city={urllib.parse.quote(city)}"
+        weather_button = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="🌤 Посмотреть погоду", web_app=WebAppInfo(url=weather_url)),
+        ]])
     recipients = [
         (uid, state) for uid, state in list(user_state.items())
         if isinstance(state, dict) and state.get('city') == city and notifications_enabled(state, 'weather')
@@ -16177,7 +16268,7 @@ async def push_rain_alert(city, event):
         try:
             await bot.send_message(
                 user_id, text, parse_mode='Markdown',
-                reply_markup=services_keyboard(state.get('category'), city, user_id),
+                reply_markup=weather_button,
             )
             sent += 1
         except Exception as e:
@@ -16247,6 +16338,18 @@ async def check_rain_transitions():
             save_rain_state(city, event_start, event['weight'])
             await push_rain_alert(city, event)
 
+_WIND_DIRS_RU = ['С', 'СВ', 'В', 'ЮВ', 'Ю', 'ЮЗ', 'З', 'СЗ']
+
+def wind_direction_label(deg):
+    """Градусы Open-Meteo (0-360, откуда дует ветер) -> 8-румбовый компас
+    по-русски. Используется и в текстовом режиме (format_weather_forecast_text),
+    и продублировано в JS у weather_webapp_html (windDirLabel) - держать в
+    синхроне при изменении."""
+    if deg is None:
+        return ""
+    idx = round(deg / 45) % 8
+    return _WIND_DIRS_RU[idx]
+
 def format_weather_forecast_text(city_name, forecast):
     """Почасовая разбивка для ручного режима (кнопка "🌤 ПОГОДА") -
     вид осадков (или "ясно"/"облачно" и т.д. по weathercode) + температура на
@@ -16264,11 +16367,30 @@ def format_weather_forecast_text(city_name, forecast):
     cur_temp = current.get('temperature_2m')
     cur_name, _, cur_emoji = describe_weathercode(cur_code) if cur_code is not None else ('нет данных', 0, '🌤')
     temp_str = f"{round(cur_temp)}°C" if cur_temp is not None else "н/д"
+    # ДОБАВЛЕНО 22.09.2026 (просьба пользователя - "не только температуру и
+    # осадки а ещё и силу ветра направления ветра давления... дату и текущее
+    # время") - тот же набор полей, что и в WebApp-версии (weather_webapp_html)
+    # для текстового fallback-режима (когда PUBLIC_URL не задан).
+    cur_wind = current.get('windspeed_10m')
+    cur_wind_dir = current.get('winddirection_10m')
+    cur_pressure = current.get('surface_pressure')
+    cur_precip = current.get('precipitation')
+    wind_str = f"{round(cur_wind)} м/с {wind_direction_label(cur_wind_dir)}".strip() if cur_wind is not None else "н/д"
+    pressure_str = f"{round(cur_pressure * 0.750062)} мм рт.ст." if cur_pressure is not None else "н/д"
+    precip_str = f"{cur_precip:.1f} мм" if cur_precip else "нет"
+    cur_time = current.get('time')
+    dt_str = ""
+    if cur_time:
+        try:
+            dt_str = f" ({datetime.fromisoformat(cur_time).strftime('%d.%m, %H:%M')})"
+        except ValueError:
+            pass
     # Разделитель WHERE_TO_GO_DIVIDER - тот же общий стиль, что и в остальных
     # карточках бота (по просьбе пользователя, 22.09.2026 - визуальный
     # проход по не-миниапп экранам), раньше здесь просто пустая строка.
     lines = [
-        f"🌤 *{city_name}*", f"_Сейчас: {cur_emoji} {cur_name}, {temp_str}_",
+        f"🌤 *{city_name}*{dt_str}", f"_Сейчас: {cur_emoji} {cur_name}, {temp_str}_",
+        f"💨 Ветер: {wind_str}  •  🧭 Давление: {pressure_str}  •  💧 Осадки: {precip_str}",
         WHERE_TO_GO_DIVIDER, "*Прогноз на 12 часов:*",
     ]
 
