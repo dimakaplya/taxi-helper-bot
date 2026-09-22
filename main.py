@@ -17306,7 +17306,7 @@ async def subscription_expiry_reminder_checker():
 # само по себе, пока нет подтверждённых платежей (SUBSCRIPTION_ENFORCEMENT_LIVE),
 # так что включение этого флага безопасно.
 REFERRAL_PROGRAM_LIVE = True
-# Пароль для переключения на схему "юр.лицо" (40%/20%/10%, см.
+# Пароль для переключения на схему "юр.лицо" (40%/30%/20%, см.
 # REFERRAL_RATES_PERCENT) - вводится пользователем в чат при выборе этой
 # категории (см. referral_category_legal_entity_callback/AwaitingReferralLegalPassword
 # ниже), чтобы обычные пользователи не переключили себе более выгодную
@@ -17319,16 +17319,17 @@ REFERRAL_LEGAL_ENTITY_PASSWORD = "261194"
 # 'individual', на 'legal_entity' переключает админ - см.
 # admin_set_referrer_type/команду /set_legal_referrer):
 #   'legal_entity' - юр.лицо приглашает водителей/курьеров напрямую и
-#   через них дальше по цепочке: 40% с платежа 1-го уровня, 20% со 2-го,
-#   10% с 3-го.
+#   через них дальше по цепочке: 40% с платежа 1-го уровня, 30% со 2-го,
+#   20% с 3-го (ИЗМЕНЕНО 22.09.2026, прямая просьба пользователя - было
+#   40%/20%/10%).
 #   'individual' (обычные пользователи, дефолт) - 30%/15%/5% по тем же
-#   трём уровням.
+#   трём уровням - без изменений.
 # В обоих случаях это ПРЯМОЙ процент от суммы платежа плательщика на каждом
 # уровне (не "доля от начисления уровня выше", как было раньше) - см.
 # distribute_referral_earnings ниже.
 REFERRAL_RATES_PERCENT = {
     'individual': [30, 15, 5],
-    'legal_entity': [40, 20, 10],
+    'legal_entity': [40, 30, 20],
 }
 REFERRAL_DEFAULT_TYPE = 'individual'
 REFERRAL_WITHDRAWAL_FEE_PERCENT = 3
@@ -17659,7 +17660,7 @@ async def show_referral_program(message: types.Message):
     # как это работает, читается быстрее одним взглядом.
     # ИЗМЕНЕНО 23.09.2026 (3 уровня + 2 схемы начислений, см.
     # REFERRAL_RATES_PERCENT/get_referrer_type) - показываем СВОЮ шкалу
-    # процентов (обычную 30/15/5 или, для юр.лиц, 40/20/10), а не одну
+    # процентов (обычную 30/15/5 или, для юр.лиц, 40/30/20), а не одну
     # зашитую формулу на всех.
     my_rates = REFERRAL_RATES_PERCENT[get_referrer_type(user_id)]
     text = (
@@ -18260,7 +18261,7 @@ def compute_referral_reserve_by_scheme():
     }
 
 
-REFERRAL_SCHEME_LABELS = {'individual': 'Обычная (30/15/5%)', 'legal_entity': 'Юр.лица (40/20/10%)'}
+REFERRAL_SCHEME_LABELS = {'individual': 'Обычная (30/15/5%)', 'legal_entity': 'Юр.лица (40/30/20%)'}
 
 
 def format_campaign_profit_text():
@@ -18334,7 +18335,7 @@ async def admin_mark_referral_paid(message: types.Message):
 # ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - 2 схемы реферальных
 # начислений): переключает referrer_type пользователя на 'legal_entity' -
 # он и его рефералы дальше по цепочке начинают получать по схеме юр.лица
-# (40%/20%/10%, см. REFERRAL_RATES_PERCENT), вместо обычной 30%/15%/5%.
+# (40%/30%/20%, см. REFERRAL_RATES_PERCENT), вместо обычной 30%/15%/5%.
 # Обратная команда возвращает 'individual'. Доступны только ADMIN_TELEGRAM_ID -
 # как /referral_paid, тот же паттерн проверки.
 @router.message(Command("set_legal_referrer"))
@@ -18347,7 +18348,7 @@ async def admin_set_legal_referrer(message: types.Message):
         return
     target_id = int(parts[1])
     set_referrer_type(target_id, 'legal_entity')
-    await message.answer(f"✅ user_id={target_id} переключён на схему юр.лица (40%/20%/10%).")
+    await message.answer(f"✅ user_id={target_id} переключён на схему юр.лица (40%/30%/20%).")
 
 @router.message(Command("set_individual_referrer"))
 async def admin_set_individual_referrer(message: types.Message):
