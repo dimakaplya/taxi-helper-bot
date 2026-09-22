@@ -2924,6 +2924,207 @@ def save_driver_profile(user_id, full_name, tariff, car_model, car_plate):
         logger.error(f"❌ Не удалось сохранить профиль водителя {user_id}: {e}")
         return False
 
+# ==================== ТО (ТЕХОБСЛУЖИВАНИЕ) - ДОБАВЛЕНО 22.09.2026 ====================
+# См. комментарий у CREATE TABLE car_maintenance в init_db - здесь только
+# чтение/запись этой таблицы, вся логика "когда слать пуш" - см.
+# maybe_send_oil_change_notification ниже (вызывается из car_maintenance_km_ping).
+CAR_MAINTENANCE_ITEMS = [
+    ('oil', '🛢', 'Масло'),
+    ('oil_filter', '🧰', 'Масляный фильтр'),
+    ('air_filter', '💨', 'Воздушный фильтр'),
+    ('cabin_filter', '🌬', 'Салонный фильтр'),
+    ('spark_plugs', '⚡', 'Свечи зажигания'),
+    ('fuel_filter', '⛽', 'Топливный фильтр'),
+]
+CAR_MAINTENANCE_ITEM_KEYS = {key for key, _emoji, _label in CAR_MAINTENANCE_ITEMS}
+OIL_INTERVAL_OPTIONS_KM = [5000, 6000, 7000, 8000, 9000, 10000]
+OIL_INTERVAL_DEFAULT_KM = 8000
+
+def get_car_maintenance(user_id):
+    """None, если водитель ещё ни разу не открывал/не сохранял раздел "🛠 ТО"
+    (строка car_maintenance для него ещё не создана)."""
+    try:
+        init_db()
+        conn = get_db_connection()
+        cursor = conn.execute(
+            'SELECT car_make, mileage_km, cumulative_km, oil_last_km, oil_interval_km, '
+            'oil_notify_enabled, oil_notified, oil_filter_last_km, air_filter_last_km, '
+            'cabin_filter_last_km, spark_plugs_last_km, fuel_filter_last_km '
+            'FROM car_maintenance WHERE user_id = ?', (user_id,)
+        )
+        row = cursor.fetchone()
+        conn.close()
+        if not row:
+            return None
+        return {
+            'car_make': row[0] or '', 'mileage_km': row[1], 'cumulative_km': row[2] or 0.0,
+            'oil_last_km': row[3], 'oil_interval_km': row[4] or OIL_INTERVAL_DEFAULT_KM,
+            'oil_notify_enabled': bool(row[5]), 'oil_notified': bool(row[6]),
+            'oil_filter_last_km': row[7], 'air_filter_last_km': row[8],
+            'cabin_filter_last_km': row[9], 'spark_plugs_last_km': row[10],
+            'fuel_filter_last_km': row[11],
+        }
+    except Exception as e:
+        logger.error(f"❌ Не удалось прочитать данные ТО {user_id}: {e}")
+        return None
+
+def ensure_car_maintenance_row(user_id):
+    """Создаёт пустую строку car_maintenance, если её ещё нет - нужно до
+    первого km-пинга (car_maintenance_km_ping), иначе UPDATE ... WHERE
+    user_id=? не находит строку и пробег не копится. Идемпотентно (ON
+    CONFLICT DO NOTHING)."""
+    try:
+        init_db()
+        conn = get_db_connection()
+        conn.execute(
+            'INSERT INTO car_maintenance (user_id, oil_interval_km, updated_at) VALUES (?, ?, ?) '
+            'ON CONFLICT(user_id) DO NOTHING',
+            (user_id, OIL_INTERVAL_DEFAULT_KM, datetime.now(ZoneInfo('UTC')).strftime('%Y-%m-%d %H:%M:%S'))
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"❌ Не удалось создать запись ТО {user_id}: {e}")
+
+def save_car_maintenance_profile(user_id, car_make, mileage_km):
+    ensure_car_maintenance_row(user_id)
+    try:
+        conn = get_db_connection()
+        conn.execute(
+            'UPDATE car_maintenance SET car_make = ?, mileage_km = ?, updated_at = ? WHERE user_id = ?',
+            (car_make, mileage_km, datetime.now(ZoneInfo('UTC')).strftime('%Y-%m-%d %H:%M:%S'), user_id)
+        )
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"❌ Не удалось сохранить профиль машины {user_id}: {e}")
+        return False
+
+def mark_car_maintenance_item_changed(user_id, item_key):
+    """Кнопка "Заменил" у конкретного пункта ТО - запоминает ТЕКУЩЕЕ значение
+    cumulative_km как точку отсчёта (см. комментарий у CREATE TABLE
+    car_maintenance) - km_since у этого пункта начинает считаться заново от
+    этого пробега. У масла дополнительно сбрасывает oil_notified, чтобы
+    уведомление могло сработать снова на следующем интервале."""
+    if item_key not in CAR_MAINTENANCE_ITEM_KEYS:
+        return False
+    ensure_car_maintenance_row(user_id)
+    cm = get_car_maintenance(user_id) or {}
+    current_cumulative = cm.get('cumulative_km') or 0.0
+    column = 'oil_last_km' if item_key == 'oil' else f'{item_key}_last_km'
+    try:
+        conn = get_db_connection()
+        now = datetime.now(ZoneInfo('UTC')).strftime('%Y-%m-%d %H:%M:%S')
+        if item_key == 'oil':
+            conn.execute(
+                'UPDATE car_maintenance SET oil_last_km = ?, oil_notified = 0, updated_at = ? WHERE user_id = ?',
+                (current_cumulative, now, user_id)
+            )
+        else:
+            conn.execute(
+                f'UPDATE car_maintenance SET {column} = ?, updated_at = ? WHERE user_id = ?',
+                (current_cumulative, now, user_id)
+            )
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"❌ Не удалось отметить замену {item_key} у {user_id}: {e}")
+        return False
+
+def set_oil_notify_settings(user_id, enabled, interval_km):
+    if interval_km not in OIL_INTERVAL_OPTIONS_KM:
+        interval_km = OIL_INTERVAL_DEFAULT_KM
+    ensure_car_maintenance_row(user_id)
+    try:
+        conn = get_db_connection()
+        conn.execute(
+            'UPDATE car_maintenance SET oil_notify_enabled = ?, oil_interval_km = ?, oil_notified = 0, updated_at = ? WHERE user_id = ?',
+            (1 if enabled else 0, interval_km, datetime.now(ZoneInfo('UTC')).strftime('%Y-%m-%d %H:%M:%S'), user_id)
+        )
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"❌ Не удалось сохранить настройку уведомления о масле {user_id}: {e}")
+        return False
+
+def car_maintenance_items_payload(cm):
+    """Список пунктов ТО с km_since для JSON-ответа /cabinet/maintenance (см.
+    handle_cabinet_maintenance_api) - используется и в GET, и после каждого
+    POST (чтобы WebApp мог просто перерисовать данные из ответа, без
+    повторного запроса)."""
+    cumulative = (cm or {}).get('cumulative_km') or 0.0
+    items = []
+    for key, emoji, label in CAR_MAINTENANCE_ITEMS:
+        last_km = (cm or {}).get('oil_last_km' if key == 'oil' else f'{key}_last_km')
+        km_since = cumulative - last_km if last_km is not None else cumulative
+        items.append({'key': key, 'emoji': emoji, 'label': label, 'km_since': round(km_since, 1)})
+    return items
+
+async def maybe_send_oil_change_notification(user_id):
+    """Проверяется после каждого car_maintenance_km_ping - если включено
+    уведомление о замене масла и с последней отметки "Заменил" накопилось
+    больше выбранного интервала (oil_interval_km), шлём пуш РОВНО ОДИН РАЗ
+    (oil_notified=1 до следующего сброса - либо новой отметки "Заменил",
+    либо изменения настроек интервала/переключателя)."""
+    cm = get_car_maintenance(user_id)
+    if not cm or not cm.get('oil_notify_enabled') or cm.get('oil_notified'):
+        return
+    cumulative = cm.get('cumulative_km') or 0.0
+    last_km = cm.get('oil_last_km') or 0.0
+    interval = cm.get('oil_interval_km') or OIL_INTERVAL_DEFAULT_KM
+    km_since = cumulative - last_km
+    if km_since < interval:
+        return
+    try:
+        conn = get_db_connection()
+        conn.execute('UPDATE car_maintenance SET oil_notified = 1 WHERE user_id = ?', (user_id,))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"❌ Не удалось выставить oil_notified у {user_id}: {e}")
+        return
+    try:
+        await bot.send_message(
+            user_id,
+            f"🛢 *Пора менять масло!*\n\nС последней замены пройдено уже {round(km_since)} км в открытых сменах "
+            f"(порог - {interval} км).\n\nКак поменяешь - отметь это в 👤 Личном кабинете → 🛠 ТО, чтобы отсчёт начался заново.",
+            parse_mode='Markdown'
+        )
+    except Exception:
+        logger.exception(f"❌ Не удалось отправить пуш о замене масла user_id={user_id}")
+
+async def car_maintenance_km_ping(user_id, jump_km):
+    """Копит cumulative_km ТОЛЬКО во время открытых смен (вызывается из
+    km_counter_ping тем же пингом, что и shift['total_km']) - см. комментарий
+    у CREATE TABLE car_maintenance. Пишет в БД, только если у водителя вообще
+    есть строка car_maintenance (см. _car_maintenance_tracking_active -
+    дешёвый кэш в user_state, чтобы НЕ делать SELECT на каждый пинг геопозиции
+    для всех остальных водителей, которые разделом ТО не пользуются)."""
+    try:
+        conn = get_db_connection()
+        conn.execute('UPDATE car_maintenance SET cumulative_km = cumulative_km + ? WHERE user_id = ?', (jump_km, user_id))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"❌ Не удалось обновить пробег ТО у {user_id}: {e}")
+        return
+    await maybe_send_oil_change_notification(user_id)
+
+def _car_maintenance_tracking_active(user_id, state):
+    if 'car_maintenance_active' not in state:
+        try:
+            init_db()
+            conn = get_db_connection()
+            row = conn.execute('SELECT 1 FROM car_maintenance WHERE user_id = ?', (user_id,)).fetchone()
+            conn.close()
+            state['car_maintenance_active'] = bool(row)
+        except Exception:
+            state['car_maintenance_active'] = False
+    return state['car_maintenance_active']
+
 def save_airport_status(icao, status):
     try:
         init_db()
@@ -7566,13 +7767,22 @@ def start_shift(user_id, tariffs=None):
         'tariffs': list(tariffs or []),
     }
 
-def km_counter_ping(user_id, lat, lon):
+async def km_counter_ping(user_id, lat, lon):
     """Обрабатывает один пинг живой геопозиции для счётчика км текущей смены -
     вызывается из тех же хендлеров location/edited_message, что и
     process_airport_queue_ping (независимо от неё - обе функции могут
     отрабатывать на один и тот же пинг, если у водителя одновременно идёт
     смена и включена очередь у аэропорта). Ничего не делает, если смена не
-    идёт (see is_shift_active)."""
+    идёт (see is_shift_active).
+
+    ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя - "то авто... считать
+    по пройденному пробегу при открытых сменах") - стала async: тот же пинг,
+    что копит shift['total_km'], теперь ДОПОЛНИТЕЛЬНО копит
+    car_maintenance.cumulative_km для трекера ТО (см. car_maintenance_km_ping),
+    но только если водитель вообще пользуется разделом "🛠 ТО" (см.
+    _car_maintenance_tracking_active - без этой проверки пришлось бы делать
+    лишний UPDATE в БД на каждый пинг геопозиции для ВСЕХ активных смен, а не
+    только тех, кто включил трекер)."""
     state = user_state[user_id]
     shift = state.get('shift')
     if not shift:
@@ -7583,6 +7793,8 @@ def km_counter_ping(user_id, lat, lon):
         jump = haversine_km(last_lat, last_lon, lat, lon)
         if jump <= SHIFT_MAX_JUMP_KM:
             shift['total_km'] = shift.get('total_km', 0.0) + jump
+            if jump > 0 and _car_maintenance_tracking_active(user_id, state):
+                await car_maintenance_km_ping(user_id, jump)
     shift['last_lat'] = lat
     shift['last_lon'] = lon
     state['shift'] = shift
@@ -14047,6 +14259,69 @@ async def handle_cabinet_settings_api(request):
         result['airport_queue_active'] = bool(state.get('airport_queue_active'))
     return web.json_response(result)
 
+CABINET_MAINTENANCE_API_PATH = '/cabinet/maintenance'
+CABINET_MAINTENANCE_CAR_MAKE_MAX_LEN = 40
+
+def _car_maintenance_payload(cm):
+    """Общий JSON-снимок раздела "🛠 ТО" - используется и в GET, и в ответе
+    каждого POST (см. handle_cabinet_maintenance_api), чтобы WebApp мог сразу
+    перерисовать актуальные данные из ответа, без повторного запроса."""
+    cm = cm or {}
+    return {
+        'car_make': cm.get('car_make') or '',
+        'mileage_km': cm.get('mileage_km'),
+        'items': car_maintenance_items_payload(cm),
+        'oil_notify_enabled': bool(cm.get('oil_notify_enabled')),
+        'oil_interval_km': cm.get('oil_interval_km') or OIL_INTERVAL_DEFAULT_KM,
+        'oil_interval_options': OIL_INTERVAL_OPTIONS_KM,
+    }
+
+async def handle_cabinet_maintenance_api(request):
+    """Раздел "🛠 ТО" личного кабинета (ДОБАВЛЕНО 22.09.2026, прямая просьба
+    пользователя - марка/пробег машины, отметки замены масла/фильтров/свечей,
+    уведомление о замене масла с выбором интервала 5000-10000 км, счётчик
+    которого копится по факту пройденных км в открытых сменах, см.
+    car_maintenance_km_ping/km_counter_ping). GET -> текущее состояние. POST
+    {action: 'save_profile'|'mark_changed'|'set_oil_notify', ...} -> меняет
+    и возвращает свежее состояние (тем же форматом, что и GET)."""
+    user_id = _cabinet_require_user(request)
+    if not user_id:
+        return web.json_response({'error': 'invalid_init_data'}, status=401)
+
+    if request.method == 'POST':
+        try:
+            body = await request.json()
+            action = body.get('action')
+        except Exception:
+            return web.json_response({'error': 'invalid_body'}, status=400)
+
+        if action == 'save_profile':
+            car_make = str(body.get('car_make') or '').strip()[:CABINET_MAINTENANCE_CAR_MAKE_MAX_LEN]
+            mileage_raw = body.get('mileage_km')
+            try:
+                mileage_km = float(mileage_raw) if mileage_raw not in (None, '') else None
+            except (TypeError, ValueError):
+                mileage_km = None
+            if not save_car_maintenance_profile(user_id, car_make, mileage_km):
+                return web.json_response({'error': 'save_failed'}, status=500)
+        elif action == 'mark_changed':
+            item = body.get('item')
+            if not mark_car_maintenance_item_changed(user_id, item):
+                return web.json_response({'error': 'invalid_item'}, status=400)
+        elif action == 'set_oil_notify':
+            enabled = bool(body.get('enabled'))
+            try:
+                interval_km = int(body.get('interval_km'))
+            except (TypeError, ValueError):
+                interval_km = OIL_INTERVAL_DEFAULT_KM
+            if not set_oil_notify_settings(user_id, enabled, interval_km):
+                return web.json_response({'error': 'save_failed'}, status=500)
+        else:
+            return web.json_response({'error': 'invalid_action'}, status=400)
+
+    cm = get_car_maintenance(user_id)
+    return web.json_response(_car_maintenance_payload(cm))
+
 def cabinet_webapp_html():
     # По просьбе пользователя (21.09.2026, "цвета сделай черный желтые белые
     # серые во всех аппсах") - фирменный акцент такси-чекера вместо зелёного:
@@ -14207,6 +14482,20 @@ def cabinet_webapp_html():
   .peak-line { font-size: 13.5px; padding: 6px 0; border-bottom: 1px solid rgba(127,127,127,.12); }
   .peak-line:last-child { border-bottom: none; }
   .muted { opacity: .6; font-size: 13px; }
+  /* ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - раздел "🛠 ТО":
+     марка/пробег машины, пункты обслуживания с кнопкой "Заменил",
+     уведомление о замене масла с выбором интервала). */
+  .mo-item {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 0;
+    border-bottom: 1px solid rgba(127,127,127,.15);
+  }
+  .mo-item:last-child { border-bottom: none; }
+  .mo-item .mo-label { font-size: 14px; }
+  .mo-item .mo-sub { font-size: 11.5px; opacity: .6; margin-top: 2px; }
+  .mo-item .mo-btn {
+    flex-shrink: 0; border: none; border-radius: 8px; padding: 8px 12px; font-size: 12px; font-weight: 700;
+    background: rgba(255,196,0,.15); color: #FFC400; text-transform: uppercase;
+  }
 </style>
 </head>
 <body>
@@ -14343,9 +14632,26 @@ def cabinet_webapp_html():
   <div id="nearbyResult"></div>
 </div>
 
-<!-- ==================== ТО ТРАНСПОРТА (заглушка, как в Telegram) ==================== -->
+<!-- ==================== ТО ТРАНСПОРТА (ДОБАВЛЕНО 22.09.2026) ====================
+     Марка/пробег машины + пункты ТО с кнопкой "Заменил" + уведомление о
+     замене масла с выбором интервала - см. handle_cabinet_maintenance_api. -->
 <div class="tab-pane" id="tab-maintenance">
-  <div class="card"><p>🛠 Этот раздел в разработке 🚧 — скоро будет</p></div>
+  <div class="card">
+    <div class="field-row"><label>Марка автомобиля</label><input type="text" id="moCarMake" placeholder="Например, Kia Rio"></div>
+    <div class="field-row"><label>Текущий пробег, км</label><input type="number" id="moMileage" placeholder="Например, 85000"></div>
+    <button class="btn" id="moSaveProfileBtn">Сохранить</button>
+  </div>
+  <div class="card">
+    <p><b>Обслуживание</b></p>
+    <div id="moItemsList" class="muted">Загружаю…</div>
+  </div>
+  <div class="card">
+    <div class="switch-row"><span>🔔 Напоминать о замене масла</span>
+      <button class="switch-toggle" id="moOilNotifyToggle"></button></div>
+    <div class="field-row" style="margin-top:10px"><label>Менять масло каждые, км</label>
+      <div class="pill-row" id="moOilIntervalRow"></div>
+    </div>
+  </div>
 </div>
 
 <!-- ==================== ГДЕ БЕНЗИН ==================== -->
@@ -14574,6 +14880,7 @@ def cabinet_webapp_html():
       if (tab === 'peak') loadPeakTab();
       if (tab === 'nearby') initNearbyTab();
       if (tab === 'settings') loadSettingsTab();
+      if (tab === 'maintenance') initMaintenanceTab();
     }
   });
 
@@ -14782,6 +15089,120 @@ def cabinet_webapp_html():
       });
     });
   }
+
+  // ---- ТО (ДОБАВЛЕНО 22.09.2026) ----
+  const MAINTENANCE_ITEMS_STATIC = [
+    {key: 'oil', emoji: '🛢', label: 'Масло'},
+    {key: 'oil_filter', emoji: '🧰', label: 'Масляный фильтр'},
+    {key: 'air_filter', emoji: '💨', label: 'Воздушный фильтр'},
+    {key: 'cabin_filter', emoji: '🌬', label: 'Салонный фильтр'},
+    {key: 'spark_plugs', emoji: '⚡', label: 'Свечи зажигания'},
+    {key: 'fuel_filter', emoji: '⛽', label: 'Топливный фильтр'},
+  ];
+  let maintenanceData = null;
+  let maintenanceInited = false;
+
+  function renderMaintenance() {
+    const d = maintenanceData;
+    if (!d) return;
+    document.getElementById('moCarMake').value = d.car_make || '';
+    document.getElementById('moMileage').value = d.mileage_km != null ? d.mileage_km : '';
+
+    const itemsWrap = document.getElementById('moItemsList');
+    itemsWrap.classList.remove('muted');
+    itemsWrap.innerHTML = MAINTENANCE_ITEMS_STATIC.map(it => {
+      const info = (d.items || []).find(x => x.key === it.key) || {};
+      const sub = info.km_since != null ? Math.round(info.km_since) + ' км с последней замены' : 'ещё не отмечено';
+      return '<div class="mo-item"><div><div class="mo-label">' + it.emoji + ' ' + it.label + '</div>' +
+        '<div class="mo-sub">' + sub + '</div></div>' +
+        '<button class="mo-btn" data-item="' + it.key + '">Заменил</button></div>';
+    }).join('');
+    itemsWrap.querySelectorAll('button[data-item]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        btn.disabled = true;
+        try {
+          const resp = await fetch('""" + CABINET_MAINTENANCE_API_PATH + """', {
+            method: 'POST', headers: { 'X-Telegram-Init-Data': initData, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'mark_changed', item: btn.dataset.item }),
+          });
+          if (!resp.ok) throw new Error('http_' + resp.status);
+          maintenanceData = await resp.json();
+          renderMaintenance();
+          if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
+        } catch (e) {
+          btn.disabled = false;
+        }
+      });
+    });
+
+    document.getElementById('moOilNotifyToggle').classList.toggle('on', !!d.oil_notify_enabled);
+
+    const row = document.getElementById('moOilIntervalRow');
+    const options = d.oil_interval_options || [5000, 6000, 7000, 8000, 9000, 10000];
+    row.innerHTML = options.map(km =>
+      '<button class="pill-btn' + (km === d.oil_interval_km ? ' active' : '') + '" data-km="' + km + '">' + km + '</button>'
+    ).join('');
+    row.querySelectorAll('button').forEach(b => {
+      b.addEventListener('click', async () => {
+        row.querySelectorAll('button').forEach(x => x.classList.toggle('active', x === b));
+        await saveOilNotify(d.oil_notify_enabled, parseInt(b.dataset.km, 10));
+      });
+    });
+  }
+
+  async function saveOilNotify(enabled, intervalKm) {
+    try {
+      const resp = await fetch('""" + CABINET_MAINTENANCE_API_PATH + """', {
+        method: 'POST', headers: { 'X-Telegram-Init-Data': initData, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'set_oil_notify', enabled: enabled, interval_km: intervalKm }),
+      });
+      if (!resp.ok) throw new Error('http_' + resp.status);
+      maintenanceData = await resp.json();
+      renderMaintenance();
+    } catch (e) {}
+  }
+
+  async function loadMaintenanceTab() {
+    const itemsWrap = document.getElementById('moItemsList');
+    try {
+      const resp = await fetch('""" + CABINET_MAINTENANCE_API_PATH + """', { headers: { 'X-Telegram-Init-Data': initData } });
+      if (!resp.ok) throw new Error('http_' + resp.status);
+      maintenanceData = await resp.json();
+      renderMaintenance();
+    } catch (e) {
+      itemsWrap.textContent = 'Не удалось загрузить данные.';
+    }
+  }
+
+  function initMaintenanceTab() {
+    loadMaintenanceTab();
+    if (maintenanceInited) return;
+    maintenanceInited = true;
+    document.getElementById('moSaveProfileBtn').addEventListener('click', async () => {
+      const btn = document.getElementById('moSaveProfileBtn');
+      btn.disabled = true;
+      try {
+        const resp = await fetch('""" + CABINET_MAINTENANCE_API_PATH + """', {
+          method: 'POST', headers: { 'X-Telegram-Init-Data': initData, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action: 'save_profile',
+            car_make: document.getElementById('moCarMake').value,
+            mileage_km: parseFloat(document.getElementById('moMileage').value) || null,
+          }),
+        });
+        if (!resp.ok) throw new Error('http_' + resp.status);
+        maintenanceData = await resp.json();
+        renderMaintenance();
+        if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
+      } catch (e) {}
+      btn.disabled = false;
+    });
+    document.getElementById('moOilNotifyToggle').addEventListener('click', async () => {
+      if (!maintenanceData) return;
+      if (tg && tg.HapticFeedback) tg.HapticFeedback.selectionChanged();
+      await saveOilNotify(!maintenanceData.oil_notify_enabled, maintenanceData.oil_interval_km);
+    });
+  }
 </script>
 </body>
 </html>"""
@@ -14848,7 +15269,7 @@ async def handle_airport_queue_location(message: types.Message):
     heading = getattr(message.location, 'heading', None)
     await process_airport_queue_ping(user_id, lat, lon, live_period=getattr(message.location, 'live_period', None))
     await process_parking_ping(user_id, lat, lon)
-    km_counter_ping(user_id, lat, lon)
+    await km_counter_ping(user_id, lat, lon)
     remember_live_location(user_id, lat, lon)
     maybe_update_map_position(user_id, lat, lon, heading=heading)
     await maybe_start_pending_shift(message, user_id)
@@ -14873,7 +15294,7 @@ async def handle_airport_queue_location_update(message: types.Message):
     heading = getattr(message.location, 'heading', None)
     await process_airport_queue_ping(user_id, lat, lon, live_period=getattr(message.location, 'live_period', None))
     await process_parking_ping(user_id, lat, lon)
-    km_counter_ping(user_id, lat, lon)
+    await km_counter_ping(user_id, lat, lon)
     remember_live_location(user_id, lat, lon)
     maybe_update_map_position(user_id, lat, lon, heading=heading)
     await maybe_start_pending_shift(message, user_id)
@@ -19648,6 +20069,8 @@ async def start_subscription_webhook_server():
     app.router.add_post(CABINET_NEARBY_API_PATH, handle_cabinet_nearby_api)
     app.router.add_get(CABINET_SETTINGS_API_PATH, handle_cabinet_settings_api)
     app.router.add_post(CABINET_SETTINGS_API_PATH, handle_cabinet_settings_api)
+    app.router.add_get(CABINET_MAINTENANCE_API_PATH, handle_cabinet_maintenance_api)
+    app.router.add_post(CABINET_MAINTENANCE_API_PATH, handle_cabinet_maintenance_api)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', SUBSCRIPTION_WEBHOOK_PORT)
