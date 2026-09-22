@@ -9441,6 +9441,70 @@ def map_webapp_html():
     }}
     return out;
   }}
+  // ВЫНЕСЕНО 22.09.2026 (прямая просьба пользователя - "а вокзалы так же
+  // маленькими облочками") - раньше highDemandBlobOpacity/seedFromString/
+  // demandCloudTimeBucket/CLOUD_SHAPE_PROFILES/blobLatLngs были объявлены
+  // ВНУТРИ data.airports.forEach в loadAirports() (пересоздавались на
+  // каждый аэропорт) и были недоступны из loadStations(). Подняты на
+  // уровень скрипта, чтобы одна и та же форма "облака" (не идеальный круг,
+  // асимметричный силуэт со сглаживанием) использовалась и у аэропортов, и
+  // у вокзалов - просто с разным максимальным радиусом.
+  function highDemandBlobOpacity(load) {{
+    if (load >= 120) return 0.34;
+    if (load >= 100) return 0.28;
+    if (load >= 90) return 0.23;
+    if (load >= 80) return 0.18;
+    return 0.13; // 70-79%
+  }}
+  function seedFromString(s) {{
+    let h = 7;
+    for (let i = 0; i < (s || '').length; i++) {{ h = (h * 31 + s.charCodeAt(i)) % 10000; }}
+    return h;
+  }}
+  function demandCloudTimeBucket() {{
+    return Math.floor(Date.now() / (5 * 60 * 1000));
+  }}
+  const CLOUD_SHAPE_PROFILES = [
+    {{base: 0.62, min: 0.35, terms: [[2, 0.24], [5, 0.12], [3, 0.09]]}},
+    {{base: 0.58, min: 0.32, terms: [[3, 0.22], [7, 0.14], [1, 0.10]]}},
+    {{base: 0.66, min: 0.40, terms: [[4, 0.18], [2, 0.15], [6, 0.08]]}},
+    {{base: 0.55, min: 0.28, terms: [[2, 0.28], [9, 0.10], [4, 0.07]]}},
+    {{base: 0.64, min: 0.38, terms: [[5, 0.20], [3, 0.13], [8, 0.06]]}},
+    {{base: 0.60, min: 0.30, terms: [[3, 0.26], [6, 0.11], [2, 0.09]]}},
+    {{base: 0.63, min: 0.42, terms: [[4, 0.16], [7, 0.12], [1, 0.08]]}},
+    {{base: 0.57, min: 0.33, terms: [[2, 0.20], [4, 0.18], [9, 0.05]]}},
+    {{base: 0.65, min: 0.36, terms: [[6, 0.19], [2, 0.14], [5, 0.07]]}},
+    {{base: 0.59, min: 0.29, terms: [[3, 0.24], [8, 0.13], [1, 0.06]]}},
+    {{base: 0.61, min: 0.41, terms: [[5, 0.17], [2, 0.12], [7, 0.09]]}},
+    {{base: 0.56, min: 0.31, terms: [[4, 0.23], [3, 0.15], [6, 0.06]]}},
+    {{base: 0.67, min: 0.44, terms: [[2, 0.16], [6, 0.13], [4, 0.08]]}},
+  ];
+  function blobLatLngs(lat, lon, maxRadiusM, seed, pointsCount) {{
+    pointsCount = pointsCount || 24;
+    const metersPerDegLat = 111320;
+    const profile = CLOUD_SHAPE_PROFILES[seed % CLOUD_SHAPE_PROFILES.length];
+    const p1 = (seed % 628) / 100;
+    const p2 = ((seed * 3) % 628) / 100;
+    const p3 = ((seed * 7) % 628) / 100;
+    const phases = [p1, p2, p3];
+    const offsetAngle = ((seed * 13) % 628) / 100;
+    const offsetDist = maxRadiusM * 0.28;
+    const cLat = lat + (offsetDist * Math.cos(offsetAngle)) / metersPerDegLat;
+    const cLon = lon + (offsetDist * Math.sin(offsetAngle)) / (metersPerDegLat * Math.cos(lat * Math.PI / 180));
+    const latLngs = [];
+    for (let i = 0; i < pointsCount; i++) {{
+      const angle = (i / pointsCount) * Math.PI * 2;
+      let wobble = profile.base;
+      profile.terms.forEach(([freq, amp], idx) => {{
+        wobble += amp * Math.sin(angle * freq + phases[idx % phases.length]);
+      }});
+      const r = maxRadiusM * Math.max(profile.min, Math.min(1, wobble));
+      const dLat = (r * Math.cos(angle)) / metersPerDegLat;
+      const dLon = (r * Math.sin(angle)) / (metersPerDegLat * Math.cos(cLat * Math.PI / 180));
+      latLngs.push([cLat + dLat, cLon + dLon]);
+    }}
+    return smoothClosedLatLngs(latLngs);
+  }}
   // Метки аэропортов - название, статус (открыт/по согласованию/закрыт),
   // текущая загрузка % и последняя отмеченная водителями очередь по каждой
   // категории (см. handle_map_airports_api). Загружаются один раз при
@@ -9491,82 +9555,9 @@ def map_webapp_html():
         // добавлена 5-я (100-119% / 120%+), и все значения снижены (бледнее).
         const HIGH_DEMAND_LOAD_THRESHOLD = 70;
         const HIGH_DEMAND_RADIUS_METERS = 5000;
-        function highDemandBlobOpacity(load) {{
-          if (load >= 120) return 0.34;
-          if (load >= 100) return 0.28;
-          if (load >= 90) return 0.23;
-          if (load >= 80) return 0.18;
-          return 0.13; // 70-79%
-        }}
-        function seedFromString(s) {{
-          let h = 7;
-          for (let i = 0; i < (s || '').length; i++) {{ h = (h * 31 + s.charCodeAt(i)) % 10000; }}
-          return h;
-        }}
-        // ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "облака спроса
-        // в период показа каждые 5 минут меняй их чтобы создавалась видимость
-        // что они меняются"): к seed примешивается номер текущего 5-минутного
-        // окна - форма остаётся стабильной внутри одного окна (не дёргается
-        // между опросами loadAirports каждые 60с), но раз в 5 минут меняется
-        // на другую (детерминированно, без реального рандома на клиенте).
-        function demandCloudTimeBucket() {{
-          return Math.floor(Date.now() / (5 * 60 * 1000));
-        }}
-        // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "сделай
-        // пожалуйста 10-15 разных облаков форм облаков спроса и рандомно
-        // их загружай"): раньше форма облака у ВСЕХ аэропортов строилась по
-        // одной и той же формуле (менялись только фазы/смещение из seed,
-        // силуэт был визуально похож). Теперь есть набор из 13 разных
-        // "профилей" силуэта (своя база/частоты-амплитуды волн/диапазон
-        // сжатия у каждого) - профиль выбирается ДЕТЕРМИНИРОВАННО по seed
-        // (seed % profiles.length), так что у каждого аэропорта своя,
-        // стабильная между перерисовками форма, а не одна и та же на всех.
-        const CLOUD_SHAPE_PROFILES = [
-          {{base: 0.62, min: 0.35, terms: [[2, 0.24], [5, 0.12], [3, 0.09]]}},
-          {{base: 0.58, min: 0.32, terms: [[3, 0.22], [7, 0.14], [1, 0.10]]}},
-          {{base: 0.66, min: 0.40, terms: [[4, 0.18], [2, 0.15], [6, 0.08]]}},
-          {{base: 0.55, min: 0.28, terms: [[2, 0.28], [9, 0.10], [4, 0.07]]}},
-          {{base: 0.64, min: 0.38, terms: [[5, 0.20], [3, 0.13], [8, 0.06]]}},
-          {{base: 0.60, min: 0.30, terms: [[3, 0.26], [6, 0.11], [2, 0.09]]}},
-          {{base: 0.63, min: 0.42, terms: [[4, 0.16], [7, 0.12], [1, 0.08]]}},
-          {{base: 0.57, min: 0.33, terms: [[2, 0.20], [4, 0.18], [9, 0.05]]}},
-          {{base: 0.65, min: 0.36, terms: [[6, 0.19], [2, 0.14], [5, 0.07]]}},
-          {{base: 0.59, min: 0.29, terms: [[3, 0.24], [8, 0.13], [1, 0.06]]}},
-          {{base: 0.61, min: 0.41, terms: [[5, 0.17], [2, 0.12], [7, 0.09]]}},
-          {{base: 0.56, min: 0.31, terms: [[4, 0.23], [3, 0.15], [6, 0.06]]}},
-          {{base: 0.67, min: 0.44, terms: [[2, 0.16], [6, 0.13], [4, 0.08]]}},
-        ];
-        function blobLatLngs(lat, lon, maxRadiusM, seed, pointsCount) {{
-          pointsCount = pointsCount || 24;
-          const metersPerDegLat = 111320;
-          const profile = CLOUD_SHAPE_PROFILES[seed % CLOUD_SHAPE_PROFILES.length];
-          // Детерминированные "случайные" фазы/смещение из seed - разные у
-          // каждого аэропорта, но стабильные между перерисовками.
-          const p1 = (seed % 628) / 100;
-          const p2 = ((seed * 3) % 628) / 100;
-          const p3 = ((seed * 7) % 628) / 100;
-          const phases = [p1, p2, p3];
-          const offsetAngle = ((seed * 13) % 628) / 100;
-          const offsetDist = maxRadiusM * 0.28;
-          const cLat = lat + (offsetDist * Math.cos(offsetAngle)) / metersPerDegLat;
-          const cLon = lon + (offsetDist * Math.sin(offsetAngle)) / (metersPerDegLat * Math.cos(lat * Math.PI / 180));
-          const latLngs = [];
-          for (let i = 0; i < pointsCount; i++) {{
-            const angle = (i / pointsCount) * Math.PI * 2;
-            // Явно асимметричное облако, а не ровный круг с лёгкой рябью
-            // по краю - конкретные база/частоты/амплитуды/диапазон сжатия
-            // берутся из выбранного CLOUD_SHAPE_PROFILES[...].
-            let wobble = profile.base;
-            profile.terms.forEach(([freq, amp], idx) => {{
-              wobble += amp * Math.sin(angle * freq + phases[idx % phases.length]);
-            }});
-            const r = maxRadiusM * Math.max(profile.min, Math.min(1, wobble));
-            const dLat = (r * Math.cos(angle)) / metersPerDegLat;
-            const dLon = (r * Math.sin(angle)) / (metersPerDegLat * Math.cos(cLat * Math.PI / 180));
-            latLngs.push([cLat + dLat, cLon + dLon]);
-          }}
-          return smoothClosedLatLngs(latLngs);
-        }}
+        // highDemandBlobOpacity/seedFromString/demandCloudTimeBucket/
+        // CLOUD_SHAPE_PROFILES/blobLatLngs вынесены на уровень скрипта (см.
+        // комментарий там же) - теперь общие для аэропортов и вокзалов.
         if (a.load !== null && a.load !== undefined && a.load > HIGH_DEMAND_LOAD_THRESHOLD) {{
           const cloudSeed = seedFromString(a.icao + '::' + demandCloudTimeBucket());
           const blob = L.polygon(blobLatLngs(a.lat, a.lon, HIGH_DEMAND_RADIUS_METERS, cloudSeed), {{
@@ -9731,15 +9722,27 @@ def map_webapp_html():
         // ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя - "Над вокзалами
         // тока когда более 80%"): было 50%.
         const STATION_HIGH_LOAD_THRESHOLD = 80;
+        // ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя - "а вокзалы
+        // так же маленькими облочками", уточнение "спроса от 80%") - раньше
+        // был ровный зелёный круг (L.circle) фиксированного радиуса. Теперь
+        // та же асимметричная "облачная" форма, что у аэропортов
+        // (blobLatLngs), но заметно меньше по охвату (STATION_CLOUD_RADIUS_
+        // METERS - в разы меньше HIGH_DEMAND_RADIUS_METERS у аэропортов) и
+        // своим цветом (зелёный #2e7d32, как раньше у круга, а не фиолетовый
+        // спроса такси) - у вокзалов бинарная шкала загрузки, а не
+        // многоуровневый спрос, поэтому одна фиксированная прозрачность.
+        const STATION_CLOUD_RADIUS_METERS = 1500;
         if (s.load !== null && s.load !== undefined && s.load > STATION_HIGH_LOAD_THRESHOLD) {{
-          const circle = L.circle([s.lat, s.lon], {{
-            radius: 1500,
+          const stationSeed = seedFromString((s.name || String(s.lat)) + '::' + demandCloudTimeBucket());
+          const blob = L.polygon(blobLatLngs(s.lat, s.lon, STATION_CLOUD_RADIUS_METERS, stationSeed), {{
             color: '#2e7d32',
-            weight: 2,
+            weight: 0,
             fillColor: '#2e7d32',
-            fillOpacity: 0.15,
+            fillOpacity: 0.18,
+            smoothFactor: 3,
           }}).addTo(map);
-          stationMarkers.push(circle);
+          if (blob._path) blob._path.style.filter = 'blur(10px)';
+          stationMarkers.push(blob);
         }}
         const icon = L.divIcon({{ className: 'airport-icon', html: '🚆', iconSize: [26, 26] }});
         const symbol = (s.load !== null && s.load !== undefined && s.load > STATION_HIGH_LOAD_THRESHOLD) ? '🟢' : '🔴';
@@ -9748,13 +9751,15 @@ def map_webapp_html():
           popup += `<div class="row">📊 Загрузка сейчас: ${{s.load}}% ${{symbol}}</div>`;
         }}
         popup += `</div>`;
-        let label = `<b>${{s.name}}</b>`;
-        if (s.load !== null && s.load !== undefined) {{
-          label += `<br>📊 ${{s.load}}% ${{symbol}}`;
-        }}
+        // ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя - "надо скрывать
+        // вокзалы, нажимая на них раскрывалась надпись") - постоянная
+        // подпись (permanent tooltip) занимала место на карте и загромождала
+        // её даже без взаимодействия. Убрали permanent-подпись у вокзалов -
+        // теперь название и загрузка показываются только по нажатию на
+        // значок 🚆 (тот же popup, что и раньше). У аэропортов постоянная
+        // подпись осталась как есть - жалоба была именно про вокзалы.
         const marker = L.marker([s.lat, s.lon], {{ icon }})
           .bindPopup(popup)
-          .bindTooltip(label, {{ permanent: true, direction: 'right', offset: [10, 0], className: 'airport-label' }})
           .addTo(map);
         stationMarkers.push(marker);
       }});
