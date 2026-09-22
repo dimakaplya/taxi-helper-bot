@@ -6,7 +6,7 @@
         {"iata": "SVO", "icao": "UUEE", "name": "SVO (Шереметьево B/C)", "emoji": "✈️", "yandex_code": "s9600213", "zone_key": "bc", "capacity": 4966, "timezone": "Europe/Moscow", "coords": [55.9736, 37.4125]},
         {"iata": "SVO", "icao": "UUEE", "name": "SVO (Шереметьево Терминал D)", "emoji": "✈️", "yandex_code": "s9600213", "zone_key": "d", "capacity": 4966, "timezone": "Europe/Moscow", "coords": [55.9736, 37.4125]},
         {"iata": "DME", "icao": "UUDD", "name": "DME (Домодедово)", "emoji": "✈️", "yandex_code": "s9600216", "capacity": 1586, "timezone": "Europe/Moscow", "coords": [55.416027, 37.899751]},
-        {"iata": "VKO", "icao": "UUWW", "name": "VKO (Внуково)", "emoji": "✈️", "yandex_code": "s9600215", "capacity": 1838, "timezone": "Europe/Moscow", "coords": [55.602436, 37.331210]}
+        {"iata": "VKO", "icao": "UUWW", "name": "VKO (Внуково)", "emoji": "✈️", "yandex_code": "s9600215", "capacity": 1838, "timezone": "Europe/Moscow", "coords": [55.598101, 37.281942]}
       ],
       "stations": [
         {"name": "Казанский вокзал", "code": "s2000003", "capacity": 2100, "coords": [55.7791, 37.6558]},
