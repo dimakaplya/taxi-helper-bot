@@ -16418,11 +16418,56 @@ def compute_campaign_profit(period='all'):
     }
 
 
+# ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "надо так же прописывать
+# сумму к выплате рефералам по отдельным схемам чтобы понимать сколько денег
+# хранить для выплат"): резерв - это НЕ то же самое, что referral_payouts_kopecks
+# выше (сколько уже НАЧИСЛЕНО за период) - это сколько денег прямо сейчас
+# "висит" на балансах рефералов и ещё не выведено (referrals.balance_kopecks -
+# уменьшается при каждом выводе, см. request_referral_withdrawal), плюс уже
+# поданные, но ещё не отмеченные оплаченными заявки на вывод
+# (referral_withdrawals.status='pending', payout_kopecks - то, что реально
+# уйдёт со счёта, уже за вычетом комиссии). Разрез по схемам - через
+# referrals.referrer_type (см. REFERRAL_RATES_PERCENT/set_referrer_type).
+# Это снимок на текущий момент (не за период), поэтому в compute_campaign_profit
+# не встроено, а считается отдельно.
+def compute_referral_reserve_by_scheme():
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    reserve = {scheme: 0 for scheme in REFERRAL_RATES_PERCENT}
+    cursor.execute("SELECT COALESCE(referrer_type, ?), COALESCE(SUM(balance_kopecks), 0) FROM referrals GROUP BY 1", (REFERRAL_DEFAULT_TYPE,))
+    for referrer_type, balance_kopecks in cursor.fetchall():
+        reserve[referrer_type if referrer_type in reserve else REFERRAL_DEFAULT_TYPE] = reserve.get(referrer_type if referrer_type in reserve else REFERRAL_DEFAULT_TYPE, 0) + balance_kopecks
+    cursor.execute('''
+        SELECT COALESCE(r.referrer_type, ?), COALESCE(SUM(w.payout_kopecks), 0)
+        FROM referral_withdrawals w
+        LEFT JOIN referrals r ON r.user_id = w.user_id
+        WHERE w.status = 'pending'
+        GROUP BY 1
+    ''', (REFERRAL_DEFAULT_TYPE,))
+    pending_withdrawals = {scheme: 0 for scheme in REFERRAL_RATES_PERCENT}
+    for referrer_type, payout_kopecks in cursor.fetchall():
+        pending_withdrawals[referrer_type if referrer_type in pending_withdrawals else REFERRAL_DEFAULT_TYPE] = pending_withdrawals.get(referrer_type if referrer_type in pending_withdrawals else REFERRAL_DEFAULT_TYPE, 0) + payout_kopecks
+    conn.close()
+    return {
+        scheme: {
+            'balance_kopecks': reserve.get(scheme, 0),
+            'pending_withdrawals_kopecks': pending_withdrawals.get(scheme, 0),
+            'total_reserve_kopecks': reserve.get(scheme, 0) + pending_withdrawals.get(scheme, 0),
+        }
+        for scheme in REFERRAL_RATES_PERCENT
+    }
+
+
+REFERRAL_SCHEME_LABELS = {'individual': 'Обычная (30/15/5%)', 'legal_entity': 'Юр.лица (40/20/10%)'}
+
+
 def format_campaign_profit_text():
     """Собирает текст отчёта сразу по двум периодам (всё время + текущий
-    месяц) - см. compute_campaign_profit."""
+    месяц) - см. compute_campaign_profit - плюс снимок резерва на выплаты
+    рефералам по каждой схеме отдельно - см. compute_referral_reserve_by_scheme."""
     all_time = compute_campaign_profit('all')
     this_month = compute_campaign_profit('month')
+    reserve = compute_referral_reserve_by_scheme()
 
     def _block(title, stats):
         return (
@@ -16433,11 +16478,28 @@ def format_campaign_profit_text():
             f"<b>Чистая прибыль: {stats['net_profit_kopecks'] / 100:,.0f}₽</b>"
         ).replace(',', ' ')
 
+    reserve_lines = []
+    total_reserve = 0
+    for scheme, label in REFERRAL_SCHEME_LABELS.items():
+        s = reserve[scheme]
+        total_reserve += s['total_reserve_kopecks']
+        reserve_lines.append(
+            f"{label}: {s['total_reserve_kopecks'] / 100:,.0f}₽ "
+            f"(на балансах {s['balance_kopecks'] / 100:,.0f}₽ + заявки на вывод {s['pending_withdrawals_kopecks'] / 100:,.0f}₽)"
+        )
+    reserve_block = (
+        "<b>💼 Резерв на выплаты рефералам (сколько держать на счету)</b>\n"
+        + "\n".join(reserve_lines)
+        + f"\n<b>Итого резерв: {total_reserve / 100:,.0f}₽</b>"
+    ).replace(',', ' ')
+
     return (
         "💰 <b>Прибыль кампании (все реферальные программы)</b>\n\n"
         + _block("За всё время", all_time)
         + "\n\n"
         + _block("Текущий месяц", this_month)
+        + "\n\n"
+        + reserve_block
     )
 
 
@@ -16500,11 +16562,40 @@ async def admin_set_individual_referrer(message: types.Message):
 # ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - см. compute_campaign_profit
 # выше): команда по запросу + см. также campaign_profit_monthly_report ниже
 # для автоматической ежемесячной рассылки того же отчёта.
+def _campaign_profit_keyboard():
+    # Кнопка "Обновить" остаётся под каждым присланным отчётом (прямая
+    # просьба пользователя - "отчёты получать можно было каждый день по
+    # кнопке") - не нужно каждый раз набирать /campaign_profit заново,
+    # достаточно нажать на кнопку под последним отчётом в любой день.
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Обновить отчёт", callback_data="campaign_profit_refresh")]
+    ])
+
+
 @router.message(Command("campaign_profit"))
 async def admin_campaign_profit(message: types.Message):
     if not ADMIN_TELEGRAM_ID or str(message.from_user.id) != str(ADMIN_TELEGRAM_ID):
         return
-    await message.answer(format_campaign_profit_text(), parse_mode='HTML')
+    await message.answer(format_campaign_profit_text(), parse_mode='HTML', reply_markup=_campaign_profit_keyboard())
+
+
+@router.callback_query(lambda c: c.data == "campaign_profit_refresh")
+async def admin_campaign_profit_refresh(callback: types.CallbackQuery):
+    if not ADMIN_TELEGRAM_ID or str(callback.from_user.id) != str(ADMIN_TELEGRAM_ID):
+        await callback.answer()
+        return
+    fresh_text = format_campaign_profit_text()
+    try:
+        # edit_text падает с "message is not modified", если цифры с прошлого
+        # обновления не изменились - это ожидаемо, просто подтверждаем нажатие
+        await callback.message.edit_text(fresh_text, parse_mode='HTML', reply_markup=_campaign_profit_keyboard())
+        await callback.answer("Обновлено")
+    except Exception as e:
+        if 'message is not modified' in str(e):
+            await callback.answer("Данные не изменились")
+        else:
+            logger.error(f"❌ Не удалось обновить отчёт по прибыли кампании: {e}")
+            await callback.answer("Ошибка обновления")
 
 # По просьбе пользователя (20.09.2026): "делай пуши перекрытий... и крупные
 # ДТП" - отдельный пуш-тип, независимый от статусов аэропортов/часов пика.
@@ -16944,7 +17035,7 @@ async def campaign_profit_monthly_report():
                 conn.close()
                 if not already_sent:
                     try:
-                        await bot.send_message(int(ADMIN_TELEGRAM_ID), format_campaign_profit_text(), parse_mode='HTML')
+                        await bot.send_message(int(ADMIN_TELEGRAM_ID), format_campaign_profit_text(), parse_mode='HTML', reply_markup=_campaign_profit_keyboard())
                     except Exception as e:
                         logger.error(f"❌ Не удалось отправить ежемесячный отчёт по прибыли кампании: {e}")
         except Exception as e:
