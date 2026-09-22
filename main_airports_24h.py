@@ -16514,8 +16514,26 @@ async def handle_refresh_menu_button(callback_query: types.CallbackQuery):
 # поменять этот флаг на True, деплоить ничего больше не нужно.
 SUBSCRIPTION_ENFORCEMENT_LIVE = False
 SUBSCRIPTION_TRIAL_DAYS = 7
-SUBSCRIPTION_PRICE_RUB = 149
+SUBSCRIPTION_PRICE_RUB = 149  # такси/Ultima
+# ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "измени стоимость
+# подписки для грузовых и курьеров 89 руб. чтобы было то есть такси такси
+# ультима 149 и курьеры грузовые 89"): у курьера/грузового такси своя,
+# более низкая цена - см. get_subscription_price_rub ниже.
+SUBSCRIPTION_PRICE_RUB_COURIER_CARGO = 89
 SUBSCRIPTION_PRICE_KOPECKS = SUBSCRIPTION_PRICE_RUB * 100
+
+def get_subscription_price_rub(user_id):
+    """Цена подписки в рублях для конкретного пользователя - зависит от его
+    категории (см. SUBSCRIPTION_PRICE_RUB/SUBSCRIPTION_PRICE_RUB_COURIER_CARGO
+    выше). Категория неизвестна (ещё не выбрана) - используем цену
+    такси/Ultima по умолчанию."""
+    state = user_state.get(user_id) or {}
+    if state.get('category') in ('courier', 'cargo'):
+        return SUBSCRIPTION_PRICE_RUB_COURIER_CARGO
+    return SUBSCRIPTION_PRICE_RUB
+
+def get_subscription_price_kopecks(user_id):
+    return get_subscription_price_rub(user_id) * 100
 SUBSCRIPTION_PERIOD_DAYS = 30
 SUBSCRIPTION_CHECK_INTERVAL_MINUTES = 60
 # ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "сделай кнопку Фантом
@@ -16556,7 +16574,8 @@ SUPPORT_FAQ_ITEMS = [
         "💳 Как работает подписка?",
         "Как работает подписка?",
         f"Первые {SUBSCRIPTION_TRIAL_DAYS} дней бот бесплатный (пробный период). Дальше - "
-        f"{SUBSCRIPTION_PRICE_RUB}₽/мес, оплата картой прямо в боте (кнопка «💳 ОПЛАТИТЬ», "
+        f"{SUBSCRIPTION_PRICE_RUB}₽/мес (для курьера и грузового такси - {SUBSCRIPTION_PRICE_RUB_COURIER_CARGO}₽/мес), "
+        "оплата картой прямо в боте (кнопка «💳 ОПЛАТИТЬ», "
         "появляется автоматически, когда пробный период заканчивается). После оплаты доступ "
         "открывается в течение пары минут."
     ),
@@ -17090,9 +17109,10 @@ async def create_tinkoff_payment(user_id: int):
         logger.warning(f"⚠️ Email для чека ещё не собран - не могу создать ссылку на оплату для user_id={user_id}")
         return None
     order_id = f"sub_{user_id}_{int(time.time())}"
+    price_kopecks = get_subscription_price_kopecks(user_id)
     params = {
         'TerminalKey': TINKOFF_TERMINAL_KEY,
-        'Amount': SUBSCRIPTION_PRICE_KOPECKS,
+        'Amount': price_kopecks,
         'OrderId': order_id,
         'Description': 'Подписка Taxi Helper на 1 месяц',
         # Обязательный блок чека (54-ФЗ) - Tax='none' соответствует УСН
@@ -17105,9 +17125,9 @@ async def create_tinkoff_payment(user_id: int):
             'Items': [
                 {
                     'Name': 'Подписка Taxi Helper на 1 месяц',
-                    'Price': SUBSCRIPTION_PRICE_KOPECKS,
+                    'Price': price_kopecks,
                     'Quantity': 1,
-                    'Amount': SUBSCRIPTION_PRICE_KOPECKS,
+                    'Amount': price_kopecks,
                     'Tax': 'none',
                     'PaymentMethod': 'full_payment',
                     'PaymentObject': 'service',
@@ -17140,14 +17160,15 @@ async def create_tinkoff_payment(user_id: int):
     if not data.get('Success'):
         logger.error(f"❌ Tinkoff Init отказал для user_id={user_id}: {data}")
         return None
-    save_subscription_order(user_id, order_id, SUBSCRIPTION_PRICE_KOPECKS)
+    save_subscription_order(user_id, order_id, price_kopecks)
     return data.get('PaymentURL')
 
 
-def subscription_paywall_keyboard(pay_url):
+def subscription_paywall_keyboard(pay_url, user_id=None):
     buttons = []
     if pay_url:
-        buttons.append([InlineKeyboardButton(text=f"💳 ОПЛАТИТЬ {SUBSCRIPTION_PRICE_RUB}₽", url=pay_url)])
+        price_rub = get_subscription_price_rub(user_id) if user_id is not None else SUBSCRIPTION_PRICE_RUB
+        buttons.append([InlineKeyboardButton(text=f"💳 ОПЛАТИТЬ {price_rub}₽", url=pay_url)])
     buttons.append([InlineKeyboardButton(text="🔄 Я ОПЛАТИЛ(А), ПРОВЕРИТЬ", callback_data="sub_pay_check")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -17157,13 +17178,18 @@ def subscription_paywall_keyboard(pay_url):
 # и везде по боту, вместо сплошного абзаца. Экран важный (единственное, что
 # видит пользователь без активной подписки) - заслуживает того же уровня
 # оформления, что и остальные ключевые карточки.
-SUBSCRIPTION_PAYWALL_TEXT = (
-    "🔒 *Пробный период закончился*\n"
-    f"{WHERE_TO_GO_DIVIDER}\n\n"
-    f"Бесплатные {SUBSCRIPTION_TRIAL_DAYS} дней использованы. Чтобы продолжать пользоваться ботом, "
-    f"оформи подписку - *{SUBSCRIPTION_PRICE_RUB}₽/мес*.\n\n"
-    "После оплаты доступ откроется в течение пары минут - или сразу нажми «Я оплатил(а), проверить»."
-)
+def subscription_paywall_text(user_id):
+    """Было константой SUBSCRIPTION_PAYWALL_TEXT - стало функцией 22.09.2026
+    (цена подписки теперь зависит от категории пользователя, см.
+    get_subscription_price_rub)."""
+    price_rub = get_subscription_price_rub(user_id)
+    return (
+        "🔒 *Пробный период закончился*\n"
+        f"{WHERE_TO_GO_DIVIDER}\n\n"
+        f"Бесплатные {SUBSCRIPTION_TRIAL_DAYS} дней использованы. Чтобы продолжать пользоваться ботом, "
+        f"оформи подписку - *{price_rub}₽/мес*.\n\n"
+        "После оплаты доступ откроется в течение пары минут - или сразу нажми «Я оплатил(а), проверить»."
+    )
 
 
 SUBSCRIPTION_EMAIL_PROMPT = (
@@ -17223,10 +17249,10 @@ async def send_subscription_paywall(event):
         await request_subscription_email(event, 'paywall')
         return
     pay_url = await create_tinkoff_payment(user_id)
-    text = SUBSCRIPTION_PAYWALL_TEXT
+    text = subscription_paywall_text(user_id)
     if not pay_url:
         text += "\n\n⚠️ Не получилось создать ссылку на оплату, попробуй ещё раз чуть позже."
-    markup = subscription_paywall_keyboard(pay_url)
+    markup = subscription_paywall_keyboard(pay_url, user_id)
     if isinstance(event, types.CallbackQuery):
         try:
             await event.answer()
@@ -17263,12 +17289,12 @@ async def show_subscription_status(message: types.Message):
     text = (
         "💳 *Подписка*\n\n"
         f"{status_line}\n\n"
-        f"Стоимость: *{SUBSCRIPTION_PRICE_RUB}₽/мес*. Оплата продлевает подписку на "
+        f"Стоимость: *{get_subscription_price_rub(user_id)}₽/мес*. Оплата продлевает подписку на "
         f"{SUBSCRIPTION_PERIOD_DAYS} дней от текущей даты окончания (даже если она ещё активна)."
     )
     if not pay_url:
         text += "\n\n⚠️ Не получилось создать ссылку на оплату, попробуй ещё раз чуть позже."
-    await message.answer(text, reply_markup=subscription_paywall_keyboard(pay_url), parse_mode='Markdown')
+    await message.answer(text, reply_markup=subscription_paywall_keyboard(pay_url, user_id), parse_mode='Markdown')
 
 
 @router.callback_query(lambda c: c.data == "phantom_start")
@@ -17607,12 +17633,12 @@ async def check_subscription_expirations():
         if active_until is None or now < active_until:
             continue
         pay_url = await create_tinkoff_payment(user_id)
-        text = SUBSCRIPTION_PAYWALL_TEXT
+        text = subscription_paywall_text(user_id)
         if not pay_url:
             text += "\n\n⚠️ Не получилось создать ссылку на оплату, попробуй ещё раз чуть позже."
         try:
             if bot:
-                await bot.send_message(user_id, text, reply_markup=subscription_paywall_keyboard(pay_url), parse_mode='Markdown')
+                await bot.send_message(user_id, text, reply_markup=subscription_paywall_keyboard(pay_url, user_id), parse_mode='Markdown')
         except Exception:
             logger.warning(f"⚠️ Не удалось отправить пуш об окончании подписки user_id={user_id}")
         conn2 = get_db_connection()
