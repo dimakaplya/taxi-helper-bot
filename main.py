@@ -2544,6 +2544,16 @@ def init_db():
             confirmed_at DATETIME
         )
     ''')
+    # ДОБАВЛЕНО 22.09.2026 (см. subscription_state/get_subscription_group
+    # выше) - какую именно группу (такси+Ultima или курьер+грузовое такси)
+    # оплачивает этот заказ, нужно знать в confirm_subscription_payment
+    # (webhook), чтобы продлить paid_until у ПРАВИЛЬНОЙ группы. Таблица уже
+    # существует в проде - колонка добавляется через ALTER TABLE, тот же
+    # паттерн, что у subscriptions.receipt_email выше.
+    try:
+        cursor.execute("ALTER TABLE subscription_payments ADD COLUMN sub_group TEXT NOT NULL DEFAULT 'taxi_ultima'")
+    except Exception:
+        pass  # колонка уже существует - обычная ситуация при каждом рестарте
     # ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "подготовь так же
     # пуши 3 2 1 день 1 час и 10 мин до окончания подписки чтобы приходили с
     # кнопкой оплатить подписку") - по одной строке на пользователя+порог
@@ -2558,10 +2568,49 @@ def init_db():
         CREATE TABLE IF NOT EXISTS subscription_expiry_reminders (
             user_id INTEGER NOT NULL,
             threshold TEXT NOT NULL,
+            sub_group TEXT NOT NULL DEFAULT 'taxi_ultima',
             sent_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY (user_id, threshold)
+            PRIMARY KEY (user_id, threshold, sub_group)
         )
     ''')
+    # ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "надо сделать
+    # чтобы логика была что за такси и ультим плати отдельно за курьеры
+    # грузовые отдельно цена 149 и 89 соответственно", см.
+    # get_subscription_group выше): раньше подписка (trial_started_at/
+    # paid_until) хранилась ОДНОЙ строкой на user_id в таблице subscriptions
+    # (PRIMARY KEY user_id) - невозможно было иметь ДВЕ независимые
+    # подписки на один Telegram-аккаунт (такси+Ultima отдельно от
+    # курьер+грузовое такси). Новая таблица - составной ключ
+    # (user_id, sub_group), под каждую группу свой триал/paid_until. Старую
+    # subscriptions НЕ удаляем (там остаётся receipt_email - контакт для
+    # чека, общий на пользователя, не зависит от группы) - только
+    # trial_started_at/paid_until там больше не читаются/не пишутся нигде,
+    # кроме одноразовой миграции сразу ниже.
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS subscription_state (
+            user_id INTEGER NOT NULL,
+            sub_group TEXT NOT NULL,
+            trial_started_at DATETIME NOT NULL,
+            paid_until DATETIME,
+            last_order_id TEXT,
+            expired_notified INTEGER DEFAULT 0,
+            PRIMARY KEY (user_id, sub_group)
+        )
+    ''')
+    # Одноразовая миграция строк старой subscriptions в subscription_state
+    # под группой 'taxi_ultima' (до этого изменения подписка была ОДНА на
+    # всех, независимо от категории - логично перенести существующих
+    # плательщиков именно в эту группу). Срабатывает только пока
+    # subscription_state ещё пустая, при каждом следующем старте бота
+    # (после первого раза) уже не пустая - миграция не повторяется.
+    cursor.execute('SELECT COUNT(*) FROM subscription_state')
+    if cursor.fetchone()[0] == 0:
+        cursor.execute('SELECT user_id, trial_started_at, paid_until, last_order_id, expired_notified FROM subscriptions')
+        for _old_row in cursor.fetchall():
+            cursor.execute(
+                "INSERT OR IGNORE INTO subscription_state (user_id, sub_group, trial_started_at, paid_until, last_order_id, expired_notified) VALUES (?, 'taxi_ultima', ?, ?, ?, ?)",
+                _old_row
+            )
     # ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "в чаевые добавь
     # возможность загружать qr код для получения чаевых") - храним только
     # Telegram file_id загруженного фото (см. get_tip_qr_file_id/
@@ -9128,6 +9177,17 @@ def map_webapp_html():
   // (.car-icon-inner). Вынесено в общую функцию navArrowIconHtml, чтобы
   // ОДНА И ТА ЖЕ форма стрелки использовалась и для себя, и для всех
   // остальных водителей на карте (см. loadPositions ниже) - "один в один".
+  // ИЗМЕНЕНО 22.09.2026 (повторная прямая просьба пользователя - "убери
+  // линию проходящую через середину стрелки"): раньше форма рисовалась
+  // ДВУМЯ отдельными треугольными polygon (левая грань темнее, правая
+  // светлее) - у каждого своя обводка (stroke), и ровно на стыке между
+  // ними (apex->notch) обе обводки накладывались друг на друга, поэтому
+  // видимая линия посередине оставалась, даже когда явный <line> убрали
+  // раньше. Теперь ОДИН polygon (весь контур целиком, без внутреннего
+  // ребра) с градиентной заливкой (<linearGradient>, тот же эффект объёма
+  // светлее/темнее по краям) - обводка (белая) идёт только по ВНЕШНЕМУ
+  // контуру, внутри ничего не делит стрелку пополам.
+  let navArrowGradientSeq = 0;
   function navArrowIconHtml(fill, stroke, heading) {{
     const apex = '21,3';
     const rightCorner = '38,37';
@@ -9135,11 +9195,14 @@ def map_webapp_html():
     const leftCorner = '4,37';
     const leftShade = darkenColor(fill, 18);
     const rightShade = lightenColor(fill, 12);
+    const gradId = `navArrowGrad${{navArrowGradientSeq++}}`;
     return `<div class="self-icon-wrap">` +
       `<div class="self-icon-rotate" style="transform:rotate(${{heading}}deg)">` +
       `<svg width="42" height="42" viewBox="0 0 42 42" style="filter:drop-shadow(0 3px 4px rgba(0,0,0,.55))">` +
-      `<polygon points="${{apex}} ${{leftCorner}} ${{notch}}" fill="${{leftShade}}" stroke="${{stroke}}" stroke-width="2" stroke-linejoin="round"/>` +
-      `<polygon points="${{apex}} ${{notch}} ${{rightCorner}}" fill="${{rightShade}}" stroke="${{stroke}}" stroke-width="2" stroke-linejoin="round"/>` +
+      `<defs><linearGradient id="${{gradId}}" x1="0" y1="0" x2="1" y2="0">` +
+      `<stop offset="0%" stop-color="${{leftShade}}"/><stop offset="100%" stop-color="${{rightShade}}"/>` +
+      `</linearGradient></defs>` +
+      `<polygon points="${{apex}} ${{rightCorner}} ${{notch}} ${{leftCorner}}" fill="url(#${{gradId}})" stroke="${{stroke}}" stroke-width="2" stroke-linejoin="round"/>` +
       `</svg></div></div>`;
   }}
   function selfIconHtml(heading) {{
@@ -16690,19 +16753,45 @@ SUBSCRIPTION_PRICE_RUB = 149  # такси/Ultima
 # ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "измени стоимость
 # подписки для грузовых и курьеров 89 руб. чтобы было то есть такси такси
 # ультима 149 и курьеры грузовые 89"): у курьера/грузового такси своя,
-# более низкая цена - см. get_subscription_price_rub ниже.
+# более низкая цена - см. get_subscription_group_price_rub ниже.
 SUBSCRIPTION_PRICE_RUB_COURIER_CARGO = 89
 SUBSCRIPTION_PRICE_KOPECKS = SUBSCRIPTION_PRICE_RUB * 100
 
-def get_subscription_price_rub(user_id):
-    """Цена подписки в рублях для конкретного пользователя - зависит от его
-    категории (см. SUBSCRIPTION_PRICE_RUB/SUBSCRIPTION_PRICE_RUB_COURIER_CARGO
-    выше). Категория неизвестна (ещё не выбрана) - используем цену
-    такси/Ultima по умолчанию."""
+# ЕЩЁ РАЗ ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя - "надо сделать
+# чтобы логика была что за такси и ультим плати отдельно за курьеры
+# грузовые отдельно цена 149 и 89 соответственно"): подписка теперь не
+# ОДНА на весь user_id, а раздельная по "группе тарифов" - 'taxi_ultima'
+# (такси+Ultima) и 'courier_cargo' (курьер+грузовое такси). Если один и
+# тот же Telegram-аккаунт работает то в такси, то в курьерке (переключает
+# категорию в user_state) - у него ДВЕ независимые подписки/триала, платить
+# нужно за каждую группу отдельно. Вся логика подписки (ensure_subscription/
+# get_subscription/subscription_active_until/create_tinkoff_payment/
+# confirm_subscription_payment и т.д.) теперь принимает sub_group - см.
+# get_subscription_group(category) и таблицу subscription_state ниже
+# (init_db) - новая, с составным ключом (user_id, sub_group), заменяет
+# старую subscriptions (та осталась только для receipt_email - контакт для
+# чека один на пользователя, не зависит от группы).
+SUBSCRIPTION_GROUP_TAXI_ULTIMA = 'taxi_ultima'
+SUBSCRIPTION_GROUP_COURIER_CARGO = 'courier_cargo'
+
+def get_subscription_group(category):
+    if category in ('courier', 'cargo'):
+        return SUBSCRIPTION_GROUP_COURIER_CARGO
+    return SUBSCRIPTION_GROUP_TAXI_ULTIMA
+
+def get_user_subscription_group(user_id):
     state = user_state.get(user_id) or {}
-    if state.get('category') in ('courier', 'cargo'):
+    return get_subscription_group(state.get('category'))
+
+def get_subscription_group_price_rub(sub_group):
+    if sub_group == SUBSCRIPTION_GROUP_COURIER_CARGO:
         return SUBSCRIPTION_PRICE_RUB_COURIER_CARGO
     return SUBSCRIPTION_PRICE_RUB
+
+def get_subscription_price_rub(user_id):
+    """Цена подписки в рублях для ТЕКУЩЕЙ группы (категории) пользователя -
+    см. get_subscription_group_price_rub/get_user_subscription_group выше."""
+    return get_subscription_group_price_rub(get_user_subscription_group(user_id))
 
 def get_subscription_price_kopecks(user_id):
     return get_subscription_price_rub(user_id) * 100
