@@ -8452,7 +8452,6 @@ MAP_CHROME_CSS = """
      повороте heading). */
   .self-icon-wrap { position: relative; width: 42px; height: 42px; }
   .self-icon-rotate { position: absolute; inset: 0; transform-origin: 50% 50%; }
-  .self-icon-emoji { position: absolute; left: 50%; top: 66%; transform: translate(-50%, -50%); font-size: 16px; filter: drop-shadow(0 1px 1px rgba(0,0,0,.6)); pointer-events: none; }
   .fuel-popup, .charging-popup { font-family: -apple-system, sans-serif; font-size: 12.5px; max-width: 230px; color: #000; }
   .fuel-popup h4, .charging-popup h4 { margin: 0 0 6px; font-size: 13.5px; }
   .fuel-popup .sub, .charging-popup .sub { color: #666; font-size: 11.5px; margin-bottom: 6px; }
@@ -8680,9 +8679,14 @@ def map_webapp_html():
   }}
   function selfIconHtml(heading) {{
     const st = SELF_MARKER_STYLE[myCategory] || SELF_MARKER_STYLE['taxi'];
-    const emoji = (CATEGORY_STYLE[myCategory] && CATEGORY_STYLE[myCategory].icon) || '🚕';
     const top = lightenColor(st.fill, 40);
     const bottom = darkenColor(st.fill, 20);
+    // ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя - "смайлики только
+    // оставляем на других юзерах остальные убираем", "на себе смайлики
+    // убираем", "только стрелка") - эмодзи-иконку категории (🚕/🤵🏽/🚶🏽‍♂️/🚚)
+    // убрали ИМЕННО у своего маркера - теперь это просто треугольник-стрелка
+    // без начинки, поворачивается по heading. У кружков остальных водителей
+    // (.car-icon-inner ниже) эмодзи осталась без изменений.
     return `<div class="self-icon-wrap">` +
       `<div class="self-icon-rotate" style="transform:rotate(${{heading}}deg)">` +
       `<svg width="42" height="42" viewBox="0 0 42 42" style="filter:drop-shadow(0 3px 4px rgba(0,0,0,.55))">` +
@@ -8691,8 +8695,7 @@ def map_webapp_html():
       `</linearGradient></defs>` +
       `<polygon points="21,2 4,38 38,38" fill="url(#selfTriGrad)" stroke="${{st.stroke}}" stroke-width="2.5" stroke-linejoin="round"/>` +
       `<polygon points="21,5 15,19 27,19" fill="rgba(255,255,255,0.30)"/>` +
-      `</svg></div>` +
-      `<div class="self-icon-emoji">${{emoji}}</div></div>`;
+      `</svg></div></div>`;
   }}
   function updateSelfMarker(lat, lon, heading) {{
     const h = (heading === null || heading === undefined || isNaN(heading)) ? selfHeading : heading;
