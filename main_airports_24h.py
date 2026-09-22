@@ -8329,6 +8329,170 @@ async def nearby_drivers_checker():
             logger.exception("❌ Ошибка фоновой проверки соседних водителей")
         await asyncio.sleep(NEARBY_DRIVERS_CHECK_INTERVAL_MINUTES * 60)
 
+# ==================== ПУШ "ОТМЕТЬ ТОПЛИВО НА ЗАПРАВКЕ" ====================
+# ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "надо сделать push с
+# меткой заправок чтобы водитель отмечал есть ли на этой заправке какое
+# топливо... если в радиусе заправки в 300 м находится пользователь и он
+# стоит более 7 минут тогда ему приходит push"): тот же принцип, что и у
+# "ПУШ РЯДОМ ЕСТЬ ВОДИТЕЛЬ" выше (радиус + время + in-memory трекер, один
+# пуш за заход, сброс при отъезде) - только вместо пары водителей здесь
+# одна живая позиция (см. get_all_map_positions_with_user_id) и ближайшая
+# АЗС из fuel_charging_data.json (load_fuel_charging_data, kind=='fuel').
+# Отметка ставится прямо из чата по инлайн-кнопкам под пушем (set_gas_fuel_
+# status) - не нужно открывать карту/WebApp специально ради одной отметки.
+FUEL_REMINDER_RADIUS_KM = 0.3
+FUEL_REMINDER_MINUTES = 7
+FUEL_REMINDER_CHECK_INTERVAL_MINUTES = 1
+
+# In-memory (тот же принцип, что _nearby_pairs_since/_nearby_pairs_notified -
+# лёгкий эфемерный трекер, переживать рестарт бота не нужно).
+_fuel_reminder_since = {}      # user_id -> (station_id, datetime первого обнаружения рядом)
+_fuel_reminder_notified = set()  # user_id, которым уже отправлен пуш за этот заход
+
+def _nearest_fuel_station(lat, lon, city, fuel_data):
+    """Ближайшая АЗС города в пределах FUEL_REMINDER_RADIUS_KM, или None."""
+    points = [p for p in (fuel_data.get('cities', {}).get(city) or []) if p.get('kind') == 'fuel']
+    nearest, nearest_dist = None, None
+    for p in points:
+        dist_km = haversine_km(lat, lon, p['lat'], p['lon'])
+        if dist_km <= FUEL_REMINDER_RADIUS_KM and (nearest_dist is None or dist_km < nearest_dist):
+            nearest, nearest_dist = p, dist_km
+    return nearest
+
+async def check_fuel_reminder_pushes():
+    """Раз в FUEL_REMINDER_CHECK_INTERVAL_MINUTES проверяет все активные
+    позиции на карте - если водитель дольше FUEL_REMINDER_MINUTES стоит в
+    пределах FUEL_REMINDER_RADIUS_KM от одной и той же АЗС, шлёт напоминание
+    отметить топливо (один раз за этот заход, пока не отъедет дальше
+    радиуса или не сменит заправку - тот же паттерн, что check_nearby_drivers)."""
+    if not bot:
+        return
+    positions = get_all_map_positions_with_user_id()
+    if not positions:
+        return
+    fuel_data = load_fuel_charging_data() or {}
+    now = datetime.now(timezone.utc)
+    currently_near = set()
+    for p in positions:
+        station = _nearest_fuel_station(p['lat'], p['lon'], p['city'], fuel_data)
+        if not station:
+            continue
+        user_id = p['user_id']
+        currently_near.add(user_id)
+        station_id = station['id']
+        prev = _fuel_reminder_since.get(user_id)
+        if prev is None or prev[0] != station_id:
+            # Впервые рядом с ЭТОЙ заправкой (или сменил заправку) - начинаем
+            # отсчёт заново, флаг "уже уведомлён" сбрасываем.
+            _fuel_reminder_since[user_id] = (station_id, now)
+            _fuel_reminder_notified.discard(user_id)
+            continue
+        elapsed_minutes = (now - prev[1]).total_seconds() / 60
+        if elapsed_minutes < FUEL_REMINDER_MINUTES or user_id in _fuel_reminder_notified:
+            continue
+        _fuel_reminder_notified.add(user_id)
+        await _send_fuel_reminder_push(user_id, station)
+
+    # Уехал от всех заправок (или пропал с карты) - сбрасываем трекер, чтобы
+    # при следующей остановке отсчёт начался с нуля.
+    stale_users = [uid for uid in _fuel_reminder_since if uid not in currently_near]
+    for uid in stale_users:
+        _fuel_reminder_since.pop(uid, None)
+        _fuel_reminder_notified.discard(uid)
+
+def fuel_reminder_keyboard(station_id):
+    """По кнопке на каждый вид топлива (см. FUEL_TYPES/FUEL_TYPE_LABELS) -
+    "есть"/"нет" сразу пишут отметку (см. handle_fuel_reminder_mark), без
+    открытия карты/WebApp. station_id (вида 'node/12345') не содержит '|' -
+    используем его разделителем в callback_data вместе с fuel_type/available."""
+    rows = []
+    for ft in FUEL_TYPES:
+        label = FUEL_TYPE_LABELS[ft]
+        rows.append([
+            InlineKeyboardButton(text=f"✅ {label} есть", callback_data=f"fmrk_{station_id}|{ft}|1"),
+            InlineKeyboardButton(text=f"❌ {label} нет", callback_data=f"fmrk_{station_id}|{ft}|0"),
+        ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+async def _send_fuel_reminder_push(user_id, station):
+    name = station.get('name') or 'заправка рядом'
+    text = (
+        f"⛽ *{name}*\n\n"
+        f"Ты уже больше {FUEL_REMINDER_MINUTES} минут рядом с этой заправкой - "
+        f"не забудь отметить, какое топливо сейчас есть в наличии. Это поможет "
+        f"другим водителям на карте."
+    )
+    try:
+        await bot.send_message(
+            user_id, text, parse_mode='Markdown',
+            reply_markup=fuel_reminder_keyboard(station['id']),
+        )
+    except Exception:
+        logger.warning(f"⚠️ Не удалось отправить пуш-напоминание о заправке user_id={user_id}")
+
+@router.callback_query(lambda c: c.data.startswith("fmrk_"))
+async def handle_fuel_reminder_mark(callback_query: types.CallbackQuery):
+    """Кнопка "есть"/"нет" под пушем-напоминанием (см. fuel_reminder_keyboard) -
+    та же запись в БД, что и отметка через карту/WebApp (set_gas_fuel_status),
+    только прямо из чата. После нажатия убираем клавиатуру у ЭТОЙ строки
+    топлива и коротко подтверждаем - остальные кнопки (другие виды топлива)
+    оставляем рабочими, чтобы можно было отметить несколько видов подряд."""
+    try:
+        payload = callback_query.data[len("fmrk_"):]
+        station_id, fuel_type, avail_str = payload.rsplit('|', 2)
+    except Exception:
+        try:
+            await callback_query.answer("Ошибка", show_alert=True)
+        except Exception:
+            pass
+        return
+    available = avail_str == '1'
+    user_id = callback_query.from_user.id
+    set_gas_fuel_status(station_id, fuel_type, available, user_id)
+    label = FUEL_TYPE_LABELS.get(fuel_type, fuel_type)
+    try:
+        await callback_query.answer(f"Отмечено: {label} {'есть ✅' if available else 'нет ❌'}")
+    except Exception:
+        pass
+    # Обновляем текст кнопки этого вида топлива, чтобы было видно, что уже
+    # отмечено - остальные виды топлива в клавиатуре не трогаем.
+    try:
+        markup = callback_query.message.reply_markup
+        if markup:
+            new_rows = []
+            for row in markup.inline_keyboard:
+                new_row = []
+                for btn in row:
+                    if btn.callback_data == callback_query.data:
+                        mark = "✅" if available else "❌"
+                        new_row.append(InlineKeyboardButton(
+                            text=f"{mark} {label}: {'есть' if available else 'нет'} (отмечено)",
+                            callback_data="fmrk_noop",
+                        ))
+                    else:
+                        new_row.append(btn)
+                new_rows.append(new_row)
+            await callback_query.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(inline_keyboard=new_rows))
+    except Exception:
+        pass
+
+@router.callback_query(lambda c: c.data == "fmrk_noop")
+async def handle_fuel_reminder_mark_noop(callback_query: types.CallbackQuery):
+    """Кнопка уже отмеченного вида топлива (см. handle_fuel_reminder_mark) -
+    просто гасим "часики" без повторной записи."""
+    try:
+        await callback_query.answer()
+    except Exception:
+        pass
+
+async def fuel_reminder_checker():
+    while True:
+        try:
+            await check_fuel_reminder_pushes()
+        except Exception:
+            logger.exception("❌ Ошибка фоновой проверки напоминаний о заправках")
+        await asyncio.sleep(FUEL_REMINDER_CHECK_INTERVAL_MINUTES * 60)
+
 def maybe_update_map_position(user_id, lat, lon, heading=None):
     """Хук из обработчиков живой геопозиции (см. вызовы ниже) - пишет позицию
     в map_positions, ТОЛЬКО пока у водителя идёт смена (см.
@@ -19062,6 +19226,7 @@ async def main():
     asyncio.create_task(campaign_profit_monthly_report())
     asyncio.create_task(check_long_shifts())
     asyncio.create_task(nearby_drivers_checker())
+    asyncio.create_task(fuel_reminder_checker())
     asyncio.create_task(morning_greeting_checker())
     asyncio.create_task(user_state_flusher())  # write-behind для user_state - см. комментарий у PersistentUserDict
     # Прогрев кэша telegram-web-app.js (21.09.2026, см. "ЛОКАЛЬНАЯ РАЗДАЧА
