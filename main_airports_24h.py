@@ -822,6 +822,27 @@ AIRPORT_TERMINAL_ZONES = {
     },
 }
 
+# ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "полигон для карты
+# отображения", вершины дал по фото/2ГИС): контуры парковок для карты
+# водителей - ЧИСТО ВИЗУАЛЬНОЕ отображение (не участвует в радиусах/пушах
+# очереди, за это по-прежнему отвечают AIRPORT_TERMINAL_ZONES/'points' с
+# radius_km выше). Ключ верхнего уровня - icao, дальше zone_key, дальше
+# point_label (как в AIRPORT_TERMINAL_ZONES['points']) -> список вершин
+# (lat, lon) контура. См. handle_map_airports_api (отдаёт полигоны в JSON)
+# и loadAirports() на фронтенде карты (L.polygon).
+AIRPORT_PARKING_ZONE_POLYGONS = {
+    'UUEE': {
+        'bc': {
+            'P22': [
+                (55.977644, 37.388370),
+                (55.978371, 37.392480),
+                (55.978863, 37.392317),
+                (55.977854, 37.388241),
+            ],
+        },
+    },
+}
+
 # Буква терминала из данных Yandex Rasp API (flight['terminal'], см.
 # fetch_yandex_data.py) -> ключ зоны в AIRPORT_TERMINAL_ZONES[icao]. Нужно
 # только для аэропортов с несколькими зонами - сейчас только UUEE. Терминал A
@@ -9139,6 +9160,20 @@ def map_webapp_html():
           }}).addTo(map);
           airportMarkers.push(circle);
         }}
+        // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "полигон для
+        // карты отображения"): контуры конкретных парковок зоны (см.
+        // AIRPORT_PARKING_ZONE_POLYGONS/handle_map_airports_api) - чисто
+        // визуальные, рисуются поверх круга загрузки, если он есть.
+        (a.parking_polygons || []).forEach(poly => {{
+          const polygon = L.polygon(poly.points, {{
+            color: '#2a7fff',
+            weight: 2,
+            fillColor: '#2a7fff',
+            fillOpacity: 0.25,
+          }}).addTo(map);
+          if (poly.label) polygon.bindPopup(`🅿️ Парковка ${{poly.label}}`);
+          airportMarkers.push(polygon);
+        }});
         const icon = L.divIcon({{ className: 'airport-icon', html: a.emoji || '✈️', iconSize: [26, 26] }});
         let popup = `<div class="airport-popup"><h4>${{a.emoji || '✈️'}} ${{a.name}}</h4>`;
         popup += `<div class="row">${{STATUS_ICON[a.status] || ''}} ${{a.status_text}}</div>`;
@@ -10225,6 +10260,18 @@ async def handle_map_airports_api(request):
                     if range_str:
                         queue[category] = {'range': range_str, 'local_time': format_airport_local_time(ts, icao)}
             entry['queue'] = queue
+            # ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "полигон для
+            # карты отображения"): контуры парковок этой зоны (см.
+            # AIRPORT_PARKING_ZONE_POLYGONS выше), если для неё заданы -
+            # список {'label', 'points': [[lat, lon], ...]}, фронтенд рисует
+            # каждый L.polygon-ом (см. loadAirports). Чисто визуальное, не
+            # влияет на радиусы/пуши очереди.
+            zone_polygons = AIRPORT_PARKING_ZONE_POLYGONS.get(icao, {}).get(zone_key) if zone_key else None
+            if zone_polygons:
+                entry['parking_polygons'] = [
+                    {'label': point_label, 'points': [[p[0], p[1]] for p in vertices]}
+                    for point_label, vertices in zone_polygons.items()
+                ]
             result.append(entry)
     except Exception:
         logger.exception("❌ Ошибка при получении аэропортов для карты водителей")
