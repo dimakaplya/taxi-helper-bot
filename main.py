@@ -15785,15 +15785,6 @@ def subscription_paywall_keyboard(pay_url):
     if pay_url:
         buttons.append([InlineKeyboardButton(text=f"💳 ОПЛАТИТЬ {SUBSCRIPTION_PRICE_RUB}₽", url=pay_url)])
     buttons.append([InlineKeyboardButton(text="🔄 Я ОПЛАТИЛ(А), ПРОВЕРИТЬ", callback_data="sub_pay_check")])
-    # "👻 ФАНТОМ" (по прямой просьбе пользователя, 23.09.2026 - "сделай
-    # кнопку Фантом и за пароль... означает что подписка действует бесплатно
-    # на месяц введи пароль") - скрытый способ выдать себе/кому-то бесплатный
-    # месяц подписки без оплаты, защищено паролем (см.
-    # PHANTOM_SUBSCRIPTION_PASSWORD/phantom_start/phantom_password_flow ниже).
-    # Показывается на обоих экранах подписки - и на статусе, и на экране-
-    # блокировке (SubscriptionMiddleware пропускает эту кнопку и ввод пароля
-    # даже когда доступ уже заблокирован - см. её код).
-    buttons.append([InlineKeyboardButton(text="👻 ФАНТОМ", callback_data="phantom_start")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
@@ -16548,6 +16539,14 @@ def referral_menu_keyboard(referral_link, current_type=REFERRAL_DEFAULT_TYPE):
         [InlineKeyboardButton(text="📤 ПОДЕЛИТЬСЯ ССЫЛКОЙ", switch_inline_query=share_text)],
         [InlineKeyboardButton(text="📋 МОИ РЕФЕРАЛЫ", callback_data="referral_list")],
         [InlineKeyboardButton(text="💸 ВЫВЕСТИ СРЕДСТВА", callback_data="referral_withdraw_start")],
+        # ПЕРЕНЕСЕНО 23.09.2026 (прямая просьба пользователя - "фантом
+        # перенеси в рефералов кнопку") - раньше "👻 ФАНТОМ" была на экранах
+        # подписки (subscription_paywall_keyboard), теперь здесь, в меню
+        # реферальной программы. Сама логика (PHANTOM_SUBSCRIPTION_PASSWORD/
+        # phantom_start/phantom_password_flow, см. блок "ПЛАТНАЯ ПОДПИСКА"
+        # выше) не менялась - только расположение кнопки, callback_data тот
+        # же ("phantom_start"), поэтому хендлер трогать не нужно.
+        [InlineKeyboardButton(text="👻 ФАНТОМ", callback_data="phantom_start")],
     ])
 
 
