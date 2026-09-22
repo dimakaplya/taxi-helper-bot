@@ -4735,6 +4735,35 @@ async def force_fetch_flights(message: types.Message):
 async def start_button(message: types.Message):
     await send_start_screen(message)
 
+# ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "Место текста /start
+# сделай кнопку TAXI HELPER GOOOO") - вместо текстовой инструкции "Нажми
+# /start" после успешной оплаты подписки показываем кликабельную inline-
+# кнопку, которая делает то же самое, что и /start (сброс user_state +
+# экран выбора города). ВАЖНО: нельзя переиспользовать send_start_screen()
+# напрямую с callback_query.message - у такого Message from_user будет БОТ
+# (это сообщение, отправленное ботом), а не реальный пользователь, поэтому
+# логика продублирована здесь с явным callback_query.from_user.id.
+def continue_to_bot_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="🚕✨ TAXI HELPER GOOOO", callback_data="continue_to_bot")
+    ]])
+
+@router.callback_query(lambda c: c.data == "continue_to_bot")
+async def continue_to_bot(callback_query: types.CallbackQuery):
+    try:
+        await callback_query.answer()
+    except Exception:
+        pass
+    init_db()
+    user_state.pop(callback_query.from_user.id, None)
+    text = (
+        "🚕✨ *TAXI HELPER*\n"
+        "_Помощник водителя такси и курьера_\n"
+        f"{WHERE_TO_GO_DIVIDER}\n\n"
+        "🏙 Выбери свой город 👇"
+    )
+    await callback_query.message.answer(text, reply_markup=city_keyboard(), parse_mode='Markdown')
+
 @router.message(lambda message: message.text == "← НАЗАД")
 async def go_back(message: types.Message):
     user_id = message.from_user.id
@@ -15972,7 +16001,10 @@ async def subscription_check_payment(callback_query: types.CallbackQuery):
             await callback_query.answer("Оплата подтверждена ✅", show_alert=True)
         except Exception:
             pass
-        await callback_query.message.answer("✅ Подписка активна! Нажми /start, чтобы продолжить пользоваться ботом.")
+        await callback_query.message.answer(
+            "✅ Подписка активна!",
+            reply_markup=continue_to_bot_keyboard(),
+        )
     else:
         try:
             await callback_query.answer("Пока не вижу оплату. Если только что оплатил(а) - подожди минуту и попробуй снова.", show_alert=True)
@@ -16076,7 +16108,8 @@ async def handle_tinkoff_webhook(request):
             try:
                 await bot.send_message(
                     user_id,
-                    f"✅ Оплата получена! Подписка продлена на {SUBSCRIPTION_PERIOD_DAYS} дней. Спасибо 🙌\n\nНажми /start, чтобы продолжить.",
+                    f"✅ Оплата получена! Подписка продлена на {SUBSCRIPTION_PERIOD_DAYS} дней. Спасибо 🙌",
+                    reply_markup=continue_to_bot_keyboard(),
                 )
             except Exception:
                 logger.exception(f"❌ Не удалось уведомить user_id={user_id} об успешной оплате")
