@@ -19236,14 +19236,25 @@ async def push_peak_hour_alert(city, category, target_date, target_hour, label, 
     текст (с таблицей такси, см. комментарий у find_upcoming_peak_start)
     уходил ОБЕИМ категориям сразу. Теперь category обязателен - вызывающий
     код (check_peak_hour_alerts) считает пик и текст ОТДЕЛЬНО для 'taxi' и
-    'ultima', и рассылает только своей категории водителей."""
+    'ultima', и рассылает только своей категории водителей.
+
+    ИСПРАВЛЕНО 22.09.2026 (жалоба пользователя - "Текст не коректный
+    водитель не понимает процентов и текст переформулировать", со
+    скриншотом пуша с сырыми процентами "Business 90% · Premier 90% ·
+    Élite 80%"): find_upcoming_peak_start() отбирает ТОЛЬКО записи с
+    level == 'peak' (см. её докстринг), так что label здесь всегда
+    соответствует часу пик - берём готовую человеко-понятную подпись из
+    PEAK_LEVEL_EMOJI/PEAK_LEVEL_LABEL вместо сырых процентов по тарифам."""
     if not bot:
         return
     city_name = CITY_DISPLAY_NAMES.get(city, city)
+    peak_emoji = PEAK_LEVEL_EMOJI['peak']
+    peak_label = PEAK_LEVEL_LABEL['peak']
     text = (
         f"📅 *{city_name}*\n\n"
         f"Через {PEAK_HOUR_PUSH_LEAD_MINUTES} минут ({start_dt.strftime('%H:%M')}) начинается "
-        f"*{label}* - самое время выехать в оживлённый район или к аэропорту."
+        f"{peak_emoji} *{peak_label}* - спрос вырастет, самое время выехать "
+        f"в оживлённый район или к аэропорту."
     )
     recipients = [
         uid for uid, state in list(user_state.items())
