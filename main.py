@@ -2368,6 +2368,18 @@ def init_db():
             expired_notified INTEGER DEFAULT 0
         )
     ''')
+    # ДОБАВЛЕНО 23.09.2026 (по факту - Tinkoff Init отказывал с ErrorCode 309
+    # "request.validate.expected.receipt": для этого терминала обязателен
+    # фискальный чек по 54-ФЗ, а в чеке законодательно нужен контакт
+    # покупателя - Email или Phone). receipt_email собирается у водителя
+    # ОДИН раз перед первой оплатой (см. get_receipt_email/set_receipt_email/
+    # create_tinkoff_payment ниже) и переиспользуется для всех следующих
+    # платежей. Таблица уже существует в проде, поэтому колонка добавляется
+    # через ALTER TABLE в try/except (см. тот же паттерн у referrals выше).
+    try:
+        cursor.execute('ALTER TABLE subscriptions ADD COLUMN receipt_email TEXT')
+    except Exception:
+        pass  # колонка уже существует - обычная ситуация при каждом рестарте
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS subscription_payments (
             order_id TEXT PRIMARY KEY,
@@ -15115,6 +15127,12 @@ SUBSCRIPTION_CHECK_INTERVAL_MINUTES = 60
 # SUBSCRIPTION_PERIOD_DAYS дней подписки бесплатно, без оплаты (см.
 # grant_free_month/phantom_password_flow ниже).
 PHANTOM_SUBSCRIPTION_PASSWORD = "210795"
+# ДОБАВЛЕНО 23.09.2026 (по факту - Tinkoff Init отказывал: обязателен
+# фискальный чек по 54-ФЗ для этого терминала) - система налогообложения
+# для чека, уточнено с пользователем через AskUserQuestion ("УСН доходы").
+# Tax='none' у позиции в Receipt ниже (create_tinkoff_payment) соответствует
+# УСН доходы - НДС не выделяется.
+TINKOFF_RECEIPT_TAXATION = 'usn_income'
 
 # ==================== ПОДДЕРЖКА (FAQ) ====================
 # ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "запихнуть условно
@@ -15545,6 +15563,32 @@ def get_subscription(user_id):
     return {'trial_started_at': row[0], 'paid_until': row[1]}
 
 
+# ДОБАВЛЕНО 23.09.2026 (по факту - Tinkoff Init отказывал: "request.validate.
+# expected.receipt" - для этого терминала обязателен чек по 54-ФЗ, а в чеке
+# законодательно нужен контакт покупателя). Собираем email ОДИН раз перед
+# первой оплатой (см. show_subscription_status/send_subscription_paywall/
+# subscription_email_flow ниже) и переиспользуем для всех следующих
+# платежей этого пользователя.
+SUBSCRIPTION_EMAIL_REGEX = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
+
+
+def get_receipt_email(user_id):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT receipt_email FROM subscriptions WHERE user_id = ?', (user_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return row[0] if row and row[0] else None
+
+
+def set_receipt_email(user_id, email):
+    ensure_subscription(user_id)
+    conn = get_db_connection()
+    conn.execute('UPDATE subscriptions SET receipt_email = ? WHERE user_id = ?', (email, user_id))
+    conn.commit()
+    conn.close()
+
+
 def subscription_active_until(user_id):
     """Возвращает datetime, до какого момента доступ открыт (конец триала
     либо paid_until, что позже), или None если записи ещё нет вообще."""
@@ -15607,9 +15651,22 @@ def save_subscription_order(user_id, order_id, amount_kopecks):
 
 async def create_tinkoff_payment(user_id: int):
     """Создаёт заказ в Tinkoff Kassa (Init) и возвращает ссылку на оплату,
-    либо None при ошибке (нет ключей, сеть недоступна, провайдер отказал)."""
+    либо None при ошибке (нет ключей, сеть недоступна, провайдер отказал,
+    email для чека ещё не собран - см. ниже).
+
+    ДОБАВЛЕНО 23.09.2026 (по факту - Init отказывал с ErrorCode 309
+    "request.validate.expected.receipt"): для этого терминала обязателен
+    фискальный чек по 54-ФЗ. Вызывающий код (show_subscription_status/
+    send_subscription_paywall) обязан СНАЧАЛА собрать email через
+    get_receipt_email/subscription_email_flow, прежде чем звать эту
+    функцию - если email всё ещё не задан, возвращаем None с предупреждением
+    в лог, чтобы не отправлять в Tinkoff заведомо невалидный запрос."""
     if not TINKOFF_TERMINAL_KEY or not TINKOFF_PASSWORD:
         logger.warning(f"⚠️ TINKOFF_TERMINAL_KEY/TINKOFF_PASSWORD не заданы - не могу создать ссылку на оплату для user_id={user_id}")
+        return None
+    receipt_email = get_receipt_email(user_id)
+    if not receipt_email:
+        logger.warning(f"⚠️ Email для чека ещё не собран - не могу создать ссылку на оплату для user_id={user_id}")
         return None
     order_id = f"sub_{user_id}_{int(time.time())}"
     params = {
@@ -15617,6 +15674,25 @@ async def create_tinkoff_payment(user_id: int):
         'Amount': SUBSCRIPTION_PRICE_KOPECKS,
         'OrderId': order_id,
         'Description': 'Подписка Taxi Helper на 1 месяц',
+        # Обязательный блок чека (54-ФЗ) - Tax='none' соответствует УСН
+        # доходы (TINKOFF_RECEIPT_TAXATION), НДС не выделяется. Это
+        # ВЛОЖЕННЫЙ объект - в подпись (tinkoff_generate_token) НЕ входит,
+        # там уже отфильтрованы dict/list, как того требует алгоритм Tinkoff.
+        'Receipt': {
+            'Email': receipt_email,
+            'Taxation': TINKOFF_RECEIPT_TAXATION,
+            'Items': [
+                {
+                    'Name': 'Подписка Taxi Helper на 1 месяц',
+                    'Price': SUBSCRIPTION_PRICE_KOPECKS,
+                    'Quantity': 1,
+                    'Amount': SUBSCRIPTION_PRICE_KOPECKS,
+                    'Tax': 'none',
+                    'PaymentMethod': 'full_payment',
+                    'PaymentObject': 'service',
+                }
+            ],
+        },
     }
     if PUBLIC_URL:
         params['NotificationURL'] = f'{PUBLIC_URL}{SUBSCRIPTION_WEBHOOK_PATH}'
@@ -15678,10 +15754,62 @@ SUBSCRIPTION_PAYWALL_TEXT = (
 )
 
 
+SUBSCRIPTION_EMAIL_PROMPT = (
+    "💳 Для оплаты нужен email - на него Т-Банк пришлёт электронный чек (обязательное требование 54-ФЗ). "
+    "Введи свой email:"
+)
+
+
+async def request_subscription_email(event, context):
+    """См. get_receipt_email/SUBSCRIPTION_EMAIL_REGEX выше - просит email
+    текстом (тот же паттерн ожидания текста, что и у phantom_password_flow/
+    referral_legal_password_flow). context ('status' или 'paywall')
+    запоминается, чтобы после ввода email вернуться на тот же экран, откуда
+    начали - см. subscription_email_flow ниже."""
+    user_id = event.from_user.id
+    state = user_state.setdefault(user_id, {})
+    state['awaiting_subscription_email'] = context
+    if isinstance(event, types.CallbackQuery):
+        try:
+            await event.answer()
+        except Exception:
+            pass
+        await event.message.answer(SUBSCRIPTION_EMAIL_PROMPT)
+    else:
+        await event.answer(SUBSCRIPTION_EMAIL_PROMPT)
+
+
+@router.message(lambda message: user_state.get(message.from_user.id, {}).get('awaiting_subscription_email'))
+async def subscription_email_flow(message: types.Message):
+    """Ловит ЛЮБОЙ текст, пока ждём email для чека - должен стоять РАНЬШЕ
+    остальных текстовых хендлеров (тот же приём, что и у
+    referral_withdraw_flow/phantom_password_flow). После валидного email
+    возвращается на экран, с которого начали (статус подписки или
+    экран-блокировка) - там create_tinkoff_payment теперь сможет собрать
+    Receipt и получить ссылку на оплату."""
+    user_id = message.from_user.id
+    state = user_state[user_id]
+    text = (message.text or '').strip()
+
+    if not SUBSCRIPTION_EMAIL_REGEX.match(text):
+        await message.answer("Не похоже на email - введи в формате name@example.com:")
+        return
+
+    context = state.pop('awaiting_subscription_email')
+    set_receipt_email(user_id, text)
+    if context == 'paywall':
+        await send_subscription_paywall(message)
+    else:
+        await show_subscription_status(message)
+
+
 async def send_subscription_paywall(event):
     """event - types.Message или types.CallbackQuery. Показывает экран
     оплаты вместо обычного ответа бота (см. SubscriptionMiddleware)."""
     user_id = event.from_user.id
+    if not get_receipt_email(user_id):
+        await request_subscription_email(event, 'paywall')
+        return
     pay_url = await create_tinkoff_payment(user_id)
     text = SUBSCRIPTION_PAYWALL_TEXT
     if not pay_url:
@@ -15707,6 +15835,9 @@ async def send_subscription_paywall(event):
 @router.message(lambda message: message.text == "💳 ОПЛАТИТЬ ПОДПИСКУ")
 async def show_subscription_status(message: types.Message):
     user_id = message.from_user.id
+    if not get_receipt_email(user_id):
+        await request_subscription_email(message, 'status')
+        return
     active_until = subscription_active_until(user_id)
     sub = get_subscription(user_id)
     if active_until and sub and sub['paid_until'] and _sub_parse(sub['paid_until']) >= active_until:
@@ -15795,6 +15926,11 @@ class SubscriptionMiddleware(BaseMiddleware):
         if isinstance(event, types.CallbackQuery) and event.data == 'phantom_start':
             return await handler(event, data)
         if isinstance(event, types.Message) and user_state.get(user_id, {}).get('awaiting_phantom_password'):
+            return await handler(event, data)
+        # Ввод email для чека (см. request_subscription_email/
+        # subscription_email_flow выше) тоже должен проходить даже на
+        # экране-блокировке - это часть самого процесса оплаты.
+        if isinstance(event, types.Message) and user_state.get(user_id, {}).get('awaiting_subscription_email'):
             return await handler(event, data)
         await send_subscription_paywall(event)
         return None
