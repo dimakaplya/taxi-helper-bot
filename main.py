@@ -9490,7 +9490,12 @@ def map_webapp_html():
   // рисуется уже полилинией из ~200+ точек, которая на глаз выглядит
   // плавной, круглой "тучкой", а не многоугольником. Общая функция - и для
   // блобов аэропортов (blobLatLngs), и для городского облака ниже.
-  const CATMULL_ROM_SEGMENTS = 8;
+  // ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя - "облака рисуй
+  // мягче") - было 8, стало 14: больше точек на кривой между исходными
+  // вершинами -> контур ещё более плавный/округлый ДО применения blur() на
+  // сами SVG-пути ниже (у аэропортов/вокзалов/города/спутников/дождя все
+  // значения blur() тоже увеличены в этом же изменении).
+  const CATMULL_ROM_SEGMENTS = 14;
   function smoothClosedLatLngs(points, segments) {{
     segments = segments || CATMULL_ROM_SEGMENTS;
     const n = points.length;
@@ -9638,7 +9643,7 @@ def map_webapp_html():
             fillOpacity: highDemandBlobOpacity(a.load),
             smoothFactor: 3,
           }}).addTo(map);
-          if (blob._path) blob._path.style.filter = 'blur(14px)';
+          if (blob._path) blob._path.style.filter = 'blur(22px)';
           airportMarkers.push(blob);
           // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - см. общий
           // комментарий у SATELLITE_DISTANCE_BASE_METERS в loadDemandCloud) -
@@ -9659,7 +9664,7 @@ def map_webapp_html():
               fillOpacity: highDemandBlobOpacity(a.load) * 0.85,
               smoothFactor: 3,
             }}).addTo(map);
-            if (satBlob._path) satBlob._path.style.filter = 'blur(12px)';
+            if (satBlob._path) satBlob._path.style.filter = 'blur(18px)';
             airportMarkers.push(satBlob);
           }}
         }}
@@ -9812,7 +9817,7 @@ def map_webapp_html():
             fillOpacity: 0.18,
             smoothFactor: 3,
           }}).addTo(map);
-          if (blob._path) blob._path.style.filter = 'blur(10px)';
+          if (blob._path) blob._path.style.filter = 'blur(16px)';
           stationMarkers.push(blob);
         }}
         const icon = L.divIcon({{ className: 'airport-icon', html: '🚆', iconSize: [26, 26] }});
@@ -9900,7 +9905,7 @@ def map_webapp_html():
         fillOpacity: 0.16,
         smoothFactor: 3,
       }}).addTo(map);
-      if (rainCloudMarker._path) rainCloudMarker._path.style.filter = 'blur(18px)';
+      if (rainCloudMarker._path) rainCloudMarker._path.style.filter = 'blur(26px)';
     }} catch (e) {{ /* тихо */ }}
   }}
   // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "у тебя же есть в
@@ -10027,7 +10032,7 @@ def map_webapp_html():
         fillOpacity: demandCloudOpacity(data.demand, myCategory),
         smoothFactor: 3,
       }}).addTo(map);
-      if (demandCloudMarker._path) demandCloudMarker._path.style.filter = 'blur(18px)';
+      if (demandCloudMarker._path) demandCloudMarker._path.style.filter = 'blur(26px)';
       // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя) - 2-3 облака-
       // спутника вполовину меньше основного, на расстоянии ~7 км (с
       // разбросом), каждое своей формы (свой seed -> свой профиль wobble) и
@@ -10099,7 +10104,7 @@ def map_webapp_html():
           fillOpacity: demandCloudOpacity(data.demand, myCategory) * 0.85,
           smoothFactor: 3,
         }}).addTo(map);
-        if (satMarker._path) satMarker._path.style.filter = 'blur(16px)';
+        if (satMarker._path) satMarker._path.style.filter = 'blur(22px)';
         demandSatelliteMarkers.push(satMarker);
       }}
     }} catch (e) {{ /* тихо */ }}
