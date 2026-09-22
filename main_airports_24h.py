@@ -19228,6 +19228,35 @@ async def green_demand_alert_checker():
             logger.error(f"❌ Ошибка фоновой проверки зелёного спроса: {e}")
         await asyncio.sleep(GREEN_DEMAND_CHECK_INTERVAL_MINUTES * 60)
 
+# ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя к пушу "час пик" -
+# "если ты предлагаешь высокий спрос в городе то аэропорт ты предлагаешь
+# тогда когда действительно есть в этом спрос и пишешь что спрос в
+# аэропорту таком-то сейчас также повышенный"): ищет среди аэропортов
+# города аэропорт, где ПРЯМО СЕЙЧАС (hour_offset=0) загрузка прилётов по
+# релевантному классу водителя (economy/business) выше зелёного порога
+# get_load_emoji (>50%) - и возвращает тот, где загрузка выше всего.
+# Если такого аэропорта нет - функция вернёт None, и пуш останется с
+# общей формулировкой "в оживлённый район или к аэропорту".
+PEAK_PUSH_ELEVATED_AIRPORT_THRESHOLD = 50  # см. get_load_emoji - выше 50% это уже 🟢/🟣, "есть смысл ехать"
+
+def find_elevated_airport_for_push(city, category):
+    relevant_class = CATEGORY_TO_CLASS.get(category)
+    if not relevant_class or relevant_class == 'total':
+        return None
+    best_airport, best_load = None, PEAK_PUSH_ELEVATED_AIRPORT_THRESHOLD
+    for airport in AIRPORTS_INFO.get(city, []):
+        icao = airport['icao']
+        if icao in PERMANENTLY_CLOSED_AIRPORTS or airport.get('closed'):
+            continue
+        try:
+            load, _, _ = compute_current_hour_load(icao, relevant_class, hour_offset=0, zone_key=airport.get('zone_key'))
+        except Exception as e:
+            logger.error(f"❌ Не удалось посчитать текущую загрузку {icao} для пуша о часе пика: {e}")
+            continue
+        if load > best_load:
+            best_airport, best_load = airport, load
+    return (best_airport, best_load) if best_airport else None
+
 # ==================== ПУШ "ЧАСЫ ПИКА" ====================
 # По просьбе пользователя - пуш за PEAK_HOUR_PUSH_LEAD_MINUTES (30) минут ДО
 # начала часа пика (см. WEEKDAY_HOUR_LOAD/find_upcoming_peak_start выше).
@@ -19255,17 +19284,37 @@ async def push_peak_hour_alert(city, category, target_date, target_hour, label, 
     Élite 80%"): find_upcoming_peak_start() отбирает ТОЛЬКО записи с
     level == 'peak' (см. её докстринг), так что label здесь всегда
     соответствует часу пик - берём готовую человеко-понятную подпись из
-    PEAK_LEVEL_EMOJI/PEAK_LEVEL_LABEL вместо сырых процентов по тарифам."""
+    PEAK_LEVEL_EMOJI/PEAK_LEVEL_LABEL вместо сырых процентов по тарифам.
+
+    ЕЩЁ РАЗ ПЕРЕРАБОТАНО 22.09.2026 (прямая просьба пользователя - цвет
+    должен быть из ТОЙ ЖЕ палитры, что у аэропортов
+    "🔴0-25%/🟡26-50%/🟢51-85%/🟣>85%" (см. get_load_emoji), и вместо
+    одного эмодзи - 5-балльная шкала-бар; для 5-го деления пользователь
+    прямо попросил "бело-чёрные цвета" - чёрно-белый бар из 5 клеток).
+    Так как этот пуш ВСЕГДА про час пик (максимальный уровень спроса,
+    см. комментарий выше), цвет всегда 🟣 (как "Срочно ехать" у
+    аэропортов) и бар всегда полный 5/5 - разного текста под разные
+    уровни здесь просто не бывает.
+    Плюс - "если предлагаешь высокий спрос в городе, то аэропорт
+    предлагай тогда, когда там ДЕЙСТВИТЕЛЬНО есть спрос": ищем через
+    find_elevated_airport_for_push() аэропорт города, где ПРЯМО СЕЙЧАС
+    загрузка выше 50% (зелёный/фиолетовый уровень) - если такой есть,
+    называем его прямо, иначе оставляем общую фразу."""
     if not bot:
         return
     city_name = CITY_DISPLAY_NAMES.get(city, city)
-    peak_emoji = PEAK_LEVEL_EMOJI['peak']
-    peak_label = PEAK_LEVEL_LABEL['peak']
+    peak_color_emoji = '🟣'  # та же палитра, что у аэропортов (get_load_emoji) - фиолетовый = максимальный спрос
+    peak_bar = '⬛⬛⬛⬛⬛'  # 5-балльная шкала, чёрно-белая по просьбе пользователя - у пуша "час пик" всегда максимум (5/5)
+    elevated = find_elevated_airport_for_push(city, category)
+    if elevated:
+        airport, airport_load = elevated
+        where_text = f"выехать в сторону {airport['emoji']} {airport['name']} - спрос там сейчас тоже повышенный ({airport_load:.0f}%)"
+    else:
+        where_text = "выехать в оживлённый район или к аэропорту"
     text = (
         f"📅 *{city_name}*\n\n"
         f"Через {PEAK_HOUR_PUSH_LEAD_MINUTES} минут ({start_dt.strftime('%H:%M')}) начинается "
-        f"{peak_emoji} *{peak_label}* - спрос вырастет, самое время выехать "
-        f"в оживлённый район или к аэропорту."
+        f"{peak_color_emoji} *час пик* {peak_bar} - спрос вырастет, самое время {where_text}."
     )
     recipients = [
         uid for uid, state in list(user_state.items())
