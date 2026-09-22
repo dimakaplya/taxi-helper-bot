@@ -5213,7 +5213,7 @@ COURIER_FINANCE_STEP_PROMPTS = {
     'rent': "🚘 Аренда ТС за день, ₽:",
     'expenses': "📦 Доп. расходы за день, ₽ (питание, ремонты, доп. покупки - если нет, пришли 0):",
     'tax_rate': f"🧾 Ставка налога, % от дохода (обычно {DEFAULT_TAX_RATE_PERCENT:g}% - можно указать свою):",
-    'hours': "🕐 Сколько часов длилась смена (можно дробно, например 5.5):",
+    'hours': "🕐 Сколько часов длилась смена? Можно числом (например 5.5) или временем \"с - до\" (например 9-21 или 22-6, если через полночь) - посчитаю сам:",
 }
 
 # "Машина: своя (в т.ч. кредит/лизинг) / в аренде" - по просьбе пользователя
@@ -5265,6 +5265,53 @@ def parse_decimal(text):
         return float(match.group())
     except ValueError:
         return None
+
+# ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя голосовым - "чтобы
+# человек писал или часы, или со скольки до скольки, чтобы бот сам считал")
+# - на шаге "Часов за рулём" (и в Telegram-расчёте, и в Кабинете) теперь
+# можно ввести либо готовое число часов (как раньше, см. parse_decimal),
+# либо диапазон времени смены ("9-21", "09:00-21:00", "с 9 до 21", "с 22 до
+# 6" - последнее считается через полночь) - бот сам вычисляет
+# продолжительность. HOURS_RANGE_RE ищет два времени вида "Ч" или "ЧЧ:ММ",
+# разделённые тире/до/-/— (с необязательными пробелами вокруг).
+HOURS_RANGE_RE = re.compile(
+    r'(\d{1,2})(?::(\d{2}))?\s*(?:-|—|до)\s*(\d{1,2})(?::(\d{2}))?'
+)
+
+def parse_hours_or_range(text):
+    """Возвращает количество часов (float) из свободного текста - либо
+    прямое число часов (5.5), либо диапазон времени смены ("9-21", "с 9 до
+    21", "09:30-21:00"). Если распознан диапазон - разница часов, с учётом
+    перехода через полночь (конец раньше или равен началу - считаем, что
+    смена закончилась на следующий день). Если ни число, ни диапазон не
+    распознаны - None."""
+    raw = (text or '').strip()
+    if not raw:
+        return None
+    m = HOURS_RANGE_RE.search(raw)
+    # Диапазон распознаём, только если в тексте реально есть разделитель
+    # диапазона ("-"/"—"/"до") - иначе "5.5" сам по себе тоже подошёл бы под
+    # часть паттерна (просто без второй половины) и увёл бы в неправильную
+    # ветку; плюс не путаем с обычным отрицательным числом (не бывает
+    # отрицательных часов смены, поэтому проверка разделителя однозначна).
+    if m and ('до' in raw or '-' in raw or '—' in raw):
+        start_h, start_m, end_h, end_m = m.groups()
+        try:
+            start_h, end_h = int(start_h), int(end_h)
+            start_m = int(start_m) if start_m else 0
+            end_m = int(end_m) if end_m else 0
+            if not (0 <= start_h <= 24 and 0 <= end_h <= 24 and 0 <= start_m < 60 and 0 <= end_m < 60):
+                return None
+            start_total = start_h * 60 + start_m
+            end_total = end_h * 60 + end_m
+            if end_total <= start_total:
+                end_total += 24 * 60  # смена через полночь
+            duration_hours = (end_total - start_total) / 60
+            if 0 < duration_hours <= 24:
+                return round(duration_hours, 2)
+        except (ValueError, TypeError):
+            pass
+    return parse_decimal(raw)
 
 # ПРИВЕТСТВЕННЫЙ ПИТЧ + ЗАПРОС ГЕОЛОКАЦИИ (добавлено 20.09.2026 по просьбе
 # пользователя) - отправляется ОДИН РАЗ самому новому пользователю, сразу
@@ -6454,8 +6501,21 @@ async def open_courier_module(message: types.Message):
             reply_markup=services_keyboard(state.get('category'), state.get('city'), user_id),
         )
         return
-    state['in_courier_module'] = True
-    await message.answer("🧰 *Инструменты водителя*\n\nВыбери раздел 👇", reply_markup=courier_module_keyboard(state.get('category')), parse_mode='Markdown')
+    # ИЗМЕНЕНО 22.09.2026 (прямая жалоба пользователя - "у нас больше нет
+    # инструменты водителя, откуда это меню, у нас же сейчас миниапп") - этот
+    # хендлер срабатывает ТОЛЬКО если у кого-то в Telegram-клиенте с ДО
+    # миграции на "👤 Личный кабинет" (21.09.2026) всё ещё физически лежит
+    # старая reply-клавиатура с кнопкой "🧰 ИНСТРУМЕНТЫ ВОДИТЕЛЯ" (сам бот эту
+    # кнопку уже нигде не отправляет - см. комментарий у 4721 строки). Раньше
+    # здесь заново открывался весь старый модуль (courier_module_keyboard) -
+    # так стухшая клавиатура пересоздавала сама себя до бесконечности. Теперь
+    # вместо этого явно отправляем в актуальный интерфейс и СТИРАЕМ старую
+    # клавиатуру (ReplyKeyboardRemove), чтобы больше никогда не всплывала.
+    state.pop('in_courier_module', None)
+    await message.answer(
+        "🧰 Этот раздел переехал в «👤 Личный кабинет» - открой его кнопкой снизу.",
+        reply_markup=types.ReplyKeyboardRemove(),
+    )
 
 @router.message(lambda message: message.text == "💰 ФИНАНСЫ" and user_state.get(message.from_user.id, {}).get('in_courier_module'))
 async def start_courier_finance(message: types.Message):
@@ -6492,7 +6552,7 @@ async def courier_stub_section(message: types.Message):
     # больше НЕ заглушки - см. show_nearby_prompt/handle_nearby_location ниже.
     # "Спрос сейчас" тоже больше не заглушка - см. show_kef_bot ниже.
     category = user_state.get(message.from_user.id, {}).get('category')
-    await message.answer("Этот раздел в разработке 🚧 — скоро будет", reply_markup=courier_module_keyboard(category))
+    await message.answer("Этот раздел в разработке 🚧 — скоро будет", reply_markup=types.ReplyKeyboardRemove())
 
 TIPS_APP_URL_IOS = "https://apps.apple.com/us/app/%D1%8F%D0%BD%D0%B4%D0%B5%D0%BA%D1%81-%D1%87%D0%B0%D0%B5%D0%B2%D1%8B%D0%B5-%D0%BD%D0%B0-%D0%BA%D0%B0%D1%80%D1%82%D1%83-%D0%BF%D0%BE-qr/id1513175603?l=ru"
 TIPS_APP_URL_ANDROID = "https://play.google.com/store/apps/details?id=com.chaevieprosto.app"
@@ -6620,7 +6680,7 @@ async def show_tips_app(message: types.Message):
     # платформы, а не общее "скачать".
     keyboard = build_tips_keyboard(message.from_user.id)
     await message.answer(text, reply_markup=keyboard, parse_mode='Markdown')
-    await message.answer("Выбери, что нужно дальше 👇", reply_markup=courier_module_keyboard(category))
+    await message.answer("Выбери, что нужно дальше 👇", reply_markup=types.ReplyKeyboardRemove())
 
 @router.message(lambda message: message.text == "💳 ЧАЕВЫЕ")
 async def show_tips_app_main_menu(message: types.Message):
@@ -8361,10 +8421,10 @@ async def toggle_airport_queue_tracking(message: types.Message):
     if state.get('airport_queue_active'):
         state['airport_queue_active'] = False
         state['airport_queue'] = {}
-        await message.answer("⏹ Отслеживание очереди у аэропорта остановлено.", reply_markup=courier_module_keyboard(category))
+        await message.answer("⏹ Отслеживание очереди у аэропорта остановлено.", reply_markup=types.ReplyKeyboardRemove())
         return
     enable_airport_queue_tracking(user_id)
-    await message.answer(airport_queue_enable_text(), reply_markup=courier_module_keyboard(category), parse_mode='Markdown')
+    await message.answer(airport_queue_enable_text(), reply_markup=types.ReplyKeyboardRemove(), parse_mode='Markdown')
 
 def airport_queue_bonus_line(user_id, icao, zone_key=None):
     """Необязательная строка-бонус в пуше - последняя САМООТЧЁТНАЯ отметка
@@ -14139,6 +14199,14 @@ async def handle_cabinet_data_api(request):
                 'km': round(st['km'], 1), 'hours': round(st['minutes'] / 60, 2),
                 'airport_wait_minutes': st['airport_wait_minutes'],
             })(today_shift_totals(user_id)),
+            # ДОБАВЛЕНО 22.09.2026 (см. save_last_day_summary) - последний
+            # посчитанный "ДЕНЬ - ИТОГ" (из Telegram-диалога ИЛИ из формы
+            # Кабинета - неважно, откуда), если он сегодняшний. Вчерашний
+            # (или более старый) не отдаём - вкладка "Профиль" не должна
+            # показывать устаревший итог как будто это данные за сегодня.
+            'day_summary': (lambda ds: ds if (ds and ds.get('date') == datetime.now(ZoneInfo('Europe/Moscow')).date().isoformat()) else None)(
+                (user_state.get(user_id) or {}).get('last_day_summary')
+            ),
         }
     except Exception:
         logger.exception(f"❌ Ошибка при сборе данных личного кабинета user_id={user_id}")
@@ -14286,6 +14354,7 @@ async def handle_cabinet_finance_api(request):
 
     r = calculate_finance_result(data)
     save_finance_result(user_id, r['income'], r['net_profit'], r['trips_count'])
+    save_last_day_summary(user_id, r)
 
     state = user_state[user_id]
     remember_finance_default(state, 'consumption', data['consumption'])
@@ -14305,6 +14374,7 @@ async def handle_cabinet_finance_api(request):
         'tax_rate': r['tax_rate'], 'net_profit': round(r['net_profit']),
         'per_hour': round(r['per_hour']), 'is_rented': r['is_rented'],
         'trips_count': r['trips_count'], 'avg_check': round(r['avg_check']) if r['avg_check'] else None,
+        'hours': r['hours'], 'km': r['km'],
     })
 
 CABINET_DEMAND_API_PATH = '/cabinet/demand'
@@ -14717,6 +14787,17 @@ def cabinet_webapp_html():
     <div class="save-msg" id="saveMsg"></div>
   </div>
 
+  <!-- ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "в кабинете на
+       первой же вкладке чтобы вся эта информация из сообщения была после
+       ввода всех данных - итог дня") - тот же разбор "ДЕНЬ - ИТОГ", что в
+       Telegram-сообщении/вкладке "Финансы", показанный сразу на "Профиле"
+       (первая вкладка). Скрыт, пока сегодня ещё ничего не считали - см.
+       renderDaySummary/loadCabinetData. -->
+  <div class="card" id="daySummaryCard" style="display:none;margin-bottom:14px;">
+    <h2 class="section-title" style="margin-top:0">🧾 Итог дня</h2>
+    <div id="daySummaryBody"></div>
+  </div>
+
   <h2 class="section-title">Сегодня</h2>
   <div class="tiles cols-3">
     <div class="tile accent"><div class="label">Заработано</div><div class="value" id="todayNet">—</div></div>
@@ -14783,7 +14864,7 @@ def cabinet_webapp_html():
     <div class="field-row"><label>🔑 Аренда ТС за день, ₽ (0 если своя)</label><input type="number" inputmode="decimal" id="finRent" placeholder="0"></div>
     <div class="field-row"><label>📦 Доп. расходы за день, ₽</label><input type="number" inputmode="decimal" id="finExpenses" placeholder="0"></div>
     <div class="field-row"><label>🧾 Ставка налога, %</label><input type="number" inputmode="decimal" id="finTaxRate" placeholder="6"></div>
-    <div class="field-row"><label>🕐 Часов за рулём</label><input type="number" inputmode="decimal" id="finHours" placeholder="5.5"></div>
+    <div class="field-row"><label>🕐 Часов за рулём (число или время "с-до", например 9-21)</label><input type="text" inputmode="text" id="finHours" placeholder="5.5 или 9-21"></div>
     <button class="btn" id="finCalcBtn">Рассчитать</button>
     <div id="finResult" style="margin-top: 12px;"></div>
   </div>
@@ -14880,11 +14961,62 @@ def cabinet_webapp_html():
   let todayShiftData = null;
 
   function fmtMoney(n) { return Math.round(n).toLocaleString('ru-RU') + ' ₽'; }
+
+  // ДОБАВЛЕНО 22.09.2026 (тот же запрос, что parse_hours_or_range в main.py -
+  // "чтобы человек писал или часы, или со скольки до скольки") - тот же
+  // разбор на клиенте, чтобы поле "Часов за рулём" в Кабинете принимало и
+  // число (5.5), и диапазон времени смены (9-21, 09:00-21:00, через полночь
+  // 22-6). Бэкенд (/cabinet/finance) как и раньше получает уже готовое
+  // число часов - контракт API не меняется.
+  function parseHoursOrRange(text) {
+    const raw = (text || '').trim();
+    if (!raw) return null;
+    const m = raw.match(/(\d{1,2})(?::(\d{2}))?\s*(?:-|—|до)\s*(\d{1,2})(?::(\d{2}))?/);
+    if (m && (raw.includes('до') || raw.includes('-') || raw.includes('—'))) {
+      const startH = parseInt(m[1], 10), startM = m[2] ? parseInt(m[2], 10) : 0;
+      const endH = parseInt(m[3], 10), endM = m[4] ? parseInt(m[4], 10) : 0;
+      if (startH >= 0 && startH <= 24 && endH >= 0 && endH <= 24 && startM < 60 && endM < 60) {
+        let startTotal = startH * 60 + startM;
+        let endTotal = endH * 60 + endM;
+        if (endTotal <= startTotal) endTotal += 24 * 60; // смена через полночь
+        const hours = (endTotal - startTotal) / 60;
+        if (hours > 0 && hours <= 24) return Math.round(hours * 100) / 100;
+      }
+    }
+    const num = parseFloat(raw.replace(',', '.'));
+    return isNaN(num) ? null : num;
+  }
   function fmtHours(h) { return h.toLocaleString('ru-RU', {maximumFractionDigits: 1}) + ' ч'; }
   function fmtKm(km) { return Math.round(km).toLocaleString('ru-RU') + ' км'; }
   function shortDate(iso) {
     const d = new Date(iso + 'T00:00:00');
     return d.toLocaleDateString('ru-RU', {day: 'numeric', month: 'short'});
+  }
+
+  // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "в кабинете на
+  // первой же вкладке чтобы вся эта информация из сообщения была после
+  // ввода всех данных - итог дня") - общий рендер разбивки "ДЕНЬ - ИТОГ",
+  // используется и в результате вкладки "Финансы" (сразу после расчёта), и
+  // в карточке "🧾 Итог дня" на вкладке "Профиль" (первая вкладка, и при
+  // открытии Кабинета, если сегодня уже что-то считали - см. day_summary в
+  // /cabinet/data, - и сразу после расчёта в "Финансы", без перезагрузки).
+  function renderDaySummary(r) {
+    return '<div class="tile accent" style="margin-bottom:8px"><div class="label">Чистыми за день</div><div class="value">' + fmtMoney(r.net_profit) + '</div>' +
+      '<div class="sub">≈ ' + fmtMoney(r.per_hour) + '/ч' + (r.hours ? ' · ' + fmtHours(r.hours) + ' за рулём' : '') + '</div></div>' +
+      '<p class="muted">Валовый доход: ' + fmtMoney(r.income) + '<br>' +
+      (r.trips_count ? '🚕 Заказов: ' + r.trips_count + (r.avg_check ? '  ·  средний чек ≈ ' + fmtMoney(r.avg_check) : '') + '<br>' : '') +
+      (r.km ? '🛣 Пробег: ' + fmtKm(r.km) + '<br>' : '') +
+      '⛽ Топливо: −' + fmtMoney(r.fuel_cost) + '<br>' +
+      (r.is_rented ? '🔧 Резерв на износ: не учтён (аренда)<br>' : '🔧 Резерв на износ (10%): −' + fmtMoney(r.wear_reserve) + '<br>') +
+      (r.rent ? '🚘 Аренда ТС: −' + fmtMoney(r.rent) + '<br>' : '') +
+      (r.expenses ? '📦 Доп. расходы: −' + fmtMoney(r.expenses) + '<br>' : '') +
+      '🧾 Налог (' + r.tax_rate + '%): −' + fmtMoney(r.tax_amount) + '</p>';
+  }
+  function showDaySummary(r) {
+    const card = document.getElementById('daySummaryCard');
+    if (!card) return;
+    document.getElementById('daySummaryBody').innerHTML = renderDaySummary(r);
+    card.style.display = 'block';
   }
 
   function baseChartOptions(yTickFormatter) {
@@ -14981,6 +15113,7 @@ def cabinet_webapp_html():
 
       renderProfile(data.profile || {});
       todayShiftData = data.today_shift || null;
+      if (data.day_summary) showDaySummary(data.day_summary);
 
       document.getElementById('todayNet').textContent = fmtMoney(t.today_net_profit);
       document.getElementById('todayHours').textContent = fmtHours(t.today_hours);
@@ -15107,9 +15240,9 @@ def cabinet_webapp_html():
         rent: parseFloat(document.getElementById('finRent').value) || 0,
         expenses: parseFloat(document.getElementById('finExpenses').value) || 0,
         tax_rate: parseFloat(document.getElementById('finTaxRate').value) || 6,
-        hours: parseFloat(document.getElementById('finHours').value) || 0,
+        hours: parseHoursOrRange(document.getElementById('finHours').value) || 0,
       };
-      if (payload.hours <= 0) { resEl.innerHTML = '<p class="muted">Укажи часы за рулём больше нуля.</p>'; return; }
+      if (payload.hours <= 0) { resEl.innerHTML = '<p class="muted">Укажи часы за рулём больше нуля (число, например 5.5, или время смены "с-до", например 9-21).</p>'; return; }
       resEl.innerHTML = '<p class="muted">Считаю…</p>';
       try {
         const resp = await fetch('""" + CABINET_FINANCE_API_PATH + """', {
@@ -15119,16 +15252,11 @@ def cabinet_webapp_html():
         });
         if (!resp.ok) throw new Error('http_' + resp.status);
         const r = await resp.json();
-        resEl.innerHTML =
-          '<div class="tile accent" style="margin-bottom:8px"><div class="label">Чистыми за день</div><div class="value">' + fmtMoney(r.net_profit) + '</div>' +
-          '<div class="sub">≈ ' + fmtMoney(r.per_hour) + '/ч</div></div>' +
-          '<p class="muted">Валовый доход: ' + fmtMoney(r.income) + '<br>' +
-          (r.trips_count ? '🚕 Заказов: ' + r.trips_count + '  ·  средний чек ≈ ' + fmtMoney(r.avg_check) + ' ₽<br>' : '') +
-          '⛽ Топливо: −' + fmtMoney(r.fuel_cost) + '<br>' +
-          (r.is_rented ? '🔧 Резерв на износ: не учтён (аренда)<br>' : '🔧 Резерв на износ (10%): −' + fmtMoney(r.wear_reserve) + '<br>') +
-          (r.rent ? '🚘 Аренда ТС: −' + fmtMoney(r.rent) + '<br>' : '') +
-          (r.expenses ? '📦 Доп. расходы: −' + fmtMoney(r.expenses) + '<br>' : '') +
-          '🧾 Налог (' + r.tax_rate + '%): −' + fmtMoney(r.tax_amount) + '</p>';
+        resEl.innerHTML = renderDaySummary(r);
+        // ДОБАВЛЕНО 22.09.2026 - тот же итог сразу же (без перезагрузки
+        // Кабинета) показываем и на первой вкладке "Профиль", см.
+        // showDaySummary/day_summary в /cabinet/data.
+        showDaySummary(r);
         if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
       } catch (e) {
         resEl.innerHTML = '<p class="muted">Не получилось посчитать, попробуй ещё раз.</p>';
@@ -15528,7 +15656,7 @@ async def cancel_nearby_prompt(message: types.Message):
     user_id = message.from_user.id
     category = user_state[user_id].get('category')
     user_state[user_id].pop('nearby_pending', None)
-    await message.answer("Отменено", reply_markup=courier_module_keyboard(category))
+    await message.answer("Отменено", reply_markup=types.ReplyKeyboardRemove())
 
 async def send_nearby_results(message: types.Message, user_id, kind, lat, lon):
     """Общая логика показа ближайших точек (Туалеты/Парковка/Шиномонтаж/
@@ -15549,18 +15677,18 @@ async def send_nearby_results(message: types.Message, user_id, kind, lat, lon):
     if scored is None:
         await message.answer(
             f"{cfg['emoji']} Данные по разделу «{cfg['label']}» пока не собраны - скоро добавим.",
-            reply_markup=courier_module_keyboard(state.get('category')),
+            reply_markup=types.ReplyKeyboardRemove(),
         )
         return
     if not scored:
         await message.answer(
             f"{cfg['emoji']} Для твоего города пока нет собранных точек «{cfg['label']}» - сбор идёт постепенно по городам, скоро дойдём и до тебя.",
-            reply_markup=courier_module_keyboard(state.get('category')),
+            reply_markup=types.ReplyKeyboardRemove(),
         )
         return
 
     text, keyboard = render_nearby_results(kind, scored)
-    await message.answer("Готово 👇", reply_markup=courier_module_keyboard(state.get('category')))
+    await message.answer("Готово 👇", reply_markup=types.ReplyKeyboardRemove())
     try:
         await message.answer(text, reply_markup=keyboard, parse_mode='Markdown')
     except Exception as e:
@@ -15959,7 +16087,7 @@ async def courier_finance_flow(message: types.Message):
 
     if text == "❌ ОТМЕНА":
         state.pop('courier_finance_draft', None)
-        await message.answer("Расчёт отменён.", reply_markup=courier_module_keyboard(state.get('category')))
+        await message.answer("Расчёт отменён.", reply_markup=types.ReplyKeyboardRemove())
         return
 
     step = draft['step']
@@ -16055,9 +16183,9 @@ async def courier_finance_flow(message: types.Message):
         return
 
     if step == 'hours':
-        value = parse_decimal(text)
+        value = parse_hours_or_range(text)
         if value is None or value <= 0:
-            await message.answer("Не понял часы - введи число больше нуля, например 5.5:")
+            await message.answer("Не понял часы - введи число больше нуля (например 5.5) или диапазон времени (например 9-21):")
             return
         draft['data']['hours'] = value
         state.pop('courier_finance_draft', None)
@@ -16106,11 +16234,35 @@ def calculate_finance_result(data):
         'trips_count': trips_count, 'avg_check': avg_check,
     }
 
+# ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "в кабинете на первой
+# же вкладке чтобы вся эта информация из сообщения была после ввода всех
+# данных - итог дня") - сохраняем последний посчитанный "ДЕНЬ - ИТОГ" целиком
+# (не только income/net_profit/trips_count, как в finance_history для
+# графиков) в user_state, чтобы вкладка "Профиль" (первая в Кабинете) могла
+# показать его сразу при открытии - независимо от того, считали через
+# Telegram-диалог или через форму в Кабинете (единая точка входа - обе
+# считают через calculate_finance_result выше). Год-месяц-день хранится
+# отдельно, чтобы Кабинет мог не показывать вчерашний расчёт как "сегодня".
+def save_last_day_summary(user_id, r):
+    try:
+        state = user_state[user_id]
+        state['last_day_summary'] = {
+            'date': datetime.now(ZoneInfo('Europe/Moscow')).date().isoformat(),
+            'income': r['income'], 'fuel_cost': r['fuel_cost'], 'wear_reserve': r['wear_reserve'],
+            'rent': r['rent'], 'expenses': r['expenses'], 'tax_rate': r['tax_rate'],
+            'tax_amount': r['tax_amount'], 'net_profit': r['net_profit'], 'per_hour': r['per_hour'],
+            'is_rented': r['is_rented'], 'trips_count': r['trips_count'], 'avg_check': r['avg_check'],
+            'hours': r['hours'], 'km': r['km'],
+        }
+    except Exception as e:
+        logger.error(f"❌ Не удалось сохранить итог дня для Кабинета (пользователь {user_id}): {e}")
+
 async def send_courier_finance_result(message: types.Message, user_id, data):
     """Считает и показывает итог дня, сохраняет доход/чистыми в отдельную
     таблицу статистики (см. save_finance_result/finance_history) - сама
     формула теперь в calculate_finance_result (см. выше)."""
     r = calculate_finance_result(data)
+    save_last_day_summary(user_id, r)
     income, km, consumption, fuel_price = r['income'], r['km'], r['consumption'], r['fuel_price']
     rent, expenses, tax_rate, hours = r['rent'], r['expenses'], r['tax_rate'], r['hours']
     airport_wait_minutes, car_ownership = r['airport_wait_minutes'], r['car_ownership']
