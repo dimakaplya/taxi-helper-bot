@@ -8127,11 +8127,20 @@ MAP_CATEGORY_STYLE = {
 # ИЗМЕНЕНО 22.09.2026 (уточнение пользователя - "ультима черные с заливкой
 # желтой") - у Ultima заливка треугольника жёлтая, обводка чёрная (было
 # наоборот - чёрная заливка с жёлтой обводкой).
+# ЕЩЁ РАЗ ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя, со скриншотом
+# референса - "стрелку сделай такую как на фото белый контур желтое
+# градиент без черной полосы по середины для всех тарифов включая такси
+# курьеры ультима и грузовые"): раньше у каждой категории была своя
+# обводка (коричневая/чёрная/красная/тёмно-красная) - теперь ОДИНАКОВЫЙ
+# стиль для всех 4 категорий: жёлтая заливка (градиент светлее/темнее по
+# граням - см. navArrowIconHtml), белая обводка. Центральная тёмная линия
+# посередине стрелки (line x1/x2 в navArrowIconHtml) убрана по той же
+# просьбе - "без чёрной полосы посередине".
 SELF_MARKER_STYLE = {
-    'taxi': {'fill': '#FFD400', 'stroke': '#B38600'},
-    'ultima': {'fill': '#FFD400', 'stroke': '#1A1A1A'},
-    'courier': {'fill': '#FFD400', 'stroke': '#D32F2F'},
-    'cargo': {'fill': '#E53935', 'stroke': '#7A1414'},
+    'taxi': {'fill': '#FFD400', 'stroke': '#FFFFFF'},
+    'ultima': {'fill': '#FFD400', 'stroke': '#FFFFFF'},
+    'courier': {'fill': '#FFD400', 'stroke': '#FFFFFF'},
+    'cargo': {'fill': '#FFD400', 'stroke': '#FFFFFF'},
 }
 
 MAP_WEBAPP_PATH = '/map'
@@ -8312,7 +8321,7 @@ def delete_map_position(user_id):
     conn.commit()
     conn.close()
 
-def get_map_positions(city, category=None):
+def get_map_positions(city, category=None, exclude_user_id=None):
     """Отдаёт список позиций для карты конкретного города - только
     категория/тарифы/координаты, БЕЗ user_id и имени (приватность, по
     просьбе пользователя - подпись маркера только "какой тариф").
@@ -8321,19 +8330,26 @@ def get_map_positions(city, category=None):
     свою категорию (такси видит такси, Ultima - только Ultima и т.д.) -
     параметр category, если задан, фильтрует запрос; category=None (или
     "all") - вся карта целиком (переключатель "Показать все" внутри WebApp,
-    см. map_webapp_html)."""
+    см. map_webapp_html).
+
+    ДОБАВЛЕНО 22.09.2026 (повторная жалоба пользователя со скриншотом -
+    "опять две метки", свой же маркер-стрелка дублировался обычной меткой
+    в общем списке): exclude_user_id - если задан (см. handle_map_
+    positions_api, initData даёт свой user_id), СВОЯ собственная последняя
+    позиция исключается из общего списка запросом на уровне SQL - её и так
+    рисует отдельный selfIconHtml по геолокации браузера, второй раз она
+    не нужна."""
     conn = get_db_connection()
     cursor = conn.cursor()
+    where = 'city = ? AND updated_at >= datetime(\'now\', ?)'
+    params = [city, f'-{MAP_VISIBILITY_STALE_MINUTES} minutes']
     if category and category in MAP_CATEGORY_STYLE:
-        cursor.execute('''
-            SELECT category, lat, lon, tariffs, heading FROM map_positions
-            WHERE city = ? AND category = ? AND updated_at >= datetime('now', ?)
-        ''', (city, category, f'-{MAP_VISIBILITY_STALE_MINUTES} minutes'))
-    else:
-        cursor.execute('''
-            SELECT category, lat, lon, tariffs, heading FROM map_positions
-            WHERE city = ? AND updated_at >= datetime('now', ?)
-        ''', (city, f'-{MAP_VISIBILITY_STALE_MINUTES} minutes'))
+        where += ' AND category = ?'
+        params.append(category)
+    if exclude_user_id is not None:
+        where += ' AND user_id != ?'
+        params.append(exclude_user_id)
+    cursor.execute(f'SELECT category, lat, lon, tariffs, heading FROM map_positions WHERE {where}', params)
     rows = cursor.fetchall()
     conn.close()
     result = []
@@ -9124,7 +9140,6 @@ def map_webapp_html():
       `<svg width="42" height="42" viewBox="0 0 42 42" style="filter:drop-shadow(0 3px 4px rgba(0,0,0,.55))">` +
       `<polygon points="${{apex}} ${{leftCorner}} ${{notch}}" fill="${{leftShade}}" stroke="${{stroke}}" stroke-width="2" stroke-linejoin="round"/>` +
       `<polygon points="${{apex}} ${{notch}} ${{rightCorner}}" fill="${{rightShade}}" stroke="${{stroke}}" stroke-width="2" stroke-linejoin="round"/>` +
-      `<line x1="21" y1="3" x2="21" y2="27" stroke="rgba(0,0,0,.25)" stroke-width="1.2"/>` +
       `</svg></div></div>`;
   }}
   function selfIconHtml(heading) {{
@@ -10515,11 +10530,20 @@ async def handle_map_positions_api(request):
     city = request.query.get('city', '')
     category = request.query.get('category', '') or None
     init_data = request.headers.get('X-Telegram-Init-Data', '')
+    exclude_user_id = None
     if BOT_TOKEN and init_data:
-        if validate_telegram_webapp_init_data(init_data, BOT_TOKEN) is None:
+        parsed = validate_telegram_webapp_init_data(init_data, BOT_TOKEN)
+        if parsed is None:
             logger.warning("⚠️ /map/positions: не прошла проверка initData")
+        else:
+            # См. get_map_positions(exclude_user_id=...) - убираем СВОЮ же
+            # позицию из общего списка, её рисует отдельный selfIconHtml.
+            try:
+                exclude_user_id = json.loads(parsed.get('user', '{}')).get('id')
+            except Exception:
+                exclude_user_id = None
     try:
-        positions = get_map_positions(city, category) if city else []
+        positions = get_map_positions(city, category, exclude_user_id) if city else []
         # Тарифы уже человекочитаемые строки (см. CATEGORIES[cat]['tariffs'] /
         # shift_tariff_options) - WebApp просто склеивает их через запятую в
         # подписи маркера (см. map_webapp_html), переводить не нужно.
