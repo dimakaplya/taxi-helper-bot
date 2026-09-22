@@ -8681,9 +8681,11 @@ MAP_CHROME_CSS = """
      штатный отступ Leaflet ~10px от края). */
   .filter-toggle { position: absolute; top: 10px; left: 56px; z-index: 1000; background: #FFC400; color: #000; border-radius: 8px; padding: 8px 12px; font-family: -apple-system, sans-serif; font-size: 12.5px; font-weight: 600; box-shadow: 0 1px 4px rgba(0,0,0,.35); cursor: pointer; user-select: none; text-transform: uppercase; }
   .airport-icon { display: flex; align-items: center; justify-content: center; font-size: 20px; filter: drop-shadow(0 1px 2px rgba(0,0,0,.5)); }
-  .car-icon-wrap { position: relative; width: 36px; height: 36px; }
-  .car-icon-inner { position: absolute; top: 6px; left: 6px; width: 24px; height: 24px; border-radius: 50%; border: 1.5px solid #333; display: flex; align-items: center; justify-content: center; font-size: 13px; box-shadow: 0 1px 3px rgba(0,0,0,.4); }
-  .car-icon-arrow { position: absolute; top: 0; left: 14px; width: 0; height: 0; border-left: 4px solid transparent; border-right: 4px solid transparent; border-bottom: 7px solid #222; transform-origin: 4px 18px; filter: drop-shadow(0 1px 1px rgba(0,0,0,.4)); }
+  /* .car-icon-wrap/.car-icon-inner/.car-icon-arrow УБРАНЫ 22.09.2026 (прямая
+     просьба пользователя - "сделай для всех тарифов один в один как
+     стрелка") - все маркеры водителей (не только свой) теперь используют
+     .self-icon-wrap/.self-icon-rotate + navArrowIconHtml, кружка с эмодзи
+     больше нет. */
   .airport-popup h4 { margin: 0 0 4px; font-family: -apple-system, sans-serif; font-size: 13.5px; color: #000; }
   .airport-popup .row { font-family: -apple-system, sans-serif; font-size: 12.5px; margin: 2px 0; color: #333; }
   .airport-label { background: rgba(20,20,20,.92); color: #fff; border: 1px solid rgba(255,196,0,.55); border-radius: 6px; padding: 3px 6px; font-family: -apple-system, sans-serif; font-size: 11px; line-height: 1.35; white-space: nowrap; box-shadow: 0 1px 3px rgba(0,0,0,.35); }
@@ -8752,8 +8754,12 @@ MAP_CHROME_CSS = """
      navigator.geolocation.watchPosition прямо в WebApp (см.
      updateSelfMarker ниже), а не общий /map/positions - тот отдаёт позиции
      АНОНИМНО без user_id (см. get_map_positions), клиент не может по нему
-     отличить "себя" среди чужих точек. Остальные водители по-прежнему
-     кружки (.car-icon-inner ниже) - не менялось.
+     отличить "себя" среди чужих точек. ИЗМЕНЕНО ЕЩЁ РАЗ 22.09.2026 (прямая
+     просьба пользователя - "сделай для всех тарифов один в один"):
+     остальные водители раньше были кружками (.car-icon-inner), теперь тоже
+     стрелка-дротик той же формы, что и своя (см. navArrowIconHtml в
+     loadPositions ниже) - отличие только в heading-повороте и в том, что у
+     своего маркера нет попапа с данными профиля, а у чужих есть popupText.
      ИЗМЕНЕНО 22.09.2026 (доп. просьба - "обрати внимание что заливка не
      равномерная у треугольника и можешь треугольник сделать объёмным почти
      3д", плюс "смайлик я имел в виду как было заложено ранее 🚕🤵🏽🚶🏽‍♂️🚚, к
@@ -8995,38 +9001,43 @@ def map_webapp_html():
     const p = pct / 100;
     return rgbToHex(r * (1 - p), g * (1 - p), b * (1 - p));
   }}
-  function selfIconHtml(heading) {{
-    const st = SELF_MARKER_STYLE[myCategory] || SELF_MARKER_STYLE['taxi'];
-    // ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя - "смайлики только
-    // оставляем на других юзерах остальные убираем", "на себе смайлики
-    // убираем", "только стрелка") - эмодзи-иконку категории (🚕/🤵🏽/🚶🏽‍♂️/🚚)
-    // убрали ИМЕННО у своего маркера - теперь это просто стрелка-навигатор
-    // без начинки, поворачивается по heading. У кружков остальных водителей
-    // (.car-icon-inner ниже) эмодзи осталась без изменений.
-    // ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя, со скриншотом
-    // навигационной стрелки - "форма не просто треугольника ... как там
-    // сделано 3д ... с переходом посередине как будто сложено") - вместо
-    // ровного треугольника с вертикальным градиентом теперь форма "дротика"
-    // (kite): вершина вверху, два боковых угла пошире у основания и ВОГНУТАЯ
-    // выемка посередине основания (та самая характерная форма нав.стрелки
-    // из скриншота) - см. точки apex/rightCorner/notch/leftCorner ниже.
-    // Форма разбита ровно пополам ребром apex->notch на два треугольника -
-    // левая грань темнее, правая светлее ОДНИМ и тем же базовым цветом
-    // категории (st.fill не меняется - только пользователь просил "цвета
-    // остаются те же") - имитация сложенной бумаги/грани, как на референсе.
+  // ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя, со скриншотом
+  // навигационной стрелки - "форма не просто треугольника ... как там
+  // сделано 3д ... с переходом посередине как будто сложено") - вместо
+  // ровного треугольника с вертикальным градиентом форма "дротика" (kite):
+  // вершина вверху, два боковых угла пошире у основания и ВОГНУТАЯ выемка
+  // посередине основания (та самая характерная форма нав.стрелки из
+  // скриншота) - см. точки apex/rightCorner/notch/leftCorner ниже. Форма
+  // разбита ровно пополам ребром apex->notch на два треугольника - левая
+  // грань темнее, правая светлее ОДНИМ и тем же базовым цветом (имитация
+  // сложенной бумаги/грани, как на референсе).
+  // ЕЩЁ РАЗ ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя - "сделай для
+  // всех тарифов прям один в один чтобы было", тот же скриншот стрелки):
+  // раньше эта форма (kite) рисовалась ТОЛЬКО для своего маркера
+  // (selfIconHtml), а у остальных водителей был кружок с эмодзи
+  // (.car-icon-inner). Вынесено в общую функцию navArrowIconHtml, чтобы
+  // ОДНА И ТА ЖЕ форма стрелки использовалась и для себя, и для всех
+  // остальных водителей на карте (см. loadPositions ниже) - "один в один".
+  function navArrowIconHtml(fill, stroke, heading) {{
     const apex = '21,3';
     const rightCorner = '38,37';
     const notch = '21,27';
     const leftCorner = '4,37';
-    const leftShade = darkenColor(st.fill, 18);
-    const rightShade = lightenColor(st.fill, 12);
+    const leftShade = darkenColor(fill, 18);
+    const rightShade = lightenColor(fill, 12);
     return `<div class="self-icon-wrap">` +
       `<div class="self-icon-rotate" style="transform:rotate(${{heading}}deg)">` +
       `<svg width="42" height="42" viewBox="0 0 42 42" style="filter:drop-shadow(0 3px 4px rgba(0,0,0,.55))">` +
-      `<polygon points="${{apex}} ${{leftCorner}} ${{notch}}" fill="${{leftShade}}" stroke="${{st.stroke}}" stroke-width="2" stroke-linejoin="round"/>` +
-      `<polygon points="${{apex}} ${{notch}} ${{rightCorner}}" fill="${{rightShade}}" stroke="${{st.stroke}}" stroke-width="2" stroke-linejoin="round"/>` +
+      `<polygon points="${{apex}} ${{leftCorner}} ${{notch}}" fill="${{leftShade}}" stroke="${{stroke}}" stroke-width="2" stroke-linejoin="round"/>` +
+      `<polygon points="${{apex}} ${{notch}} ${{rightCorner}}" fill="${{rightShade}}" stroke="${{stroke}}" stroke-width="2" stroke-linejoin="round"/>` +
       `<line x1="21" y1="3" x2="21" y2="27" stroke="rgba(0,0,0,.25)" stroke-width="1.2"/>` +
       `</svg></div></div>`;
+  }}
+  function selfIconHtml(heading) {{
+    const st = SELF_MARKER_STYLE[myCategory] || SELF_MARKER_STYLE['taxi'];
+    // Эмодзи-иконку категории (🚕/🤵🏽/🚶🏽‍♂️/🚚) убрали ИМЕННО у своего маркера -
+    // просто стрелка-навигатор без начинки, поворачивается по heading.
+    return navArrowIconHtml(st.fill, st.stroke, heading);
   }}
   // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "пусть по нажатию
   // на стрелку на карте он берет данные тарифа машина и номера из кабинета
@@ -9108,28 +9119,22 @@ def map_webapp_html():
       data.positions.filter(isPositionVisible).forEach(p => {{
         const style = CATEGORY_STYLE[p.category] || {{ color: '#888', label: p.category, icon: '🚗' }};
         const popupText = (p.tariffs && p.tariffs.length) ? `${{style.label}} (${{p.tariffs.join(', ')}})` : style.label;
-        // ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя): вместо кружка -
-        // иконка по категории (машинка 🚗 у такси/Ultima, человек 🚶 у
-        // курьера, грузовик 🚚 у грузового такси - см. MAP_CATEGORY_STYLE),
-        // залитая цветом категории (тем же, что раньше был у кружка) -
-        // чтобы на карте сразу было видно, что это за водитель, а не просто
-        // цветная точка.
-        // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "машинка
-        // может показывать направление?"): если Telegram прислал heading
-        // (направление движения, 0-360° по часовой от севера - не все
-        // устройства его отдают, см. миграцию heading в map_positions),
-        // рисуем маленькую стрелку у края кружка, повёрнутую в эту сторону -
-        // саму иконку (эмодзи) не крутим, чтобы машинка/человечек/грузовик
-        // не переворачивались "вверх ногами" при развороте.
-        const hasHeading = p.heading !== null && p.heading !== undefined;
-        const arrowHtml = hasHeading
-          ? `<div class="car-icon-arrow" style="transform:rotate(${{p.heading}}deg)"></div>`
-          : '';
+        // ЕЩЁ РАЗ ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя, со
+        // скриншотом навигационной стрелки - "сделай для всех тарифов прям
+        // один в один чтобы было"): вместо кружка с эмодзи + маленькой
+        // стрелкой сбоку (.car-icon-inner/.car-icon-arrow, теперь не
+        // используются) - ТА ЖЕ форма "дротика" (kite), что и у своего
+        // маркера (см. navArrowIconHtml/selfIconHtml выше), цвета по
+        // категории из SELF_MARKER_STYLE (fill/stroke, та же палитра, что
+        // на референсе). Без heading стрелка просто не повёрнута (смотрит
+        // "вверх", как и у своего маркера при heading=0).
+        const navSt = SELF_MARKER_STYLE[p.category] || SELF_MARKER_STYLE['taxi'];
+        const heading = (p.heading !== null && p.heading !== undefined) ? p.heading : 0;
         const icon = L.divIcon({{
           className: 'car-icon',
-          html: `<div class="car-icon-wrap"><div class="car-icon-inner" style="background:${{style.color}}">${{style.icon || '🚗'}}</div>${{arrowHtml}}</div>`,
-          iconSize: [36, 36],
-          iconAnchor: [18, 18],
+          html: navArrowIconHtml(navSt.fill, navSt.stroke, heading),
+          iconSize: [42, 42],
+          iconAnchor: [21, 21],
         }});
         const marker = L.marker([p.lat, p.lon], {{ icon }}).bindPopup(popupText).addTo(map);
         markers.push(marker);
