@@ -4192,7 +4192,12 @@ def services_keyboard(category=None, city=None, user_id=None):
     # кнопки в меню не было. Теперь есть отдельный экран (см.
     # show_subscription_status ниже) - можно оплатить/продлить заранее, не
     # дожидаясь блокировки, в одном ряду с реферальной программой.
-    buttons.append([KeyboardButton(text="💳 ОПЛАТИТЬ ПОДПИСКУ"), KeyboardButton(text="🤝 РЕФЕРАЛЬНАЯ ПРОГРАММА")])
+    # ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя - "когда она оплачена
+    # выводить текст оплатить подписку поменяй на дату сколько дней осталось
+    # до окончания подписки") - см. subscription_menu_button_text ниже: если
+    # подписка реально ОПЛАЧЕНА (не просто триал), кнопка вместо "ОПЛАТИТЬ"
+    # показывает дату окончания и сколько дней осталось.
+    buttons.append([KeyboardButton(text=subscription_menu_button_text(user_id)), KeyboardButton(text="🤝 РЕФЕРАЛЬНАЯ ПРОГРАММА")])
     # "🔓 БЕСПЛАТНЫЙ VPN TAXI HELPER" - ИЗМЕНЕНО 23.09.2026 (прямая просьба
     # пользователя - "кнопку большую бесплатный vpn перенеси предпоследней
     # строчкой снизу"): раньше стояла сразу под "⛽ ГДЕ БЕНЗИН"/"💳 ЧАЕВЫЕ",
@@ -15610,6 +15615,29 @@ def is_subscription_active(user_id):
     return _sub_now() < active_until
 
 
+SUBSCRIPTION_MENU_BUTTON_DEFAULT_TEXT = "💳 ОПЛАТИТЬ ПОДПИСКУ"
+
+
+# ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "когда она оплачена
+# выводить текст оплатить подписку поменяй на дату сколько дней осталось до
+# окончания подписки"): текст кнопки в главном меню (см. services_keyboard)
+# зависит от того, реально ли ОПЛАЧЕНА подписка (paid_until доходит хотя бы
+# до конца триала - т.е. был хотя бы один платёж), а не просто идёт триал.
+# ВАЖНО: текст кнопки - это "ключ", по которому её ищут обработчики (см.
+# show_subscription_status ниже) - при изменении формата нужно поменять и
+# лямбду там же.
+def subscription_menu_button_text(user_id):
+    if user_id is None:
+        return SUBSCRIPTION_MENU_BUTTON_DEFAULT_TEXT
+    sub = get_subscription(user_id)
+    active_until = subscription_active_until(user_id)
+    is_paid = bool(sub and sub['paid_until'] and active_until and _sub_parse(sub['paid_until']) >= active_until)
+    if not is_paid:
+        return SUBSCRIPTION_MENU_BUTTON_DEFAULT_TEXT
+    days_left = max(0, (active_until - _sub_now()).days)
+    return f"✅ Подписка до {active_until.strftime('%d.%m')} ({days_left} дн.)"
+
+
 def tinkoff_generate_token(params: dict) -> str:
     """Подпись запроса к Tinkoff Kassa: берутся только плоские (не
     вложенные) поля запроса + Password из личного кабинета, сортируются по
@@ -15832,7 +15860,7 @@ async def send_subscription_paywall(event):
 # (та срабатывает только когда доступ уже истёк). Переиспользует
 # create_tinkoff_payment/subscription_paywall_keyboard - тот же платёж, что
 # и на экране-блокировке.
-@router.message(lambda message: message.text == "💳 ОПЛАТИТЬ ПОДПИСКУ")
+@router.message(lambda message: message.text == SUBSCRIPTION_MENU_BUTTON_DEFAULT_TEXT or (message.text or '').startswith("✅ Подписка до "))
 async def show_subscription_status(message: types.Message):
     user_id = message.from_user.id
     if not get_receipt_email(user_id):
