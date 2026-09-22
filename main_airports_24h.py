@@ -3339,7 +3339,18 @@ class SingleMessageMiddleware(BaseRequestMiddleware):
         if isinstance(method, SendMessage):
             chat_id = method.chat_id
             has_reply_keyboard = isinstance(method.reply_markup, ReplyKeyboardMarkup)
-            if not has_reply_keyboard:
+            # УТОЧНЕНО 23.09.2026 (прямая просьба пользователя - "кнопка
+            # появляется, если меню кнопок снизу не открыто") - нижняя
+            # reply-клавиатура в Telegram, once отправлена, остаётся у
+            # пользователя пристыкованной постоянно (не привязана к
+            # конкретному сообщению) - то есть уже даёт доступ к меню.
+            # Поэтому инлайн-кнопку "МЕНЮ TAXI HELPER" добавляем ТОЛЬКО пока
+            # у этого чата ещё ни разу не было отправлено такое меню
+            # (_last_reply_keyboard_msg_id ещё пусто для chat_id) - как
+            # только оно появилось, дублировать доступ к меню инлайн-кнопкой
+            # на каждом сообщении больше не нужно.
+            reply_keyboard_already_open = chat_id in _last_reply_keyboard_msg_id
+            if not has_reply_keyboard and not reply_keyboard_already_open:
                 method.reply_markup = _with_main_menu_button(method.reply_markup)
             skip_trim = _skip_message_trim.get()
             result = await make_request(bot_instance, method)
