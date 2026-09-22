@@ -9479,6 +9479,62 @@ def map_webapp_html():
     if (ev.is_closure) return '⛔';
     return '⚠️';
   }}
+  // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "давай когда дождь
+  // ты будешь над городом такое рисовать как раз такого цвета" +
+  // уточнение "рисовать прям когда идут осадки и когда заканчивается
+  // убирать её с карты"): то же асимметричное "облако" (см. blobLatLngs у
+  // loadAirports), но ОДНО на весь город, центрировано на RAIN_CITY_COORDS
+  // (см. /map/weather), появляется ТОЛЬКО пока раскладка weathercode - это
+  // реальные осадки (PRECIP_WEATHERCODES на сервере), и убирается сразу,
+  // как только осадки прекращаются - опрос раз в минуту, как у вокзалов.
+  // Цвет - тот же фиолетовый, что у облака спроса аэропортов, по прямой
+  // просьбе пользователя.
+  let rainCloudMarker = null;
+  function rainCloudSeed(s) {{
+    let h = 11;
+    for (let i = 0; i < (s || '').length; i++) {{ h = (h * 31 + s.charCodeAt(i)) % 10000; }}
+    return h;
+  }}
+  async function loadRainCloud() {{
+    try {{
+      const resp = await fetch(`/map/weather?city=${{encodeURIComponent(city)}}`);
+      if (!resp.ok) return;
+      const data = await resp.json();
+      if (rainCloudMarker) {{ map.removeLayer(rainCloudMarker); rainCloudMarker = null; }}
+      if (!data.raining || data.lat === null || data.lon === null) return;
+      const RAIN_CLOUD_RADIUS_METERS = 15000; // "над городом" - заметно больше, чем облако спроса аэропорта (5 км)
+      const metersPerDegLat = 111320;
+      const seed = rainCloudSeed(city);
+      const p1 = (seed % 628) / 100;
+      const p2 = ((seed * 3) % 628) / 100;
+      const p3 = ((seed * 7) % 628) / 100;
+      const offsetAngle = ((seed * 13) % 628) / 100;
+      const offsetDist = RAIN_CLOUD_RADIUS_METERS * 0.2;
+      const cLat = data.lat + (offsetDist * Math.cos(offsetAngle)) / metersPerDegLat;
+      const cLon = data.lon + (offsetDist * Math.sin(offsetAngle)) / (metersPerDegLat * Math.cos(data.lat * Math.PI / 180));
+      const pointsCount = 28;
+      const latLngs = [];
+      for (let i = 0; i < pointsCount; i++) {{
+        const angle = (i / pointsCount) * Math.PI * 2;
+        const wobble = 0.65
+          + 0.22 * Math.sin(angle * 2 + p1)
+          + 0.10 * Math.sin(angle * 5 + p2)
+          + 0.08 * Math.sin(angle * 3 + p3);
+        const r = RAIN_CLOUD_RADIUS_METERS * Math.max(0.4, Math.min(1, wobble));
+        const dLat = (r * Math.cos(angle)) / metersPerDegLat;
+        const dLon = (r * Math.sin(angle)) / (metersPerDegLat * Math.cos(cLat * Math.PI / 180));
+        latLngs.push([cLat + dLat, cLon + dLon]);
+      }}
+      rainCloudMarker = L.polygon(latLngs, {{
+        color: '#9b30ff',
+        weight: 0,
+        fillColor: '#9b30ff',
+        fillOpacity: 0.16,
+        smoothFactor: 3,
+      }}).addTo(map);
+      if (rainCloudMarker._path) rainCloudMarker._path.style.filter = 'blur(18px)';
+    }} catch (e) {{ /* тихо */ }}
+  }}
   async function loadRoadEvents() {{
     try {{
       const resp = await fetch(`/map/road_events?city=${{encodeURIComponent(city)}}`);
@@ -9758,6 +9814,7 @@ def map_webapp_html():
   loadPositions();
   loadAirports();
   loadStations();
+  loadRainCloud();
   loadRoadEvents();
   loadCityEvents();
   setInterval(loadPositions, 15000);
@@ -9769,6 +9826,7 @@ def map_webapp_html():
   setInterval(loadRoadEvents, 30000);
   setInterval(loadAirports, 60000);
   setInterval(loadStations, 60000);
+  setInterval(loadRainCloud, 60000);
   setInterval(loadCityEvents, 300000);
 </script>
 </body>
@@ -10547,6 +10605,35 @@ async def handle_map_stations_api(request):
         logger.exception("❌ Ошибка при получении вокзалов для карты водителей")
         result = []
     return web.json_response({'stations': result})
+
+MAP_WEATHER_API_PATH = '/map/weather'
+
+async def handle_map_weather_api(request):
+    """ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "давай когда
+    дождь ты будешь над городом такое рисовать... рисовать прям когда идут
+    осадки и когда заканчивается убирать её с карты"): JSON API, говорящий
+    WebApp-карте, идут ли ПРЯМО СЕЙЧАС осадки в городе - чтобы поверх города
+    рисовать то же асимметричное "облако" (blobLatLngs), что у повышенного
+    спроса аэропортов (тот же фиолетовый цвет, по прямой просьбе
+    пользователя). Источник - тот же кэш-снепшот погоды, что у кнопки
+    "🌤 ПОГОДА" (get_cached_weather_forecast/load_weather_data, без живого
+    запроса к Open-Meteo на каждый опрос карты). raining=True только для
+    кодов из PRECIP_WEATHERCODES (реальные осадки - дождь/снег/град, НЕ
+    просто облачность/туман) - см. WEATHERCODE_INFO."""
+    city = request.query.get('city', '')
+    coords = RAIN_CITY_COORDS.get(city)
+    result = {'raining': False, 'lat': None, 'lon': None, 'weathercode': None}
+    if coords:
+        result['lat'], result['lon'] = coords
+        try:
+            forecast = get_cached_weather_forecast(city)
+            current = (forecast or {}).get('current') or {}
+            code = current.get('weathercode')
+            result['weathercode'] = code
+            result['raining'] = code in PRECIP_WEATHERCODES
+        except Exception:
+            logger.exception("❌ Ошибка при получении текущей погоды для карты водителей")
+    return web.json_response(result)
 
 async def handle_map_fuel_stations_api(request):
     """JSON API для меток заправок на карте (см. блок "ЗАПРАВКИ +
@@ -17431,6 +17518,7 @@ async def start_subscription_webhook_server():
     app.router.add_get(MAP_MY_PROFILE_API_PATH, handle_map_my_profile_api)
     app.router.add_get(MAP_AIRPORTS_API_PATH, handle_map_airports_api)
     app.router.add_get(MAP_STATIONS_API_PATH, handle_map_stations_api)
+    app.router.add_get(MAP_WEATHER_API_PATH, handle_map_weather_api)
     app.router.add_get(MAP_FUEL_STATIONS_API_PATH, handle_map_fuel_stations_api)
     app.router.add_get(MAP_CHARGING_STATIONS_API_PATH, handle_map_charging_stations_api)
     app.router.add_get(MAP_PARKING_API_PATH, handle_map_parking_api)
