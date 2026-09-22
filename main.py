@@ -7670,31 +7670,31 @@ async def process_airport_queue_ping(user_id, lat, lon, live_period=None):
     state['airport_queue'] = aq
 
 def _in_parking_zone(lat, lon, city):
-    """True, если точка (lat, lon) в зоне действия фичи "Парковка" - либо в
-    пределах PARKING_CITY_RADIUS_KM от центра города (RAIN_CITY_COORDS),
-    либо в зоне аэропорта (nearest_airport_zone) - см. комментарий у
-    PARKING_CITY_RADIUS_KM выше (аэропорт может быть за пределами города,
-    например Внуково). Зоны ж/д вокзалов отдельно не проверяем - они и так
-    покрыты городским радиусом.
+    """True, если точка (lat, lon) в зоне действия фичи "Парковка" - в
+    пределах PARKING_CITY_RADIUS_KM от центра города (RAIN_CITY_COORDS), см.
+    комментарий у PARKING_CITY_RADIUS_KM выше.
 
-    ВАЖНО (правка 21.09.2026): зона аэропорта для парковки НЕ включает
-    радиус airport_queue_outer_radius_km(icao) - там уже работает свой пуш
-    "Встать в очередь" (см. process_airport_queue_ping), и присылать вдобавок
-    пуш про платную парковку в той же точке было бы дублированием/конфликтом
-    (см. PARKING_AIRPORT_ZONE_RADIUS_KM). Зона парковки у аэропорта -
-    "бублик" СНАРУЖИ радиуса очереди и ВНУТРИ PARKING_AIRPORT_ZONE_RADIUS_KM.
-    Если аэропорт также попадает в городской радиус - городская проверка
-    выше всё равно сработает как обычно, ограничение касается только самой
-    зоны аэропорта."""
+    ИЗМЕНЕНО 22.09.2026 (жалоба пользователя со скриншотом - "я стою в зоне
+    аэропорта, а он присылает уведомления [про парковку]"): раньше зона
+    аэропорта для парковки была "бубликом" СНАРУЖИ радиуса очереди
+    (airport_queue_outer_radius_km) и ВНУТРИ PARKING_AIRPORT_ZONE_RADIUS_KM
+    (8 км) - идея была не дублировать пуш "Встать в очередь" в одной точке.
+    На практике это означало, что водитель, который только что выехал из
+    радиуса очереди (например на привокзальную/парковочную зону для
+    встречающих - "cell phone lot") и стоит там пару минут, получал пуш
+    "похоже, ты припарковался, оплати парковку" - хотя для него это всё ещё
+    "территория аэропорта", а не городская платная парковка. Теперь зона
+    аэропорта ЦЕЛИКОМ (весь PARKING_AIRPORT_ZONE_RADIUS_KM от точки
+    аэропорта, включая бывший "бублик") ИСКЛЮЧЕНА из пуша о парковке - рядом
+    с аэропортом этот пуш больше не шлётся вообще, независимо от того,
+    работает ли сейчас фича "Очередь" в этой же точке."""
+    icao, dist_km, zone_key, zone_label = nearest_airport_zone(lat, lon)
+    if icao is not None and dist_km is not None and dist_km <= PARKING_AIRPORT_ZONE_RADIUS_KM:
+        return False
     city_coords = RAIN_CITY_COORDS.get(city) if city else None
     if city_coords:
         c_lat, c_lon = city_coords
         if haversine_km(lat, lon, c_lat, c_lon) <= PARKING_CITY_RADIUS_KM:
-            return True
-    icao, dist_km, zone_key, zone_label = nearest_airport_zone(lat, lon)
-    if icao is not None and dist_km is not None:
-        queue_radius_km = airport_queue_outer_radius_km(icao)
-        if queue_radius_km < dist_km <= PARKING_AIRPORT_ZONE_RADIUS_KM:
             return True
     return False
 
