@@ -9,6 +9,7 @@ import time
 import functools
 import hashlib
 import hmac
+import ssl
 import urllib.parse
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -15375,6 +15376,66 @@ PUBLIC_URL = os.getenv('PUBLIC_URL') or (f'https://{_railway_domain}' if _railwa
 SUBSCRIPTION_WEBHOOK_PORT = int(os.getenv('PORT', '8080'))
 SUBSCRIPTION_WEBHOOK_PATH = '/tinkoff/webhook'
 
+# ДОБАВЛЕНО 22.09.2026 (по факту - оплата падала с ClientConnectorCertificateError:
+# "self-signed certificate in certificate chain" при обращении к
+# securepay.tinkoff.ru): с 2022 года Т-Банк (как и другие крупные российские
+# банки) использует TLS-сертификаты, выпущенные НУЦ Минцифры (Russian Trusted
+# Root CA/Sub CA) - они НЕ входят в стандартный набор доверенных корневых
+# сертификатов на большинстве серверов за пределами России (в т.ч. на
+# Railway), поэтому обычный aiohttp.ClientSession() отказывается проверять
+# цепочку сертификата. Дело НЕ в TINKOFF_TERMINAL_KEY/TINKOFF_PASSWORD - до
+# них запрос даже не доходит, падает на этапе TLS-хендшейка.
+# Решение (тот же паттерн, что get_tg_webapp_js выше - self-healing
+# кэширование): скачиваем оба сертификата (root+sub) с официального
+# статического хостинга Госуслуг (gu-st.ru, обычный международно доверенный
+# сертификат, поэтому качается без проблем) при первом платеже, сохраняем в
+# DATA_DIR (тот же постоянный Railway Volume, что и БД/flights_data.json -
+# переживёт редеплой, не нужно качать заново при каждом рестарте), и
+# добавляем их ДОПОЛНИТЕЛЬНО к системному доверенному набору (ssl.create_
+# default_context() + load_verify_locations() не заменяет системные CA, а
+# добавляет к ним - обычные HTTPS-запросы продолжат работать как раньше).
+RUSSIAN_TRUSTED_CA_URLS = [
+    'https://gu-st.ru/content/lending/russian_trusted_root_ca_pem.crt',
+    'https://gu-st.ru/content/lending/russian_trusted_sub_ca_pem.crt',
+]
+RUSSIAN_TRUSTED_CA_BUNDLE_FILE = os.path.join(DATA_DIR, 'russian_trusted_ca_bundle.pem')
+_tinkoff_ssl_context_cache = {'context': None}
+
+
+async def get_tinkoff_ssl_context():
+    """Возвращает ssl.SSLContext с добавленными российскими корневыми
+    сертификатами Минцифры (см. комментарий выше), кэшируя результат в
+    памяти процесса после первого успешного построения. Если скачать/
+    прочитать сертификаты не удалось - возвращает None (вызывающий код
+    в этом случае просто не передаёт ssl= в коннектор, как и раньше, чтобы
+    не ломать поведение на средах, где проблемы нет - например, если бот
+    когда-нибудь будет запущен на сервере в России, где эта проблема не
+    возникает)."""
+    if _tinkoff_ssl_context_cache['context'] is not None:
+        return _tinkoff_ssl_context_cache['context']
+    try:
+        if not os.path.exists(RUSSIAN_TRUSTED_CA_BUNDLE_FILE):
+            logger.info("🔄 Скачиваю сертификаты НУЦ Минцифры (Russian Trusted Root/Sub CA) для оплаты через Т-Банк...")
+            bundle_parts = []
+            async with aiohttp.ClientSession() as session:
+                for cert_url in RUSSIAN_TRUSTED_CA_URLS:
+                    async with session.get(cert_url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                        resp.raise_for_status()
+                        cert_text = (await resp.text()).strip()
+                        if '-----BEGIN CERTIFICATE-----' not in cert_text:
+                            raise ValueError(f"Ответ {cert_url} не похож на PEM-сертификат")
+                        bundle_parts.append(cert_text)
+            with open(RUSSIAN_TRUSTED_CA_BUNDLE_FILE, 'w') as f:
+                f.write('\n'.join(bundle_parts) + '\n')
+            logger.info(f"✅ Сертификаты НУЦ Минцифры сохранены в {RUSSIAN_TRUSTED_CA_BUNDLE_FILE}")
+        ssl_context = ssl.create_default_context()
+        ssl_context.load_verify_locations(cafile=RUSSIAN_TRUSTED_CA_BUNDLE_FILE)
+        _tinkoff_ssl_context_cache['context'] = ssl_context
+        return ssl_context
+    except Exception as e:
+        logger.error(f"❌ Не удалось подготовить сертификаты НУЦ Минцифры для оплаты через Т-Банк: {e}")
+        return None
+
 # ==================== ЛОКАЛЬНАЯ РАЗДАЧА telegram-web-app.js ====================
 # По факту (21.09.2026): в "Личном кабинете" tg.initData приходил ПУСТЫМ
 # (X-Telegram-Init-Data len=0 в логах) - у части российских мобильных
@@ -15532,8 +15593,17 @@ async def create_tinkoff_payment(user_id: int):
         logger.warning(f"⚠️ PUBLIC_URL/RAILWAY_PUBLIC_DOMAIN не заданы - Tinkoff не сможет прислать webhook об оплате для user_id={user_id}")
     payload = dict(params)
     payload['Token'] = tinkoff_generate_token(params)
+    # См. комментарий у get_tinkoff_ssl_context/RUSSIAN_TRUSTED_CA_URLS выше -
+    # securepay.tinkoff.ru отдаёт сертификат от НУЦ Минцифры, которого нет в
+    # обычном системном доверенном наборе на Railway, поэтому без явного
+    # ssl_context запрос падает с ClientConnectorCertificateError. Если
+    # подготовить контекст не получилось (сеть, gu-st.ru недоступен) -
+    # ssl_context будет None, и TCPConnector просто использует обычную
+    # проверку по умолчанию (как и раньше).
+    ssl_context = await get_tinkoff_ssl_context()
     try:
-        async with aiohttp.ClientSession() as session:
+        connector = aiohttp.TCPConnector(ssl=ssl_context) if ssl_context else None
+        async with aiohttp.ClientSession(connector=connector) as session:
             async with session.post(TINKOFF_INIT_URL, json=payload, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                 data = await resp.json()
     except Exception:
