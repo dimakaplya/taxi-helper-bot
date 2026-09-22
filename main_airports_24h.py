@@ -8409,6 +8409,24 @@ MAP_CHROME_CSS = """
      Теперь квадратик на полупрозрачном белом фоне - как отдельный
      UI-элемент, а не часть карты, читается на любом фоне. */
   .fuel-icon, .charging-icon, .parking-icon { box-sizing: border-box; display: flex; align-items: center; justify-content: center; font-size: 16px; background: rgba(255,255,255,.8); border: 1px solid rgba(0,0,0,.2); border-radius: 50%; box-shadow: 0 1px 3px rgba(0,0,0,.5); }
+  /* ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "пусть на карте
+     показывает тебя как треугольник со смайликом с заливкой соответствующей
+     и угол верхний треугольника это направления движения а остальных в
+     кружке"): своя позиция - отдельный маркер-треугольник (не смешивается
+     с обычными кружками других водителей из CATEGORY_STYLE), залит цветом
+     СВОЕЙ категории (тем же CATEGORY_STYLE[myCategory]), верхний угол
+     треугольника (.self-icon-triangle, clip-path даёт остриё вверх при
+     повороте 0°) поворачивается на актуальный heading устройства - значит
+     "смотрит" в сторону движения. Смайлик - отдельный НЕ вращающийся слой
+     поверх треугольника (иначе кружился бы вместе с ним при повороте).
+     Источник координат/heading - браузерная navigator.geolocation.watchPosition
+     прямо в WebApp (см. updateSelfMarker ниже), а не общий /map/positions -
+     тот отдаёт позиции АНОНИМНО без user_id (см. get_map_positions), так что
+     клиент не может по нему отличить "себя" среди чужих точек. Остальные
+     водители по-прежнему кружки (.car-icon-inner ниже) - не менялось. */
+  .self-icon-wrap { position: relative; width: 40px; height: 40px; }
+  .self-icon-triangle { position: absolute; inset: 0; clip-path: polygon(50% 0%, 6% 100%, 94% 100%); box-shadow: 0 1px 4px rgba(0,0,0,.5); border: 2px solid rgba(255,255,255,.95); box-sizing: border-box; transform-origin: 50% 50%; }
+  .self-icon-emoji { position: absolute; left: 50%; top: 62%; transform: translate(-50%, -50%); font-size: 17px; filter: drop-shadow(0 1px 1px rgba(0,0,0,.6)); }
   .fuel-popup, .charging-popup { font-family: -apple-system, sans-serif; font-size: 12.5px; max-width: 230px; color: #000; }
   .fuel-popup h4, .charging-popup h4 { margin: 0 0 6px; font-size: 13.5px; }
   .fuel-popup .sub, .charging-popup .sub { color: #666; font-size: 11.5px; margin-bottom: 6px; }
@@ -8596,6 +8614,40 @@ def map_webapp_html():
   let markers = [];
   let airportMarkers = [];
   let airportsLoaded = false;
+  // ДОБАВЛЕНО 22.09.2026 (см. .self-icon-wrap/.self-icon-triangle выше -
+  // прямая просьба пользователя показывать себя треугольником со
+  // смайликом, остриё которого указывает направление движения, а
+  // остальных - кружками) - берём координаты и heading прямо из браузера
+  // (navigator.geolocation.watchPosition), не из общего /map/positions:
+  // та выдача анонимна (без user_id), так что определить "своя" ли точка
+  // среди чужих на клиенте нельзя. Треугольник залит цветом СВОЕЙ
+  // категории (myCategory), смайлик - фиксированный слой поверх, не
+  // вращается вместе с треугольником.
+  let selfMarker = null;
+  let selfHeading = 0;
+  function selfIconHtml(heading) {{
+    const style = CATEGORY_STYLE[myCategory] || {{ color: '#FFC629' }};
+    return `<div class="self-icon-wrap"><div class="self-icon-triangle" style="background:${{style.color}}; transform:rotate(${{heading}}deg)"></div><div class="self-icon-emoji">😊</div></div>`;
+  }}
+  function updateSelfMarker(lat, lon, heading) {{
+    const h = (heading === null || heading === undefined || isNaN(heading)) ? selfHeading : heading;
+    selfHeading = h;
+    const icon = L.divIcon({{ className: 'self-icon', html: selfIconHtml(h), iconSize: [40, 40], iconAnchor: [20, 20] }});
+    if (selfMarker) {{
+      selfMarker.setLatLng([lat, lon]);
+      selfMarker.setIcon(icon);
+    }} else {{
+      selfMarker = L.marker([lat, lon], {{ icon, zIndexOffset: 1000 }}).bindPopup('Ты').addTo(map);
+      map.setView([lat, lon], 13);
+    }}
+  }}
+  if (navigator.geolocation) {{
+    navigator.geolocation.watchPosition(
+      (pos) => {{ updateSelfMarker(pos.coords.latitude, pos.coords.longitude, pos.coords.heading); }},
+      (err) => {{ /* тихо - геолокация запрещена/недоступна, просто не показываем свой треугольник */ }},
+      {{ enableHighAccuracy: true, maximumAge: 5000, timeout: 15000 }}
+    );
+  }}
   // ДОБАВЛЕНО 23.09.2026 (см. selectedTariffs выше) - водитель показывается
   // на карте, если хотя бы один из ЕГО тарифов отмечен в панели "Тарифы";
   // если у позиции тарифов нет вовсе (p.tariffs пуст - старые записи до
