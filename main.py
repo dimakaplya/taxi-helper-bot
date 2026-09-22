@@ -816,7 +816,11 @@ AIRPORT_TERMINAL_ZONES = {
         'd': {
             'label': 'Терминал D', 'capacity': 1490,
             'points': [
-                {'coords': (55.961860, 37.409638), 'radius_km': 0.35, 'point_label': None},
+                # point_label='D' (было None) - ИЗМЕНЕНО 22.09.2026, чтобы
+                # совпадать с ключом полигона парковки D в
+                # AIRPORT_PARKING_ZONE_POLYGONS ниже (handle_map_airports_api
+                # сопоставляет полигон и точку радиуса именно по point_label).
+                {'coords': (55.961860, 37.409638), 'radius_km': 0.35, 'point_label': 'D'},
             ],
         },
     },
@@ -853,6 +857,15 @@ AIRPORT_PARKING_ZONE_POLYGONS = {
                 (55.980840, 37.399599),
                 (55.980731, 37.398353),
                 (55.980982, 37.398144),
+            ],
+        },
+        # Парковка Терминала D - вершины по прямой просьбе пользователя
+        # 22.09.2026.
+        'd': {
+            'D': [
+                (55.961430, 37.409649),
+                (55.962323, 37.409923),
+                (55.961563, 37.410036),
             ],
         },
     },
@@ -8305,6 +8318,29 @@ def get_map_positions(city, category=None):
         result.append({'category': r[0], 'lat': r[1], 'lon': r[2], 'tariffs': tariffs, 'heading': r[4]})
     return result
 
+# ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "при тапе на парковку
+# тоже очередь выводи текущую и количество ещё машин каждого тарифа"):
+# считает, сколько сейчас на карте живых позиций (get_map_positions) в
+# радиусе radius_km от заданной точки - раздельно по категории и по
+# тарифу внутри категории (у категорий без тарифов - просто total, у
+# категорий с тарифами - ещё и by_tariff). Используется в
+# handle_map_airports_api для попапа парковок (см.
+# AIRPORT_TERMINAL_ZONES[...]['points']/AIRPORT_PARKING_ZONE_POLYGONS) -
+# отдельно от очереди (queue_latest_report - последняя ОТМЕТКА водителя),
+# это ЖИВОЙ подсчёт машин на карте прямо сейчас поблизости от парковки.
+def count_positions_near(city, lat, lon, radius_km):
+    positions = get_map_positions(city)
+    counts = {}
+    for p in positions:
+        if haversine_km(lat, lon, p['lat'], p['lon']) > radius_km:
+            continue
+        cat = p['category']
+        bucket = counts.setdefault(cat, {'total': 0, 'by_tariff': {}})
+        bucket['total'] += 1
+        for t in (p.get('tariffs') or []):
+            bucket['by_tariff'][t] = bucket['by_tariff'].get(t, 0) + 1
+    return counts
+
 def get_all_map_positions_with_user_id():
     """Как get_map_positions, но ВКЛЮЧАЕТ user_id и без фильтра по городу -
     только для служебного использования внутри бота (см.
@@ -9183,7 +9219,16 @@ def map_webapp_html():
         // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "полигон для
         // карты отображения"): контуры конкретных парковок зоны (см.
         // AIRPORT_PARKING_ZONE_POLYGONS/handle_map_airports_api) - чисто
-        // визуальные, рисуются поверх круга загрузки, если он есть.
+        // визуальные (форма контура ни на что не влияет), рисуются поверх
+        // круга загрузки, если он есть.
+        // ЕЩЁ РАЗ ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя - "при
+        // тапе на парковку тоже очередь выводи текущую и количество ещё
+        // машин каждого тарифа"): попап парковки теперь показывает ту же
+        // очередь по тарифам, что и попап аэропорта (poly.queue - общий на
+        // зону bc/d, отдельных отметок по P22/P20 не ведётся), плюс СВЕЖИЙ
+        // подсчёт машин конкретно у ЭТОЙ парковки (poly.cars - см.
+        // count_positions_near, радиус той же точки, что отвечает за пуш
+        // "встать в очередь" у P22/P20/D).
         (a.parking_polygons || []).forEach(poly => {{
           const polygon = L.polygon(poly.points, {{
             color: '#2a7fff',
@@ -9191,7 +9236,43 @@ def map_webapp_html():
             fillColor: '#2a7fff',
             fillOpacity: 0.25,
           }}).addTo(map);
-          if (poly.label) polygon.bindPopup(`🅿️ Парковка ${{poly.label}}`);
+          let ppopup = `<div class="airport-popup"><h4>🅿️ Парковка ${{poly.label || ''}}</h4>`;
+          const pQueueKeys = Object.keys(poly.queue || {{}});
+          let pHasQueue = false;
+          pQueueKeys.forEach(key => {{
+            const q = poly.queue[key];
+            const qlabel = (CATEGORY_STYLE[key] && CATEGORY_STYLE[key].label) || key;
+            if (q.by_tariff) {{
+              Object.keys(q.by_tariff).forEach(tariff => {{
+                const t = q.by_tariff[tariff];
+                ppopup += `<div class="row">🚗 ${{qlabel}} ${{tariff}}: ${{t.range}} (на ${{t.local_time}})</div>`;
+                pHasQueue = true;
+              }});
+            }} else {{
+              ppopup += `<div class="row">🚗 ${{qlabel}}: ${{q.range}} (на ${{q.local_time}})</div>`;
+              pHasQueue = true;
+            }}
+          }});
+          if (!pHasQueue) ppopup += `<div class="row">🚗 Очередь: свежих отметок нет</div>`;
+          const pCarsKeys = Object.keys(poly.cars || {{}});
+          let pHasCars = false;
+          pCarsKeys.forEach(key => {{
+            const c = poly.cars[key];
+            const clabel = (CATEGORY_STYLE[key] && CATEGORY_STYLE[key].label) || key;
+            const byTariffKeys = Object.keys(c.by_tariff || {{}});
+            if (byTariffKeys.length) {{
+              byTariffKeys.forEach(tariff => {{
+                ppopup += `<div class="row">🚘 ${{clabel}} ${{tariff}} рядом сейчас: ${{c.by_tariff[tariff]}}</div>`;
+                pHasCars = true;
+              }});
+            }} else if (c.total) {{
+              ppopup += `<div class="row">🚘 ${{clabel}} рядом сейчас: ${{c.total}}</div>`;
+              pHasCars = true;
+            }}
+          }});
+          if (!pHasCars) ppopup += `<div class="row">🚘 Рядом сейчас никого нет</div>`;
+          ppopup += `</div>`;
+          polygon.bindPopup(ppopup);
           airportMarkers.push(polygon);
         }});
         const icon = L.divIcon({{ className: 'airport-icon', html: a.emoji || '✈️', iconSize: [26, 26] }});
@@ -10288,10 +10369,35 @@ async def handle_map_airports_api(request):
             # влияет на радиусы/пуши очереди.
             zone_polygons = AIRPORT_PARKING_ZONE_POLYGONS.get(icao, {}).get(zone_key) if zone_key else None
             if zone_polygons:
-                entry['parking_polygons'] = [
-                    {'label': point_label, 'points': [[p[0], p[1]] for p in vertices]}
-                    for point_label, vertices in zone_polygons.items()
-                ]
+                # ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "при
+                # тапе на парковку тоже очередь выводи текущую и количество
+                # ещё машин каждого тарифа"): у каждого полигона своя
+                # опорная точка в AIRPORT_TERMINAL_ZONES[...]['points'] (тот
+                # же point_label, что и у полигона) - именно её
+                # coords/radius_km используем для подсчёта живых машин
+                # ПОБЛИЗОСТИ (count_positions_near), т.к. полигон это
+                # произвольная форма, а радиус - уже готовая метрика
+                # "рядом". Очередь (queue) берём ту же, что уже посчитана
+                # для всей зоны выше - отдельных отметок очереди по
+                # конкретной парковке P22/P20 не ведётся, только по зоне
+                # bc/d целиком.
+                _points_by_label = {
+                    pt.get('point_label'): pt
+                    for pt in (AIRPORT_TERMINAL_ZONES.get(icao, {}).get(zone_key, {}).get('points') or [])
+                }
+                entry['parking_polygons'] = []
+                for point_label, vertices in zone_polygons.items():
+                    poly_entry = {'label': point_label, 'points': [[p[0], p[1]] for p in vertices]}
+                    poly_entry['queue'] = queue
+                    pt = _points_by_label.get(point_label)
+                    if pt:
+                        try:
+                            poly_entry['cars'] = count_positions_near(city, pt['coords'][0], pt['coords'][1], pt['radius_km'])
+                        except Exception:
+                            poly_entry['cars'] = {}
+                    else:
+                        poly_entry['cars'] = {}
+                    entry['parking_polygons'].append(poly_entry)
             result.append(entry)
     except Exception:
         logger.exception("❌ Ошибка при получении аэропортов для карты водителей")
