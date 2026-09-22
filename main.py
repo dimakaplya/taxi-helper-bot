@@ -9799,6 +9799,17 @@ def map_webapp_html():
       if (demandCloudMarker._path) demandCloudMarker._path.style.filter = 'blur(18px)';
     }} catch (e) {{ /* тихо */ }}
   }}
+  // ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "вокруг такого
+  // события рисуй красную квадратную зону радиусом 500 м") - только вокруг
+  // ПЕРЕКРЫТИЙ (is_closure), не обычных аварий - квадрат 500х500м в каждую
+  // сторону от точки (L.rectangle по расчитанным из метров градусам).
+  const ROAD_CLOSURE_ZONE_RADIUS_METERS = 500;
+  function closureZoneBounds(lat, lon) {{
+    const metersPerDegLat = 111320;
+    const dLat = ROAD_CLOSURE_ZONE_RADIUS_METERS / metersPerDegLat;
+    const dLon = ROAD_CLOSURE_ZONE_RADIUS_METERS / (metersPerDegLat * Math.cos(lat * Math.PI / 180));
+    return [[lat - dLat, lon - dLon], [lat + dLat, lon + dLon]];
+  }}
   async function loadRoadEvents() {{
     try {{
       const resp = await fetch(`/map/road_events?city=${{encodeURIComponent(city)}}`);
@@ -9820,6 +9831,12 @@ def map_webapp_html():
           popup += `<div class="time">${{t.toLocaleTimeString('ru-RU', {{ hour: '2-digit', minute: '2-digit' }})}}</div>`;
         }}
         popup += `</div>`;
+        if (ev.is_closure) {{
+          const zone = L.rectangle(closureZoneBounds(ev.lat, ev.lon), {{
+            color: '#e53935', weight: 1, fillColor: '#e53935', fillOpacity: 0.18,
+          }}).addTo(map);
+          roadEventMarkers.push(zone);
+        }}
         const marker = L.marker([ev.lat, ev.lon], {{ icon }}).bindPopup(popup).addTo(map);
         roadEventMarkers.push(marker);
       }});
@@ -11160,7 +11177,10 @@ MAP_ROAD_EVENTS_API_PATH = '/map/road_events'
 # быстро - снимается с карты уже через 3ч, чтобы не захламлять её старыми
 # метками. Данные при этом собираются (fetch_road_events.py) с окном 24ч -
 # этого достаточно с запасом для более долгого TTL перекрытий.
-MAP_CLOSURE_TTL_HOURS = 24
+# ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя - "держи их на карте не
+# больше 3 часов") - перекрытия теперь держатся на карте столько же, сколько
+# обычные аварии (было 24ч).
+MAP_CLOSURE_TTL_HOURS = 3
 MAP_INCIDENT_TTL_HOURS = 3
 
 async def handle_map_road_events_api(request):
