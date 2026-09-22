@@ -6416,7 +6416,12 @@ def score_station_candidate(city, code, station, category):
     label = get_train_load_label(load)
     if label == 'ЕХАТЬ':
         reasons.append("стоит подъехать")
-    return {'label': f"🚆 {station['name']}", 'score': load, 'reasons': reasons, 'closed': False, 'advice': None}
+    coords = station.get('coords')
+    return {
+        'label': f"🚆 {station['name']}", 'score': load, 'reasons': reasons, 'closed': False, 'advice': None,
+        'lat': coords[0] if coords else None,
+        'lon': coords[1] if coords else None,
+    }
 
 # ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя, скриншот "Куда ехать" -
 # "рейсов мало в домодедово ехать далеко идет дождь лучше в городе ловить
@@ -6458,6 +6463,42 @@ def airport_distance_penalty(icao, origin_lat, origin_lon):
     if dist_km <= AIRPORT_DISTANCE_PENALTY_FREE_KM:
         return 1.0, dist_km
     return AIRPORT_DISTANCE_PENALTY_FREE_KM / dist_km, dist_km
+
+# ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "у каждого из пяти
+# мест нужно писать расстояние... рассчитай время в пути исходя из того,
+# что средняя скорость в городе 80 км/ч") - единая оценка времени в пути
+# для ВСЕХ кандидатов "Куда ехать" (аэропорты/вокзалы/районы/город/афиша),
+# считается централизованно в compute_where_to_go (см. ниже), а не в
+# каждой score_*_candidate функции отдельно.
+AVG_CITY_SPEED_KMH = 80
+
+def eta_minutes_from_distance(dist_km):
+    if dist_km is None:
+        return None
+    return max(1, round(dist_km / AVG_CITY_SPEED_KMH * 60))
+
+# Радиус, в котором сообщение о перекрытии (is_closure=True в ленте ДТП,
+# см. fetch_road_events.py) считается "рядом" с конкретным кандидатом
+# "Куда ехать" - по просьбе пользователя (22.09.2026): "если перекрытия в
+# той стороне, куда показываешь - обязательно пиши, что там возможно
+# перекрытие". Сообщения без геокоординат (адрес не удалось распознать) в
+# эту проверку не попадают - они по-прежнему учтены только в общем счётчике
+# count_active_road_closures в подвале сводки.
+CANDIDATE_CLOSURE_RADIUS_KM = 6
+
+def get_nearby_road_closures(city, lat, lon, radius_km=CANDIDATE_CLOSURE_RADIUS_KM):
+    if lat is None or lon is None:
+        return []
+    nearby = []
+    for e in get_road_events_for_city(city):
+        if not e.get('is_closure'):
+            continue
+        e_lat, e_lon = e.get('lat'), e.get('lon')
+        if e_lat is None or e_lon is None:
+            continue
+        if haversine_km(lat, lon, e_lat, e_lon) <= radius_km:
+            nearby.append(e)
+    return nearby
 
 # ICAO Шереметьево - по просьбе пользователя (22.09.2026) получает
 # небольшой множитель к score в "Куда ехать" (см. score_airport_candidate
@@ -6530,15 +6571,17 @@ async def score_airport_candidate(city, airport, category, user_lat=None, user_l
         score *= 0.6
 
     if user_lat is not None and user_lon is not None:
-        origin_lat, origin_lon, origin_label = user_lat, user_lon, "от тебя"
+        origin_lat, origin_lon = user_lat, user_lon
     else:
-        city_coords = RAIN_CITY_COORDS.get(city)
-        origin_lat, origin_lon = (city_coords or (None, None))
-        origin_label = "от центра города"
-    penalty, dist_km = airport_distance_penalty(icao, origin_lat, origin_lon)
-    if dist_km is not None and penalty < 1.0:
+        origin_lat, origin_lon = (RAIN_CITY_COORDS.get(city) or (None, None))
+    # Текст расстояния/времени в пути и штраф закрытий больше не считаются
+    # здесь - см. централизованный проход по всем кандидатам в
+    # compute_where_to_go (единый формат для аэропортов/вокзалов/районов/
+    # города/афиши, ДОБАВЛЕНО 22.09.2026). Здесь остаётся только сам
+    # множитель штрафа к score (влияет на ранжирование).
+    penalty, _dist_km = airport_distance_penalty(icao, origin_lat, origin_lon)
+    if penalty < 1.0:
         score *= penalty
-        reasons.append(f"🚗 ~{round(dist_km)} км {origin_label} - дальше ехать")
 
     # ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя) - Шереметьево
     # (SVO) в Москве стабильно даёт больше заказов, чем показывает голая
@@ -6551,7 +6594,12 @@ async def score_airport_candidate(city, airport, category, user_lat=None, user_l
         score *= SVO_PRIORITY_BONUS_MULTIPLIER
         reasons.append("⭐ обычно больше заказов")
 
-    return {'label': airport['name'], 'score': score, 'reasons': reasons, 'closed': False, 'advice': None}
+    airport_coords = AIRPORT_COORDS.get(icao)
+    return {
+        'label': airport['name'], 'score': score, 'reasons': reasons, 'closed': False, 'advice': None,
+        'lat': airport_coords[0] if airport_coords else None,
+        'lon': airport_coords[1] if airport_coords else None,
+    }
 
 # Развёрнутая рекомендация по типам заведений для "Город/центр" - по
 # просьбе пользователя (21.09.2026): просто "повышенный спрос" мало что
@@ -6686,7 +6734,7 @@ def get_city_advice(city, level, category=None):
 # заметно меньше, чем у аэропортов (AIRPORT_DISTANCE_PENALTY_FREE_KM=30),
 # т.к. районы внутри одного города и разница даже в 10-15 км уже заметно
 # сказывается на времени подачи. За пределами этого радиуса штраф линейно
-# режет скорректированный балл района - см. score_district_candidate.
+# режет скорректированный балл района - см. score_district_candidates.
 DISTRICT_DEMAND_PENALTY_FREE_KM = 8
 
 def district_distance_penalty(dist_km):
@@ -6696,22 +6744,25 @@ def district_distance_penalty(dist_km):
         return 1.0
     return DISTRICT_DEMAND_PENALTY_FREE_KM / dist_km
 
-async def score_district_candidate(city, category, user_lat=None, user_lon=None):
-    """Кандидат "Город/центр" для Москвы такси/Ultima (ДОБАВЛЕНО 22.09.2026,
-    прямая просьба пользователя): вместо общей эвристики по часу пика
-    (score_city_candidate) теперь берём РЕАЛЬНЫЙ лучший район из
-    загруженной пользователем матрицы спроса (см. get_moscow_district_demand/
-    moscow_district_demand.json), с учётом расстояния от текущей позиции
-    водителя - район выбирается по спросу, скорректированному на удалённость
-    (см. district_distance_penalty), чтобы не отправлять водителя на другой
-    конец города ради района с чуть более высоким % спроса. Если данных нет
-    (файл не загрузился) или подходящего района на текущий час/день не
-    нашлось - откатываемся на старый score_city_candidate, чтобы "Куда
-    ехать" не осталась без кандидата "Город/центр" вообще."""
+async def score_district_candidates(city, category, user_lat=None, user_lon=None, limit=3):
+    """Кандидаты "Город/центр" для Москвы такси/Ultima - ДОБАВЛЕНО
+    22.09.2026, прямая просьба пользователя: вместо общей эвристики по часу
+    пика (score_city_candidate) и вместо ОДНОГО лучшего района (первая
+    версия этой фичи в тот же день) теперь берём ТОП-N (по умолчанию 3, по
+    просьбе пользователя - "выдавай хотя бы три перспективных района")
+    районов из загруженной пользователем матрицы спроса (см.
+    get_moscow_district_demand/moscow_district_demand.json), с учётом
+    расстояния от текущей позиции водителя - районы ранжируются по спросу,
+    скорректированному на удалённость (см. district_distance_penalty),
+    чтобы не отправлять водителя на другой конец города ради района с чуть
+    более высоким % спроса. Если данных нет (файл не загрузился) или
+    подходящего района на текущий час/день не нашлось - откатываемся на
+    старый список из одного score_city_candidate, чтобы "Куда ехать" не
+    осталась совсем без кандидата "Город/центр"."""
     table = get_moscow_district_demand()
     indices = MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES.get(category) if table else None
     if not table or not indices:
-        return await score_city_candidate(city, category=category)
+        return [await score_city_candidate(city, category=category)]
 
     now = get_city_now(city)
     weekday = str(now.weekday())
@@ -6724,13 +6775,11 @@ async def score_district_candidate(city, category, user_lat=None, user_lon=None)
         pass
 
     if user_lat is not None and user_lon is not None:
-        origin_lat, origin_lon, origin_label = user_lat, user_lon, "от тебя"
+        origin_lat, origin_lon = user_lat, user_lon
     else:
-        city_coords = RAIN_CITY_COORDS.get(city)
-        origin_lat, origin_lon = (city_coords or (None, None))
-        origin_label = "от центра города"
+        origin_lat, origin_lon = (RAIN_CITY_COORDS.get(city) or (None, None))
 
-    best = None
+    scored = []
     for name, entry in table.get('districts', {}).items():
         slots = entry.get('weekday', {}).get(weekday, [])
         demand = None
@@ -6747,21 +6796,24 @@ async def score_district_candidate(city, category, user_lat=None, user_lon=None)
         if origin_lat is not None and origin_lon is not None:
             dist_km = haversine_km(origin_lat, origin_lon, entry['lat'], entry['lon'])
         adjusted = demand * district_distance_penalty(dist_km)
-        if best is None or adjusted > best['adjusted']:
-            best = {'name': name, 'demand': demand, 'dist_km': dist_km, 'adjusted': adjusted}
+        scored.append({'name': name, 'demand': demand, 'lat': entry['lat'], 'lon': entry['lon'], 'adjusted': adjusted})
 
-    if best is None:
-        return await score_city_candidate(city, category=category)
+    if not scored:
+        return [await score_city_candidate(city, category=category)]
 
-    reasons = [f"{best['demand']}% спроса в районе"]
-    if rain_now:
-        reasons.append("🌧 осадки сейчас - спрос выше обычного")
-    if best['dist_km'] is not None and best['dist_km'] > DISTRICT_DEMAND_PENALTY_FREE_KM:
-        reasons.append(f"🚗 ~{round(best['dist_km'])} км {origin_label} - дальше ехать")
-
-    level = 'peak' if best['demand'] >= 90 else ('high' if best['demand'] >= 70 else ('mid' if best['demand'] >= 40 else 'low'))
-    advice = get_city_advice(city, level, category=category)
-    return {'label': f"Район {best['name']}", 'score': best['adjusted'], 'reasons': reasons, 'closed': False, 'advice': advice}
+    scored.sort(key=lambda d: d['adjusted'], reverse=True)
+    result = []
+    for d in scored[:limit]:
+        reasons = [f"{d['demand']}% спроса в районе"]
+        if rain_now:
+            reasons.append("🌧 осадки сейчас - спрос выше обычного")
+        level = 'peak' if d['demand'] >= 90 else ('high' if d['demand'] >= 70 else ('mid' if d['demand'] >= 40 else 'low'))
+        advice = get_city_advice(city, level, category=category)
+        result.append({
+            'label': f"Район {d['name']}", 'score': d['adjusted'], 'reasons': reasons, 'closed': False,
+            'advice': advice, 'lat': d['lat'], 'lon': d['lon'],
+        })
+    return result
 
 async def score_city_candidate(city, category=None):
     """Балл для обобщённого "Город/центр" - на основе часа пика + погоды.
@@ -6809,7 +6861,12 @@ async def score_city_candidate(city, category=None):
                 reasons.append(f"{upcoming['emoji']} скоро осадки - спрос скоро вырастет")
 
     advice = get_city_advice(city, level, category=category)
-    return {'label': 'Город / центр', 'score': score, 'reasons': reasons, 'closed': False, 'advice': advice}
+    city_coords = RAIN_CITY_COORDS.get(city)
+    return {
+        'label': 'Город / центр', 'score': score, 'reasons': reasons, 'closed': False, 'advice': advice,
+        'lat': city_coords[0] if city_coords else None,
+        'lon': city_coords[1] if city_coords else None,
+    }
 
 # Концертное событие начинает давать всплеск спроса ЗА CONCERT_EVENT_LEAD_HOURS
 # часов до начала (люди подъезжают заранее) и ОСТАЁТСЯ актуальным ещё
@@ -6854,7 +6911,10 @@ def score_concert_event_candidates(city, category, limit=3):
         if post.get('place'):
             reasons.append(post['place'])
         label = f"🎤 {post.get('title') or 'Мероприятие'}"
-        candidates.append({'label': label, 'score': score, 'reasons': reasons, 'closed': False, 'advice': None})
+        candidates.append({
+            'label': label, 'score': score, 'reasons': reasons, 'closed': False, 'advice': None,
+            'lat': post.get('lat'), 'lon': post.get('lon'),
+        })
     candidates.sort(key=lambda c: c['score'], reverse=True)
     return candidates[:limit]
 
@@ -6932,17 +6992,51 @@ async def compute_where_to_go(city, category, user_lat=None, user_lon=None):
     # этом случае, не падая).
     try:
         # ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя) - для Москвы
-        # такси/Ultima кандидат "Город/центр" заменён на реальный лучший
-        # район (см. score_district_candidate), посчитанный по загруженной
-        # пользователем матрице спроса + удалённости от текущей позиции
-        # водителя. Для остальных городов/категорий - прежняя эвристика по
-        # часу пика (score_city_candidate).
+        # такси/Ultima кандидат "Город/центр" заменён на ТОП-3 реальных
+        # района (см. score_district_candidates - изначально была версия с
+        # одним лучшим районом, пользователь попросил "хотя бы три"),
+        # посчитанных по загруженной пользователем матрице спроса +
+        # удалённости от текущей позиции водителя. Для остальных городов/
+        # категорий - прежняя эвристика по часу пика (score_city_candidate).
         if city == 'moscow' and category in ('taxi', 'ultima'):
-            candidates.append(await score_district_candidate(city, category, user_lat=user_lat, user_lon=user_lon))
+            candidates.extend(await score_district_candidates(city, category, user_lat=user_lat, user_lon=user_lon, limit=3))
         else:
             candidates.append(await score_city_candidate(city, category=category))
     except Exception:
         logger.exception(f"❌ Не удалось посчитать кандидата 'Город/центр' для 'Куда ехать' ({city}/{category})")
+
+    # ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "обязательно
+    # нужно писать расстояние до того района... рассчитай время в пути
+    # исходя из скорости 80 км/ч" + "если перекрытия в той стороне - пиши,
+    # что возможно перекрытие") - единый проход по ВСЕМ уже собранным
+    # кандидатам (аэропорты/вокзалы/районы/город/афиша), у кого есть
+    # координаты (см. 'lat'/'lon' в каждой score_*_candidate выше):
+    # дописываем строку расстояния+ETA от текущей позиции водителя (или
+    # условного центра города, если позиции нет) и, если рядом (см.
+    # CANDIDATE_CLOSURE_RADIUS_KM) есть активное перекрытие из ленты ДТП -
+    # явное предупреждение прямо в карточке этого кандидата, а не только
+    # общим счётчиком в подвале сводки (см. count_active_road_closures в
+    # format_where_to_go_text/handle_where_to_go_data_api).
+    if user_lat is not None and user_lon is not None:
+        origin_lat, origin_lon, origin_label = user_lat, user_lon, "от тебя"
+    else:
+        city_coords = RAIN_CITY_COORDS.get(city)
+        origin_lat, origin_lon = (city_coords or (None, None))
+        origin_label = "от центра города"
+    for c in candidates:
+        lat, lon = c.get('lat'), c.get('lon')
+        if lat is None or lon is None:
+            continue
+        if origin_lat is not None and origin_lon is not None:
+            dist_km = haversine_km(origin_lat, origin_lon, lat, lon)
+            eta_min = eta_minutes_from_distance(dist_km)
+            c['reasons'].append(f"🚗 ~{round(dist_km)} км {origin_label} · ~{eta_min} мин в пути")
+        try:
+            if get_nearby_road_closures(city, lat, lon):
+                c['reasons'].append("⚠️ рядом возможны перекрытия - см. «⛔ Дорожные события»")
+        except Exception:
+            logger.exception(f"❌ Не удалось проверить перекрытия рядом с кандидатом 'Куда ехать' ({city})")
+
     candidates.sort(key=lambda c: c['score'], reverse=True)
     return candidates
 
@@ -6961,6 +7055,35 @@ def _where_to_go_score_bar(score):
     return '●' * filled + '○' * (5 - filled)
 
 WHERE_TO_GO_DIVIDER = "┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄"
+
+def where_to_go_keyboard(candidates):
+    """Инлайн-кнопки "🚗 ПОЕХАЛИ" под текстовой сводкой "Куда ехать" -
+    ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "аэропорты и
+    районы помечай кнопкой поехали чтобы переводила на Яндекс.Навигатор").
+    По одной кнопке на каждый ОТКРЫТЫЙ кандидат с известными координатами
+    (см. 'lat'/'lon' в каждой score_*_candidate - у части концертных
+    событий координат может не быть, если адрес не удалось геокодировать,
+    см. fetch_concert_events.py, для них кнопки просто не будет). Номер и
+    эмодзи у кнопки совпадают с тем, что показано в тексте сводки (см.
+    WHERE_TO_GO_RANK_EMOJI ниже), чтобы кнопка X по порядку соответствовала
+    варианту X в тексте выше."""
+    open_candidates = [c for c in candidates if not c['closed']]
+    rows = []
+    for i, c in enumerate(open_candidates):
+        lat, lon = c.get('lat'), c.get('lon')
+        if lat is None or lon is None:
+            continue
+        if i == 0:
+            rank = '🏆'
+        elif i - 1 < len(WHERE_TO_GO_RANK_EMOJI):
+            rank = WHERE_TO_GO_RANK_EMOJI[i - 1]
+        else:
+            rank = f"{i + 1}."
+        label = c['label']
+        if len(label) > 26:
+            label = label[:25] + "…"
+        rows.append([InlineKeyboardButton(text=f"🚗 {rank} Поехали — {label}", url=yandex_navi_url(lat, lon))])
+    return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
 
 def format_where_to_go_text(city, category, candidates, extra_header=None):
     """extra_header - по просьбе пользователя (20.09.2026): позволяет
@@ -7102,12 +7225,16 @@ async def send_where_to_go(message: types.Message, user_id, city, category, extr
             return
         anim_task.cancel()
         text = format_where_to_go_text(city, category, candidates, extra_header=extra_header)
+        # ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя) - кнопки "🚗
+        # ПОЕХАЛИ" на маршрут в Яндекс Навигаторе/Картах под каждым открытым
+        # кандидатом с известными координатами (см. where_to_go_keyboard).
+        keyboard = where_to_go_keyboard(candidates)
         try:
-            await status_msg.edit_text(text, parse_mode='Markdown')
+            await status_msg.edit_text(text, parse_mode='Markdown', reply_markup=keyboard)
         except Exception:
             # status_msg уже мог быть удалён (см. комментарий выше) -
             # отправляем результат новым сообщением, чтобы он точно дошёл.
-            await message.answer(text, parse_mode='Markdown')
+            await message.answer(text, parse_mode='Markdown', reply_markup=keyboard)
     finally:
         _where_to_go_in_progress.discard(user_id)
 
@@ -7514,21 +7641,41 @@ async def start_shift_and_notify(target, user_id, category, city, tariffs):
         "*«Транслировать геопозицию»* → *«Пока не отключу»*.\n"
         "_Без трансляции секундомер идёт как обычно, но км и показ на карте не сработают._"
     )
-    # По просьбе пользователя (20.09.2026): сообщение "СМЕНА НАЧАТА" и
-    # сводка "Куда ехать" - теперь ОДНО сообщение (раньше были два
-    # отдельных) - см. extra_header у send_where_to_go/
-    # format_where_to_go_text. Сначала обновляем клавиатуру коротким
-    # тех.сообщением (Reply-клавиатуру нельзя приложить к тому же
-    # сообщению, что инлайн-результат "Куда ехать"). Раньше это было
-    # только для категорий с аэропортами - теперь доступно всем, включая
-    # courier/cargo (у них теперь тоже есть сводка "Куда ехать" на
-    # своих часах пика, см. compute_where_to_go).
+    # Сначала обновляем клавиатуру коротким тех.сообщением (Reply-клавиатуру
+    # нельзя приложить к тому же сообщению, что инлайн-кнопка ниже).
     await target("✅ Смена начата", reply_markup=services_keyboard(category, city, user_id))
-    # send_where_to_go ожидает объект message (зовёт message.answer(...)
-    # внутри) - target у нас уже сама функция answer (message.answer или
-    # callback_query.message.answer), поэтому оборачиваем в простой объект с
-    # атрибутом .answer вместо неё самой (см. _AnswerFuncAsMessage ниже).
-    await send_where_to_go(_AnswerFuncAsMessage(target), user_id, city, category, extra_header=shift_header)
+    # ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя) - раньше сразу же
+    # следом отправлялась ПОЛНАЯ сводка "Куда ехать" одним длинным
+    # сообщением (см. extra_header у send_where_to_go/format_where_to_go_text
+    # выше, было добавлено 20.09.2026 как раз чтобы объединить оба
+    # сообщения в одно). Пользователь попросил сделать короче: полную
+    # сводку теперь не шлём при каждом старте смены сама по себе - вместо
+    # неё короткое приглашение с кнопкой на WebApp "Куда ехать" (который
+    # считает по РЕАЛЬНОЙ текущей геопозиции браузера, полученной внутри
+    # самого WebApp - см. where_to_go_webapp_html/getCurrentPositionQuiet, -
+    # а не по последнему пингу живой геопозиции смены, как текстовая
+    # версия). Если WebApp недоступен (PUBLIC_URL/город не заданы) -
+    # прежнее поведение как фолбэк, чтобы "Куда ехать" не пропала совсем.
+    if PUBLIC_URL and city and category:
+        where_to_go_url = f"{PUBLIC_URL}{WHERE_TO_GO_WEBAPP_PATH}?city={urllib.parse.quote(city)}&category={urllib.parse.quote(category)}"
+        cta_text = (
+            f"{shift_header}\n"
+            "▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓\n"
+            "🧭 Ассистент рассчитал для тебя план работы на сейчас - аэропорты, "
+            "районы и события, где сейчас выгоднее всего работать. Открой «Куда "
+            "ехать», чтобы увидеть маршрут и доехать за пару тапов."
+        )
+        cta_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="💰 КУДА ЕХАТЬ", web_app=WebAppInfo(url=where_to_go_url))]
+        ])
+        await target(cta_text, parse_mode='Markdown', reply_markup=cta_keyboard)
+    else:
+        # send_where_to_go ожидает объект message (зовёт message.answer(...)
+        # внутри) - target у нас уже сама функция answer (message.answer или
+        # callback_query.message.answer), поэтому оборачиваем в простой
+        # объект с атрибутом .answer вместо неё самой (см.
+        # _AnswerFuncAsMessage ниже).
+        await send_where_to_go(_AnswerFuncAsMessage(target), user_id, city, category, extra_header=shift_header)
 
 @router.callback_query(lambda c: c.data.startswith("shift_tariff_toggle_"))
 async def shift_tariff_toggle(callback_query: types.CallbackQuery):
@@ -11079,6 +11226,12 @@ def where_to_go_webapp_html():
   .cand .bar { font-size: 13px; margin: 3px 0; }
   .cand .reasons { font-size: 12.5px; color: #aaa; }
   .cand .advice { margin-top: 6px; font-size: 12px; padding: 7px 9px; }
+  .go-btn {
+    display: block; text-align: center; margin-top: 10px; padding: 10px 12px;
+    background: #FFC400; color: #000; font-weight: 700; font-size: 13.5px;
+    border-radius: 10px; text-decoration: none;
+  }
+  .cand .go-btn { margin-top: 8px; padding: 8px 10px; font-size: 12.5px; }
   .closed-box {
     margin-top: 14px; font-size: 12.5px; color: #999; background: #131313;
     border: 1px solid rgba(255,255,255,.08); border-radius: 10px; padding: 10px 12px;
@@ -11117,6 +11270,19 @@ def where_to_go_webapp_html():
     if (!advice) return '';
     const text = advice.charAt(0).toUpperCase() + advice.slice(1);
     return '<div class="advice">💡 ' + text + '.</div>';
+  }
+
+  // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "аэропорты и
+  // районы помечай кнопкой поехали чтобы переводила на Яндекс.Навигатор") -
+  // та же ссылка-схема, что и у текстовой версии (см. yandex_navi_url в
+  // Python) - обычный https://yandex.ru/maps/?rtext=~lat,lon&rtt=auto,
+  // Telegram/браузер сами откроют её в приложении Яндекс Карт/Навигатора,
+  // если оно установлено. Без координат (часть концертных событий без
+  // геокодированного адреса) кнопки просто не будет.
+  function renderGoButton(c) {
+    if (c.lat === null || c.lat === undefined || c.lon === null || c.lon === undefined) return '';
+    const url = 'https://yandex.ru/maps/?rtext=~' + c.lat + ',' + c.lon + '&rtt=auto';
+    return '<a class="go-btn" href="' + url + '" target="_blank" rel="noopener">🚗 ПОЕХАЛИ</a>';
   }
 
   // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "сделай это на
@@ -11185,7 +11351,8 @@ def where_to_go_webapp_html():
           '<div class="label">' + best.label + '</div>' +
           '<div class="bar">' + scoreBar(best.score) + '</div>' +
           '<div class="reasons">' + best.reasons.join(', ') + '</div>' +
-          renderAdvice(best.advice);
+          renderAdvice(best.advice) +
+          renderGoButton(best);
         content.appendChild(bestBox);
 
         const rest = data.open.slice(1);
@@ -11205,6 +11372,7 @@ def where_to_go_webapp_html():
                 '<div class="bar">' + scoreBar(c.score) + '</div>' +
                 '<div class="reasons">' + c.reasons.join(', ') + '</div>' +
                 renderAdvice(c.advice) +
+                renderGoButton(c) +
               '</div>';
             content.appendChild(row);
           });
@@ -11288,7 +11456,10 @@ async def handle_where_to_go_data_api(request):
         footnote = f"🚧 Сейчас в городе {closures_count} активных {word}. " + footnote
 
     def _pack(c):
-        return {'label': c['label'], 'score': c['score'], 'reasons': c['reasons'], 'advice': c.get('advice')}
+        return {
+            'label': c['label'], 'score': c['score'], 'reasons': c['reasons'], 'advice': c.get('advice'),
+            'lat': c.get('lat'), 'lon': c.get('lon'),
+        }
 
     return web.json_response({
         'city_name': city_name,
