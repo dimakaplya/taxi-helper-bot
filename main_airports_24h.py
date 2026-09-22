@@ -6418,6 +6418,37 @@ def score_station_candidate(city, code, station, category):
         reasons.append("стоит подъехать")
     return {'label': f"🚆 {station['name']}", 'score': load, 'reasons': reasons, 'closed': False, 'advice': None}
 
+# ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя, скриншот "Куда ехать" -
+# "рейсов мало в домодедово ехать далеко идет дождь лучше в городе ловить
+# заказы") - раньше score аэропорта считался ТОЛЬКО по % загрузки прилётов
+# относительно пропускной способности терминала/зоны, совсем без учёта
+# того, что до аэропорта может быть далеко ехать. При небольшой пропускной
+# способности зоны даже немного рейсов (9 в примере с Домодедово) давали
+# высокий % загрузки, и аэропорт обгонял "Город/центр" по баллу, хотя ехать
+# до него дольше, а в городе как раз шёл дождь (который и так поднимает
+# балл "Города" - см. score_city_candidate). Теперь штрафуем score
+# аэропорта за удалённость от центра города (RAIN_CITY_COORDS): в пределах
+# AIRPORT_DISTANCE_PENALTY_FREE_KM штрафа нет вовсе (Внуково/Шереметьево
+# почти не задеты), дальше - понижающий коэффициент
+# AIRPORT_DISTANCE_PENALTY_FREE_KM/расстояние, и причина явно видна в самой
+# карточке ("N км от центра"), а не просто "магически" теряет место в
+# рейтинге без объяснения.
+AIRPORT_DISTANCE_PENALTY_FREE_KM = 30
+
+def airport_distance_penalty(city, icao):
+    """Коэффициент штрафа (0-1] к score аэропорта за удалённость от центра
+    города, и расстояние в км (для текста причины) - см. комментарий выше.
+    Возвращает (1.0, None), если координаты города/аэропорта неизвестны -
+    штраф в этом случае просто не применяется."""
+    city_coords = RAIN_CITY_COORDS.get(city)
+    airport_coords = AIRPORT_COORDS.get(icao)
+    if not city_coords or not airport_coords:
+        return 1.0, None
+    dist_km = haversine_km(city_coords[0], city_coords[1], airport_coords[0], airport_coords[1])
+    if dist_km <= AIRPORT_DISTANCE_PENALTY_FREE_KM:
+        return 1.0, dist_km
+    return AIRPORT_DISTANCE_PENALTY_FREE_KM / dist_km, dist_km
+
 async def score_airport_candidate(city, airport, category):
     """Считает балл и обоснование для одного аэропорта города. Возвращает
     dict {label, score, reasons: [str, ...], closed: bool}. relevant_class -
@@ -6477,6 +6508,11 @@ async def score_airport_candidate(city, airport, category):
                 worst_range = range_str
     if worst_range:
         score *= 0.6
+
+    penalty, dist_km = airport_distance_penalty(city, icao)
+    if dist_km is not None and penalty < 1.0:
+        score *= penalty
+        reasons.append(f"🚗 ~{round(dist_km)} км от центра города - дальше ехать")
 
     return {'label': airport['name'], 'score': score, 'reasons': reasons, 'closed': False, 'advice': None}
 
