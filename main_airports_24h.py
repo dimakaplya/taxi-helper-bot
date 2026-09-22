@@ -4183,10 +4183,14 @@ def services_keyboard(category=None, city=None, user_id=None):
     # дожидаясь блокировки, в одном ряду с реферальной программой.
     buttons.append([KeyboardButton(text="💳 ОПЛАТИТЬ ПОДПИСКУ"), KeyboardButton(text="🤝 РЕФЕРАЛЬНАЯ ПРОГРАММА")])
     # "❓ ПОДДЕРЖКА" (по просьбе пользователя, 22.09.2026 - "поддержка,
-    # которая сама будет отвечать в боте") - простой FAQ без ИИ, см.
-    # SUPPORT_FAQ_ITEMS/show_support_menu выше.
-    buttons.append([KeyboardButton(text="❓ ПОДДЕРЖКА")])
-    buttons.append([KeyboardButton(text="← НАЗАД"), KeyboardButton(text="🏙 ВЫБОР ГОРОДА")])
+    # которая сама будет отвечать в боте") - ИЗМЕНЕНО 23.09.2026 (прямая
+    # просьба пользователя - "на главной меню вместо кнопки назад перенеси
+    # кнопку поддержка"): раньше была отдельной строкой над "← НАЗАД"/
+    # "🏙 ВЫБОР ГОРОДА", теперь встала НА МЕСТО "← НАЗАД" в нижнем ряду -
+    # своей отдельной строки больше нет. "🏙 ВЫБОР ГОРОДА" уже даёт по сути
+    # тот же эффект возврата (открывает выбор города), поэтому отдельная
+    # кнопка "Назад" на этом (главном) экране была избыточна.
+    buttons.append([KeyboardButton(text="❓ ПОДДЕРЖКА"), KeyboardButton(text="🏙 ВЫБОР ГОРОДА")])
     return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=buttons)
 
 # ==================== МОДУЛЬ "ИНСТРУМЕНТЫ ВОДИТЕЛЯ" (бывш. "Курьеру") ====================
@@ -15938,7 +15942,23 @@ async def subscription_expiry_checker():
 # подтверждённые платежи подписки, которых пока не бывает, пока
 # SUBSCRIPTION_ENFORCEMENT_LIVE = False. Включать оба флага - отдельное
 # решение пользователя, когда Tinkoff будет настроен.
-REFERRAL_PROGRAM_LIVE = False
+#
+# ВКЛЮЧЕНО 23.09.2026 (прямая просьба пользователя - "сразу выведи две
+# кнопки с реферальной программой для двух категорий под кнопкой
+# реферальная программа и запароль юрлиц введи пароль 261194"): теперь при
+# нажатии "🤝 РЕФЕРАЛЬНАЯ ПРОГРАММА" сразу показываются реальная ссылка/
+# статистика (не заглушка), с выбором категории начислений - см.
+# show_referral_program/referral_category_choice_keyboard ниже. Само
+# начисление денег (distribute_referral_earnings) по-прежнему не сработает
+# само по себе, пока нет подтверждённых платежей (SUBSCRIPTION_ENFORCEMENT_LIVE),
+# так что включение этого флага безопасно.
+REFERRAL_PROGRAM_LIVE = True
+# Пароль для переключения на схему "юр.лицо" (40%/20%/10%, см.
+# REFERRAL_RATES_PERCENT) - вводится пользователем в чат при выборе этой
+# категории (см. referral_category_legal_entity_callback/AwaitingReferralLegalPassword
+# ниже), чтобы обычные пользователи не переключили себе более выгодную
+# схему без ведома админа.
+REFERRAL_LEGAL_ENTITY_PASSWORD = "261194"
 # ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя): теперь ДВЕ схемы
 # начислений на выбор, по 3 уровня в каждой (было 2 уровня, единая схема
 # 40%/50%-от-1-уровня). Какую схему применять к КОНКРЕТНОМУ человеку -
@@ -16172,7 +16192,7 @@ REFERRAL_SHARE_TEXT_TEMPLATE = (
 )
 
 
-def referral_menu_keyboard(referral_link):
+def referral_menu_keyboard(referral_link, current_type=REFERRAL_DEFAULT_TYPE):
     # "🔗 МОЯ ССЫЛКА"/"📤 ПОДЕЛИТЬСЯ ССЫЛКОЙ" - по прямой просьбе пользователя
     # (20.09.2026: "нужна кнопка... чтобы люди понимали какую ссылку давать
     # чтобы делиться"). "Поделиться" - через switch_inline_query: открывает
@@ -16181,8 +16201,19 @@ def referral_menu_keyboard(referral_link):
     # для обычной кнопки бота (Telegram не даёт ботам напрямую копировать
     # текст в буфер обмена). "Моя ссылка" - просто прислать ссылку отдельным
     # сообщением, чтобы было удобно скопировать долгим нажатием.
+    #
+    # ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "сразу выведи две
+    # кнопки с реферальной программой для двух категорий под кнопкой
+    # реферальная программа"): выбор схемы начислений ПРЯМО здесь, сверху -
+    # "Юр.лицо" защищена паролем (см. referral_category_legal_start/
+    # REFERRAL_LEGAL_ENTITY_PASSWORD), "Обычная" переключает сразу без
+    # подтверждения. Текущий выбор отмечен галочкой.
     share_text = REFERRAL_SHARE_TEXT_TEMPLATE.format(link=referral_link)
+    individual_label = ("✅ " if current_type == 'individual' else "") + "👤 Обычная (30/15/5%)"
+    legal_label = ("✅ " if current_type == 'legal_entity' else "") + "🏢 Юр.лицо (40/20/10%)"
     return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=individual_label, callback_data="referral_category_individual")],
+        [InlineKeyboardButton(text=legal_label, callback_data="referral_category_legal_start")],
         [InlineKeyboardButton(text="🔗 МОЯ ССЫЛКА", callback_data="referral_link_show")],
         [InlineKeyboardButton(text="📤 ПОДЕЛИТЬСЯ ССЫЛКОЙ", switch_inline_query=share_text)],
         [InlineKeyboardButton(text="📋 МОИ РЕФЕРАЛЫ", callback_data="referral_list")],
@@ -16245,7 +16276,132 @@ async def show_referral_program(message: types.Message):
         f"Вывод - только на карту, комиссия сервиса {REFERRAL_WITHDRAWAL_FEE_PERCENT}%, "
         f"минимум {REFERRAL_MIN_WITHDRAWAL_RUB}₽."
     )
-    await message.answer(text, reply_markup=referral_menu_keyboard(link), parse_mode='Markdown')
+    await message.answer(text, reply_markup=referral_menu_keyboard(link, get_referrer_type(user_id)), parse_mode='Markdown')
+
+
+async def _refresh_referral_menu_message(message, user_id):
+    """Перерисовывает экран реферальной программы (текст + клавиатура) после
+    смены категории начислений - используется и при успешном переключении, и
+    когда пользователь просто нажал на уже выбранную категорию повторно."""
+    stats = get_referral_stats(user_id)
+    me = await bot.get_me()
+    link = get_referral_link(me.username, user_id)
+    my_rates = REFERRAL_RATES_PERCENT[get_referrer_type(user_id)]
+    text = (
+        "🤝 *Реферальная программа*\n"
+        f"{WHERE_TO_GO_DIVIDER}\n\n"
+        f"🔗 Твоя ссылка (отправляй друзьям):\n`{link}`\n\n"
+        f"👥 Рефералов 1-го уровня: {stats['level1_count']}\n"
+        f"👥 Рефералов 2-го уровня: {stats['level2_count']}\n"
+        f"👥 Рефералов 3-го уровня: {stats['level3_count']}\n"
+        f"🌳 Всего людей в твоей ветке (любая глубина): {stats['downline_total']}\n"
+        f"{WHERE_TO_GO_DIVIDER}\n\n"
+        f"💰 Баланс: {stats['balance'] / 100:.0f}₽\n"
+        f"📈 Всего заработано: {stats['total_earned'] / 100:.0f}₽\n"
+        f"📤 Всего выведено: {stats['total_withdrawn'] / 100:.0f}₽\n"
+        f"{WHERE_TO_GO_DIVIDER}\n\n"
+        f"_Как это работает:_ {my_rates[0]}% с каждого ежемесячного платежа приглашённого "
+        f"тобой напрямую (1 уровень), {my_rates[1]}% с платежей его рефералов (2 уровень) и "
+        f"{my_rates[2]}% с платежей рефералов 2 уровня (3 уровень) - прямой процент от суммы "
+        f"платежа на каждом уровне. Начисляется каждый месяц, пока реферал платит подписку. "
+        f"Дальше 3 уровня деньги не идут, но всю ветку целиком видно в «📋 Мои рефералы».\n\n"
+        f"Вывод - только на карту, комиссия сервиса {REFERRAL_WITHDRAWAL_FEE_PERCENT}%, "
+        f"минимум {REFERRAL_MIN_WITHDRAWAL_RUB}₽."
+    )
+    markup = referral_menu_keyboard(link, get_referrer_type(user_id))
+    try:
+        await message.edit_text(text, reply_markup=markup, parse_mode='Markdown')
+    except Exception:
+        await message.answer(text, reply_markup=markup, parse_mode='Markdown')
+
+
+@router.callback_query(lambda c: c.data == "referral_category_individual")
+async def referral_category_individual(callback_query: types.CallbackQuery):
+    user_id = callback_query.from_user.id
+    set_referrer_type(user_id, 'individual')
+    user_state.get(user_id, {}).pop('awaiting_referral_legal_password', None)
+    try:
+        await callback_query.answer("Схема: обычная (30/15/5%)")
+    except Exception:
+        pass
+    await _refresh_referral_menu_message(callback_query.message, user_id)
+
+
+@router.callback_query(lambda c: c.data == "referral_category_legal_start")
+async def referral_category_legal_start(callback_query: types.CallbackQuery):
+    """Схема "юр.лицо" защищена паролем (по прямой просьбе пользователя,
+    23.09.2026 - "запароль юрлиц введи пароль 261194") - не переключаем
+    сразу, а просим ввести пароль текстом (см. referral_legal_password_flow
+    ниже, тот же паттерн ожидания текста, что и у referral_withdraw_flow)."""
+    user_id = callback_query.from_user.id
+    if get_referrer_type(user_id) == 'legal_entity':
+        try:
+            await callback_query.answer("Уже выбрана схема юр.лица")
+        except Exception:
+            pass
+        return
+    try:
+        await callback_query.answer()
+    except Exception:
+        pass
+    state = user_state.setdefault(user_id, {})
+    state['awaiting_referral_legal_password'] = True
+    await callback_query.message.answer(
+        "🔒 Схема «Юр.лицо» (40%/20%/10%) доступна по паролю. Введи пароль:",
+        reply_markup=referral_withdraw_cancel_keyboard()
+    )
+
+
+@router.message(lambda message: user_state.get(message.from_user.id, {}).get('awaiting_referral_legal_password'))
+async def referral_legal_password_flow(message: types.Message):
+    """Ловит ЛЮБОЙ текст, пока ждём пароль для схемы "юр.лицо" - должен
+    стоять РАНЬШЕ остальных текстовых хендлеров (тот же приём, что и
+    referral_withdraw_flow для заявки на вывод)."""
+    user_id = message.from_user.id
+    state = user_state[user_id]
+    text = (message.text or '').strip()
+    category = state.get('category')
+    city = state.get('city')
+
+    if text == "❌ ОТМЕНА":
+        state.pop('awaiting_referral_legal_password', None)
+        await message.answer("Отменено.", reply_markup=services_keyboard(category, city, user_id))
+        return
+
+    if text == REFERRAL_LEGAL_ENTITY_PASSWORD:
+        state.pop('awaiting_referral_legal_password', None)
+        set_referrer_type(user_id, 'legal_entity')
+        await message.answer(
+            "✅ Схема переключена на «Юр.лицо» (40%/20%/10%).",
+            reply_markup=services_keyboard(category, city, user_id)
+        )
+        me = await bot.get_me()
+        link = get_referral_link(me.username, user_id)
+        stats = get_referral_stats(user_id)
+        my_rates = REFERRAL_RATES_PERCENT['legal_entity']
+        text_out = (
+            "🤝 *Реферальная программа*\n"
+            f"{WHERE_TO_GO_DIVIDER}\n\n"
+            f"🔗 Твоя ссылка (отправляй друзьям):\n`{link}`\n\n"
+            f"👥 Рефералов 1-го уровня: {stats['level1_count']}\n"
+            f"👥 Рефералов 2-го уровня: {stats['level2_count']}\n"
+            f"👥 Рефералов 3-го уровня: {stats['level3_count']}\n"
+            f"🌳 Всего людей в твоей ветке (любая глубина): {stats['downline_total']}\n"
+            f"{WHERE_TO_GO_DIVIDER}\n\n"
+            f"💰 Баланс: {stats['balance'] / 100:.0f}₽\n"
+            f"📈 Всего заработано: {stats['total_earned'] / 100:.0f}₽\n"
+            f"📤 Всего выведено: {stats['total_withdrawn'] / 100:.0f}₽\n"
+            f"{WHERE_TO_GO_DIVIDER}\n\n"
+            f"_Как это работает:_ {my_rates[0]}% с каждого ежемесячного платежа приглашённого "
+            f"тобой напрямую (1 уровень), {my_rates[1]}% с платежей его рефералов (2 уровень) и "
+            f"{my_rates[2]}% с платежей рефералов 2 уровня (3 уровень).\n\n"
+            f"Вывод - только на карту, комиссия сервиса {REFERRAL_WITHDRAWAL_FEE_PERCENT}%, "
+            f"минимум {REFERRAL_MIN_WITHDRAWAL_RUB}₽."
+        )
+        await message.answer(text_out, reply_markup=referral_menu_keyboard(link, 'legal_entity'), parse_mode='Markdown')
+        return
+
+    await message.answer("❌ Неверный пароль. Попробуй ещё раз или нажми «❌ ОТМЕНА»:")
 
 
 @router.callback_query(lambda c: c.data == "referral_link_show")
