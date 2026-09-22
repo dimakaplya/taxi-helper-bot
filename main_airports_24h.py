@@ -16157,15 +16157,28 @@ def find_upcoming_precip_event(forecast, city):
     и только если там осадков нет - смотрим в hourly[] на "скоро начнётся"."""
     if not forecast:
         return None
-    current = forecast.get('current', {})
-    current_code = current.get('weathercode')
-    if current_code in PRECIP_WEATHERCODES:
-        name, weight, emoji = describe_weathercode(current_code)
-        return {'hour_offset': 0, 'time': current.get('time'), 'code': current_code, 'weight': weight, 'name': name, 'emoji': emoji, '_array_index': _current_hour_index(forecast, city)}
     hourly = forecast.get('hourly', {})
     times = hourly.get('time', [])
     codes = hourly.get('weathercode', [])
     base = _current_hour_index(forecast, city)
+    current = forecast.get('current', {})
+    current_code = current.get('weathercode')
+    if current_code in PRECIP_WEATHERCODES:
+        name, weight, emoji = describe_weathercode(current_code)
+        # ИСПРАВЛЕНО 22.09.2026 (жалоба пользователя - "постоянно шлёт пуш
+        # 'через 30 минут', хотя дождь идёт уже час") - раньше 'time' здесь
+        # был current.get('time'), т.е. "сырая" метка nowcast-снимка
+        # Open-Meteo, которая меняется на КАЖДОЕ обновление снепшота (раз в
+        # ~20 мин, см. weather_data_updater) - из-за этого check_rain_transitions
+        # видел "новое" время старта на каждом прогоне и слал повторный пуш
+        # с текстом "начался... через 30 минут" ВЕСЬ дождь, а не один раз в
+        # его начале. Теперь используем стабильную границу часа из hourly[]
+        # (times[base] - тот же час, что и current, но не меняется, пока не
+        # закончится) - тот же приём, что уже был в ветке hour_offset>0 ниже,
+        # так что event['time'] стабилен всё время, пока идёт один и тот же
+        # дождь, и повторный пуш шлётся только при реальном усилении.
+        stable_time = times[base] if base < len(times) else current.get('time')
+        return {'hour_offset': 0, 'time': stable_time, 'code': current_code, 'weight': weight, 'name': name, 'emoji': emoji, '_array_index': base}
     lead_hours_window = max(1, -(-RAIN_LEAD_MINUTES // 60))  # округление вверх - для 30 мин достаточно проверить час[0..1]
     for offset in range(min(lead_hours_window + 1, len(times) - base, len(codes) - base)):
         i = base + offset
@@ -16223,10 +16236,22 @@ async def push_rain_alert(city, event):
     # пределах ближайших ~60 минут, не обязательно ровно через
     # RAIN_LEAD_MINUTES - формулировка ниже намеренно не даёт точность до
     # минуты, которой у источника данных просто нет).
+    # ИСПРАВЛЕНО 22.09.2026 (жалоба пользователя - "текст постоянно через 30
+    # минут" на скриншоте с уже идущим дождём): раньше последняя строка
+    # ("Через {RAIN_LEAD_MINUTES} минут в городе ожидается больше заказов")
+    # была ЖЁСТКО захардкожена одинаковой для обоих случаев - даже когда
+    # событие уже идёт (hour_offset==0, when_text="начался"), текст всё
+    # равно говорил "через 30 минут", хотя спрос уже растёт СЕЙЧАС, а не
+    # через 30 минут. Теперь фраза про спрос зависит от hour_offset так же,
+    # как when_text выше - и повторный пуш с этим текстом теперь в принципе
+    # шлётся только на реальное усиление дождя (см. фикс event['time'] в
+    # find_upcoming_precip_event выше), а не на каждый прогон фоновой задачи.
     if event['hour_offset'] == 0:
         when_text = "начался"
+        demand_text = "В городе уже подрос спрос - хорошее время быть на линии."
     else:
         when_text = f"ожидается в ближайшие {RAIN_LEAD_MINUTES} минут"
+        demand_text = f"Через {RAIN_LEAD_MINUTES} минут в городе ожидается больше заказов - хорошее время быть на линии."
     duration_hours = find_precip_event_end(event['_forecast'], event['_array_index'])
     if duration_hours:
         duration_text = f"продлится примерно {duration_hours} ч"
@@ -16235,8 +16260,7 @@ async def push_rain_alert(city, event):
     text = (
         f"{event['emoji']} *{city_name}*\n\n"
         f"{event['name'].capitalize()} {when_text}, {duration_text}.\n\n"
-        f"Через {RAIN_LEAD_MINUTES} минут в городе ожидается больше заказов - "
-        f"хорошее время быть на линии."
+        f"{demand_text}"
     )
     # ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя - "к этому сообщению
     # переделаем кнопку посмотреть погоду, по этой кнопке он будет попадать
@@ -16253,12 +16277,24 @@ async def push_rain_alert(city, event):
     # ЛЮБОГО сообщения без Reply-клавиатуры, если нижнее меню давно не
     # обновлялось (see REPLY_KEYBOARD_STALE_HOURS), так что доступ к меню не
     # теряется и здесь - просто добавляется middleware'ом автоматически.
-    weather_button = None
-    if PUBLIC_URL:
-        weather_url = f"{PUBLIC_URL}{WEATHER_WEBAPP_PATH}?city={urllib.parse.quote(city)}"
-        weather_button = InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="🌤 Посмотреть погоду", web_app=WebAppInfo(url=weather_url)),
-        ]])
+    # ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "добавь кнопку
+    # карта водителей в погоду") - вторая инлайн-кнопка под пушем, открывает
+    # ту же карту (MAP_WEBAPP_PATH), что и "🗺 КАРТА ВОДИТЕЛЕЙ" в нижнем
+    # меню. В отличие от кнопки погоды карте нужен ещё и category (класс
+    # авто - Такси/Ultima/Курьер/Грузовое такси), поэтому клавиатура теперь
+    # собирается НА КАЖДОГО получателя внутри цикла ниже (у каждого может
+    # быть свой category), а не один раз заранее.
+    def _rain_push_keyboard(state):
+        rows = []
+        if PUBLIC_URL:
+            weather_url = f"{PUBLIC_URL}{WEATHER_WEBAPP_PATH}?city={urllib.parse.quote(city)}"
+            rows.append([InlineKeyboardButton(text="🌤 Посмотреть погоду", web_app=WebAppInfo(url=weather_url))])
+            category = state.get('category')
+            if category:
+                map_url = f"{PUBLIC_URL}{MAP_WEBAPP_PATH}?city={urllib.parse.quote(city)}&category={urllib.parse.quote(category)}"
+                rows.append([InlineKeyboardButton(text="🗺 Карта водителей", web_app=WebAppInfo(url=map_url))])
+        return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
+
     recipients = [
         (uid, state) for uid, state in list(user_state.items())
         if isinstance(state, dict) and state.get('city') == city and notifications_enabled(state, 'weather')
@@ -16272,7 +16308,7 @@ async def push_rain_alert(city, event):
         try:
             await bot.send_message(
                 user_id, text, parse_mode='Markdown',
-                reply_markup=weather_button,
+                reply_markup=_rain_push_keyboard(state),
             )
             sent += 1
         except Exception as e:
