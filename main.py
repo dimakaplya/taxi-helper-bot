@@ -9431,6 +9431,15 @@ def map_webapp_html():
           for (let i = 0; i < (s || '').length; i++) {{ h = (h * 31 + s.charCodeAt(i)) % 10000; }}
           return h;
         }}
+        // ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "облака спроса
+        // в период показа каждые 5 минут меняй их чтобы создавалась видимость
+        // что они меняются"): к seed примешивается номер текущего 5-минутного
+        // окна - форма остаётся стабильной внутри одного окна (не дёргается
+        // между опросами loadAirports каждые 60с), но раз в 5 минут меняется
+        // на другую (детерминированно, без реального рандома на клиенте).
+        function demandCloudTimeBucket() {{
+          return Math.floor(Date.now() / (5 * 60 * 1000));
+        }}
         // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "сделай
         // пожалуйста 10-15 разных облаков форм облаков спроса и рандомно
         // их загружай"): раньше форма облака у ВСЕХ аэропортов строилась по
@@ -9487,7 +9496,7 @@ def map_webapp_html():
           return latLngs;
         }}
         if (a.load !== null && a.load !== undefined && a.load > HIGH_DEMAND_LOAD_THRESHOLD) {{
-          const blob = L.polygon(blobLatLngs(a.lat, a.lon, HIGH_DEMAND_RADIUS_METERS, seedFromString(a.icao)), {{
+          const blob = L.polygon(blobLatLngs(a.lat, a.lon, HIGH_DEMAND_RADIUS_METERS, seedFromString(a.icao + '::' + demandCloudTimeBucket())), {{
             color: '#9b30ff',
             weight: 0,
             fillColor: '#9b30ff',
@@ -9739,6 +9748,12 @@ def map_webapp_html():
     for (let i = 0; i < (s || '').length; i++) {{ h = (h * 31 + s.charCodeAt(i)) % 10000; }}
     return h;
   }}
+  // Тот же приём "меняется раз в 5 минут", что и у облаков аэропортов
+  // (см. demandCloudTimeBucket в loadAirports) - своя копия функции здесь,
+  // т.к. эта переменная объявлена внутри отдельной async function выше.
+  function cityDemandCloudTimeBucket() {{
+    return Math.floor(Date.now() / (5 * 60 * 1000));
+  }}
   function demandCloudOpacity(demand) {{
     if (demand >= 100) return 0.26;
     if (demand >= 90) return 0.19;
@@ -9753,7 +9768,7 @@ def map_webapp_html():
       if (data.demand === null || data.demand === undefined || data.demand < 80 || data.lat === null || data.lon === null) return;
       const DEMAND_CLOUD_RADIUS_METERS = 12000;
       const metersPerDegLat = 111320;
-      const seed = demandCloudSeed(city + '::' + myCategory);
+      const seed = demandCloudSeed(city + '::' + myCategory + '::' + cityDemandCloudTimeBucket());
       const p1 = (seed % 628) / 100;
       const p2 = ((seed * 3) % 628) / 100;
       const p3 = ((seed * 7) % 628) / 100;
