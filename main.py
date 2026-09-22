@@ -8512,6 +8512,14 @@ def map_webapp_html():
   }}
   tariffBtn.addEventListener('click', () => {{
     tariffPanel.classList.toggle('collapsed');
+    // ИСПРАВЛЕНО 23.09.2026 (жалоба пользователя со скриншотом -
+    // "накладываются фильтры"): панели "Тарифы" и "Слои" стоят близко друг
+    // к другу (обе top:10px/top:52px, left:56px) и при одновременном
+    // раскрытии перекрывали друг друга текстом. Теперь открытие одной
+    // панели всегда закрывает другую - раскрыты одновременно они больше не
+    // бывают, а значит и накладываться не могут.
+    const layerToggleRowEl = document.getElementById('layerToggle');
+    if (!tariffPanel.classList.contains('collapsed')) layerToggleRowEl.classList.add('collapsed');
   }});
   function renderLegend() {{
     legend.innerHTML = '';
@@ -8984,6 +8992,9 @@ def map_webapp_html():
   const layerToggleRow = document.getElementById('layerToggle');
   layerToggleBtn.addEventListener('click', () => {{
     layerToggleRow.classList.toggle('collapsed');
+    // См. комментарий у tariffBtn.addEventListener выше - те же две панели,
+    // взаимоисключающе.
+    if (!layerToggleRow.classList.contains('collapsed')) tariffPanel.classList.add('collapsed');
   }});
   const fuelCheckbox = document.getElementById('fuelLayerCheckbox');
   const chargingCheckbox = document.getElementById('chargingLayerCheckbox');
