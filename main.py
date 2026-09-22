@@ -9197,6 +9197,33 @@ def map_webapp_html():
   const SELF_MARKER_STYLE = {self_marker_style_json};
   let selfMarker = null;
   let selfHeading = 0;
+  // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "убери чёрный
+  // смайлик, который меня преследует за моим жёлтым, залитый фон должен
+  // быть только у других пользователей") - серверное исключение своей же
+  // позиции (exclude_user_id в handle_map_positions_api/get_map_positions)
+  // работает, только если initData у клиента прошёл проверку подписи; если
+  // initData пуст/не прошёл проверку (например, BOT_TOKEN не задан или
+  // WebApp открыт не так, как ожидается), своя же точка (записанная через
+  // maybe_update_map_position по трансляции геопозиции в Telegram) снова
+  // попадает в общий список - и рисуется вторым кружком-эмодзи рядом со
+  // своей стрелкой (которая берётся из browser navigator.geolocation,
+  // независимого источника, поэтому кружок "отстаёт"/"преследует").
+  // Подстраховка на клиенте: держим последнюю известную координату своей
+  // стрелки и в loadPositions() ниже дополнительно отфильтровываем любую
+  // точку из общего списка, оказавшуюся достаточно близко к ней - кто бы
+  // её ни прислал сервер.
+  let selfLat = null;
+  let selfLon = null;
+  const SELF_DEDUP_RADIUS_METERS = 250;
+  function distanceMetersLatLon(lat1, lon1, lat2, lon2) {{
+    const R = 6371000;
+    const toRad = (d) => d * Math.PI / 180;
+    const dLat = toRad(lat2 - lat1);
+    const dLon = toRad(lon2 - lon1);
+    const a = Math.sin(dLat / 2) ** 2 +
+      Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  }}
   function clamp255(v) {{ return Math.max(0, Math.min(255, v)); }}
   function hexToRgb(hex) {{
     let h = hex.replace('#', '');
@@ -9303,6 +9330,8 @@ def map_webapp_html():
     const h = (heading === null || heading === undefined || isNaN(heading)) ? selfHeading : heading;
     selfHeading = h;
     const icon = L.divIcon({{ className: 'self-icon', html: selfIconHtml(h), iconSize: [42, 42], iconAnchor: [21, 21] }});
+    selfLat = lat;
+    selfLon = lon;
     if (selfMarker) {{
       selfMarker.setLatLng([lat, lon]);
       selfMarker.setIcon(icon);
@@ -9345,7 +9374,10 @@ def map_webapp_html():
       markers.forEach(m => map.removeLayer(m));
       markers = [];
       let bounds = [];
-      data.positions.filter(isPositionVisible).forEach(p => {{
+      data.positions.filter(isPositionVisible).filter(p => {{
+        if (selfLat === null || selfLon === null) return true;
+        return distanceMetersLatLon(selfLat, selfLon, p.lat, p.lon) > SELF_DEDUP_RADIUS_METERS;
+      }}).forEach(p => {{
         const style = CATEGORY_STYLE[p.category] || {{ color: '#888', label: p.category, icon: '🚗' }};
         const popupText = (p.tariffs && p.tariffs.length) ? `${{style.label}} (${{p.tariffs.join(', ')}})` : style.label;
         // ОТКАЧЕНО 22.09.2026 (прямая просьба пользователя - на карте
@@ -9841,9 +9873,14 @@ def map_webapp_html():
     return Math.floor(Date.now() / (5 * 60 * 1000));
   }}
   function demandCloudOpacity(demand) {{
+    // ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя - "спрос рисовать от
+    // 70 по часам, то что я скидывал в файле") - порог опустили с 80% до
+    // 70% (см. MAP_DEMAND_CLOUD_THRESHOLD), добавлена своя, самая слабая
+    // прозрачность для нового нижнего диапазона 70-79%.
     if (demand >= 100) return 0.26;
     if (demand >= 90) return 0.19;
-    return 0.13; // 80-89%
+    if (demand >= 80) return 0.13;
+    return 0.08; // 70-79%
   }}
   // ВЫНЕСЕНО 22.09.2026 из тела loadDemandCloud - генерация формы облака по
   // центру/радиусу/seed теперь отдельная функция, чтобы её же переиспользовать
@@ -9881,7 +9918,7 @@ def map_webapp_html():
       if (demandCloudMarker) {{ map.removeLayer(demandCloudMarker); demandCloudMarker = null; }}
       demandSatelliteMarkers.forEach(m => map.removeLayer(m));
       demandSatelliteMarkers = [];
-      if (data.demand === null || data.demand === undefined || data.demand < 80 || data.lat === null || data.lon === null) return;
+      if (data.demand === null || data.demand === undefined || data.demand < {MAP_DEMAND_CLOUD_THRESHOLD} || data.lat === null || data.lon === null) return;
       const DEMAND_CLOUD_RADIUS_METERS = 12000;
       const seed = demandCloudSeed(city + '::' + myCategory + '::' + cityDemandCloudTimeBucket());
       demandCloudMarker = L.polygon(cityCloudLatLngs(data.lat, data.lon, DEMAND_CLOUD_RADIUS_METERS, seed), {{
@@ -9897,13 +9934,60 @@ def map_webapp_html():
       // разбросом), каждое своей формы (свой seed -> свой профиль wobble) и
       // своей позиции (свой угол), меняются вместе с основным облаком раз в
       // 5 минут (тот же cityDemandCloudTimeBucket сидит внутри seed).
+      //
+      // ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя - "в Москве спрос
+      // больше в центре, на севере Москвы и на северо-западе, в такси
+      // Ultima"): раньше угол спутника был ПОЛНОСТЬЮ случайным (от seed) -
+      // спутники могли оказаться в любой стороне от города, без всякой
+      // географической логики. Для Москвы в категориях такси/Ultima (тех
+      // же, для которых вообще есть реальные проценты спроса по часам, см.
+      // MOSCOW_TAXI_DEMAND_PERCENT/MOSCOW_ULTIMA_DEMAND_PERCENT выше по
+      // файлу) первый спутник теперь целится на север (0°), второй - на
+      // северо-запад (-45°) с небольшим случайным разбросом ±10° (чтобы не
+      // рисовались буквально на одном месте каждый раз), а основное облако
+      // и так уже держится близко к центру города (небольшой offsetDist в
+      // cityCloudLatLngs) - вместе получается "центр + север + северо-
+      // запад", как попросил пользователь. Для остальных городов/категорий
+      // угол по-прежнему полностью случайный (старое поведение).
+      const CITY_DEMAND_DIRECTION_BIAS_DEG = {{ moscow: [0, -45] }}; // север, северо-запад
+      const directionBias = (city === 'moscow' && (myCategory === 'taxi' || myCategory === 'ultima'))
+        ? CITY_DEMAND_DIRECTION_BIAS_DEG[city] : null;
+      // ИЗМЕНЕНО 22.09.2026 (жалоба пользователя - "город почти весь спросом
+      // закрыт в дождь и часы спроса от 70%", уточнение - "спутники на
+      // эконом/комфорт/комфорт+ сделать меньше, основные облака развести
+      // подальше друг от друга, чтобы не накладывались и не захватывали весь
+      // город, а спутники относить за пределы МКАДа, в разные части
+      // города"): раньше спутники были ровно в 2 раза меньше основного
+      // облака и в ~7 км от него - для Москвы это укладывалось ЦЕЛИКОМ
+      // внутри МКАД и визуально сливалось с основным облаком (12 км
+      // радиусом) в сплошное фиолетовое пятно на весь город. Теперь:
+      // - для Москвы спутники относятся на MOSCOW_SATELLITE_DISTANCE_METERS
+      //   (~20 км, за пределы МКАД) вместо стандартных 7 км - визуально
+      //   разносится "город/центр" (основное облако) и отдельные более
+      //   слабые всплески на севере/северо-западе за кольцом, а не единое
+      //   пятно;
+      // - для тарифа "такси" (эконом/комфорт/комфорт+, в отличие от Ultima)
+      //   спутники дополнительно уменьшены (радиус не половина, а треть
+      //   основного облака) - в этом тарифе выше плотность заказов и без
+      //   того субъективно "многолюднее", поэтому сильнее сокращаем площадь.
+      const MOSCOW_SATELLITE_DISTANCE_METERS = 20000;
+      const MOSCOW_SATELLITE_DISTANCE_SPREAD_METERS = 4000;
+      const satDistanceBase = city === 'moscow' ? MOSCOW_SATELLITE_DISTANCE_METERS : SATELLITE_DISTANCE_BASE_METERS;
+      const satDistanceSpread = city === 'moscow' ? MOSCOW_SATELLITE_DISTANCE_SPREAD_METERS : SATELLITE_DISTANCE_SPREAD_METERS;
+      const satRadiusDivisor = myCategory === 'taxi' ? 3.5 : 2;
       const satCount = satelliteCount(seed);
       for (let s = 0; s < satCount; s++) {{
         const satSeed = (seed * 97 + s * 311 + 1) % 100000;
-        const distM = SATELLITE_DISTANCE_BASE_METERS + (satSeed % SATELLITE_DISTANCE_SPREAD_METERS) - SATELLITE_DISTANCE_SPREAD_METERS / 2;
-        const angle = ((satSeed * 17) % 628) / 100;
+        const distM = satDistanceBase + (satSeed % satDistanceSpread) - satDistanceSpread / 2;
+        let angle;
+        if (directionBias && directionBias[s] !== undefined) {{
+          const jitterDeg = ((satSeed % 2000) / 100) - 10; // ±10°
+          angle = (directionBias[s] + jitterDeg) * Math.PI / 180;
+        }} else {{
+          angle = ((satSeed * 17) % 628) / 100;
+        }}
         const [satLat, satLon] = offsetLatLon(data.lat, data.lon, distM, angle);
-        const satMarker = L.polygon(cityCloudLatLngs(satLat, satLon, DEMAND_CLOUD_RADIUS_METERS / 2, satSeed), {{
+        const satMarker = L.polygon(cityCloudLatLngs(satLat, satLon, DEMAND_CLOUD_RADIUS_METERS / satRadiusDivisor, satSeed), {{
           color: '#9b30ff',
           weight: 0,
           fillColor: '#9b30ff',
@@ -11125,7 +11209,18 @@ MAP_DEMAND_API_PATH = '/map/demand'
 # handle_map_demand_api/loadDemandCloud) - по прямой просьбе пользователя
 # ("когда 80% и выше эти часы ты будешь над городом произвольно рисовать
 # зоны спроса... получается 80 90 и 100").
-MAP_DEMAND_CLOUD_THRESHOLD = 80
+# ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя - "спрос рисовать от 70 по
+# часам, то что я скидывал в файле") - опущено с 80% до 70%, чтобы совпадать
+# с часами реального повышенного спроса из MOSCOW_TAXI_DEMAND_PERCENT/
+# MOSCOW_ULTIMA_DEMAND_PERCENT (там "высокий спрос" начинается от 70%, а не
+# только от 80%).
+MAP_DEMAND_CLOUD_THRESHOLD = 70
+# ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "в дождь рисовать
+# всегда спрос") - пока в городе идут осадки, % спроса для облака не может
+# быть ниже этого значения, даже если по часовой таблице сейчас "тихий" час -
+# дождь считается самостоятельным поводом показать облако (см.
+# handle_map_demand_api).
+MAP_DEMAND_RAIN_FLOOR_PERCENT = 85
 
 async def handle_map_demand_api(request):
     """ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "у тебя же есть в
@@ -11167,9 +11262,24 @@ async def handle_map_demand_api(request):
         else:
             level = get_current_peak_level(city, category)
             # Условное соответствие уровня и процента - только чтобы решить,
-            # рисовать ли облако (порог MAP_DEMAND_CLOUD_THRESHOLD=80), для
+            # рисовать ли облако (порог MAP_DEMAND_CLOUD_THRESHOLD), для
             # городов/категорий без реальных цифр по тарифам.
             demand = {'peak': 90, 'high': 75, 'mid': 55, 'low': 30}.get(level)
+        # ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "в дождь
+        # рисовать всегда спрос") - если в городе СЕЙЧАС идут осадки (тот же
+        # источник, что у push_rain_alert/find_upcoming_precip_event -
+        # snapshot weather_data.json, без живого запроса к Open-Meteo),
+        # спрос "подтягивается" минимум до MAP_DEMAND_RAIN_FLOOR_PERCENT,
+        # даже если по часовой таблице сейчас тихий час - дождь сам по себе
+        # уже повод показать облако (реальный % берём как максимум из
+        # табличного значения и дождевого "пола", а не просто заменяем).
+        try:
+            forecast = get_cached_weather_forecast(city)
+            current_code = (forecast or {}).get('current', {}).get('weathercode')
+            if current_code in PRECIP_WEATHERCODES:
+                demand = max(demand or 0, MAP_DEMAND_RAIN_FLOOR_PERCENT)
+        except Exception:
+            pass
         result['demand'] = demand
     except Exception:
         logger.exception("❌ Ошибка при получении текущего спроса для карты водителей")
