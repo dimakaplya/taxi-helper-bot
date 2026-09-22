@@ -798,16 +798,18 @@ for _city_key, _airports_list in AIRPORTS_INFO.items():
 # AIRPORT_QUEUE_ZONE_RADIUS_OVERRIDES_KM) - 'points' зоны это список
 # {'coords', 'radius_km', 'point_label'}. nearest_airport_zone ниже
 # находит БЛИЖАЙШУЮ точку зоны и возвращает именно её radius_km - так у
-# P22 (500 м) и P20 (350 м) фактически два независимых круга разного
-# размера с общим zone_key 'bc' (общие label/capacity зоны не меняются,
-# т.к. обе точки относятся к одним и тем же терминалам B/C).
+# P22 (500 м) и P20 (350 м, ЕЩЁ РАЗ УТОЧНЕНО 22.09.2026 по прямой просьбе
+# пользователя - координаты 55.980484, 37.398565, радиус 170 м) фактически
+# два независимых круга разного размера с общим zone_key 'bc' (общие
+# label/capacity зоны не меняются, т.к. обе точки относятся к одним и тем
+# же терминалам B/C).
 AIRPORT_TERMINAL_ZONES = {
     'UUEE': {
         'bc': {
             'label': 'Терминалы B/C', 'capacity': 3477,
             'points': [
                 {'coords': (55.978379, 37.390870), 'radius_km': 0.5, 'point_label': 'P22'},
-                {'coords': (55.980470, 37.398516), 'radius_km': 0.35, 'point_label': 'P20'},
+                {'coords': (55.980484, 37.398565), 'radius_km': 0.17, 'point_label': 'P20'},
             ],
         },
         'd': {
