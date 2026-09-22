@@ -4578,7 +4578,7 @@ def courier_module_keyboard(category=None):
     buttons = [
         [KeyboardButton(text="💰 ФИНАНСЫ"), KeyboardButton(text="📈 СПРОС СЕЙЧАС")],
         [KeyboardButton(text="📅 ЧАСЫ ПИКА"), KeyboardButton(text="🚻 ТУАЛЕТЫ")],
-        [KeyboardButton(text="🅿️ ПАРКОВКА"), KeyboardButton(text="🔧 ШИНОМОНТАЖ")],
+        [KeyboardButton(text="🅿️ БЕСПЛАТНАЯ ПАРКОВКА"), KeyboardButton(text="🔧 ШИНОМОНТАЖ")],
         [KeyboardButton(text="🚿 МОЙКИ"), KeyboardButton(text="🍷 АЛКОМАРКЕТЫ 24Ч")],
         [KeyboardButton(text="🛒 МАГАЗИНЫ 24Ч"), KeyboardButton(text="🔌 ЭЛЕКТРОЗАРЯДКИ")],
         # "⛽ ГДЕ БЕНЗИН" перенесена сюда из главного меню (по просьбе
@@ -4638,7 +4638,7 @@ def notification_settings_keyboard(state, category=None):
 # остановка", стало "🅿️ ПАРКОВКА".
 NEARBY_BUTTON_TO_KIND = {
     "🚻 ТУАЛЕТЫ": 'toilets',
-    "🅿️ ПАРКОВКА": 'parking',
+    "🅿️ БЕСПЛАТНАЯ ПАРКОВКА": 'parking',
     "🔧 ШИНОМОНТАЖ": 'tires',
     "🚿 МОЙКИ": 'car_wash',
     "🍷 АЛКОМАРКЕТЫ 24Ч": 'alcohol',
@@ -9060,7 +9060,7 @@ def map_webapp_html():
     <div class="layer-toggle collapsed" id="layerToggle">
       <label><input type="checkbox" id="fuelLayerCheckbox"> ⛽ Заправки</label>
       <label><input type="checkbox" id="chargingLayerCheckbox"> 🔌 Зарядки</label>
-      <label><input type="checkbox" id="parkingLayerCheckbox"> 🅿️ Парковки</label>
+      <label><input type="checkbox" id="parkingLayerCheckbox"> 🅿️ Бесплатные парковки</label>
     </div>
   </div>
 </div>
@@ -13178,7 +13178,7 @@ def cabinet_webapp_html():
   // ---- РЯДОМ (гео) ----
   const nearbyKinds = [
     {key: 'toilets', emoji: '🚻', label: 'Туалеты'},
-    {key: 'parking', emoji: '🅿️', label: 'Парковка'},
+    {key: 'parking', emoji: '🅿️', label: 'Бесплатная парковка'},
     {key: 'tires', emoji: '🔧', label: 'Шиномонтаж'},
     {key: 'car_wash', emoji: '🚿', label: 'Мойки'},
     {key: 'alcohol', emoji: '🍷', label: 'Алкомаркеты 24ч'},
