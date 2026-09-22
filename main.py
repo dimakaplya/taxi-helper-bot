@@ -4741,6 +4741,25 @@ WELCOME_GEO_TEXT = (
     "Это займёт 20 секунд, а дальше бот будет работать за тебя ⚡"
 )
 
+# Ссылка на презентацию бота (со скриншотами и QR-кодом) - по просьбе
+# пользователя (22.09.2026 - "вторую с куар кодом загружай при старте бота
+# чтобы люди могли ознакомиться куда они попали ... по кнопке посмотреть
+# возможности бота"). Показывается кнопкой прямо под приветственным питчем
+# (см. send_welcome_pitch ниже), чтобы новый пользователь сразу мог
+# полистать, что умеет бот, не отходя от первого экрана.
+# ВАЖНО: страница-презентация приватная по умолчанию - чтобы кнопка
+# открывалась у ЛЮБОГО пользователя бота (а не только у автора), доступ к
+# ней нужно один раз включить через меню "Share" на самой странице
+# презентации (сделать не может бот - это ручное действие в интерфейсе).
+BOT_PRESENTATION_URL = "https://claude.ai/artifact/RKFt9ZggB5zLbUyA3eMDCN"
+
+
+def welcome_pitch_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📊 ПОСМОТРЕТЬ ВОЗМОЖНОСТИ БОТА", url=BOT_PRESENTATION_URL)],
+    ])
+
+
 async def send_welcome_pitch(message: types.Message):
     """Отправляет новому пользователю приветственный питч с картинкой, затем
     отдельным сообщением - объяснение про геолокацию. Если файл картинки не
@@ -4760,13 +4779,14 @@ async def send_welcome_pitch(message: types.Message):
             await message.answer_photo(
                 FSInputFile(WELCOME_PHOTO_PATH),
                 caption=WELCOME_PITCH_TEXT,
-                parse_mode='Markdown'
+                parse_mode='Markdown',
+                reply_markup=welcome_pitch_keyboard(),
             )
         else:
-            await message.answer(WELCOME_PITCH_TEXT, parse_mode='Markdown')
+            await message.answer(WELCOME_PITCH_TEXT, parse_mode='Markdown', reply_markup=welcome_pitch_keyboard())
     except Exception as e:
         logger.error(f"❌ Не удалось отправить приветственную картинку: {e}")
-        await message.answer(WELCOME_PITCH_TEXT, parse_mode='Markdown')
+        await message.answer(WELCOME_PITCH_TEXT, parse_mode='Markdown', reply_markup=welcome_pitch_keyboard())
     finally:
         _skip_message_trim.reset(token)
     await message.answer(WELCOME_GEO_TEXT, parse_mode='Markdown')
