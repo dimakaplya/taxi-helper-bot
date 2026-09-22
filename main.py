@@ -2748,6 +2748,18 @@ def init_db():
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    # ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "добавь была ли
+    # очередь нет/мало машин/много машин" в попап заправки) - крауд-отметка
+    # очереди на заправке, тот же паттерн, что и charging_station_status
+    # выше (одна текущая отметка на station_id, а не история).
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS gas_station_queue_status (
+            station_id TEXT PRIMARY KEY,
+            status TEXT NOT NULL,
+            reported_by INTEGER,
+            reported_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
     conn.commit()
     conn.close()
     _db_initialized = True
@@ -8256,10 +8268,17 @@ FUEL_TYPE_LABELS = {'92': 'АИ-92', '95': 'АИ-95', '100': 'АИ-100', 'diesel
 CHARGING_STATUSES = ['free', 'busy', 'queue']
 CHARGING_STATUS_LABELS = {'free': '🟢 Свободна', 'busy': '🟡 Занята', 'queue': '🔴 Очередь'}
 
+# ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "добавь была ли
+# очередь нет/мало машин/много машин" в попап заправки) - крауд-отметка
+# очереди на заправке, тот же паттерн кнопок, что и у зарядок выше.
+GAS_QUEUE_STATUSES = ['none', 'few', 'many']
+GAS_QUEUE_STATUS_LABELS = {'none': '🟢 Очереди нет', 'few': '🟡 Мало машин', 'many': '🔴 Много машин'}
+
 MAP_FUEL_STATIONS_API_PATH = '/map/fuel_stations'
 MAP_CHARGING_STATIONS_API_PATH = '/map/charging_stations'
 MAP_FUEL_REPORT_API_PATH = '/map/fuel_report'
 MAP_CHARGING_REPORT_API_PATH = '/map/charging_report'
+MAP_GAS_QUEUE_REPORT_API_PATH = '/map/gas_queue_report'
 
 def get_gas_fuel_statuses():
     """dict {station_id: {fuel_type: {'available': bool, 'reported_at': iso_str}}}
@@ -8327,6 +8346,38 @@ def set_charging_status(station_id, status, user_id):
         conn.close()
     except Exception as e:
         logger.error(f"❌ Не удалось сохранить статус зарядки {station_id}: {e}")
+
+def get_gas_queue_statuses():
+    """dict {station_id: {'status': str, 'reported_at': iso_str}} - крауд-
+    отметка очереди на заправках (см. GAS_QUEUE_STATUSES/GAS_QUEUE_STATUS_
+    LABELS выше), тот же паттерн, что get_charging_statuses."""
+    try:
+        init_db()
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT station_id, status, reported_at FROM gas_station_queue_status')
+        rows = cursor.fetchall()
+        conn.close()
+    except Exception as e:
+        logger.error(f"❌ Не удалось прочитать gas_station_queue_status: {e}")
+        return {}
+    return {station_id: {'status': status, 'reported_at': reported_at} for station_id, status, reported_at in rows}
+
+def set_gas_queue_status(station_id, status, user_id):
+    try:
+        init_db()
+        conn = get_db_connection()
+        conn.execute(
+            'INSERT INTO gas_station_queue_status (station_id, status, reported_by, reported_at) '
+            'VALUES (?, ?, ?, CURRENT_TIMESTAMP) '
+            'ON CONFLICT(station_id) DO UPDATE SET status=excluded.status, '
+            'reported_by=excluded.reported_by, reported_at=excluded.reported_at',
+            (station_id, status, user_id)
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"❌ Не удалось сохранить статус очереди на заправке {station_id}: {e}")
 
 # Категории, чья очередь показывается в попапе аэропорта на карте (по
 # просьбе пользователя, 22.09.2026: "названия и очереди какие сейчас там
@@ -8947,6 +8998,7 @@ def map_webapp_html():
     self_marker_style_json = json.dumps(SELF_MARKER_STYLE, ensure_ascii=False)
     fuel_type_labels_json = json.dumps(FUEL_TYPE_LABELS, ensure_ascii=False)
     charging_status_labels_json = json.dumps(CHARGING_STATUS_LABELS, ensure_ascii=False)
+    gas_queue_status_labels_json = json.dumps(GAS_QUEUE_STATUS_LABELS, ensure_ascii=False)
     # ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "тумблер
     # переключение отображения других тарифов не работает, надо сделать
     # чтобы пользователь мог выбрать кого отображать на экране какие
@@ -9018,6 +9070,7 @@ def map_webapp_html():
   const TARIFF_OPTIONS = {tariff_options_json};
   const FUEL_TYPE_LABELS = {fuel_type_labels_json};
   const CHARGING_STATUS_LABELS = {charging_status_labels_json};
+  const GAS_QUEUE_STATUS_LABELS = {gas_queue_status_labels_json};
   const STATUS_ICON = {{ open: '🟢', coordinated: '🟡', closed: '🔴' }};
   const tg = window.Telegram && window.Telegram.WebApp;
   if (tg) {{ tg.ready(); tg.expand(); }}
@@ -9830,6 +9883,18 @@ def map_webapp_html():
       html += `<button class="${{cls}}" onclick="window.reportFuel('${{p.id}}','${{ft}}',true)">${{FUEL_TYPE_LABELS[ft]}} есть</button>`;
       html += `<button class="${{cls}}" onclick="window.reportFuel('${{p.id}}','${{ft}}',false)">${{FUEL_TYPE_LABELS[ft]}} нет</button>`;
     }});
+    html += `</div>`;
+    // ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "добавь была ли
+    // очередь нет мало машин много машин") - та же крауд-отметка, что и у
+    // статуса зарядки (одна текущая отметка на станцию), 3 кнопки.
+    html += `<div class="sub" style="margin-top:8px;">Была ли очередь:</div><div class="status-btn-row">`;
+    const curQueue = p.queue;
+    ['none', 'few', 'many'].forEach(st => {{
+      let cls = 'status-btn';
+      const mapCls = {{ none: 'free', few: 'busy', many: 'queue' }}[st];
+      if (curQueue === st) cls += ' on-' + mapCls;
+      html += `<button class="${{cls}}" onclick="window.reportGasQueue('${{p.id}}','${{st}}')">${{GAS_QUEUE_STATUS_LABELS[st]}}</button>`;
+    }});
     html += `</div><div class="status-note">Отметки водителей, могут устаревать</div>`;
     html += goButtonHtml(p.lat, p.lon);
     html += `</div>`;
@@ -9849,6 +9914,23 @@ def map_webapp_html():
     if (p) {{
       p.fuel = p.fuel || {{}};
       p.fuel[fuelType] = {{ available: available }};
+      const marker = fuelMarkerById[stationId];
+      if (marker) marker.setPopupContent(buildFuelPopup(p));
+    }}
+  }};
+
+  window.reportGasQueue = async function(stationId, status) {{
+    try {{
+      const initData = tg ? tg.initData : '';
+      await fetch('{MAP_GAS_QUEUE_REPORT_API_PATH}', {{
+        method: 'POST',
+        headers: {{ 'Content-Type': 'application/json', 'X-Telegram-Init-Data': initData }},
+        body: JSON.stringify({{ station_id: stationId, status: status }}),
+      }});
+    }} catch (e) {{ /* тихо */ }}
+    const p = fuelStations.find(s => s.id === stationId);
+    if (p) {{
+      p.queue = status;
       const marker = fuelMarkerById[stationId];
       if (marker) marker.setPopupContent(buildFuelPopup(p));
     }}
@@ -10909,11 +10991,15 @@ async def handle_map_fuel_stations_api(request):
         data = load_fuel_charging_data() or {}
         points = [p for p in (data.get('cities', {}).get(city) or []) if p.get('kind') == 'fuel']
         statuses = get_gas_fuel_statuses()
+        queue_statuses = get_gas_queue_statuses()
         for p in points:
+            q = queue_statuses.get(p['id'])
             result.append({
                 'id': p['id'], 'lat': p['lat'], 'lon': p['lon'],
                 'name': p.get('name'),
                 'fuel': statuses.get(p['id'], {}),
+                'queue': q['status'] if q else None,
+                'queue_reported_at': q['reported_at'] if q else None,
             })
     except Exception:
         logger.exception("❌ Ошибка при получении заправок для карты водителей")
@@ -10970,6 +11056,33 @@ async def handle_map_fuel_report_api(request):
     if not station_id or fuel_type not in FUEL_TYPES:
         return web.json_response({'error': 'invalid_params'}, status=400)
     set_gas_fuel_status(station_id, fuel_type, available, user_id)
+    return web.json_response({'ok': True})
+
+async def handle_map_gas_queue_report_api(request):
+    """POST {station_id, status: 'none'|'few'|'many'} - крауд-отметка очереди
+    на заправке (по прямой просьбе пользователя - "добавь была ли очередь
+    нет/мало машин/много машин"). Тот же паттерн проверки initData, что у
+    handle_map_fuel_report_api/handle_map_charging_report_api."""
+    init_data = request.headers.get('X-Telegram-Init-Data', '')
+    parsed = validate_telegram_webapp_init_data(init_data, BOT_TOKEN) if BOT_TOKEN else None
+    if not parsed:
+        return web.json_response({'error': 'invalid_init_data'}, status=401)
+    try:
+        tg_user = json.loads(parsed.get('user', '{}'))
+        user_id = tg_user.get('id')
+    except Exception:
+        user_id = None
+    if not user_id:
+        return web.json_response({'error': 'invalid_init_data'}, status=401)
+    try:
+        body = await request.json()
+        station_id = str(body.get('station_id') or '')
+        status = str(body.get('status') or '')
+    except Exception:
+        return web.json_response({'error': 'invalid_body'}, status=400)
+    if not station_id or status not in GAS_QUEUE_STATUSES:
+        return web.json_response({'error': 'invalid_params'}, status=400)
+    set_gas_queue_status(station_id, status, user_id)
     return web.json_response({'ok': True})
 
 async def handle_map_charging_report_api(request):
@@ -17880,6 +17993,7 @@ async def start_subscription_webhook_server():
     app.router.add_get(MAP_CHARGING_STATIONS_API_PATH, handle_map_charging_stations_api)
     app.router.add_get(MAP_PARKING_API_PATH, handle_map_parking_api)
     app.router.add_post(MAP_FUEL_REPORT_API_PATH, handle_map_fuel_report_api)
+    app.router.add_post(MAP_GAS_QUEUE_REPORT_API_PATH, handle_map_gas_queue_report_api)
     app.router.add_post(MAP_CHARGING_REPORT_API_PATH, handle_map_charging_report_api)
     app.router.add_get(MAP_ROAD_EVENTS_API_PATH, handle_map_road_events_api)
     app.router.add_get(MAP_CITY_EVENTS_API_PATH, handle_map_city_events_api)
