@@ -6282,7 +6282,7 @@ async def score_city_candidate(city, category=None):
             # push_rain_alert), даём водителю подъехать заранее: бонус
             # поменьше, чем за уже идущие осадки (impact 0-10 -> 0-40 баллов,
             # тоже по категории - см. комментарий выше).
-            upcoming = find_upcoming_precip_event(forecast)
+            upcoming = find_upcoming_precip_event(forecast, city)
             if upcoming and upcoming['hour_offset'] > 0:
                 impact = rain_impact_score(upcoming['code'], category)
                 bonus = impact * 4
@@ -14568,22 +14568,50 @@ async def weather_data_updater():
             logger.error(f"❌ Ошибка фонового обновления weather_data.json: {e}")
         await asyncio.sleep(WEATHER_UPDATE_INTERVAL_MINUTES * 60)
 
-def find_upcoming_precip_event(forecast):
+def _current_hour_index(forecast, city):
+    """ИСПРАВЛЕНО 23.09.2026 (жалоба пользователя - "идёт дождь, а бот
+    показывает что будет дождь через 3 часа, может неправильно время
+    показывает"): find_upcoming_precip_event раньше слепо считал, что
+    hourly.time[0] - это ТЕКУЩИЙ час (hour_offset=0). Но Open-Meteo с
+    параметрами forecast_hours+timezone=auto без явного start_hour вовсе не
+    гарантированно начинает массив С ТЕКУЩЕГО часа - как минимум сразу после
+    полуночи по местному времени города массив уже мог "сместиться"
+    относительно предположения кода на несколько часов. Из-за этого
+    смещения индекс, который код считал "сейчас", на самом деле был уже
+    прошедшим часом, а реальный текущий (с уже идущим дождём) код видел как
+    "через несколько часов". Теперь ищем нужный индекс ЯВНО - по совпадению
+    с текущим часом местного времени города, вместо того чтобы полагаться
+    на позицию 0 массива."""
+    hourly = forecast.get('hourly', {})
+    times = hourly.get('time', [])
+    if not times:
+        return 0
+    now_hour_str = get_city_now(city).strftime('%Y-%m-%dT%H:00')
+    for i, t in enumerate(times):
+        if t >= now_hour_str:
+            return i
+    return max(0, len(times) - 1)  # весь массив в прошлом (снепшот совсем устарел) - берём последний час как least-bad вариант
+
+def find_upcoming_precip_event(forecast, city):
     """Ищет ближайшее почасовое окно с осадками в пределах RAIN_LEAD_MINUTES
     от текущего момента - то есть "начнётся достаточно скоро, чтобы имело
     смысл предупредить водителя сейчас". Возвращает None, если в этом окне
-    осадков нет, иначе dict {hour_offset, time, code, weight, name, emoji}."""
+    осадков нет, иначе dict {hour_offset, time, code, weight, name, emoji}.
+    hour_offset и time.index() всегда отсчитываются от РЕАЛЬНОГО текущего
+    часа (см. _current_hour_index), а не от начала массива hourly."""
     if not forecast:
         return None
     hourly = forecast.get('hourly', {})
     times = hourly.get('time', [])
     codes = hourly.get('weathercode', [])
+    base = _current_hour_index(forecast, city)
     lead_hours_window = max(1, -(-RAIN_LEAD_MINUTES // 60))  # округление вверх - для 30 мин достаточно проверить час[0..1]
-    for i in range(min(lead_hours_window + 1, len(times), len(codes))):
+    for offset in range(min(lead_hours_window + 1, len(times) - base, len(codes) - base)):
+        i = base + offset
         code = codes[i]
         if code in PRECIP_WEATHERCODES:
             name, weight, emoji = describe_weathercode(code)
-            return {'hour_offset': i, 'time': times[i], 'code': code, 'weight': weight, 'name': name, 'emoji': emoji}
+            return {'hour_offset': offset, 'time': times[i], 'code': code, 'weight': weight, 'name': name, 'emoji': emoji, '_array_index': i}
     return None
 
 def find_precip_event_end(forecast, start_offset):
@@ -14638,7 +14666,7 @@ async def push_rain_alert(city, event):
         when_text = "начался"
     else:
         when_text = f"ожидается в ближайшие {RAIN_LEAD_MINUTES} минут"
-    duration_hours = find_precip_event_end(event['_forecast'], event['hour_offset'])
+    duration_hours = find_precip_event_end(event['_forecast'], event['_array_index'])
     if duration_hours:
         duration_text = f"продлится примерно {duration_hours} ч"
     else:
@@ -14702,7 +14730,7 @@ async def check_rain_transitions():
         forecast = get_cached_weather_forecast(city)
         if not forecast:
             continue  # снепшота для этого города ещё нет - не трогаем сохранённое состояние
-        event = find_upcoming_precip_event(forecast)
+        event = find_upcoming_precip_event(forecast, city)
         prev_start, prev_weight = previous.get(city, (None, None))
 
         if event is None:
