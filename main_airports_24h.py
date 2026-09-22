@@ -16339,8 +16339,37 @@ async def phantom_password_flow(message: types.Message):
         )
         return
 
+    # ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "занеси кнопку
+    # админ в фантом будет с двойной верефикацией") - доступ в админ-панель
+    # спрятан внутри той же кнопки "👻 ФАНТОМ", отдельной кнопки для него
+    # больше нет (см. referral_menu_keyboard). Если введённый "пароль
+    # Фантома" на самом деле ADMIN_PANEL_PASSWORD - НЕ показываем админку
+    # сразу, а просим ввести его ЕЩЁ РАЗ (двойная верификация, см.
+    # admin_panel_password_confirm_flow ниже) - случайно подсмотренный или
+    # угаданный пароль с первого раза панель не откроет.
+    if text == ADMIN_PANEL_PASSWORD:
+        state.pop('awaiting_phantom_password', None)
+        state['awaiting_admin_panel_password_confirm'] = True
+        await message.answer("🔐 Подтверди пароль ещё раз:")
+        return
+
     state.pop('awaiting_phantom_password', None)
     await message.answer("❌ Неверный пароль.")
+
+
+@router.message(lambda message: user_state.get(message.from_user.id, {}).get('awaiting_admin_panel_password_confirm'))
+async def admin_panel_password_confirm_flow(message: types.Message):
+    """Второй шаг двойной верификации админ-панели (см. phantom_password_flow
+    выше) - должен стоять РАНЬШЕ остальных текстовых хендлеров, тем же
+    приёмом. Ловит ЛЮБОЙ текст, пока ждём подтверждение пароля."""
+    user_id = message.from_user.id
+    state = user_state[user_id]
+    text = (message.text or '').strip()
+    state.pop('awaiting_admin_panel_password_confirm', None)
+    if text != ADMIN_PANEL_PASSWORD:
+        await message.answer("❌ Неверный пароль.")
+        return
+    await message.answer(format_admin_overview_text(), parse_mode='HTML', reply_markup=admin_panel_keyboard())
 
 
 class SubscriptionMiddleware(BaseMiddleware):
@@ -17056,14 +17085,15 @@ def referral_menu_keyboard(referral_link, current_type=REFERRAL_DEFAULT_TYPE):
         # phantom_start/phantom_password_flow, см. блок "ПЛАТНАЯ ПОДПИСКА"
         # выше) не менялась - только расположение кнопки, callback_data тот
         # же ("phantom_start"), поэтому хендлер трогать не нужно.
+        # ПЕРЕНЕСЕНО 23.09.2026 (прямая просьба пользователя - "занеси кнопку
+        # админ в фантом будет с двойной верефикацией") - отдельная кнопка
+        # "🔐 АДМИН" убрана, доступ в админ-панель теперь спрятан ВНУТРИ
+        # "👻 ФАНТОМ" (см. phantom_password_flow ниже): если ввести
+        # ADMIN_PANEL_PASSWORD вместо обычного пароля Фантома, бот просит
+        # ввести его ЕЩЁ РАЗ (двойная верификация) и только после второго
+        # совпадения показывает админ-панель - отдельной кнопки, которая
+        # выдавала бы саму возможность существования админки, больше нет.
         [InlineKeyboardButton(text="👻 ФАНТОМ", callback_data="phantom_start")],
-        # ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "сделай кнопку
-        # в рефералах Админ за паролем... и там выведи все админские
-        # данные") - тот же паттерн, что и "👻 ФАНТОМ"/"🏢 Юр.лицо" выше
-        # (ждём пароль текстом, см. admin_panel_start/admin_panel_password_
-        # flow/format_admin_overview_text в блоке "ПЛАТНАЯ ПОДПИСКА" выше -
-        # рядом с campaign_profit, откуда переиспользуется финансовый отчёт).
-        [InlineKeyboardButton(text="🔐 АДМИН", callback_data="admin_panel_start")],
     ])
 
 
@@ -17850,35 +17880,11 @@ def admin_panel_keyboard():
     ])
 
 
-@router.callback_query(lambda c: c.data == "admin_panel_start")
-async def admin_panel_start(callback_query: types.CallbackQuery):
-    """Кнопка "🔐 АДМИН" в меню реферальной программы - тот же паттерн, что
-    и у "👻 ФАНТОМ"/"🏢 Юр.лицо" (ждём пароль текстом, см.
-    admin_panel_password_flow ниже)."""
-    try:
-        await callback_query.answer()
-    except Exception:
-        pass
-    state = user_state.setdefault(callback_query.from_user.id, {})
-    state['awaiting_admin_panel_password'] = True
-    await callback_query.message.answer("🔐 Введи пароль:")
-
-
-@router.message(lambda message: user_state.get(message.from_user.id, {}).get('awaiting_admin_panel_password'))
-async def admin_panel_password_flow(message: types.Message):
-    """Ловит ЛЮБОЙ текст, пока ждём пароль админ-панели - должен стоять
-    РАНЬШЕ остальных текстовых хендлеров (тот же приём, что и
-    phantom_password_flow/referral_legal_password_flow)."""
-    user_id = message.from_user.id
-    state = user_state[user_id]
-    text = (message.text or '').strip()
-    state.pop('awaiting_admin_panel_password', None)
-    if text != ADMIN_PANEL_PASSWORD:
-        await message.answer("❌ Неверный пароль.")
-        return
-    await message.answer(format_admin_overview_text(), parse_mode='HTML', reply_markup=admin_panel_keyboard())
-
-
+# ПЕРЕНЕСЕНО 23.09.2026 (прямая просьба пользователя - "занеси кнопку админ
+# в фантом будет с двойной верефикацией") - отдельная точка входа
+# admin_panel_start/admin_panel_password_flow убрана; доступ теперь только
+# через "👻 ФАНТОМ" с двойным вводом пароля (см. phantom_password_flow/
+# admin_panel_password_confirm_flow в блоке "ПЛАТНАЯ ПОДПИСКА" выше).
 @router.callback_query(lambda c: c.data == "admin_panel_refresh")
 async def admin_panel_refresh(callback_query: types.CallbackQuery):
     """Кнопка "🔄 Обновить" под уже показанной админ-панелью - пароль уже
