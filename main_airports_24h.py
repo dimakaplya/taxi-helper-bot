@@ -14221,13 +14221,47 @@ def _cabinet_require_user(request):
         return None
 
 CABINET_FINANCE_API_PATH = '/cabinet/finance'
+# ДОБАВЛЕНО 22.09.2026 (прямая жалоба пользователя - "запоминай один раз
+# ввёл, чтобы не вводить каждый раз налог/своя машина/расход/цена топлива" +
+# уточнение "все эти данные можно вбить по новой в кабинете") - раньше
+# запоминание "запоминаемых" полей (FINANCE_REMEMBERED_FIELDS/
+# finance_defaults) работало ТОЛЬКО в пошаговом Telegram-расчёте
+# (advance_finance_step/remember_finance_default) - в Кабинете (WebApp,
+# одна форма сразу) те же поля надо было вбивать заново при каждом расчёте,
+# ничего не запоминалось и не подставлялось. Теперь используем тот же
+# state['finance_defaults'], что и Telegram-версия (единый профиль для
+# обоих интерфейсов): GET отдаёт сохранённые значения для подстановки в
+# форму при открытии вкладки, POST после расчёта сохраняет введённые
+# значения как новые дефолты (поля остаются обычными <input> - водитель в
+# любой момент может ввести другое число поверх подставленного, оно тут же
+# станет новым запомненным значением).
+CABINET_FINANCE_DEFAULTS_API_PATH = '/cabinet/finance/defaults'
+
+async def handle_cabinet_finance_defaults_api(request):
+    """GET -> {consumption, fuel_price, rent, tax_rate, car_ownership}
+    (любое поле может отсутствовать, если ещё ни разу не вводилось) - для
+    подстановки в форму "Финансы" при открытии вкладки Кабинета."""
+    user_id = _cabinet_require_user(request)
+    if not user_id:
+        return web.json_response({'error': 'invalid_init_data'}, status=401)
+    state = user_state.get(user_id) or {}
+    defaults = finance_defaults(state)
+    return web.json_response({
+        'consumption': defaults.get('consumption'),
+        'fuel_price': defaults.get('fuel_price'),
+        'rent': defaults.get('rent'),
+        'tax_rate': defaults.get('tax_rate'),
+        'car_ownership': defaults.get('car_ownership'),
+    })
 
 async def handle_cabinet_finance_api(request):
     """POST {income, km, consumption, fuel_price, car_ownership, rent,
     expenses, tax_rate, hours} -> тот же расчёт, что и в Telegram-версии
     (calculate_finance_result), результат сохраняется в ту же статистику
     (save_finance_result, см. get_finance_history/handle_cabinet_data_api
-    выше - значит появится и на графике "Заработок по дням")."""
+    выше - значит появится и на графике "Заработок по дням"). Заодно
+    запоминает "повторяющиеся" поля в тот же profile, что и Telegram-версия
+    (см. handle_cabinet_finance_defaults_api выше)."""
     user_id = _cabinet_require_user(request)
     if not user_id:
         return web.json_response({'error': 'invalid_init_data'}, status=401)
@@ -14252,6 +14286,18 @@ async def handle_cabinet_finance_api(request):
 
     r = calculate_finance_result(data)
     save_finance_result(user_id, r['income'], r['net_profit'], r['trips_count'])
+
+    state = user_state[user_id]
+    remember_finance_default(state, 'consumption', data['consumption'])
+    remember_finance_default(state, 'fuel_price', data['fuel_price'])
+    remember_finance_default(state, 'tax_rate', data['tax_rate'])
+    remember_finance_default(state, 'car_ownership', data['car_ownership'])
+    # Аренду запоминаем только если машина реально в аренде - иначе "0"
+    # затёр бы ранее сохранённую сумму аренды на случай, если водитель
+    # временно посчитал день на своей машине.
+    if data['car_ownership'] == CAR_OWNERSHIP_RENTED:
+        remember_finance_default(state, 'rent', data['rent'])
+
     return web.json_response({
         'income': round(r['income']), 'fuel_cost': round(r['fuel_cost']),
         'wear_reserve': round(r['wear_reserve']), 'rent': round(r['rent']),
@@ -15018,7 +15064,7 @@ def cabinet_webapp_html():
   });
 
   // ---- ФИНАНСЫ ----
-  function initFinanceTab() {
+  async function initFinanceTab() {
     // Автоподстановка км/часов из сегодняшних завершённых смен (по аналогии
     // с Telegram-версией, см. today_shift_totals/advance_finance_step,
     // 21.09.2026) - если данных нет, поля остаются пустыми (placeholder-пример).
@@ -15030,6 +15076,25 @@ def cabinet_webapp_html():
       noteEl.textContent = 'Из сегодняшних смен: ' + todayShiftData.km + ' км, ' + todayShiftData.hours +
         ' ч за рулём. Данные взяты автоматически - если что-то не так, можешь поправить.';
     }
+    // ДОБАВЛЕНО 22.09.2026 (жалоба пользователя - "запоминай один раз ввёл,
+    // чтобы не вводить каждый раз налог/своя машина/расход/цена топлива") -
+    // подставляем ранее сохранённые значения "повторяющихся" полей (тот же
+    // профиль, что и в Telegram-версии, см. handle_cabinet_finance_defaults_api).
+    // Поля остаются обычными <input>/<select> - можно в любой момент вбить
+    // другое значение поверх подставленного (по уточнению "все эти данные
+    // можно вбить по новой в кабинете"), оно сохранится как новое дефолтное
+    // после следующего расчёта.
+    try {
+      const dResp = await fetch('""" + CABINET_FINANCE_DEFAULTS_API_PATH + """', { headers: { 'X-Telegram-Init-Data': initData } });
+      if (dResp.ok) {
+        const d = await dResp.json();
+        if (d.consumption != null) document.getElementById('finConsumption').value = d.consumption;
+        if (d.fuel_price != null) document.getElementById('finFuelPrice').value = d.fuel_price;
+        if (d.tax_rate != null) document.getElementById('finTaxRate').value = d.tax_rate;
+        if (d.rent != null) document.getElementById('finRent').value = d.rent;
+        if (d.car_ownership) document.getElementById('finCarOwnership').value = d.car_ownership;
+      }
+    } catch (e) { /* нет сохранённых значений или сеть недоступна - просто оставляем поля пустыми */ }
     document.getElementById('finCalcBtn').addEventListener('click', async () => {
       const resEl = document.getElementById('finResult');
       const payload = {
@@ -16099,8 +16164,15 @@ async def send_courier_finance_result(message: types.Message, user_id, data):
     lines.append(f"_≈ {fmt(per_hour)} ₽/ч за {hours:g} ч_")
     lines.append("▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓")
 
-    category = user_state.get(user_id, {}).get('category')
-    await message.answer('\n'.join(lines), reply_markup=courier_module_keyboard(category), parse_mode='Markdown')
+    # ИЗМЕНЕНО 22.09.2026 (прямая жалоба пользователя со скриншотом - "после
+    # ввода данных появляется это меню, его уже давно нет, надо убрать") -
+    # раньше здесь повторно отправлялась ВСЯ старая клавиатура "Инструменты
+    # водителя" (courier_module_keyboard) поверх результата расчёта. Сам
+    # список инструментов давно переехал в приложение "Личный кабинет"
+    # (WebApp), эта reply-клавиатура за пределами самого пошагового расчёта
+    # финансов больше нигде не нужна - убираем её после результата, чтобы не
+    # показывать устаревшее меню.
+    await message.answer('\n'.join(lines), reply_markup=types.ReplyKeyboardRemove(), parse_mode='Markdown')
     save_finance_result(user_id, income, net_profit, trips_count)
 
 CITY_MAP = {
@@ -20197,6 +20269,7 @@ async def start_subscription_webhook_server():
     # - РАСШИРЕНИЕ" выше) - новые разделы WebApp: Финансы/Спрос сейчас/Часы
     # пика/Рядом (гео)/Настройки.
     app.router.add_post(CABINET_FINANCE_API_PATH, handle_cabinet_finance_api)
+    app.router.add_get(CABINET_FINANCE_DEFAULTS_API_PATH, handle_cabinet_finance_defaults_api)
     app.router.add_get(CABINET_DEMAND_API_PATH, handle_cabinet_demand_api)
     app.router.add_get(CABINET_PEAK_API_PATH, handle_cabinet_peak_api)
     app.router.add_post(CABINET_NEARBY_API_PATH, handle_cabinet_nearby_api)
