@@ -9373,6 +9373,42 @@ def map_webapp_html():
       if (bounds.length && !airportsLoaded) map.fitBounds(bounds, {{ padding: [30, 30], maxZoom: 13 }});
     }} catch (e) {{ /* тихо - карта просто останется пустой до следующего опроса */ }}
   }}
+  // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "сгладь края
+  // облака, сделай более мягкими, размазанными") - облака спроса (и у
+  // аэропортов, и городское) строились из 24-28 точек, соединённых ПРЯМЫМИ
+  // отрезками - при таком количестве вершин силуэт получался гранёным,
+  // с заметными "острыми" углами вместо мягкого органического контура
+  // (та же проблема была и с blur(18px) на _path - SVG-фильтр не везде
+  // рендерится в WebView Telegram, поэтому полагаться только на него
+  // нельзя). Замкнутый сплайн Катмулла-Рома добавляет между каждой парой
+  // исходных вершин ещё CATMULL_ROM_SEGMENTS точек по гладкой кривой,
+  // проходящей через все исходные точки - контур остаётся той же формы
+  // (не "усредняется" и не теряет характерную асимметрию профиля), но
+  // рисуется уже полилинией из ~200+ точек, которая на глаз выглядит
+  // плавной, круглой "тучкой", а не многоугольником. Общая функция - и для
+  // блобов аэропортов (blobLatLngs), и для городского облака ниже.
+  const CATMULL_ROM_SEGMENTS = 8;
+  function smoothClosedLatLngs(points, segments) {{
+    segments = segments || CATMULL_ROM_SEGMENTS;
+    const n = points.length;
+    if (n < 3) return points;
+    const out = [];
+    for (let i = 0; i < n; i++) {{
+      const p0 = points[(i - 1 + n) % n];
+      const p1 = points[i];
+      const p2 = points[(i + 1) % n];
+      const p3 = points[(i + 2) % n];
+      for (let t = 0; t < segments; t++) {{
+        const tt = t / segments;
+        const tt2 = tt * tt;
+        const tt3 = tt2 * tt;
+        const lat = 0.5 * ((2 * p1[0]) + (-p0[0] + p2[0]) * tt + (2 * p0[0] - 5 * p1[0] + 4 * p2[0] - p3[0]) * tt2 + (-p0[0] + 3 * p1[0] - 3 * p2[0] + p3[0]) * tt3);
+        const lon = 0.5 * ((2 * p1[1]) + (-p0[1] + p2[1]) * tt + (2 * p0[1] - 5 * p1[1] + 4 * p2[1] - p3[1]) * tt2 + (-p0[1] + 3 * p1[1] - 3 * p2[1] + p3[1]) * tt3);
+        out.push([lat, lon]);
+      }}
+    }}
+    return out;
+  }}
   // Метки аэропортов - название, статус (открыт/по согласованию/закрыт),
   // текущая загрузка % и последняя отмеченная водителями очередь по каждой
   // категории (см. handle_map_airports_api). Загружаются один раз при
@@ -9497,7 +9533,7 @@ def map_webapp_html():
             const dLon = (r * Math.sin(angle)) / (metersPerDegLat * Math.cos(cLat * Math.PI / 180));
             latLngs.push([cLat + dLat, cLon + dLon]);
           }}
-          return latLngs;
+          return smoothClosedLatLngs(latLngs);
         }}
         if (a.load !== null && a.load !== undefined && a.load > HIGH_DEMAND_LOAD_THRESHOLD) {{
           const blob = L.polygon(blobLatLngs(a.lat, a.lon, HIGH_DEMAND_RADIUS_METERS, seedFromString(a.icao + '::' + demandCloudTimeBucket())), {{
@@ -9793,7 +9829,7 @@ def map_webapp_html():
         const dLon = (r * Math.sin(angle)) / (metersPerDegLat * Math.cos(cLat * Math.PI / 180));
         latLngs.push([cLat + dLat, cLon + dLon]);
       }}
-      demandCloudMarker = L.polygon(latLngs, {{
+      demandCloudMarker = L.polygon(smoothClosedLatLngs(latLngs), {{
         color: '#9b30ff',
         weight: 0,
         fillColor: '#9b30ff',
