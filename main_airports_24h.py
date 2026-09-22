@@ -3153,7 +3153,7 @@ def queue_submit_report(user_id, city, airport_icao, category, range_str, zone_k
     conn.commit()
     conn.close()
 
-def user_recent_queue_marks(user_id, city, airport_icao, zone_key=None):
+def user_recent_queue_marks(user_id, city, airport_icao, zone_key=None, since=None):
     """Собственные СВЕЖИЕ (за QUEUE_ENTRY_TTL_MINUTES) отметки ЭТОГО водителя
     для этого аэропорта/терминала - {tariff: range_str}, самая свежая по
     каждому tariff. Добавлено 20.09.2026 по просьбе пользователя: "если он
@@ -3161,11 +3161,29 @@ def user_recent_queue_marks(user_id, city, airport_icao, zone_key=None):
     повторном пуше "давно рядом с аэропортом" (см. send_airport_queue_push)
     так можно предложить водителю просто подтвердить "я всё ещё тут" одной
     кнопкой (переотправить те же тарифы/диапазоны с новым временем), не
-    заставляя заново проходить весь выбор тарифа и диапазона машин."""
+    заставляя заново проходить весь выбор тарифа и диапазона машин.
+    ИЗМЕНЕНО 22.09.2026 (жалоба пользователя - "я ещё не встал в очередь в
+    этой смене, а он присылает что я выехал"): необязательный параметр
+    since (datetime или ISO-строка) дополнительно отсекает отметки СТАРШЕ
+    начала ТЕКУЩЕГО захода в зону аэропорта - без него отметка, сделанная
+    ДО этого (например в предыдущей смене) до QUEUE_ENTRY_TTL_MINUTES=120
+    минут назад, всё ещё считалась "свежей" и process_airport_queue_ping
+    ошибочно решал, что водитель уже встал в очередь ПРЯМО СЕЙЧАС, хотя
+    отметка вообще не относилась к этому заходу. См. вызов в
+    process_airport_queue_ping - since = aq['entered_outer_at']."""
     init_db()
     conn = get_db_connection()
     cursor = conn.cursor()
     cutoff = (datetime.now(ZoneInfo('UTC')) - timedelta(minutes=QUEUE_ENTRY_TTL_MINUTES)).strftime('%Y-%m-%d %H:%M:%S')
+    if since:
+        if isinstance(since, str):
+            try:
+                since = datetime.fromisoformat(since)
+            except Exception:
+                since = None
+        if since:
+            since_str = since.astimezone(ZoneInfo('UTC')).strftime('%Y-%m-%d %H:%M:%S') if since.tzinfo else since.strftime('%Y-%m-%d %H:%M:%S')
+            cutoff = max(cutoff, since_str)
     cursor.execute(
         'SELECT tariff, position_range, timestamp FROM queue WHERE user_id = ? AND city = ? AND airport = ? '
         'AND timestamp >= ? ORDER BY timestamp ASC',
@@ -7510,14 +7528,22 @@ async def process_airport_queue_ping(user_id, lat, lon, live_period=None):
     is_snoozed = bool(snoozed_until and now < snoozed_until)
     # ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "и пропадает если
     # человек уже встал в очередь"): если у водителя уже есть СВОЯ свежая
-    # отметка (за QUEUE_ENTRY_TTL_MINUTES) по этому аэропорту/зоне - он уже
-    # встал в очередь, напоминание "🚗 ВСТАТЬ В ОЧЕРЕДЬ" больше не нужно.
-    # Тот же принцип, что и is_snoozed (пуш подавляется), но источник другой -
-    # не ручной снуз, а факт реальной отметки. is_already_queued используется
-    # и ниже (уровни расстояния), и в check_airport_queue_timers (пуш "уже 30
-    # минут рядом").
+    # отметка по этому аэропорту/зоне - он уже встал в очередь, напоминание
+    # "🚗 ВСТАТЬ В ОЧЕРЕДЬ" больше не нужно. Тот же принцип, что и is_snoozed
+    # (пуш подавляется), но источник другой - не ручной снуз, а факт реальной
+    # отметки. is_already_queued используется и ниже (уровни расстояния), и в
+    # check_airport_queue_timers (пуш "уже 30 минут рядом").
+    # ИЗМЕНЕНО 22.09.2026 (жалоба пользователя - "я ещё не встал в очередь в
+    # этой смене, а он присылает что я выехал"): вычисление ПЕРЕНЕСЕНО ниже,
+    # после того как aq['entered_outer_at'] гарантированно установлен для
+    # ТЕКУЩЕГО захода в зону - раньше проверялась просто "есть ли своя
+    # отметка за последние QUEUE_ENTRY_TTL_MINUTES=120 минут" БЕЗ привязки к
+    # текущему заходу, из-за чего отметка из ПРЕДЫДУЩЕЙ смены (до 2 часов
+    # назад) заставляла бота решить, что водитель уже в очереди ПРЯМО СЕЙЧАС,
+    # хотя он только что заехал в зону и ещё не отмечался. Теперь считаются
+    # только отметки, сделанные НЕ РАНЬШЕ начала этого захода (since=
+    # entered_outer_at, см. user_recent_queue_marks).
     city_for_marks = ICAO_TO_CITY.get(icao)
-    is_already_queued = bool(city_for_marks and user_recent_queue_marks(user_id, city_for_marks, icao, zone_key))
     # Смена АЭРОПОРТА или, для Шереметьево, смена ЗОНЫ (B <-> C <-> D,
     # это отдельные подъезды - водитель, переехавший из одной в другую,
     # по факту заново въезжает в радиус) - начинаем отслеживание с чистого
@@ -7550,6 +7576,15 @@ async def process_airport_queue_ping(user_id, lat, lon, live_period=None):
             # отсчёта для таймера "уже 30 минут рядом" (см. check_airport_queue_timers).
             aq['entered_outer_at'] = now.isoformat()
             aq['pushed_30'] = False
+        # ИЗМЕНЕНО 22.09.2026 (жалоба пользователя - "я ещё не встал в
+        # очередь в этой смене, а он присылает что я выехал") - is_already_queued
+        # считается ТОЛЬКО отсюда, ПОСЛЕ того как entered_outer_at уже
+        # гарантированно установлен (см. комментарий выше по функции) - since
+        # отсекает отметки старше начала ЭТОГО захода в зону, так что отметка
+        # из прошлой смены/визита сюда больше не засчитывается.
+        is_already_queued = bool(city_for_marks and user_recent_queue_marks(
+            user_id, city_for_marks, icao, zone_key, since=aq['entered_outer_at'],
+        ))
         # ИЗМЕНЕНО 22.09.2026 (жёсткая просьба пользователя - "push
         # уведомления и сбор данных осуществляется только после того когда
         # человек встал в очередь, не вставая в очередь этот пуш прийти не
@@ -15542,8 +15577,13 @@ async def check_airport_queue_timers():
         # process_airport_queue_ping: если у водителя уже есть своя свежая
         # отметка по этому аэропорту/зоне, таймерный пуш "уже 30 минут рядом"
         # тоже не нужен - он уже отметился.
+        # ИЗМЕНЕНО 22.09.2026 (та же жалоба, что у process_airport_queue_ping -
+        # "я ещё не встал в очередь в этой смене") - since=entered_outer_at,
+        # чтобы отметка из прошлого захода/смены не засчиталась за этот.
         city_for_marks = ICAO_TO_CITY.get(icao)
-        is_already_queued = bool(city_for_marks and user_recent_queue_marks(user_id, city_for_marks, icao, zone_key))
+        is_already_queued = bool(city_for_marks and user_recent_queue_marks(
+            user_id, city_for_marks, icao, zone_key, since=aq.get('entered_outer_at'),
+        ))
 
         aq_updated = dict(aq)
         changed = False
