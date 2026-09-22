@@ -466,28 +466,24 @@ AIRPORT_QUEUE_OUTER_RADIUS_OVERRIDES_KM = {
     'UUDD': 5.0,   # DME (Домодедово) - прямая просьба пользователя
     'URSS': 0.5,   # AER (Адлер/Сочи) - прямая просьба пользователя
 }
-# Для аэропортов с терминальными зонами (см. AIRPORT_TERMINAL_ZONES) можно
-# задать радиус ПОУЖЕ/ПОШИРЕ дефолтного отдельно на каждую зону - имеет
-# приоритет и над AIRPORT_QUEUE_OUTER_RADIUS_DEFAULT_KM, и над
-# AIRPORT_QUEUE_OUTER_RADIUS_OVERRIDES_KM по icao. Сейчас задано только для
-# Шереметьево (UUEE) - прямая просьба пользователя 22.09.2026: у зоны B/C
-# координаты сдвинуты на реальную точку парковки встречающих (см.
-# AIRPORT_TERMINAL_ZONES), радиус 1 км; у зоны D координаты уточнены,
-# радиус узкий - 300 м.
-AIRPORT_QUEUE_ZONE_RADIUS_OVERRIDES_KM = {
-    'UUEE': {'bc': 1.0, 'd': 0.3},
-}
+# Для аэропортов с терминальными зонами (см. AIRPORT_TERMINAL_ZONES) радиус
+# задаётся ИНДИВИДУАЛЬНО НА КАЖДУЮ ТОЧКУ зоны (AIRPORT_TERMINAL_ZONES[icao]
+# [zone_key]['points'][i]['radius_km']) - имеет приоритет и над
+# AIRPORT_QUEUE_OUTER_RADIUS_DEFAULT_KM, и над
+# AIRPORT_QUEUE_OUTER_RADIUS_OVERRIDES_KM по icao (см. nearest_airport_zone/
+# process_airport_queue_ping - zone_point_radius_km). ИЗМЕНЕНО 22.09.2026
+# (прямая просьба пользователя - "две парковки ... P22 500 метров, P20 ...
+# 350 метров"): раньше был один радиус на всю зону
+# (AIRPORT_QUEUE_ZONE_RADIUS_OVERRIDES_KM), теперь у каждой точки свой -
+# этот словарь убран, вся логика в AIRPORT_TERMINAL_ZONES/nearest_airport_zone.
 
-def airport_queue_outer_radius_km(icao, zone_key=None):
-    """Радиус "зоны аэропорта" для самого внешнего уровня гео-пушей очереди.
-    Приоритет: зональный override (AIRPORT_QUEUE_ZONE_RADIUS_OVERRIDES_KM,
-    по icao+zone_key) -> override по icao целиком (AIRPORT_QUEUE_OUTER_RADIUS_OVERRIDES_KM,
-    сейчас только Внуково, 3.5 км) -> общий дефолт (AIRPORT_QUEUE_OUTER_RADIUS_DEFAULT_KM,
-    2 км). Изменено 22.09.2026 по прямой просьбе пользователя."""
-    if zone_key:
-        zone_overrides = AIRPORT_QUEUE_ZONE_RADIUS_OVERRIDES_KM.get(icao)
-        if zone_overrides and zone_key in zone_overrides:
-            return zone_overrides[zone_key]
+def airport_queue_outer_radius_km(icao):
+    """Радиус "зоны аэропорта" для самого внешнего уровня гео-пушей очереди -
+    используется ТОЛЬКО когда у ближайшей точки терминальной зоны нет
+    собственного radius_km (обычный аэропорт без AIRPORT_TERMINAL_ZONES, см.
+    process_airport_queue_ping). Приоритет: override по icao целиком
+    (AIRPORT_QUEUE_OUTER_RADIUS_OVERRIDES_KM) -> общий дефолт
+    (AIRPORT_QUEUE_OUTER_RADIUS_DEFAULT_KM, 2 км)."""
     return AIRPORT_QUEUE_OUTER_RADIUS_OVERRIDES_KM.get(icao, AIRPORT_QUEUE_OUTER_RADIUS_DEFAULT_KM)
 # Пользователь также попросил убрать пуш "уже 1 час рядом" и пуш "уже 15
 # минут рядом" (последнего на самом деле и не было - только 30/60), оставив
@@ -794,14 +790,32 @@ for _city_key, _airports_list in AIRPORTS_INFO.items():
 # 'capacity' ниже - в пассажирах/час, та же единица, что AIRPORT_CAPACITY.
 # Координаты bc/d ИЗМЕНЕНЫ 22.09.2026 (прямая просьба пользователя) - взяты
 # точки реальных парковок ("встречающих"/высадки), а не усреднённые точки
-# терминалов как раньше, так как именно там реально стоят водители. Радиус
-# для каждой зоны - см. AIRPORT_QUEUE_ZONE_RADIUS_OVERRIDES_KM выше (bc - 1
-# км на КАЖДУЮ из двух точек P22/P20, d - 300 м, тоже прямая просьба
-# пользователя).
+# терминалов как раньше, так как именно там реально стоят водители.
+# ЕЩЁ РАЗ ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя - "две парковки
+# там два пуша и две координатные линии ... P22 500 метров, P20 ... 350
+# метров B C, парковка D ... 350 метров"): у КАЖДОЙ точки парковки теперь
+# СВОЙ радиус (а не общий на всю зону, как было раньше в
+# AIRPORT_QUEUE_ZONE_RADIUS_OVERRIDES_KM) - 'points' зоны это список
+# {'coords', 'radius_km', 'point_label'}. nearest_airport_zone ниже
+# находит БЛИЖАЙШУЮ точку зоны и возвращает именно её radius_km - так у
+# P22 (500 м) и P20 (350 м) фактически два независимых круга разного
+# размера с общим zone_key 'bc' (общие label/capacity зоны не меняются,
+# т.к. обе точки относятся к одним и тем же терминалам B/C).
 AIRPORT_TERMINAL_ZONES = {
     'UUEE': {
-        'bc': {'coords': [(55.978379, 37.390870), (55.980470, 37.398516)], 'label': 'Терминалы B/C', 'capacity': 3477},
-        'd': {'coords': (55.961860, 37.409638), 'label': 'Терминал D', 'capacity': 1490},
+        'bc': {
+            'label': 'Терминалы B/C', 'capacity': 3477,
+            'points': [
+                {'coords': (55.978379, 37.390870), 'radius_km': 0.5, 'point_label': 'P22'},
+                {'coords': (55.980470, 37.398516), 'radius_km': 0.35, 'point_label': 'P20'},
+            ],
+        },
+        'd': {
+            'label': 'Терминал D', 'capacity': 1490,
+            'points': [
+                {'coords': (55.961860, 37.409638), 'radius_km': 0.35, 'point_label': None},
+            ],
+        },
     },
 }
 
@@ -4588,29 +4602,32 @@ def nearest_airport_zone(lat, lon):
        среди НИХ отдельно ищем ближайшую и считаем расстояние уже до неё
        (точнее, чем до усреднённой точки всего аэропорта), иначе zone_key/
        zone_label = None и расстояние - как раньше, до AIRPORT_COORDS[icao].
-    Возвращает (icao, dist_km, zone_key, zone_label)."""
+    Возвращает (icao, dist_km, zone_key, zone_label, zone_point_radius_km).
+    zone_point_radius_km - радиус САМОЙ БЛИЖНЕЙ точки зоны (см.
+    AIRPORT_TERMINAL_ZONES['points'], ИЗМЕНЕНО 22.09.2026 - у каждой точки
+    парковки теперь свой радиус, не общий на зону), None - если у
+    аэропорта/зоны вообще нет точек с радиусом (обычный аэропорт без
+    AIRPORT_TERMINAL_ZONES)."""
     icao, dist_km = nearest_airport(lat, lon)
     if icao is None:
-        return None, None, None, None
+        return None, None, None, None, None
     zones = AIRPORT_TERMINAL_ZONES.get(icao)
     if not zones:
-        return icao, dist_km, None, None
-    best_zone_key, best_zone_label, best_zone_dist = None, None, None
+        return icao, dist_km, None, None, None
+    best_zone_key, best_zone_label, best_zone_dist, best_point_radius = None, None, None, None
     for zone_key, zone_data in zones.items():
         # ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя - "две парковки,
-        # там два пуша и две координатные точки" для зоны B/C Шереметьево):
-        # zone_data['coords'] теперь может быть СПИСКОМ точек (несколько
-        # парковок одной зоны), а не только одной парой (lat, lon) - берём
-        # расстояние до БЛИЖАЙШЕЙ из точек зоны, так что попадание в радиус
-        # у ЛЮБОЙ из парковок засчитывается как "въехал в зону". Одна точка
-        # (как у зоны D) по-прежнему поддерживается как раньше.
-        _points = zone_data['coords']
-        if not isinstance(_points, list):
-            _points = [_points]
-        d = min(haversine_km(lat, lon, p[0], p[1]) for p in _points)
-        if best_zone_dist is None or d < best_zone_dist:
-            best_zone_key, best_zone_label, best_zone_dist = zone_key, zone_data['label'], d
-    return icao, best_zone_dist, best_zone_key, best_zone_label
+        # там два пуша ... P22 500 метров, P20 ... 350 метров") - у зоны
+        # теперь СПИСОК точек ('points'), КАЖДАЯ со своим radius_km, а не
+        # общий радиус на всю зону. Берём точку зоны, ближайшую к
+        # пользователю, и её собственный radius_km.
+        for _point in zone_data['points']:
+            p_lat, p_lon = _point['coords']
+            d = haversine_km(lat, lon, p_lat, p_lon)
+            if best_zone_dist is None or d < best_zone_dist:
+                best_zone_key, best_zone_label = zone_key, zone_data['label']
+                best_zone_dist, best_point_radius = d, _point['radius_km']
+    return icao, best_zone_dist, best_zone_key, best_zone_label, best_point_radius
 
 def nearest_nearby_points(kind, city, lat, lon, count=NEARBY_RESULTS_COUNT):
     """Возвращает (расстояние_км, точка) для ближайших count точек в городе,
@@ -7560,7 +7577,7 @@ async def process_airport_queue_ping(user_id, lat, lon, live_period=None):
         # Защитный случай - активная трансляция, начатая ДО смены категории
         # на courier/cargo, не должна продолжать слать аэропортовые пуши.
         return
-    icao, dist_km, zone_key, zone_label = nearest_airport_zone(lat, lon)
+    icao, dist_km, zone_key, zone_label, zone_point_radius_km = nearest_airport_zone(lat, lon)
     if icao is None:
         return
     now = datetime.now(ZoneInfo('UTC'))
@@ -7616,10 +7633,17 @@ async def process_airport_queue_ping(user_id, lat, lon, live_period=None):
     # ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя - "зона аэропорта в
     # 1.5 км, исключение для внуково 2.5 км"): самый внешний уровень больше
     # не фиксированный AIRPORT_QUEUE_RADIUS_LEVELS_KM[0] (2 км для всех) - он
-    # берётся из airport_queue_outer_radius_km(icao), у Внуково это 2.5 км,
-    # у остальных 1.5 км. Уровни ПОУЖЕ (1 км/500 м) не меняются - идут следом
-    # за внешним, как и раньше.
-    outer_radius_km = airport_queue_outer_radius_km(icao, zone_key)
+    # берётся из airport_queue_outer_radius_km(icao), у Внуково это 5 км,
+    # у остальных 2 км (кроме индивидуальных override по icao/точкам зон).
+    # Уровни ПОУЖЕ (1 км/500 м) не меняются - идут следом за внешним, как и
+    # раньше. ЕЩЁ РАЗ ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя - у
+    # каждой точки зоны Шереметьево теперь СВОЙ радиус, см.
+    # AIRPORT_TERMINAL_ZONES['points']/nearest_airport_zone): если у ближайшей
+    # точки зоны есть свой radius_km (zone_point_radius_km, вернула
+    # nearest_airport_zone выше) - он в приоритете над
+    # airport_queue_outer_radius_km(icao), иначе (обычный аэропорт без зон)
+    # используется он как раньше.
+    outer_radius_km = zone_point_radius_km if zone_point_radius_km is not None else airport_queue_outer_radius_km(icao)
     levels_km = [outer_radius_km] + [lvl for lvl in AIRPORT_QUEUE_RADIUS_LEVELS_KM[1:] if lvl < outer_radius_km]
     if dist_km <= outer_radius_km:
         if not aq.get('entered_outer_at'):
@@ -7739,7 +7763,7 @@ def _in_parking_zone(lat, lon, city):
     аэропорта, включая бывший "бублик") ИСКЛЮЧЕНА из пуша о парковке - рядом
     с аэропортом этот пуш больше не шлётся вообще, независимо от того,
     работает ли сейчас фича "Очередь" в этой же точке."""
-    icao, dist_km, zone_key, zone_label = nearest_airport_zone(lat, lon)
+    icao, dist_km, zone_key, zone_label, _zone_point_radius_km = nearest_airport_zone(lat, lon)
     if icao is not None and dist_km is not None and dist_km <= PARKING_AIRPORT_ZONE_RADIUS_KM:
         return False
     city_coords = RAIN_CITY_COORDS.get(city) if city else None
@@ -10142,12 +10166,12 @@ async def handle_map_airports_api(request):
             # что уже используются для "Очередь у аэропорта" - см.
             # nearest_airport_zone) - маркеры расходятся по факту на карте, как
             # и сами терминалы физически разнесены.
-            zone_coords = AIRPORT_TERMINAL_ZONES.get(icao, {}).get(zone_key, {}).get('coords') if zone_key else None
-            # zone_coords может быть списком нескольких точек (см.
-            # nearest_airport_zone, 22.09.2026, зона B/C с двумя парковками) -
-            # маркер на карте по-прежнему один на зону, берём первую точку.
-            if isinstance(zone_coords, list):
-                zone_coords = zone_coords[0] if zone_coords else None
+            # ЕЩЁ РАЗ ИЗМЕНЕНО 22.09.2026 (структура зоны сменилась на 'points' -
+            # список точек с собственным radius_km у каждой, см.
+            # AIRPORT_TERMINAL_ZONES/nearest_airport_zone) - маркер на карте
+            # по-прежнему один на зону, берём координаты первой точки.
+            _zone_points = AIRPORT_TERMINAL_ZONES.get(icao, {}).get(zone_key, {}).get('points') if zone_key else None
+            zone_coords = _zone_points[0]['coords'] if _zone_points else None
             coords = zone_coords or AIRPORT_COORDS.get(icao)
             if not coords:
                 continue
