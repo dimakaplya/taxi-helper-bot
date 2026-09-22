@@ -823,8 +823,18 @@ AIRPORT_TERMINAL_ZONES = {
         'bc': {
             'label': 'Терминалы B/C', 'capacity': 3477,
             'points': [
-                {'coords': (55.978200, 37.390618), 'radius_km': 0.2, 'point_label': 'P22'},
-                {'coords': (55.980484, 37.398565), 'radius_km': 0.2, 'point_label': 'P20'},
+                # ЕЩЁ РАЗ ИСПРАВЛЕНО 22.09.2026 (прямая жалоба пользователя со
+                # скриншотом карты - "смотри как метки смещены относительно
+                # терминалов" - прежние P22/P20 были смещены больше чем на
+                # 1 км по долготе от настоящего здания) - пользователь прислал
+                # новую координату B/C напрямую (55.981312, 37.413876).
+                # point_label оставлены прежними (P22/P20), т.к. по ним же
+                # matched'ятся контуры парковок в AIRPORT_PARKING_ZONE_POLYGONS
+                # (см. handle_map_airports_api) - оба точечных радиуса теперь
+                # указывают на одну и ту же (верную) точку, вместо прежних
+                # разъехавшихся координат.
+                {'coords': (55.981312, 37.413876), 'radius_km': 0.2, 'point_label': 'P22'},
+                {'coords': (55.981312, 37.413876), 'radius_km': 0.2, 'point_label': 'P20'},
             ],
         },
         'd': {
@@ -838,7 +848,9 @@ AIRPORT_TERMINAL_ZONES = {
                 # пользователя - "для терминала Д поставь 150 м") с 0.35 на
                 # 0.15 - именно этот радиус определяет, когда водителю
                 # приходит пуш "встал в очередь" на парковке Терминала D.
-                {'coords': (55.961860, 37.409638), 'radius_km': 0.15, 'point_label': 'D'},
+                # Координата ЕЩЁ РАЗ ИСПРАВЛЕНА 22.09.2026 (та же жалоба на
+                # смещение меток, пользователь прислал 55.962594, 37.406163).
+                {'coords': (55.962594, 37.406163), 'radius_km': 0.15, 'point_label': 'D'},
             ],
         },
     },
@@ -5418,6 +5430,21 @@ async def send_start_screen(message: types.Message):
     клавиатурах ниже корневого экрана (см. category_keyboard,
     services_keyboard, courier_module_keyboard)."""
     init_db()
+    # ИСПРАВЛЕНО 22.09.2026 (жалоба пользователя со скриншотом - метка на
+    # карте есть, а смена ещё не начата) - сброс user_state здесь стирает и
+    # in-memory state['shift'], из-за которого кнопка "НАЧАТЬ/ЗАВЕРШИТЬ
+    # СМЕНУ" тут же показывает "не в смене", НО строка в SQL-таблице
+    # map_positions (откуда карта водителей берёт метки, см.
+    # get_map_positions/MAP_VISIBILITY_STALE_MINUTES) при этом не
+    # трогалась - водитель пропадал из user_state, но до 15 минут оставался
+    # видимым на карте, будто смена ещё активна. finish_shift уже чистит
+    # map_positions при обычном завершении смены кнопкой - здесь тот же
+    # вызов, на случай если /start или "🏙 ВЫБОР ГОРОДА" нажали ПРЯМО во
+    # время активной смены.
+    try:
+        delete_map_position(message.from_user.id)
+    except Exception:
+        logger.exception(f"❌ Не удалось убрать с карты водителей user_id={message.from_user.id} при сбросе через /start")
     user_state.pop(message.from_user.id, None)
     # Обновлённый визуал стартового экрана (по просьбе пользователя,
     # 22.09.2026 - "поработать над визуалом бота на всех страницах", начиная с
@@ -5536,6 +5563,13 @@ async def continue_to_bot(callback_query: types.CallbackQuery):
     except Exception:
         pass
     init_db()
+    # ИСПРАВЛЕНО 22.09.2026 - см. комментарий у send_start_screen выше (тот же
+    # риск: сброс user_state здесь тоже мог оставлять стухшую метку на карте,
+    # если этот экран открылся во время активной смены).
+    try:
+        delete_map_position(callback_query.from_user.id)
+    except Exception:
+        logger.exception(f"❌ Не удалось убрать с карты водителей user_id={callback_query.from_user.id} при continue_to_bot")
     user_state.pop(callback_query.from_user.id, None)
     text = (
         "🚕✨ *TAXI HELPER*\n"
@@ -5567,6 +5601,11 @@ async def go_back(message: types.Message):
         await message.answer("Выбери категорию 👇", reply_markup=category_keyboard())
     else:
         # Были на экране категорий -> возвращаемся к выбору города
+        # ИСПРАВЛЕНО 22.09.2026 - см. комментарий у send_start_screen выше.
+        try:
+            delete_map_position(user_id)
+        except Exception:
+            logger.exception(f"❌ Не удалось убрать с карты водителей user_id={user_id} при go_back")
         user_state.pop(user_id, None)
         await message.answer("Выбери город 👇", reply_markup=city_keyboard())
 
