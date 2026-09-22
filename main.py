@@ -19727,7 +19727,7 @@ async def high_demand_alert_checker():
 GREEN_DEMAND_LEAD_HOURS = 2
 # По условию пользователя - "3 часа подряд" (не 2, как у фиолетового уровня).
 GREEN_DEMAND_STREAK_HOURS = 3
-GREEN_DEMAND_THRESHOLD_LOW = 50   # нижняя граница зелёного (см. get_load_emoji) - ИЗМЕНЕНО 21.09.2026 (было 70)
+GREEN_DEMAND_THRESHOLD_LOW = 70   # ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя - "смотри такие сообщения присылай когда загрузка в аэропортах более 70% менее не присылай такое уведомление"; было 50, до этого 70)
 GREEN_DEMAND_THRESHOLD_HIGH = 85  # верхняя граница - выше уже фиолетовый, это отдельный пуш - ИЗМЕНЕНО 21.09.2026 (было 100)
 GREEN_DEMAND_CHECK_INTERVAL_MINUTES = 15
 
@@ -19747,7 +19747,7 @@ async def push_green_demand_alert(icao, airport, relevant_class, hour_from, hour
         f"🟢 *{airport['emoji']} {airport['name']}*\n\n"
         f"Через {GREEN_DEMAND_LEAD_HOURS} часа (~{hour_from:02d}:00-{hour_to_end:02d}:00) ожидается "
         f"*повышенный спрос* на прилёты ({class_name}) - "
-        f"{GREEN_DEMAND_STREAK_HOURS} часа подряд прогноз загрузки 51-85% ({loads_str}). "
+        f"{GREEN_DEMAND_STREAK_HOURS} часа подряд прогноз загрузки {GREEN_DEMAND_THRESHOLD_LOW+1}-{GREEN_DEMAND_THRESHOLD_HIGH}% ({loads_str}). "
         f"*Занимай очередь* заранее - к началу окна освободится место."
     )
 
