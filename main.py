@@ -16900,6 +16900,13 @@ def referral_menu_keyboard(referral_link, current_type=REFERRAL_DEFAULT_TYPE):
         # выше) не менялась - только расположение кнопки, callback_data тот
         # же ("phantom_start"), поэтому хендлер трогать не нужно.
         [InlineKeyboardButton(text="👻 ФАНТОМ", callback_data="phantom_start")],
+        # ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "сделай кнопку
+        # в рефералах Админ за паролем... и там выведи все админские
+        # данные") - тот же паттерн, что и "👻 ФАНТОМ"/"🏢 Юр.лицо" выше
+        # (ждём пароль текстом, см. admin_panel_start/admin_panel_password_
+        # flow/format_admin_overview_text в блоке "ПЛАТНАЯ ПОДПИСКА" выше -
+        # рядом с campaign_profit, откуда переиспользуется финансовый отчёт).
+        [InlineKeyboardButton(text="🔐 АДМИН", callback_data="admin_panel_start")],
     ])
 
 
@@ -17584,6 +17591,153 @@ async def admin_campaign_profit_refresh(callback: types.CallbackQuery):
         else:
             logger.error(f"❌ Не удалось обновить отчёт по прибыли кампании: {e}")
             await callback.answer("Ошибка обновления")
+
+
+# ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "сделай кнопку в
+# рефералах Админ за паролем Anefog1234567890! и там выведи все админские
+# данные о прибыли поступлениях количестве пользователей бота кто сейчас на
+# линии кто не на линии всю статистику") - в отличие от /campaign_profit
+# выше (доступна только ADMIN_TELEGRAM_ID по Telegram ID), этот экран
+# защищён ПАРОЛЕМ, как "👻 ФАНТОМ"/"🏢 Юр.лицо" (см. referral_menu_keyboard) -
+# доступен любому, кто знает пароль, а не привязан к конкретному аккаунту.
+ADMIN_PANEL_PASSWORD = "Anefog1234567890!"
+
+
+def compute_admin_online_counts():
+    """Сколько пользователей боту известно всего и сколько из них СЕЙЧАС на
+    линии (is_shift_active) - живьём из user_state в памяти (та же
+    структура, что использует вся остальная логика бота - карта, "Куда
+    ехать" и т.п.), без похода в БД."""
+    total = 0
+    online = 0
+    online_by_category = {}
+    for state in list(user_state.values()):
+        if not isinstance(state, dict):
+            continue
+        total += 1
+        if is_shift_active(state):
+            online += 1
+            cat = state.get('category') or 'unknown'
+            online_by_category[cat] = online_by_category.get(cat, 0) + 1
+    return {'total': total, 'online': online, 'offline': total - online, 'online_by_category': online_by_category}
+
+
+def compute_admin_subscription_counts():
+    """Сколько пользователей прямо сейчас платно подписаны / на бесплатном
+    триале / с истёкшим доступом - та же логика, что subscription_active_
+    until/is_subscription_active, посчитанная разом по всей таблице
+    subscriptions."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT trial_started_at, paid_until FROM subscriptions')
+    rows = cursor.fetchall()
+    conn.close()
+    now = _sub_now()
+    trial, paid_active, expired = 0, 0, 0
+    for trial_started_at, paid_until in rows:
+        try:
+            active_until = _sub_parse(trial_started_at) + timedelta(days=SUBSCRIPTION_TRIAL_DAYS)
+        except Exception:
+            continue
+        is_paid = False
+        if paid_until:
+            try:
+                p = _sub_parse(paid_until)
+                if p > active_until:
+                    active_until = p
+                    is_paid = True
+            except Exception:
+                pass
+        if now >= active_until:
+            expired += 1
+        elif is_paid:
+            paid_active += 1
+        else:
+            trial += 1
+    return {'total': len(rows), 'trial': trial, 'paid_active': paid_active, 'expired': expired}
+
+
+def format_admin_overview_text():
+    """Вся админская сводка одним сообщением - живые счётчики пользователей
+    (на линии/не на линии, по категориям), разбивка по подпискам (оплачена/
+    триал/истёк) и уже существующий финансовый отчёт кампании
+    (format_campaign_profit_text - доход с подписок/выплаты рефералам/
+    резерв на выплаты, за всё время и за месяц)."""
+    online_counts = compute_admin_online_counts()
+    sub_counts = compute_admin_subscription_counts()
+    lines = [
+        "🔐 <b>Админ-панель</b>",
+        "",
+        "<b>👥 Пользователи бота</b>",
+        f"Всего известно боту: {online_counts['total']}",
+        f"🟢 На линии сейчас: {online_counts['online']}",
+        f"⚪️ Не на линии: {online_counts['offline']}",
+    ]
+    for cat, n in sorted(online_counts['online_by_category'].items(), key=lambda x: -x[1]):
+        label = CATEGORIES.get(cat, {}).get('name', cat)
+        lines.append(f"  • {label}: {n}")
+    lines += [
+        "",
+        "<b>💳 Подписки</b>",
+        f"💰 Оплаченная подписка активна: {sub_counts['paid_active']}",
+        f"🎁 На бесплатном пробном периоде: {sub_counts['trial']}",
+        f"🔴 Доступ истёк (не продлили): {sub_counts['expired']}",
+        "",
+    ]
+    return '\n'.join(lines) + '\n' + format_campaign_profit_text()
+
+
+def admin_panel_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Обновить", callback_data="admin_panel_refresh")]
+    ])
+
+
+@router.callback_query(lambda c: c.data == "admin_panel_start")
+async def admin_panel_start(callback_query: types.CallbackQuery):
+    """Кнопка "🔐 АДМИН" в меню реферальной программы - тот же паттерн, что
+    и у "👻 ФАНТОМ"/"🏢 Юр.лицо" (ждём пароль текстом, см.
+    admin_panel_password_flow ниже)."""
+    try:
+        await callback_query.answer()
+    except Exception:
+        pass
+    state = user_state.setdefault(callback_query.from_user.id, {})
+    state['awaiting_admin_panel_password'] = True
+    await callback_query.message.answer("🔐 Введи пароль:")
+
+
+@router.message(lambda message: user_state.get(message.from_user.id, {}).get('awaiting_admin_panel_password'))
+async def admin_panel_password_flow(message: types.Message):
+    """Ловит ЛЮБОЙ текст, пока ждём пароль админ-панели - должен стоять
+    РАНЬШЕ остальных текстовых хендлеров (тот же приём, что и
+    phantom_password_flow/referral_legal_password_flow)."""
+    user_id = message.from_user.id
+    state = user_state[user_id]
+    text = (message.text or '').strip()
+    state.pop('awaiting_admin_panel_password', None)
+    if text != ADMIN_PANEL_PASSWORD:
+        await message.answer("❌ Неверный пароль.")
+        return
+    await message.answer(format_admin_overview_text(), parse_mode='HTML', reply_markup=admin_panel_keyboard())
+
+
+@router.callback_query(lambda c: c.data == "admin_panel_refresh")
+async def admin_panel_refresh(callback_query: types.CallbackQuery):
+    """Кнопка "🔄 Обновить" под уже показанной админ-панелью - пароль уже
+    проверен при открытии этого самого сообщения, повторно не спрашиваем
+    (тот же принцип, что и у "🔄 Обновить отчёт" campaign_profit)."""
+    fresh_text = format_admin_overview_text()
+    try:
+        await callback_query.message.edit_text(fresh_text, parse_mode='HTML', reply_markup=admin_panel_keyboard())
+        await callback_query.answer("Обновлено")
+    except Exception as e:
+        if 'message is not modified' in str(e):
+            await callback_query.answer("Данные не изменились")
+        else:
+            logger.error(f"❌ Не удалось обновить админ-панель: {e}")
+            await callback_query.answer("Ошибка обновления")
+
 
 # По просьбе пользователя (20.09.2026): "делай пуши перекрытий... и крупные
 # ДТП" - отдельный пуш-тип, независимый от статусов аэропортов/часов пика.
