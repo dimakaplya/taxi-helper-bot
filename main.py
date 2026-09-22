@@ -8633,7 +8633,11 @@ async def nearby_drivers_checker():
 # АЗС из fuel_charging_data.json (load_fuel_charging_data, kind=='fuel').
 # Отметка ставится прямо из чата по инлайн-кнопкам под пушем (set_gas_fuel_
 # status) - не нужно открывать карту/WebApp специально ради одной отметки.
-FUEL_REMINDER_RADIUS_KM = 0.3
+# ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя - "push на заправках 75 м,
+# не 300 и не 500 - зона слишком большая"): было 300 м (0.3 км) - слишком
+# широкий радиус срабатывал на водителях, которые просто проезжали мимо или
+# стояли у соседнего здания, а не реально были на самой заправке.
+FUEL_REMINDER_RADIUS_KM = 0.075
 FUEL_REMINDER_MINUTES = 7
 FUEL_REMINDER_CHECK_INTERVAL_MINUTES = 1
 
