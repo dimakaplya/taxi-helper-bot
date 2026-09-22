@@ -9270,14 +9270,40 @@ def map_webapp_html():
           for (let i = 0; i < (s || '').length; i++) {{ h = (h * 31 + s.charCodeAt(i)) % 10000; }}
           return h;
         }}
+        // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "сделай
+        // пожалуйста 10-15 разных облаков форм облаков спроса и рандомно
+        // их загружай"): раньше форма облака у ВСЕХ аэропортов строилась по
+        // одной и той же формуле (менялись только фазы/смещение из seed,
+        // силуэт был визуально похож). Теперь есть набор из 13 разных
+        // "профилей" силуэта (своя база/частоты-амплитуды волн/диапазон
+        // сжатия у каждого) - профиль выбирается ДЕТЕРМИНИРОВАННО по seed
+        // (seed % profiles.length), так что у каждого аэропорта своя,
+        // стабильная между перерисовками форма, а не одна и та же на всех.
+        const CLOUD_SHAPE_PROFILES = [
+          {{base: 0.62, min: 0.35, terms: [[2, 0.24], [5, 0.12], [3, 0.09]]}},
+          {{base: 0.58, min: 0.32, terms: [[3, 0.22], [7, 0.14], [1, 0.10]]}},
+          {{base: 0.66, min: 0.40, terms: [[4, 0.18], [2, 0.15], [6, 0.08]]}},
+          {{base: 0.55, min: 0.28, terms: [[2, 0.28], [9, 0.10], [4, 0.07]]}},
+          {{base: 0.64, min: 0.38, terms: [[5, 0.20], [3, 0.13], [8, 0.06]]}},
+          {{base: 0.60, min: 0.30, terms: [[3, 0.26], [6, 0.11], [2, 0.09]]}},
+          {{base: 0.63, min: 0.42, terms: [[4, 0.16], [7, 0.12], [1, 0.08]]}},
+          {{base: 0.57, min: 0.33, terms: [[2, 0.20], [4, 0.18], [9, 0.05]]}},
+          {{base: 0.65, min: 0.36, terms: [[6, 0.19], [2, 0.14], [5, 0.07]]}},
+          {{base: 0.59, min: 0.29, terms: [[3, 0.24], [8, 0.13], [1, 0.06]]}},
+          {{base: 0.61, min: 0.41, terms: [[5, 0.17], [2, 0.12], [7, 0.09]]}},
+          {{base: 0.56, min: 0.31, terms: [[4, 0.23], [3, 0.15], [6, 0.06]]}},
+          {{base: 0.67, min: 0.44, terms: [[2, 0.16], [6, 0.13], [4, 0.08]]}},
+        ];
         function blobLatLngs(lat, lon, maxRadiusM, seed, pointsCount) {{
           pointsCount = pointsCount || 24;
           const metersPerDegLat = 111320;
+          const profile = CLOUD_SHAPE_PROFILES[seed % CLOUD_SHAPE_PROFILES.length];
           // Детерминированные "случайные" фазы/смещение из seed - разные у
           // каждого аэропорта, но стабильные между перерисовками.
           const p1 = (seed % 628) / 100;
           const p2 = ((seed * 3) % 628) / 100;
           const p3 = ((seed * 7) % 628) / 100;
+          const phases = [p1, p2, p3];
           const offsetAngle = ((seed * 13) % 628) / 100;
           const offsetDist = maxRadiusM * 0.28;
           const cLat = lat + (offsetDist * Math.cos(offsetAngle)) / metersPerDegLat;
@@ -9285,13 +9311,14 @@ def map_webapp_html():
           const latLngs = [];
           for (let i = 0; i < pointsCount; i++) {{
             const angle = (i / pointsCount) * Math.PI * 2;
-            // 0.35..1.0 от максимума - явно асимметричное облако, а не
-            // ровный круг с лёгкой рябью по краю.
-            const wobble = 0.62
-              + 0.24 * Math.sin(angle * 2 + p1)
-              + 0.12 * Math.sin(angle * 5 + p2)
-              + 0.09 * Math.sin(angle * 3 + p3);
-            const r = maxRadiusM * Math.max(0.35, Math.min(1, wobble));
+            // Явно асимметричное облако, а не ровный круг с лёгкой рябью
+            // по краю - конкретные база/частоты/амплитуды/диапазон сжатия
+            // берутся из выбранного CLOUD_SHAPE_PROFILES[...].
+            let wobble = profile.base;
+            profile.terms.forEach(([freq, amp], idx) => {{
+              wobble += amp * Math.sin(angle * freq + phases[idx % phases.length]);
+            }});
+            const r = maxRadiusM * Math.max(profile.min, Math.min(1, wobble));
             const dLat = (r * Math.cos(angle)) / metersPerDegLat;
             const dLon = (r * Math.sin(angle)) / (metersPerDegLat * Math.cos(cLat * Math.PI / 180));
             latLngs.push([cLat + dLat, cLon + dLon]);
