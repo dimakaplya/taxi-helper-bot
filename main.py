@@ -2115,32 +2115,60 @@ def get_airport_departures(airport_icao):
 # центра и подождать заказ, плюс запас на предрегистрацию/провожающих,
 # которые тоже едут В аэропорт заранее.
 DEPARTURE_WAVE_LEAD_HOURS = 2
-# Порог суммарного числа вылетов (по всем 3 аэропортам Москвы вместе) в
-# ближайшие DEPARTURE_WAVE_LEAD_HOURS часов, начиная с которого считаем это
-# "волной" и даём бонус кандидату "Центр города" в "Куда ехать" (см.
-# score_moscow_center_candidate). Число подобрано по порядку величины - на
-# крупных аэропортах Москвы под сотню вылетов в сутки на каждый, окно 2ч из
-# ~18 часовых "живых" слотов - типичный час без явного пика даёт куда
-# меньше 25 рейсов суммарно по всем 3 аэропортам, а предпиковые окна заметно
-# больше. Не претендует на калиброванную точность - как и остальные пороги
-# спроса в этом боте, ориентир, а не гарантия.
-DEPARTURE_WAVE_THRESHOLD = 25
 
-def moscow_departure_wave_info():
+# ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя голосовым - "вылет
+# собирает только с таких аэропортов как Москва Санкт-Петербург... давать
+# их в сводку по формуле как ранее сказал в куда поехать") - сбор вылетов
+# расширен с 3 московских аэропортов на Москву+Питер (см. DEPARTURE_ICAO в
+# fetch_yandex_data.py, теперь включает ULLI/Пулково), поэтому "волна
+# вылетов" считается ПО ГОРОДУ, не только для Москвы. Список аэропортов на
+# город и свой порог для каждого (Пулково - один аэропорт, а не три, так что
+# порог ниже, пропорционально его собственной загрузке).
+DEPARTURE_WAVE_AIRPORTS_BY_CITY = {
+    'moscow': ('UUEE', 'UUWW', 'UUDD'),
+    'spb': ('ULLI',),
+}
+# Порог суммарного числа вылетов по аэропортам города в ближайшие
+# DEPARTURE_WAVE_LEAD_HOURS часов, начиная с которого считаем это "волной" и
+# даём бонус кандидату "Центр города" в "Куда ехать" (см.
+# score_moscow_center_candidate/score_city_candidate). Москва: 3 крупных
+# аэропорта вместе, под сотню вылетов в сутки на каждый, окно 2ч из ~18
+# часовых "живых" слотов - типичный час без явного пика даёт куда меньше 25
+# рейсов суммарно, а предпиковые окна заметно больше. Питер: один Пулково,
+# порог снижен пропорционально (примерно вдвое от доли одного аэропорта
+# Москвы). Не претендует на калиброванную точность - как и остальные пороги
+# спроса в этом боте, ориентир, а не гарантия.
+DEPARTURE_WAVE_THRESHOLD_BY_CITY = {
+    'moscow': 25,
+    'spb': 12,
+}
+# Порог по умолчанию для обратной совместимости (старое имя переменной,
+# использовалось только для Москвы).
+DEPARTURE_WAVE_THRESHOLD = DEPARTURE_WAVE_THRESHOLD_BY_CITY['moscow']
+
+def departure_wave_info(city):
     """Возвращает {'count': int, 'is_wave': bool} - суммарное число вылетов
-    из SVO+VKO+DME в ближайшие DEPARTURE_WAVE_LEAD_HOURS часов и флаг,
-    превышен ли DEPARTURE_WAVE_THRESHOLD. Используется только для Москвы
-    (см. score_moscow_center_candidate) - для остальных городов вылеты не
-    собираются вообще."""
+    из аэропортов города (см. DEPARTURE_WAVE_AIRPORTS_BY_CITY) в ближайшие
+    DEPARTURE_WAVE_LEAD_HOURS часов и флаг, превышен ли порог для этого
+    города (DEPARTURE_WAVE_THRESHOLD_BY_CITY). Для городов вне словаря -
+    вылеты не собираются вообще, возвращаем нулевой результат."""
+    airports = DEPARTURE_WAVE_AIRPORTS_BY_CITY.get(city)
+    if not airports:
+        return {'count': 0, 'is_wave': False}
+    threshold = DEPARTURE_WAVE_THRESHOLD_BY_CITY.get(city, DEPARTURE_WAVE_THRESHOLD)
     now_ts = datetime.now().timestamp()
     horizon_ts = now_ts + DEPARTURE_WAVE_LEAD_HOURS * 3600
     count = 0
-    for icao in ('UUEE', 'UUWW', 'UUDD'):
+    for icao in airports:
         for f in get_airport_departures(icao):
             first_seen = f.get('firstSeen')
             if first_seen is not None and now_ts <= first_seen <= horizon_ts:
                 count += 1
-    return {'count': count, 'is_wave': count >= DEPARTURE_WAVE_THRESHOLD}
+    return {'count': count, 'is_wave': count >= threshold}
+
+def moscow_departure_wave_info():
+    """Обратная совместимость - старое имя, только Москва."""
+    return departure_wave_info('moscow')
 
 def get_load_emoji(load_percent):
     # Пороги ИЗМЕНЕНЫ 21.09.2026 по просьбе пользователя (было 0-50/51-70/71-100/>100)
@@ -7252,6 +7280,21 @@ async def score_city_candidate(city, category=None):
                 score += bonus
                 reasons.append(f"{upcoming['emoji']} скоро осадки - спрос скоро вырастет")
 
+    # ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - расширение сбора
+    # вылетов на Санкт-Петербург/Пулково, см. departure_wave_info выше) -
+    # тот же сигнал "волны вылетов", что для Москвы (score_moscow_center_candidate),
+    # но для Питера, т.к. у него нет отдельного кандидата "Центр" -
+    # генерический "Город/центр" (эта функция) - единственный кандидат,
+    # к которому применимо усиление.
+    if city == 'spb' and category in ('taxi', 'ultima'):
+        try:
+            wave = departure_wave_info('spb')
+        except Exception:
+            wave = None
+        if wave and wave['is_wave']:
+            score *= 1.25
+            reasons.append(f"🛫 скоро волна вылетов ({wave['count']} за {DEPARTURE_WAVE_LEAD_HOURS}ч) - вероятны заказы в аэропорт")
+
     advice = get_city_advice(city, level, category=category)
     city_coords = RAIN_CITY_COORDS.get(city)
     return {
@@ -7294,7 +7337,7 @@ async def score_moscow_center_candidate(city, category):
     # источник данных общий (только 3 аэропорта Москвы, см. DEPARTURE_ICAO
     # в fetch_yandex_data.py).
     try:
-        wave = moscow_departure_wave_info()
+        wave = departure_wave_info('moscow')
     except Exception:
         wave = None
     if wave and wave['is_wave']:

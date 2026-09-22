@@ -16,18 +16,33 @@
     pip install requests
     python3 fetch_yandex_data.py
 
-ПРИЛЁТЫ по всем 14 аэропортам + ВЫЛЕТЫ только по 3 московским (Шереметьево/
-Внуково/Домодедово, см. DEPARTURE_ICAO) - добавлено 22.09.2026 как сигнал
-"скоро волна вылетов -> держись центра/гостиниц, будут заказы В аэропорт"
-(см. moscow_departure_wave_info в main.py). Вылеты не по всем 14 ради
-экономии квоты - при лимите ключа 500 запросов/сутки один запуск уходит
-примерно 14-25 запросов (13 аэропортов x 1 направление + доп. 3 запроса на
-вылеты для Москвы + пагинация для крупных). Точное число запросов
-конкретно у тебя скрипт печатает в конце каждого запуска ("Потрачено запросов").
+ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя - "Краснодар/Ростов ночью
+закрыты, нет смысла собирать... по остальным раз в 3 часа, крупные города
+(Москва/СПб/Сочи/Новосибирск/Казань/Н.Новгород) каждый час, ночью раз в 2
+часа... вылеты только Москва/СПб, с 10 до 20") - теперь НЕ все аэропорты
+опрашиваются с одной частотой:
+  - Ростов (URRP) - постоянно закрыт (closed=true в config.json), не
+    опрашивается вообще, как и раньше.
+  - "Крупные" (см. BIG_CITY_ICAO: Москва x3, СПб, Сочи, Новосибирск,
+    Казань, Нижний Новгород) - прилёты каждый час, а в ночное окно (см.
+    NIGHT_START_HOUR/NIGHT_END_HOUR, по МЕСТНОМУ времени аэропорта) - раз в
+    2 часа.
+  - Остальные (Екатеринбург/Челябинск/Омск/Самара/Краснодар) - прилёты раз
+    в REGULAR_FETCH_INTERVAL_HOURS=3 часа днём, ночью не опрашиваются
+    вообще (эти аэропорты реально не принимают рейсы ночью - расход квоты
+    на пустой ответ бессмысленен).
+  - Вылеты (см. DEPARTURE_ICAO) - только Москва+СПб, и только в окне
+    DEPARTURE_COLLECT_START_HOUR..END_HOUR (10:00-20:00) - сигнал "волна
+    вылетов" в "Куда ехать" нужен днём, ночью вылетов из аэропортов почти
+    нет.
+Само решение "опрашивать ли этот аэропорт в этот час" считается внутри
+main() по местному часу КАЖДОГО аэропорта отдельно (см. should_fetch_arrivals/
+should_fetch_departures) - крону достаточно дёргать скрипт РАЗ В ЧАС, вся
+экономия квоты происходит уже внутри одного запуска.
 
-Рекомендуется гонять по крону раз в 2 часа:
+Рекомендуется гонять по крону раз в час:
     crontab -e
-    0 */2 * * * cd /путь/к/проекту && /usr/bin/python3 fetch_yandex_data.py >> fetch.log 2>&1
+    0 * * * * cd /путь/к/проекту && /usr/bin/python3 fetch_yandex_data.py >> fetch.log 2>&1
 
 Скрипт сам ведёт счётчик запросов за сегодня (api_usage_log.json) и откажется
 запускаться, если дневной лимит (500) почти исчерпан - так что даже если крон
@@ -291,12 +306,53 @@ def extract_point_city(thread_title, event):
 # вылеты, это тоже неплохой показатель, который можно включить в систему
 # расчёта - если много вылетов в аэропорту, значит нужно держаться центра/
 # гостиниц, чтобы ждать заказ, едущий В аэропорт"): вылеты СНОВА собираются
-# (были убраны 19-21.09.2026 ради экономии квоты), но ТОЛЬКО для 3
-# аэропортов Москвы - здесь у бота уже есть районная система спроса и
-# time-bias для Ultima, где этот сигнал реально полезен, и это минимизирует
-# доп. расход квоты (вместо удвоения запросов по ВСЕМ 14 аэропортам). Для
-# остальных 11 аэропортов - по-прежнему только прилёты.
-DEPARTURE_ICAO = {'UUEE', 'UUWW', 'UUDD'}  # Шереметьево, Внуково, Домодедово
+# (были убраны 19-21.09.2026 ради экономии квоты). ИЗМЕНЕНО 22.09.2026 (та же
+# просьба, уточнение голосовым - "вылет собирает только с таких аэропортов
+# как Москва Санкт-Петербург... с 10 утра до 8 вечера") - список расширен с 3
+# московских до Москвы+СПб, но добавлено дневное окно (см.
+# DEPARTURE_COLLECT_START_HOUR/END_HOUR ниже) вместо круглосуточного сбора.
+DEPARTURE_ICAO = {'UUEE', 'UUWW', 'UUDD', 'ULLI'}  # Шереметьево, Внуково, Домодедово, Пулково
+DEPARTURE_COLLECT_START_HOUR = 10
+DEPARTURE_COLLECT_END_HOUR = 20  # [10, 20) по МЕСТНОМУ времени аэропорта (для этих 4 - Europe/Moscow)
+
+# ==================== ТИРЫ ЧАСТОТЫ ОПРОСА АЭРОПОРТОВ (ДОБАВЛЕНО 22.09.2026) ====================
+# Прямая просьба пользователя: "Краснодар с 12 ночи до 6 утра вообще нет
+# смысла собирать данные - аэропорт закрыт... по остальным - раз в 3 часа...
+# крупные города - Москва/СПб/Сочи/Новосибирск/Казань/Нижний Новгород -
+# прилёт и вылет каждый час, ночью раз в 2 часа". Ростов (URRP) отдельно
+# просить не нужно - он уже помечен closed=true в config.json и полностью
+# пропускается существующей проверкой airport.get('closed') в main() (см.
+# ниже), как и раньше.
+BIG_CITY_ICAO = {
+    'UUEE', 'UUWW', 'UUDD',  # Москва (Шереметьево/Внуково/Домодедово)
+    'ULLI',  # Санкт-Петербург (Пулково)
+    'URSS',  # Сочи (Адлер)
+    'UNNT',  # Новосибирск (Толмачёво)
+    'UWKD',  # Казань
+    'UWGG',  # Нижний Новгород
+}
+REGULAR_FETCH_INTERVAL_HOURS = 3  # обычные (не "крупные") аэропорты - раз в 3 часа днём
+NIGHT_START_HOUR = 0
+NIGHT_END_HOUR = 6  # [0, 6) по МЕСТНОМУ времени аэропорта - ночное окно
+
+def should_fetch_arrivals(icao, local_hour):
+    """Решает, стоит ли опрашивать ПРИЛЁТЫ этого аэропорта в данный час его
+    местного времени - см. комментарий у BIG_CITY_ICAO выше. Вызывается
+    заново для каждого аэропорта при каждом запуске (крон - раз в час),
+    поэтому сама разница в частоте получается без разных crontab-записей."""
+    is_night = NIGHT_START_HOUR <= local_hour < NIGHT_END_HOUR
+    if icao in BIG_CITY_ICAO:
+        return (local_hour % 2 == 0) if is_night else True
+    if is_night:
+        return False
+    return local_hour % REGULAR_FETCH_INTERVAL_HOURS == 0
+
+def should_fetch_departures(icao, local_hour):
+    """Решает, стоит ли опрашивать ВЫЛЕТЫ этого аэропорта - см.
+    DEPARTURE_ICAO/DEPARTURE_COLLECT_START_HOUR/END_HOUR выше."""
+    if icao not in DEPARTURE_ICAO:
+        return False
+    return DEPARTURE_COLLECT_START_HOUR <= local_hour < DEPARTURE_COLLECT_END_HOUR
 
 REQUEST_COUNT = 0  # глобальный счётчик реальных запросов к API за этот запуск
 
@@ -476,14 +532,24 @@ def parse_flights(schedule_items, event):
     return flights
 
 
-def fetch_departures_if_needed(icao, name, station_code, airport_today, previous_result, target_dict):
+def fetch_departures_if_needed(icao, name, station_code, airport_today, previous_result, target_dict, local_hour):
     """Довесок к основному прогону прилётов (ДОБАВЛЕНО 22.09.2026) - вылеты
-    только для DEPARTURE_ICAO (см. выше). Сознательно НЕ участвует в
-    circuit breaker'е прилётов (consecutive_failures/circuit_broken в
-    main()) - сбой здесь просто оставляет предыдущие вылеты (или пустой
-    список) и не останавливает прогон по остальным аэропортам, вылеты не
-    настолько критичны, чтобы ради них рисковать блокировкой ключа."""
-    if icao not in DEPARTURE_ICAO:
+    только для DEPARTURE_ICAO и только в дневном окне (см.
+    should_fetch_departures выше). Сознательно НЕ участвует в circuit
+    breaker'е прилётов (consecutive_failures/circuit_broken в main()) - сбой
+    здесь просто оставляет предыдущие вылеты (или пустой список) и не
+    останавливает прогон по остальным аэропортам, вылеты не настолько
+    критичны, чтобы ради них рисковать блокировкой ключа. Вне окна сбора -
+    просто оставляет то, что уже было в target_dict (не трогает 'departures'
+    вообще), а не затирает пустым списком."""
+    if not should_fetch_departures(icao, local_hour):
+        # Вне окна сбора - переносим предыдущие вылеты как есть (если были),
+        # чтобы moscow_departure_wave_info() в main.py не остался без данных
+        # только из-за того, что этот конкретный час вне окна 10-20.
+        prev_airport = (previous_result or {}).get('airports', {}).get(icao)
+        prev_departures = (prev_airport or {}).get('departures')
+        if prev_departures:
+            target_dict['departures'] = prev_departures
         return
     raw = fetch_schedule(station_code, 'departure', airport_today)
     if raw is None:
@@ -576,9 +642,12 @@ def main():
         # Дата - по СВОЕМУ часовому поясу аэропорта (см. комментарий у
         # AIRPORTS выше), а не по общему московскому "today".
         try:
-            airport_today = datetime.now(ZoneInfo(airport.get('timezone', 'Europe/Moscow'))).strftime('%Y-%m-%d')
+            airport_local_now = datetime.now(ZoneInfo(airport.get('timezone', 'Europe/Moscow')))
+            airport_today = airport_local_now.strftime('%Y-%m-%d')
+            local_hour = airport_local_now.hour
         except Exception:
             airport_today = today
+            local_hour = datetime.now(MSK_TZ).hour
 
         if airport.get('closed'):
             logger.info(f"⏭️  {name} ({iata}) закрыт - пропускаю без единого запроса к API")
@@ -599,6 +668,22 @@ def main():
                 logger.warning(f"⏭️  {name}: пропускаю запрос (ключ похоже заблокирован) - оставляю предыдущие данные")
             else:
                 result['airports'][icao] = {'iata': iata, 'arrivals': []}
+            continue
+
+        # ДОБАВЛЕНО 22.09.2026 (см. BIG_CITY_ICAO/should_fetch_arrivals выше,
+        # прямая просьба пользователя про ночные окна и частоту опроса) - вне
+        # своего "окна" этот час просто пропускаем БЕЗ единого запроса к API,
+        # оставляя предыдущие данные как есть (в т.ч. departures, если были -
+        # см. fetch_departures_if_needed ниже, у него своя отдельная логика
+        # для того же случая).
+        if not should_fetch_arrivals(icao, local_hour):
+            prev_airport = (previous_result or {}).get('airports', {}).get(icao)
+            if prev_airport:
+                result['airports'][icao] = prev_airport
+                logger.info(f"⏭️  {name}: вне окна опроса (местное время {local_hour}:00) - оставляю предыдущие данные без запроса")
+            else:
+                result['airports'][icao] = {'iata': iata, 'arrivals': []}
+                logger.info(f"⏭️  {name}: вне окна опроса (местное время {local_hour}:00), прошлых данных тоже нет - пусто")
             continue
 
         logger.info(f"✈️  Обрабатываю {name} ({iata}/{icao})...")
@@ -657,7 +742,7 @@ def main():
                     f"{previous_result.get('generated_at', '?')}) вместо нулей"
                 )
                 time.sleep(2.0)
-                fetch_departures_if_needed(icao, name, station_code, airport_today, previous_result, result['airports'][icao])
+                fetch_departures_if_needed(icao, name, station_code, airport_today, previous_result, result['airports'][icao], local_hour)
                 continue
 
         result['airports'][icao] = {
@@ -667,7 +752,7 @@ def main():
         logger.info(f"✅ {name}: {len(arrivals_today)} прилётов")
         time.sleep(2.0)  # не долбим API слишком часто (было 0.3с, потом 0.5с - всё равно 429
         # почти на каждом аэропорте подряд, см. инцидент 19.09.2026 20:20-20:24 МСК)
-        fetch_departures_if_needed(icao, name, station_code, airport_today, previous_result, result['airports'][icao])
+        fetch_departures_if_needed(icao, name, station_code, airport_today, previous_result, result['airports'][icao], local_hour)
 
     with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
