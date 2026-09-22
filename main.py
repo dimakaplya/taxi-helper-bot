@@ -869,6 +869,19 @@ AIRPORT_PARKING_ZONE_POLYGONS = {
             ],
         },
     },
+    # Сочи/Адлер (URSS) - аэропорт БЕЗ терминальных зон (нет записи в
+    # AIRPORT_TERMINAL_ZONES), поэтому полигон парковки лежит под sentinel-
+    # ключом '_airport' (см. handle_map_airports_api) вместо zone_key.
+    'URSS': {
+        '_airport': {
+            None: [
+                (43.446218, 39.936550),
+                (43.447031, 39.939055),
+                (43.447804, 39.938537),
+                (43.447234, 39.936097),
+            ],
+        },
+    },
 }
 
 # Буква терминала из данных Yandex Rasp API (flight['terminal'], см.
@@ -10367,7 +10380,16 @@ async def handle_map_airports_api(request):
             # список {'label', 'points': [[lat, lon], ...]}, фронтенд рисует
             # каждый L.polygon-ом (см. loadAirports). Чисто визуальное, не
             # влияет на радиусы/пуши очереди.
-            zone_polygons = AIRPORT_PARKING_ZONE_POLYGONS.get(icao, {}).get(zone_key) if zone_key else None
+            # ЕЩЁ РАЗ ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя -
+            # полигон парковки Сочи/Адлера, у которого НЕТ терминальных зон
+            # (AIRPORT_TERMINAL_ZONES) - раньше полигон подхватывался только
+            # у зон Шереметьево, т.к. lookup был `if zone_key`): для
+            # аэропортов БЕЗ zone_key используем sentinel-ключ '_airport' в
+            # AIRPORT_PARKING_ZONE_POLYGONS[icao] - опорная точка тогда не
+            # из AIRPORT_TERMINAL_ZONES (её нет), а сам аэропорт целиком:
+            # coords аэропорта + его радиус из airport_queue_outer_radius_km(icao).
+            _polygons_key = zone_key or '_airport'
+            zone_polygons = AIRPORT_PARKING_ZONE_POLYGONS.get(icao, {}).get(_polygons_key)
             if zone_polygons:
                 # ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "при
                 # тапе на парковку тоже очередь выводи текущую и количество
@@ -10378,13 +10400,20 @@ async def handle_map_airports_api(request):
                 # ПОБЛИЗОСТИ (count_positions_near), т.к. полигон это
                 # произвольная форма, а радиус - уже готовая метрика
                 # "рядом". Очередь (queue) берём ту же, что уже посчитана
-                # для всей зоны выше - отдельных отметок очереди по
-                # конкретной парковке P22/P20 не ведётся, только по зоне
-                # bc/d целиком.
-                _points_by_label = {
-                    pt.get('point_label'): pt
-                    for pt in (AIRPORT_TERMINAL_ZONES.get(icao, {}).get(zone_key, {}).get('points') or [])
-                }
+                # для всей зоны/аэропорта выше - отдельных отметок очереди
+                # по конкретной парковке P22/P20/D не ведётся.
+                if zone_key:
+                    _points_by_label = {
+                        pt.get('point_label'): pt
+                        for pt in (AIRPORT_TERMINAL_ZONES.get(icao, {}).get(zone_key, {}).get('points') or [])
+                    }
+                else:
+                    # Аэропорт без зон (например URSS/Сочи) - единственная
+                    # "точка" это сам аэропорт, radius_km берём из
+                    # airport_queue_outer_radius_km(icao) (0.5 км у Сочи).
+                    _points_by_label = {
+                        None: {'coords': coords, 'radius_km': airport_queue_outer_radius_km(icao)},
+                    }
                 entry['parking_polygons'] = []
                 for point_label, vertices in zone_polygons.items():
                     poly_entry = {'label': point_label, 'points': [[p[0], p[1]] for p in vertices]}
