@@ -2071,6 +2071,77 @@ def get_airport_flights(airport_icao):
         logger.error(f"❌ Ошибка: {e}")
         return []
 
+# ==================== ВЫЛЕТЫ (сигнал "волна вылетов") - ДОБАВЛЕНО 22.09.2026 ====================
+# По прямой просьбе пользователя ("если много вылетов в аэропорту, значит
+# нужно держаться центра/гостиниц, чтобы ждать заказ, едущий В аэропорт") -
+# вылеты собираются ТОЛЬКО для 3 аэропортов Москвы (см. DEPARTURE_ICAO в
+# fetch_yandex_data.py, решение сознательно ограничено Москвой ради экономии
+# дневной квоты Yandex Rasp API в 500 запросов). get_airport_departures - та
+# же логика парсинга, что get_airport_flights выше, но читает 'departures',
+# а moscow_departure_wave_info считает "надвигающуюся волну" - сколько
+# вылетов из ВСЕХ 3 аэропортов суммарно намечено в ближайшие
+# DEPARTURE_WAVE_LEAD_HOURS часов.
+def get_airport_departures(airport_icao):
+    """Вылеты аэропорта из flights_data.json (только SVO/VKO/DME - см.
+    DEPARTURE_ICAO в fetch_yandex_data.py). Для остальных аэропортов или
+    если данных ещё нет - пустой список (не откатываемся ни на какой
+    хардкод, в отличие от get_airport_flights - для вылетов запасных данных
+    никогда не было)."""
+    try:
+        now = datetime.now()
+        flights = []
+        data = load_flights_data()
+        if not data or airport_icao not in data.get('airports', {}):
+            return []
+        raw_flights = data['airports'][airport_icao].get('departures', [])
+        for flight_data in raw_flights:
+            time_parts = flight_data['time'].split(':')
+            hour, minute = int(time_parts[0]), int(time_parts[1])
+            flight_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            flights.append({
+                'time': flight_data['time'],
+                'callsign': f"{flight_data['airline']} {flight_data['flight']}",
+                'destination': flight_data.get('point', ''),
+                'firstSeen': int(flight_time.timestamp()),
+            })
+        return flights
+    except Exception as e:
+        logger.error(f"❌ Ошибка чтения вылетов {airport_icao}: {e}")
+        return []
+
+# Окно "надвигающейся волны вылетов" - вперёд от текущего момента (рейсы,
+# которые уже улетели сегодня раньше, в подсчёт не идут). 2 часа - тот же
+# порядок величины, что у водителя занимает доехать до гостиницы/делового
+# центра и подождать заказ, плюс запас на предрегистрацию/провожающих,
+# которые тоже едут В аэропорт заранее.
+DEPARTURE_WAVE_LEAD_HOURS = 2
+# Порог суммарного числа вылетов (по всем 3 аэропортам Москвы вместе) в
+# ближайшие DEPARTURE_WAVE_LEAD_HOURS часов, начиная с которого считаем это
+# "волной" и даём бонус кандидату "Центр города" в "Куда ехать" (см.
+# score_moscow_center_candidate). Число подобрано по порядку величины - на
+# крупных аэропортах Москвы под сотню вылетов в сутки на каждый, окно 2ч из
+# ~18 часовых "живых" слотов - типичный час без явного пика даёт куда
+# меньше 25 рейсов суммарно по всем 3 аэропортам, а предпиковые окна заметно
+# больше. Не претендует на калиброванную точность - как и остальные пороги
+# спроса в этом боте, ориентир, а не гарантия.
+DEPARTURE_WAVE_THRESHOLD = 25
+
+def moscow_departure_wave_info():
+    """Возвращает {'count': int, 'is_wave': bool} - суммарное число вылетов
+    из SVO+VKO+DME в ближайшие DEPARTURE_WAVE_LEAD_HOURS часов и флаг,
+    превышен ли DEPARTURE_WAVE_THRESHOLD. Используется только для Москвы
+    (см. score_moscow_center_candidate) - для остальных городов вылеты не
+    собираются вообще."""
+    now_ts = datetime.now().timestamp()
+    horizon_ts = now_ts + DEPARTURE_WAVE_LEAD_HOURS * 3600
+    count = 0
+    for icao in ('UUEE', 'UUWW', 'UUDD'):
+        for f in get_airport_departures(icao):
+            first_seen = f.get('firstSeen')
+            if first_seen is not None and now_ts <= first_seen <= horizon_ts:
+                count += 1
+    return {'count': count, 'is_wave': count >= DEPARTURE_WAVE_THRESHOLD}
+
 def get_load_emoji(load_percent):
     # Пороги ИЗМЕНЕНЫ 21.09.2026 по просьбе пользователя (было 0-50/51-70/71-100/>100)
     if load_percent <= 25: return '🔴'
@@ -7211,6 +7282,25 @@ async def score_moscow_center_candidate(city, category):
             base['reasons'].append("⭐ сейчас приоритет центру")
         else:
             base['reasons'].append("сейчас приоритет районам/аэропортам")
+
+    # ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "если много
+    # вылетов в аэропорту, значит нужно держаться центра/гостиниц, чтобы
+    # ждать заказ, едущий В аэропорт") - реальный данные-сигнал (не
+    # эвристика по часу, как ultima_time_bias выше): если в ближайшие
+    # DEPARTURE_WAVE_LEAD_HOURS часов из SVO+VKO+DME суммарно улетает
+    # DEPARTURE_WAVE_THRESHOLD+ рейсов, поднимаем "Центр города" - там
+    # предполётные пассажиры (гостиницы/бизнес-центры/жильё), которым
+    # понадобится заказ В аэропорт. Применяется и к такси, и к Ultima -
+    # источник данных общий (только 3 аэропорта Москвы, см. DEPARTURE_ICAO
+    # в fetch_yandex_data.py).
+    try:
+        wave = moscow_departure_wave_info()
+    except Exception:
+        wave = None
+    if wave and wave['is_wave']:
+        base['score'] *= 1.25
+        base['reasons'].append(f"🛫 скоро волна вылетов ({wave['count']} за {DEPARTURE_WAVE_LEAD_HOURS}ч) - вероятны заказы в аэропорт")
+
     return base
 
 # Концертное событие начинает давать всплеск спроса ЗА CONCERT_EVENT_LEAD_HOURS

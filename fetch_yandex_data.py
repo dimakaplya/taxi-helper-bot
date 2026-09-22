@@ -16,10 +16,13 @@
     pip install requests
     python3 fetch_yandex_data.py
 
-Только ПРИЛЁТЫ (вылеты убраны ради экономии квоты) - при лимите ключа 500
-запросов/сутки и ~14-25 запросов за один запуск (13 активных аэропортов x 1
-направление + пагинация для крупных) помещается заметно больше запусков в
-сутки, чем раньше (когда тянули оба направления). Точное число запросов
+ПРИЛЁТЫ по всем 14 аэропортам + ВЫЛЕТЫ только по 3 московским (Шереметьево/
+Внуково/Домодедово, см. DEPARTURE_ICAO) - добавлено 22.09.2026 как сигнал
+"скоро волна вылетов -> держись центра/гостиниц, будут заказы В аэропорт"
+(см. moscow_departure_wave_info в main.py). Вылеты не по всем 14 ради
+экономии квоты - при лимите ключа 500 запросов/сутки один запуск уходит
+примерно 14-25 запросов (13 аэропортов x 1 направление + доп. 3 запроса на
+вылеты для Москвы + пагинация для крупных). Точное число запросов
 конкретно у тебя скрипт печатает в конце каждого запуска ("Потрачено запросов").
 
 Рекомендуется гонять по крону раз в 2 часа:
@@ -284,6 +287,17 @@ def extract_point_city(thread_title, event):
     return thread_title
 
 
+# ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "если будем собирать
+# вылеты, это тоже неплохой показатель, который можно включить в систему
+# расчёта - если много вылетов в аэропорту, значит нужно держаться центра/
+# гостиниц, чтобы ждать заказ, едущий В аэропорт"): вылеты СНОВА собираются
+# (были убраны 19-21.09.2026 ради экономии квоты), но ТОЛЬКО для 3
+# аэропортов Москвы - здесь у бота уже есть районная система спроса и
+# time-bias для Ultima, где этот сигнал реально полезен, и это минимизирует
+# доп. расход квоты (вместо удвоения запросов по ВСЕМ 14 аэропортам). Для
+# остальных 11 аэропортов - по-прежнему только прилёты.
+DEPARTURE_ICAO = {'UUEE', 'UUWW', 'UUDD'}  # Шереметьево, Внуково, Домодедово
+
 REQUEST_COUNT = 0  # глобальный счётчик реальных запросов к API за этот запуск
 
 
@@ -462,6 +476,36 @@ def parse_flights(schedule_items, event):
     return flights
 
 
+def fetch_departures_if_needed(icao, name, station_code, airport_today, previous_result, target_dict):
+    """Довесок к основному прогону прилётов (ДОБАВЛЕНО 22.09.2026) - вылеты
+    только для DEPARTURE_ICAO (см. выше). Сознательно НЕ участвует в
+    circuit breaker'е прилётов (consecutive_failures/circuit_broken в
+    main()) - сбой здесь просто оставляет предыдущие вылеты (или пустой
+    список) и не останавливает прогон по остальным аэропортам, вылеты не
+    настолько критичны, чтобы ради них рисковать блокировкой ключа."""
+    if icao not in DEPARTURE_ICAO:
+        return
+    raw = fetch_schedule(station_code, 'departure', airport_today)
+    if raw is None:
+        prev_airport = (previous_result or {}).get('airports', {}).get(icao)
+        prev_departures = (prev_airport or {}).get('departures')
+        target_dict['departures'] = prev_departures if prev_departures else []
+        if prev_departures:
+            logger.warning(f"⚠️ {name}: не удалось получить вылеты - оставляю предыдущие ({len(prev_departures)})")
+        else:
+            logger.warning(f"⚠️ {name}: не удалось получить вылеты, и прошлых данных тоже нет")
+        return
+    departures_today = parse_flights(raw, 'departure')
+    if not departures_today:
+        prev_airport = (previous_result or {}).get('airports', {}).get(icao)
+        prev_departures = (prev_airport or {}).get('departures')
+        if prev_departures:
+            departures_today = prev_departures
+    target_dict['departures'] = departures_today
+    logger.info(f"✅ {name}: {len(departures_today)} вылетов")
+    time.sleep(1.5)
+
+
 def main():
     """Возвращает 'daily_limit_reached', если пропустили запуск из-за
     DAILY_SAFETY_LIMIT (ИСПРАВЛЕНО 20.09.2026 - по просьбе пользователя
@@ -613,6 +657,7 @@ def main():
                     f"{previous_result.get('generated_at', '?')}) вместо нулей"
                 )
                 time.sleep(2.0)
+                fetch_departures_if_needed(icao, name, station_code, airport_today, previous_result, result['airports'][icao])
                 continue
 
         result['airports'][icao] = {
@@ -622,6 +667,7 @@ def main():
         logger.info(f"✅ {name}: {len(arrivals_today)} прилётов")
         time.sleep(2.0)  # не долбим API слишком часто (было 0.3с, потом 0.5с - всё равно 429
         # почти на каждом аэропорте подряд, см. инцидент 19.09.2026 20:20-20:24 МСК)
+        fetch_departures_if_needed(icao, name, station_code, airport_today, previous_result, result['airports'][icao])
 
     with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
