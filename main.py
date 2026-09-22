@@ -16747,7 +16747,7 @@ async def handle_refresh_menu_button(callback_query: types.CallbackQuery):
 # клиенты пользуются ботом как раньше. Как только Tinkoff будет настроен и
 # пользователь решит включать платную подписку для всех - достаточно
 # поменять этот флаг на True, деплоить ничего больше не нужно.
-SUBSCRIPTION_ENFORCEMENT_LIVE = False
+SUBSCRIPTION_ENFORCEMENT_LIVE = True  # ВКЛЮЧЕНО 22.09.2026 по прямой просьбе пользователя
 SUBSCRIPTION_TRIAL_DAYS = 7
 SUBSCRIPTION_PRICE_RUB = 149  # такси/Ultima
 # ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "измени стоимость
