@@ -9070,6 +9070,7 @@ def map_webapp_html():
     проверки подписи на сервере (см. validate_telegram_webapp_init_data)."""
     style_json = json.dumps(MAP_CATEGORY_STYLE, ensure_ascii=False)
     self_marker_style_json = json.dumps(SELF_MARKER_STYLE, ensure_ascii=False)
+    demand_threshold_by_category_json = json.dumps(MAP_DEMAND_CLOUD_THRESHOLD_BY_CATEGORY, ensure_ascii=False)
     fuel_type_labels_json = json.dumps(FUEL_TYPE_LABELS, ensure_ascii=False)
     charging_status_labels_json = json.dumps(CHARGING_STATUS_LABELS, ensure_ascii=False)
     gas_queue_status_labels_json = json.dumps(GAS_QUEUE_STATUS_LABELS, ensure_ascii=False)
@@ -9947,11 +9948,34 @@ def map_webapp_html():
   function cityDemandCloudTimeBucket() {{
     return Math.floor(Date.now() / (5 * 60 * 1000));
   }}
-  function demandCloudOpacity(demand) {{
-    // ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя - "спрос рисовать от
-    // 70 по часам, то что я скидывал в файле") - порог опустили с 80% до
-    // 70% (см. MAP_DEMAND_CLOUD_THRESHOLD), добавлена своя, самая слабая
-    // прозрачность для нового нижнего диапазона 70-79%.
+  // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "спрос в такси
+  // рисуем от 60% и каждые 20% усиливает до 100%, такси Ultima 85% и
+  // каждые 5 до 100") - порог показа облака (MAP_DEMAND_CLOUD_THRESHOLD_BY_
+  // CATEGORY, см. Python) свой у каждой категории, интерполируется прямо
+  // сюда как JSON (тот же приём, что CATEGORY_STYLE/SELF_MARKER_STYLE).
+  const DEMAND_THRESHOLD_BY_CATEGORY = {demand_threshold_by_category_json};
+  const DEMAND_THRESHOLD_DEFAULT = {MAP_DEMAND_CLOUD_THRESHOLD_DEFAULT};
+  function demandCloudThreshold(category) {{
+    return DEMAND_THRESHOLD_BY_CATEGORY[category] !== undefined
+      ? DEMAND_THRESHOLD_BY_CATEGORY[category] : DEMAND_THRESHOLD_DEFAULT;
+  }}
+  // ИЗМЕНЕНО 22.09.2026 (та же просьба, что у DEMAND_THRESHOLD выше) -
+  // ступени прозрачности теперь СВОИ у такси (шаг 20%: 60/80/100) и у
+  // Ultima (шаг 5%: 85/90/95/100, более плавно и до максимума повыше -
+  // спрос там реже, но заметнее, когда есть). У остальных категорий (без
+  // реальных почасовых % - курьер/грузовое такси) - прежняя шкала от 70%.
+  function demandCloudOpacity(demand, category) {{
+    if (category === 'ultima') {{
+      if (demand >= 100) return 0.30;
+      if (demand >= 95) return 0.24;
+      if (demand >= 90) return 0.18;
+      return 0.12; // 85-89%
+    }}
+    if (category === 'taxi') {{
+      if (demand >= 100) return 0.26;
+      if (demand >= 80) return 0.18;
+      return 0.10; // 60-79%
+    }}
     if (demand >= 100) return 0.26;
     if (demand >= 90) return 0.19;
     if (demand >= 80) return 0.13;
@@ -9993,14 +10017,14 @@ def map_webapp_html():
       if (demandCloudMarker) {{ map.removeLayer(demandCloudMarker); demandCloudMarker = null; }}
       demandSatelliteMarkers.forEach(m => map.removeLayer(m));
       demandSatelliteMarkers = [];
-      if (data.demand === null || data.demand === undefined || data.demand < {MAP_DEMAND_CLOUD_THRESHOLD} || data.lat === null || data.lon === null) return;
+      if (data.demand === null || data.demand === undefined || data.demand < demandCloudThreshold(myCategory) || data.lat === null || data.lon === null) return;
       const DEMAND_CLOUD_RADIUS_METERS = 12000;
       const seed = demandCloudSeed(city + '::' + myCategory + '::' + cityDemandCloudTimeBucket());
       demandCloudMarker = L.polygon(cityCloudLatLngs(data.lat, data.lon, DEMAND_CLOUD_RADIUS_METERS, seed), {{
         color: '#9b30ff',
         weight: 0,
         fillColor: '#9b30ff',
-        fillOpacity: demandCloudOpacity(data.demand),
+        fillOpacity: demandCloudOpacity(data.demand, myCategory),
         smoothFactor: 3,
       }}).addTo(map);
       if (demandCloudMarker._path) demandCloudMarker._path.style.filter = 'blur(18px)';
@@ -10014,19 +10038,24 @@ def map_webapp_html():
       // больше в центре, на севере Москвы и на северо-западе, в такси
       // Ultima"): раньше угол спутника был ПОЛНОСТЬЮ случайным (от seed) -
       // спутники могли оказаться в любой стороне от города, без всякой
-      // географической логики. Для Москвы в категориях такси/Ultima (тех
-      // же, для которых вообще есть реальные проценты спроса по часам, см.
-      // MOSCOW_TAXI_DEMAND_PERCENT/MOSCOW_ULTIMA_DEMAND_PERCENT выше по
-      // файлу) первый спутник теперь целится на север (0°), второй - на
-      // северо-запад (-45°) с небольшим случайным разбросом ±10° (чтобы не
-      // рисовались буквально на одном месте каждый раз), а основное облако
-      // и так уже держится близко к центру города (небольшой offsetDist в
-      // cityCloudLatLngs) - вместе получается "центр + север + северо-
-      // запад", как попросил пользователь. Для остальных городов/категорий
-      // угол по-прежнему полностью случайный (старое поведение).
-      const CITY_DEMAND_DIRECTION_BIAS_DEG = {{ moscow: [0, -45] }}; // север, северо-запад
-      const directionBias = (city === 'moscow' && (myCategory === 'taxi' || myCategory === 'ultima'))
-        ? CITY_DEMAND_DIRECTION_BIAS_DEG[city] : null;
+      // географической логики. Для Москвы в категориях такси/Ultima первый
+      // спутник целился на север, второй - на северо-запад.
+      // ЕЩЁ РАЗ ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя - "ультима
+      // центральный северный и северозападный и югозападный в облаках
+      // спутники произвольно, такси обычный весь город спутники
+      // произвольно"): теперь направленность ТОЛЬКО у Ultima (у обычного
+      // такси убрали совсем - спутники снова могут оказаться в любой части
+      // города, без привязки к сторонам света). У Ultima сторон стало три -
+      // север/северо-запад/юго-запад - и каждый спутник НЕЗАВИСИМО выбирает
+      // одну из них по своему seed (а не жёстко "первый на север, второй на
+      // северо-запад", как раньше), т.е. "произвольно" среди этих трёх
+      // направлений. Основное облако и так уже держится близко к центру
+      // города (небольшой offsetDist в cityCloudLatLngs) - вместе выходит
+      // "центр + север/северо-запад/юго-запад произвольно" для Ultima. Для
+      // остальных городов/категорий угол по-прежнему полностью случайный.
+      const CITY_DEMAND_DIRECTION_OPTIONS_DEG = {{ moscow: [0, -45, -135] }}; // север, северо-запад, юго-запад
+      const directionOptions = (city === 'moscow' && myCategory === 'ultima')
+        ? CITY_DEMAND_DIRECTION_OPTIONS_DEG[city] : null;
       // ИЗМЕНЕНО 22.09.2026 (жалоба пользователя - "город почти весь спросом
       // закрыт в дождь и часы спроса от 70%", уточнение - "спутники на
       // эконом/комфорт/комфорт+ сделать меньше, основные облака развести
@@ -10055,9 +10084,10 @@ def map_webapp_html():
         const satSeed = (seed * 97 + s * 311 + 1) % 100000;
         const distM = satDistanceBase + (satSeed % satDistanceSpread) - satDistanceSpread / 2;
         let angle;
-        if (directionBias && directionBias[s] !== undefined) {{
+        if (directionOptions) {{
+          const dirIdx = satSeed % directionOptions.length;
           const jitterDeg = ((satSeed % 2000) / 100) - 10; // ±10°
-          angle = (directionBias[s] + jitterDeg) * Math.PI / 180;
+          angle = (directionOptions[dirIdx] + jitterDeg) * Math.PI / 180;
         }} else {{
           angle = ((satSeed * 17) % 628) / 100;
         }}
@@ -10066,7 +10096,7 @@ def map_webapp_html():
           color: '#9b30ff',
           weight: 0,
           fillColor: '#9b30ff',
-          fillOpacity: demandCloudOpacity(data.demand) * 0.85,
+          fillOpacity: demandCloudOpacity(data.demand, myCategory) * 0.85,
           smoothFactor: 3,
         }}).addTo(map);
         if (satMarker._path) satMarker._path.style.filter = 'blur(16px)';
@@ -11338,7 +11368,17 @@ MAP_DEMAND_API_PATH = '/map/demand'
 # с часами реального повышенного спроса из MOSCOW_TAXI_DEMAND_PERCENT/
 # MOSCOW_ULTIMA_DEMAND_PERCENT (там "высокий спрос" начинается от 70%, а не
 # только от 80%).
-MAP_DEMAND_CLOUD_THRESHOLD = 70
+# ЕЩЁ РАЗ ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя - "спрос в такси
+# рисуем от 60% и каждые 20% усиливает до 100%, такси Ultima 85% и каждые 5
+# до 100"): раньше был ОДИН порог для всех категорий (70%). Теперь свой
+# порог у такси (эконом/комфорт/комфорт+ - ниже, 60%, у этого тарифа выше
+# базовая плотность заказов) и у Ultima (выше, 85% - более редкий/премиальный
+# спрос, показываем зону только когда он реально высокий). Курьер/грузовое
+# такси/прочие категории без реальных почасовых % - остаются на прежнем
+# общем пороге (MAP_DEMAND_CLOUD_THRESHOLD_DEFAULT). См. demandCloudOpacity в
+# map_webapp_html - ступени прозрачности идут в том же ритме (20%/5%).
+MAP_DEMAND_CLOUD_THRESHOLD_BY_CATEGORY = {'taxi': 60, 'ultima': 85}
+MAP_DEMAND_CLOUD_THRESHOLD_DEFAULT = 70
 # ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "в дождь рисовать
 # всегда спрос") - пока в городе идут осадки, % спроса для облака не может
 # быть ниже этого значения, даже если по часовой таблице сейчас "тихий" час -
@@ -11386,8 +11426,8 @@ async def handle_map_demand_api(request):
         else:
             level = get_current_peak_level(city, category)
             # Условное соответствие уровня и процента - только чтобы решить,
-            # рисовать ли облако (порог MAP_DEMAND_CLOUD_THRESHOLD), для
-            # городов/категорий без реальных цифр по тарифам.
+            # рисовать ли облако (порог MAP_DEMAND_CLOUD_THRESHOLD_BY_CATEGORY/
+            # _DEFAULT), для городов/категорий без реальных цифр по тарифам.
             demand = {'peak': 90, 'high': 75, 'mid': 55, 'low': 30}.get(level)
         # ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "в дождь
         # рисовать всегда спрос") - если в городе СЕЙЧАС идут осадки (тот же
