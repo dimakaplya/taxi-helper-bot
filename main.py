@@ -9246,8 +9246,20 @@ def map_webapp_html():
         // краем". seedFromString(a.icao) - фаза волн/направление смещения
         // свои у каждого аэропорта (детерминированно по ICAO, не дёргаются
         // между опросами loadAirports), а не одна и та же форма у всех.
-        const HIGH_DEMAND_LOAD_THRESHOLD = 85;
+        // ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя - "От 75% рисуй
+        // облако над аэропортами и чем больше процент тем менее
+        // прозрачнее он будет 70/80/90/100 и более 4 оттенка"): порог
+        // появления облака снижен с 85% до 70%, и вместо одной фиксированной
+        // прозрачности - 4 ступени непрозрачности (чем выше загрузка, тем
+        // облако плотнее/менее прозрачное): 70-79% / 80-89% / 90-99% / 100%+.
+        const HIGH_DEMAND_LOAD_THRESHOLD = 70;
         const HIGH_DEMAND_RADIUS_METERS = 5000;
+        function highDemandBlobOpacity(load) {{
+          if (load >= 100) return 0.42;
+          if (load >= 90) return 0.34;
+          if (load >= 80) return 0.27;
+          return 0.20; // 70-79%
+        }}
         function seedFromString(s) {{
           let h = 7;
           for (let i = 0; i < (s || '').length; i++) {{ h = (h * 31 + s.charCodeAt(i)) % 10000; }}
@@ -9286,7 +9298,7 @@ def map_webapp_html():
             color: '#9b30ff',
             weight: 0,
             fillColor: '#9b30ff',
-            fillOpacity: 0.22,
+            fillOpacity: highDemandBlobOpacity(a.load),
             smoothFactor: 3,
           }}).addTo(map);
           if (blob._path) blob._path.style.filter = 'blur(14px)';
@@ -9419,7 +9431,9 @@ def map_webapp_html():
       stationMarkers.forEach(m => map.removeLayer(m));
       stationMarkers = [];
       data.stations.forEach(s => {{
-        const STATION_HIGH_LOAD_THRESHOLD = 50;
+        // ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя - "Над вокзалами
+        // тока когда более 80%"): было 50%.
+        const STATION_HIGH_LOAD_THRESHOLD = 80;
         if (s.load !== null && s.load !== undefined && s.load > STATION_HIGH_LOAD_THRESHOLD) {{
           const circle = L.circle([s.lat, s.lon], {{
             radius: 1500,
