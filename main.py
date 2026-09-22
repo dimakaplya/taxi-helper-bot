@@ -16501,8 +16501,13 @@ def referral_menu_keyboard(referral_link, current_type=REFERRAL_DEFAULT_TYPE):
     # REFERRAL_LEGAL_ENTITY_PASSWORD), "Обычная" переключает сразу без
     # подтверждения. Текущий выбор отмечен галочкой.
     share_text = REFERRAL_SHARE_TEXT_TEMPLATE.format(link=referral_link)
+    # ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя - "поменяй где юр лица
+    # убери там проценты чтобы не видели обычные юзеры") - проценты схемы
+    # "юр.лицо" больше не показываются в кнопке (обычные пользователи не
+    # должны видеть, насколько она выгоднее). У "Обычной" проценты оставлены -
+    # это ставка самого пользователя, её скрывать незачем.
     individual_label = ("✅ " if current_type == 'individual' else "") + "👤 Обычная (30/15/5%)"
-    legal_label = ("✅ " if current_type == 'legal_entity' else "") + "🏢 Юр.лицо (40/20/10%)"
+    legal_label = ("✅ " if current_type == 'legal_entity' else "") + "🏢 Юр.лицо"
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=individual_label, callback_data="referral_category_individual")],
         [InlineKeyboardButton(text=legal_label, callback_data="referral_category_legal_start")],
@@ -16639,7 +16644,7 @@ async def referral_category_legal_start(callback_query: types.CallbackQuery):
     state = user_state.setdefault(user_id, {})
     state['awaiting_referral_legal_password'] = True
     await callback_query.message.answer(
-        "🔒 Схема «Юр.лицо» (40%/20%/10%) доступна по паролю. Введи пароль:",
+        "🔒 Схема «Юр.лицо» доступна по паролю. Введи пароль:",
         reply_markup=referral_withdraw_cancel_keyboard()
     )
 
@@ -16664,7 +16669,7 @@ async def referral_legal_password_flow(message: types.Message):
         state.pop('awaiting_referral_legal_password', None)
         set_referrer_type(user_id, 'legal_entity')
         await message.answer(
-            "✅ Схема переключена на «Юр.лицо» (40%/20%/10%).",
+            "✅ Схема переключена на «Юр.лицо».",
             reply_markup=services_keyboard(category, city, user_id)
         )
         me = await bot.get_me()
