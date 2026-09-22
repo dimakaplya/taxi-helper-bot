@@ -9540,20 +9540,26 @@ def map_webapp_html():
   function demandCloudTimeBucket() {{
     return Math.floor(Date.now() / (5 * 60 * 1000));
   }}
+  // ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя - "и края и сами
+  // облака мягче прям") - амплитуды волн (terms) уменьшены примерно вдвое,
+  // а min поднят ближе к base - раньше силуэт мог резко "проваливаться" до
+  // min (заметные острые вмятины/выступы), теперь колебания формы заметно
+  // более пологие, силуэт визуально круглее и мягче ещё ДО blur() (см.
+  // комментарий у CATMULL_ROM_SEGMENTS выше и значения blur() ниже).
   const CLOUD_SHAPE_PROFILES = [
-    {{base: 0.62, min: 0.35, terms: [[2, 0.24], [5, 0.12], [3, 0.09]]}},
-    {{base: 0.58, min: 0.32, terms: [[3, 0.22], [7, 0.14], [1, 0.10]]}},
-    {{base: 0.66, min: 0.40, terms: [[4, 0.18], [2, 0.15], [6, 0.08]]}},
-    {{base: 0.55, min: 0.28, terms: [[2, 0.28], [9, 0.10], [4, 0.07]]}},
-    {{base: 0.64, min: 0.38, terms: [[5, 0.20], [3, 0.13], [8, 0.06]]}},
-    {{base: 0.60, min: 0.30, terms: [[3, 0.26], [6, 0.11], [2, 0.09]]}},
-    {{base: 0.63, min: 0.42, terms: [[4, 0.16], [7, 0.12], [1, 0.08]]}},
-    {{base: 0.57, min: 0.33, terms: [[2, 0.20], [4, 0.18], [9, 0.05]]}},
-    {{base: 0.65, min: 0.36, terms: [[6, 0.19], [2, 0.14], [5, 0.07]]}},
-    {{base: 0.59, min: 0.29, terms: [[3, 0.24], [8, 0.13], [1, 0.06]]}},
-    {{base: 0.61, min: 0.41, terms: [[5, 0.17], [2, 0.12], [7, 0.09]]}},
-    {{base: 0.56, min: 0.31, terms: [[4, 0.23], [3, 0.15], [6, 0.06]]}},
-    {{base: 0.67, min: 0.44, terms: [[2, 0.16], [6, 0.13], [4, 0.08]]}},
+    {{base: 0.62, min: 0.53, terms: [[2, 0.132], [5, 0.066], [3, 0.05]]}},
+    {{base: 0.58, min: 0.5, terms: [[3, 0.121], [7, 0.077], [1, 0.055]]}},
+    {{base: 0.66, min: 0.58, terms: [[4, 0.099], [2, 0.083], [6, 0.044]]}},
+    {{base: 0.55, min: 0.46, terms: [[2, 0.154], [9, 0.055], [4, 0.039]]}},
+    {{base: 0.64, min: 0.56, terms: [[5, 0.11], [3, 0.072], [8, 0.033]]}},
+    {{base: 0.6, min: 0.48, terms: [[3, 0.143], [6, 0.061], [2, 0.05]]}},
+    {{base: 0.63, min: 0.58, terms: [[4, 0.088], [7, 0.066], [1, 0.044]]}},
+    {{base: 0.57, min: 0.51, terms: [[2, 0.11], [4, 0.099], [9, 0.028]]}},
+    {{base: 0.65, min: 0.54, terms: [[6, 0.105], [2, 0.077], [5, 0.039]]}},
+    {{base: 0.59, min: 0.47, terms: [[3, 0.132], [8, 0.072], [1, 0.033]]}},
+    {{base: 0.61, min: 0.56, terms: [[5, 0.094], [2, 0.066], [7, 0.05]]}},
+    {{base: 0.56, min: 0.49, terms: [[4, 0.127], [3, 0.083], [6, 0.033]]}},
+    {{base: 0.67, min: 0.62, terms: [[2, 0.088], [6, 0.072], [4, 0.044]]}},
   ];
   function blobLatLngs(lat, lon, maxRadiusM, seed, pointsCount) {{
     pointsCount = pointsCount || 24;
@@ -9643,7 +9649,7 @@ def map_webapp_html():
             fillOpacity: highDemandBlobOpacity(a.load),
             smoothFactor: 3,
           }}).addTo(map);
-          if (blob._path) blob._path.style.filter = 'blur(22px)';
+          if (blob._path) blob._path.style.filter = 'blur(30px)';
           airportMarkers.push(blob);
           // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - см. общий
           // комментарий у SATELLITE_DISTANCE_BASE_METERS в loadDemandCloud) -
@@ -9664,7 +9670,7 @@ def map_webapp_html():
               fillOpacity: highDemandBlobOpacity(a.load) * 0.85,
               smoothFactor: 3,
             }}).addTo(map);
-            if (satBlob._path) satBlob._path.style.filter = 'blur(18px)';
+            if (satBlob._path) satBlob._path.style.filter = 'blur(24px)';
             airportMarkers.push(satBlob);
           }}
         }}
@@ -9817,7 +9823,7 @@ def map_webapp_html():
             fillOpacity: 0.18,
             smoothFactor: 3,
           }}).addTo(map);
-          if (blob._path) blob._path.style.filter = 'blur(16px)';
+          if (blob._path) blob._path.style.filter = 'blur(22px)';
           stationMarkers.push(blob);
         }}
         const icon = L.divIcon({{ className: 'airport-icon', html: '🚆', iconSize: [26, 26] }});
@@ -9905,7 +9911,7 @@ def map_webapp_html():
         fillOpacity: 0.16,
         smoothFactor: 3,
       }}).addTo(map);
-      if (rainCloudMarker._path) rainCloudMarker._path.style.filter = 'blur(26px)';
+      if (rainCloudMarker._path) rainCloudMarker._path.style.filter = 'blur(34px)';
     }} catch (e) {{ /* тихо */ }}
   }}
   // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "у тебя же есть в
@@ -9926,6 +9932,14 @@ def map_webapp_html():
   // отдельный массив, чтобы стирать и перерисовывать вместе с основным
   // облаком на каждый опрос loadDemandCloud.
   let demandSatelliteMarkers = [];
+  // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - прислал файл
+  // moscow_taxi_demand_baseline_inside_mkad.xlsx с реальной матрицей спроса
+  // по 30 районам Москвы) - облака для Москвы в категориях такси/Ultima
+  // теперь рисуются ПО РЕАЛЬНЫМ РАЙОНАМ (см. loadDistrictDemandClouds
+  // ниже), а не процедурными случайными спутниками вокруг центра - свой
+  // массив маркеров, отдельный от demandCloudMarker/demandSatelliteMarkers
+  // (те используются как fallback для остальных городов/категорий).
+  let districtDemandMarkers = [];
   // Общий helper для смещения точки на distM метров под углом angleRad -
   // используется и для спутников городского облака, и для спутников
   // облаков у аэропортов (см. loadAirports).
@@ -10003,19 +10017,75 @@ def map_webapp_html():
     const latLngs = [];
     for (let i = 0; i < pointsCount; i++) {{
       const angle = (i / pointsCount) * Math.PI * 2;
-      const wobble = 0.63
-        + 0.23 * Math.sin(angle * 2 + p1)
-        + 0.11 * Math.sin(angle * 6 + p2)
-        + 0.08 * Math.sin(angle * 4 + p3);
-      const r = radiusM * Math.max(0.38, Math.min(1, wobble));
+      // ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя - "и края и сами
+      // облака мягче прям") - амплитуды волн уменьшены примерно вдвое (было
+      // 0.23/0.11/0.08), нижняя граница поднята с 0.38 к базе (было резче
+      // "проваливалось") - контур городского облака заметно более пологий и
+      // круглый, тот же приём, что у CLOUD_SHAPE_PROFILES выше.
+      const wobble = 0.68
+        + 0.12 * Math.sin(angle * 2 + p1)
+        + 0.06 * Math.sin(angle * 6 + p2)
+        + 0.04 * Math.sin(angle * 4 + p3);
+      const r = radiusM * Math.max(0.56, Math.min(1, wobble));
       const dLat = (r * Math.cos(angle)) / metersPerDegLat;
       const dLon = (r * Math.sin(angle)) / (metersPerDegLat * Math.cos(cLat * Math.PI / 180));
       latLngs.push([cLat + dLat, cLon + dLon]);
     }}
     return smoothClosedLatLngs(latLngs);
   }}
+  // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя, реальная матрица
+  // спроса по районам Москвы - "реальные облака по районам") - для Москвы в
+  // категориях такси/Ultima облака спроса теперь рисуются по РЕАЛЬНЫМ 30
+  // жилым районам (moscow_district_demand.json на сервере, см.
+  // MAP_DISTRICT_DEMAND_API_PATH/handle_map_district_demand_api), а не
+  // процедурными случайными спутниками вокруг центра города - каждый район,
+  // где спрос сейчас проходит порог категории (demandCloudThreshold),
+  // получает своё небольшое облако на СВОИХ координатах с РЕАЛЬНЫМ %
+  // спроса (день недели + получасовой слот + максимум по тарифам категории,
+  // те же MAP_DEMAND_CLOUD_THRESHOLD_BY_CATEGORY/demandCloudOpacity
+  // ступени, что и у старой единой схемы). Для остальных городов/категорий
+  // (без такой детализации) - прежнее поведение loadDemandCloud ниже.
+  const DISTRICT_CLOUD_RADIUS_METERS = 3000;
+  async function loadDistrictDemandClouds() {{
+    try {{
+      const resp = await fetch(`/map/district_demand?city=${{encodeURIComponent(city)}}&category=${{encodeURIComponent(myCategory)}}`);
+      districtDemandMarkers.forEach(m => map.removeLayer(m));
+      districtDemandMarkers = [];
+      if (!resp.ok) return;
+      const data = await resp.json();
+      const threshold = demandCloudThreshold(myCategory);
+      (data.districts || []).forEach(d => {{
+        if (d.demand === null || d.demand === undefined || d.demand < threshold) return;
+        const seed = demandCloudSeed(d.name + '::' + myCategory + '::' + demandCloudTimeBucket());
+        const marker = L.polygon(cityCloudLatLngs(d.lat, d.lon, DISTRICT_CLOUD_RADIUS_METERS, seed), {{
+          color: '#9b30ff',
+          weight: 0,
+          fillColor: '#9b30ff',
+          fillOpacity: demandCloudOpacity(d.demand, myCategory),
+          smoothFactor: 3,
+        }}).addTo(map);
+        if (marker._path) marker._path.style.filter = 'blur(20px)';
+        marker.bindTooltip(`${{d.name}} · ${{d.demand}}%`, {{ direction: 'top', offset: [0, -6], className: 'airport-label' }});
+        districtDemandMarkers.push(marker);
+      }});
+    }} catch (e) {{ /* тихо */ }}
+  }}
+
   async function loadDemandCloud() {{
     try {{
+      // Москва + такси/Ultima -> реальные районные облака (см. выше), а не
+      // процедурная схема ниже. Старые demandCloudMarker/demandSatelliteMarkers
+      // на всякий случай тоже очищаются, чтобы не оставалось "хвостов" при
+      // переключении категории/города внутри одной сессии карты.
+      if (city === 'moscow' && (myCategory === 'taxi' || myCategory === 'ultima')) {{
+        if (demandCloudMarker) {{ map.removeLayer(demandCloudMarker); demandCloudMarker = null; }}
+        demandSatelliteMarkers.forEach(m => map.removeLayer(m));
+        demandSatelliteMarkers = [];
+        await loadDistrictDemandClouds();
+        return;
+      }}
+      districtDemandMarkers.forEach(m => map.removeLayer(m));
+      districtDemandMarkers = [];
       const resp = await fetch(`/map/demand?city=${{encodeURIComponent(city)}}&category=${{encodeURIComponent(myCategory)}}`);
       if (!resp.ok) return;
       const data = await resp.json();
@@ -10032,7 +10102,7 @@ def map_webapp_html():
         fillOpacity: demandCloudOpacity(data.demand, myCategory),
         smoothFactor: 3,
       }}).addTo(map);
-      if (demandCloudMarker._path) demandCloudMarker._path.style.filter = 'blur(26px)';
+      if (demandCloudMarker._path) demandCloudMarker._path.style.filter = 'blur(34px)';
       // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя) - 2-3 облака-
       // спутника вполовину меньше основного, на расстоянии ~7 км (с
       // разбросом), каждое своей формы (свой seed -> свой профиль wobble) и
@@ -10104,7 +10174,7 @@ def map_webapp_html():
           fillOpacity: demandCloudOpacity(data.demand, myCategory) * 0.85,
           smoothFactor: 3,
         }}).addTo(map);
-        if (satMarker._path) satMarker._path.style.filter = 'blur(22px)';
+        if (satMarker._path) satMarker._path.style.filter = 'blur(28px)';
         demandSatelliteMarkers.push(satMarker);
       }}
     }} catch (e) {{ /* тихо */ }}
@@ -11452,6 +11522,89 @@ async def handle_map_demand_api(request):
         result['demand'] = demand
     except Exception:
         logger.exception("❌ Ошибка при получении текущего спроса для карты водителей")
+    return web.json_response(result)
+
+# ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя, прислал файл
+# moscow_taxi_demand_baseline_inside_mkad.xlsx - "реальные облака по
+# районам") - раньше облако спроса для Москвы (см. handle_map_demand_api
+# выше) было ОДНО на весь город плюс процедурные случайные спутники, без
+# привязки к реальной географии. Пользователь прислал модельную, но куда
+# более детальную матрицу спроса: 30 крупных жилых районов внутри МКАД x
+# 7 дней недели x 8 получасовых интервалов x 5 тарифов (Эконом/Комфорт/
+# Комфорт+/Бизнес/Премиум), 0-100. Файл лежит рядом с main.py
+# (moscow_district_demand.json), тот же принцип, что config_loader.py у
+# аэропортов/вокзалов - грузим и кэшируем один раз при старте процесса.
+_MOSCOW_DISTRICT_DEMAND_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'moscow_district_demand.json')
+_moscow_district_demand_cache = None
+
+def get_moscow_district_demand():
+    """Возвращает {'tariff_order': [...], 'districts': {name: {'lat','lon','weekday': {0..6: [[start,end,v0..v4],...]}}}}.
+    Если файла нет/битый - логируем и возвращаем None (см. handle_map_district_
+    demand_api) - фича просто не покажет районные облака, а не роняет карту
+    целиком, в отличие от config.json у аэропортов (тот - критичен для
+    старта бота, этот - нет)."""
+    global _moscow_district_demand_cache
+    if _moscow_district_demand_cache is not None:
+        return _moscow_district_demand_cache
+    try:
+        with open(_MOSCOW_DISTRICT_DEMAND_PATH, 'r', encoding='utf-8') as f:
+            _moscow_district_demand_cache = json.load(f)
+    except Exception:
+        logger.exception(f"❌ Не удалось загрузить {_MOSCOW_DISTRICT_DEMAND_PATH} - районные облака спроса для Москвы недоступны")
+        _moscow_district_demand_cache = False  # False, не None - чтобы не пытаться перечитать на каждый запрос
+    return _moscow_district_demand_cache or None
+
+# Индексы колонок tariff_order (['Эконом','Комфорт','Комфорт+','Бизнес','Премиум'])
+# для каждой категории - такси смотрит на первые 3 (эконом/комфорт/комфорт+),
+# Ultima - на последние 2 (бизнес/премиум), берём МАКСИМУМ среди своих (та
+# же логика "общий спрос по городу", что и в handle_map_demand_api выше).
+MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES = {'taxi': (0, 1, 2), 'ultima': (3, 4)}
+
+MAP_DISTRICT_DEMAND_API_PATH = '/map/district_demand'
+
+async def handle_map_district_demand_api(request):
+    """JSON API для районных облаков спроса Москвы (см. loadDistrictDemandClouds
+    в map_webapp_html) - только city=moscow и category in (taxi, ultima), для
+    остальных город/категорий отдаёт пустой список (карта в этом случае
+    использует прежнюю единую схему, см. handle_map_demand_api). Публичные
+    агрегированные данные, initData не проверяется (как и у /map/demand)."""
+    city = request.query.get('city', '')
+    category = request.query.get('category', '') or None
+    result = {'districts': []}
+    if city != 'moscow' or category not in ('taxi', 'ultima'):
+        return web.json_response(result)
+    table = get_moscow_district_demand()
+    if not table:
+        return web.json_response(result)
+    try:
+        now = get_city_now(city)
+        weekday = str(now.weekday())
+        indices = MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES[category]
+        # Тот же "дождевой пол", что и у общегородского облака - см.
+        # комментарий в handle_map_demand_api выше.
+        rain_now = False
+        try:
+            forecast = get_cached_weather_forecast(city)
+            current_code = (forecast or {}).get('current', {}).get('weathercode')
+            rain_now = current_code in PRECIP_WEATHERCODES
+        except Exception:
+            pass
+        for name, entry in table.get('districts', {}).items():
+            slots = entry.get('weekday', {}).get(weekday, [])
+            demand = None
+            for slot in slots:
+                start_h, end_h = slot[0], slot[1]
+                if start_h <= now.hour < end_h:
+                    demand = max(slot[2 + i] for i in indices)
+                    break
+            if demand is None:
+                continue
+            if rain_now:
+                demand = max(demand, MAP_DEMAND_RAIN_FLOOR_PERCENT)
+            result['districts'].append({'name': name, 'lat': entry['lat'], 'lon': entry['lon'], 'demand': demand})
+    except Exception:
+        logger.exception("❌ Ошибка при получении районного спроса для карты водителей (Москва)")
+        result = {'districts': []}
     return web.json_response(result)
 
 MAP_WEATHER_API_PATH = '/map/weather'
@@ -18577,6 +18730,7 @@ async def start_subscription_webhook_server():
     app.router.add_get(MAP_STATIONS_API_PATH, handle_map_stations_api)
     app.router.add_get(MAP_WEATHER_API_PATH, handle_map_weather_api)
     app.router.add_get(MAP_DEMAND_API_PATH, handle_map_demand_api)
+    app.router.add_get(MAP_DISTRICT_DEMAND_API_PATH, handle_map_district_demand_api)
     app.router.add_get(MAP_FUEL_STATIONS_API_PATH, handle_map_fuel_stations_api)
     app.router.add_get(MAP_CHARGING_STATIONS_API_PATH, handle_map_charging_stations_api)
     app.router.add_get(MAP_PARKING_API_PATH, handle_map_parking_api)
