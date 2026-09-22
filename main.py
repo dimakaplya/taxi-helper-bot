@@ -6426,33 +6426,46 @@ def score_station_candidate(city, code, station, category):
 # способности зоны даже немного рейсов (9 в примере с Домодедово) давали
 # высокий % загрузки, и аэропорт обгонял "Город/центр" по баллу, хотя ехать
 # до него дольше, а в городе как раз шёл дождь (который и так поднимает
-# балл "Города" - см. score_city_candidate). Теперь штрафуем score
-# аэропорта за удалённость от центра города (RAIN_CITY_COORDS): в пределах
-# AIRPORT_DISTANCE_PENALTY_FREE_KM штрафа нет вовсе (Внуково/Шереметьево
-# почти не задеты), дальше - понижающий коэффициент
-# AIRPORT_DISTANCE_PENALTY_FREE_KM/расстояние, и причина явно видна в самой
-# карточке ("N км от центра"), а не просто "магически" теряет место в
-# рейтинге без объяснения.
+# балл "Города" - см. score_city_candidate). Штрафуем score аэропорта за
+# удалённость - в пределах AIRPORT_DISTANCE_PENALTY_FREE_KM штрафа нет
+# вовсе, дальше - понижающий коэффициент AIRPORT_DISTANCE_PENALTY_FREE_KM/
+# расстояние, и причина явно видна в самой карточке, а не просто
+# "магически" теряет место в рейтинге без объяснения.
+# ЕЩЁ РАЗ ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя - "сделай это на
+# основе текущей локации и расстояния"): раньше расстояние всегда мерялось
+# от УСЛОВНОГО ЦЕНТРА города (RAIN_CITY_COORDS) - одинаково для всех
+# водителей города, независимо от того, где они реально находятся. Теперь
+# origin - ТЕКУЩАЯ позиция водителя, когда она известна: у бота это
+# state['shift']['last_lat']/['last_lon'] (последний пинг живой геопозиции
+# смены, см. km_counter_ping), у WebApp - navigator.geolocation браузера
+# (см. loadWhereToGo в where_to_go_webapp_html, передаётся параметрами
+# lat/lon в /whereto/data). Если позиция неизвестна (смена не идёт/геолокация
+# не дала результата) - используем ПРЕЖНИЙ fallback, условный центр города
+# (RAIN_CITY_COORDS), чтобы штраф всё равно применялся хоть как-то, а не
+# пропадал вовсе.
 AIRPORT_DISTANCE_PENALTY_FREE_KM = 30
 
-def airport_distance_penalty(city, icao):
-    """Коэффициент штрафа (0-1] к score аэропорта за удалённость от центра
-    города, и расстояние в км (для текста причины) - см. комментарий выше.
-    Возвращает (1.0, None), если координаты города/аэропорта неизвестны -
+def airport_distance_penalty(icao, origin_lat, origin_lon):
+    """Коэффициент штрафа (0-1] к score аэропорта за удалённость от точки
+    origin_lat/origin_lon (текущая позиция водителя или, если её нет,
+    условный центр города - см. комментарий выше), и расстояние в км (для
+    текста причины). Возвращает (1.0, None), если координаты неизвестны -
     штраф в этом случае просто не применяется."""
-    city_coords = RAIN_CITY_COORDS.get(city)
     airport_coords = AIRPORT_COORDS.get(icao)
-    if not city_coords or not airport_coords:
+    if not airport_coords or origin_lat is None or origin_lon is None:
         return 1.0, None
-    dist_km = haversine_km(city_coords[0], city_coords[1], airport_coords[0], airport_coords[1])
+    dist_km = haversine_km(origin_lat, origin_lon, airport_coords[0], airport_coords[1])
     if dist_km <= AIRPORT_DISTANCE_PENALTY_FREE_KM:
         return 1.0, dist_km
     return AIRPORT_DISTANCE_PENALTY_FREE_KM / dist_km, dist_km
 
-async def score_airport_candidate(city, airport, category):
+async def score_airport_candidate(city, airport, category, user_lat=None, user_lon=None):
     """Считает балл и обоснование для одного аэропорта города. Возвращает
     dict {label, score, reasons: [str, ...], closed: bool}. relevant_class -
-    та же логика, что CATEGORY_TO_CLASS в остальном боте (эконом/бизнес/все)."""
+    та же логика, что CATEGORY_TO_CLASS в остальном боте (эконом/бизнес/все).
+    user_lat/user_lon - текущая позиция водителя, если известна (см.
+    комментарий у airport_distance_penalty выше) - если нет, используется
+    условный центр города."""
     icao = airport['icao']
     zone_key = airport.get('zone_key')
     relevant_class = CATEGORY_TO_CLASS.get(category, 'total')
@@ -6509,10 +6522,16 @@ async def score_airport_candidate(city, airport, category):
     if worst_range:
         score *= 0.6
 
-    penalty, dist_km = airport_distance_penalty(city, icao)
+    if user_lat is not None and user_lon is not None:
+        origin_lat, origin_lon, origin_label = user_lat, user_lon, "от тебя"
+    else:
+        city_coords = RAIN_CITY_COORDS.get(city)
+        origin_lat, origin_lon = (city_coords or (None, None))
+        origin_label = "от центра города"
+    penalty, dist_km = airport_distance_penalty(icao, origin_lat, origin_lon)
     if dist_km is not None and penalty < 1.0:
         score *= penalty
-        reasons.append(f"🚗 ~{round(dist_km)} км от центра города - дальше ехать")
+        reasons.append(f"🚗 ~{round(dist_km)} км {origin_label} - дальше ехать")
 
     return {'label': airport['name'], 'score': score, 'reasons': reasons, 'closed': False, 'advice': None}
 
@@ -6740,7 +6759,7 @@ def score_concert_event_candidates(city, category, limit=3):
     candidates.sort(key=lambda c: c['score'], reverse=True)
     return candidates[:limit]
 
-async def compute_where_to_go(city, category):
+async def compute_where_to_go(city, category, user_lat=None, user_lon=None):
     """Считает и сортирует всех кандидатов (аэропорты + вокзалы + актуальные
     события афиши + "Город/центр") по баллу - возвращает список dict от
     score_airport_candidate/score_station_candidate/score_concert_event_candidates/
@@ -6750,6 +6769,11 @@ async def compute_where_to_go(city, category):
     (см. STATION_CITY). Афиша концертов добавлена по просьбе пользователя
     (22.09.2026) - только события, актуальные ПРЯМО СЕЙЧАС (см.
     score_concert_event_candidates), не более 3, чтобы не забивать список.
+    user_lat/user_lon - текущая позиция водителя (см. комментарий у
+    airport_distance_penalty) - передаётся дальше в score_airport_candidate
+    для штрафа аэропортов за удалённость ОТ ВОДИТЕЛЯ, а не от условного
+    центра города; если не задано - используется прежний fallback (центр
+    города).
 
     Курьер/Грузовое такси (20.09.2026): аэропорты, вокзалы и афиша концертов
     им не релевантны (это про пассажирские поездки с рейсов/на мероприятия) -
@@ -6776,7 +6800,7 @@ async def compute_where_to_go(city, category):
         # с одним icao (B/C и D), каждая - самостоятельный кандидат (разная
         # загрузка по зоне), дедуп не нужен, в отличие от ICAO_TO_AIRPORT.
         try:
-            candidates.append(await score_airport_candidate(city, airport, category))
+            candidates.append(await score_airport_candidate(city, airport, category, user_lat=user_lat, user_lon=user_lon))
         except Exception:
             logger.exception(f"❌ Не удалось посчитать кандидата 'Куда ехать' для аэропорта {airport.get('icao')} ({city})")
     if city in TRAIN_CITIES:
@@ -6939,8 +6963,18 @@ async def send_where_to_go(message: types.Message, user_id, city, category, extr
     try:
         status_msg = await show_loading_animation(message.answer, "🧭 Считаю варианты")
         anim_task = asyncio.create_task(animate_loading(status_msg, "🧭 Считаю варианты"))
+        # ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "сделай это на
+        # основе текущей локации и расстояния") - если у водителя сейчас
+        # идёт смена и хотя бы раз пришёл пинг живой геопозиции
+        # (km_counter_ping), берём его последнюю известную точку для штрафа
+        # за удалённость аэропорта (см. score_airport_candidate/
+        # airport_distance_penalty) вместо условного центра города. Если
+        # смена не идёт/геопозиция ещё не пришла - shift.get('last_lat')
+        # вернёт None, и score_airport_candidate сам откатится на fallback.
+        shift = user_state.get(user_id, {}).get('shift') or {}
+        user_lat, user_lon = shift.get('last_lat'), shift.get('last_lon')
         try:
-            candidates = await compute_where_to_go(city, category)
+            candidates = await compute_where_to_go(city, category, user_lat=user_lat, user_lon=user_lon)
         except Exception:
             anim_task.cancel()
             # logger.exception (не просто logger.error с str(e)) - пишет
@@ -10841,7 +10875,7 @@ def where_to_go_webapp_html():
 </style>
 </head>
 <body>
-<div id="state">Считаю варианты…</div>
+<div id="state">📍 Определяю твою локацию…</div>
 <div id="app" style="display:none">
   <h1 id="cityTitle">🧭 Куда ехать</h1>
   <div class="sub" id="timeSub"></div>
@@ -10872,13 +10906,49 @@ def where_to_go_webapp_html():
     return '<div class="advice">💡 ' + text + '.</div>';
   }
 
+  // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "сделай это на
+  // основе текущей локации и расстояния") - берём текущую геопозицию
+  // браузера (тот же navigator.geolocation, что у своей стрелки на карте,
+  // см. map_webapp_html) и передаём её параметрами lat/lon в /whereto/data -
+  // сервер штрафует аэропорты за удалённость ИМЕННО от водителя (см.
+  // score_airport_candidate/airport_distance_penalty), а не от условного
+  // центра города. Короткий таймаут (2с) и молчаливый fallback на null -
+  // геолокация не должна задерживать или ломать выдачу карточки, если она
+  // запрещена/недоступна (сервер сам откатится на центр города).
+  function getCurrentPositionQuiet() {
+    return new Promise((resolve) => {
+      if (!navigator.geolocation) {
+        resolve(null);
+        return;
+      }
+      navigator.geolocation.getCurrentPosition(
+        (pos) => resolve({ lat: pos.coords.latitude, lon: pos.coords.longitude }),
+        () => resolve(null),
+        { enableHighAccuracy: false, timeout: 2000, maximumAge: 300000 }
+      );
+    });
+  }
+
   async function load() {
     if (!city || !category) {
       document.getElementById('state').textContent = 'Город или категория не выбраны.';
       return;
     }
     try {
-      const resp = await fetch('""" + WHERE_TO_GO_DATA_API_PATH + """?city=' + encodeURIComponent(city) + '&category=' + encodeURIComponent(category));
+      // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "по нажатию он
+      // считают текущую локацию и говорит уже") - раньше на экране всё это
+      // время висел один и тот же текст "Считаю варианты…", хотя первым
+      // делом идёт запрос геопозиции у браузера - водителю было непонятно,
+      // что вообще происходит. Теперь два отдельных статуса: сначала
+      // "Определяю твою локацию…" (пока идёт getCurrentPositionQuiet), затем
+      // "Считаю варианты…" (пока грузится сам расчёт с сервера).
+      const stateEl = document.getElementById('state');
+      stateEl.textContent = '📍 Определяю твою локацию…';
+      const myPos = await getCurrentPositionQuiet();
+      stateEl.textContent = '🧭 Считаю варианты…';
+      let url = '""" + WHERE_TO_GO_DATA_API_PATH + """?city=' + encodeURIComponent(city) + '&category=' + encodeURIComponent(category);
+      if (myPos) { url += '&lat=' + myPos.lat + '&lon=' + myPos.lon; }
+      const resp = await fetch(url);
       if (!resp.ok) throw new Error('http_' + resp.status);
       const data = await resp.json();
 
@@ -10961,13 +11031,26 @@ async def handle_where_to_go_data_api(request):
     """JSON для WebApp "Куда ехать" - переиспользует ТОТ ЖЕ compute_where_to_go,
     что и текстовая версия (send_where_to_go/format_where_to_go_text), просто
     отдаёт кандидатов как JSON вместо готового текста. Не персональные данные
-    (город/категория публичны, как и у карты/погоды) - initData не проверяется."""
+    (город/категория публичны, как и у карты/погоды) - initData не проверяется.
+    ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "сделай это на основе
+    текущей локации и расстояния") - опциональные lat/lon (browser
+    navigator.geolocation, см. where_to_go_webapp_html) для штрафа
+    аэропортов за удалённость ОТ ВОДИТЕЛЯ (см. score_airport_candidate/
+    airport_distance_penalty) вместо условного центра города; координаты не
+    сохраняются, используются только для этого одного расчёта."""
     city = request.query.get('city', '')
     category = request.query.get('category', '')
     if not city or not category:
         return web.json_response({'error': 'missing_params'}, status=400)
+    user_lat = user_lon = None
     try:
-        candidates = await compute_where_to_go(city, category)
+        lat_raw, lon_raw = request.query.get('lat'), request.query.get('lon')
+        if lat_raw is not None and lon_raw is not None:
+            user_lat, user_lon = float(lat_raw), float(lon_raw)
+    except (TypeError, ValueError):
+        user_lat = user_lon = None
+    try:
+        candidates = await compute_where_to_go(city, category, user_lat=user_lat, user_lon=user_lon)
     except Exception:
         logger.exception(f"❌ Не удалось посчитать варианты 'Куда ехать' (WebApp) для {city}/{category}")
         return web.json_response({'error': 'compute_failed'}, status=500)
