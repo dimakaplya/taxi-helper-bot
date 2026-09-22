@@ -834,7 +834,11 @@ AIRPORT_TERMINAL_ZONES = {
                 # совпадать с ключом полигона парковки D в
                 # AIRPORT_PARKING_ZONE_POLYGONS ниже (handle_map_airports_api
                 # сопоставляет полигон и точку радиуса именно по point_label).
-                {'coords': (55.961860, 37.409638), 'radius_km': 0.35, 'point_label': 'D'},
+                # radius_km ЕЩЁ РАЗ ИЗМЕНЁН 22.09.2026 (прямая просьба
+                # пользователя - "для терминала Д поставь 150 м") с 0.35 на
+                # 0.15 - именно этот радиус определяет, когда водителю
+                # приходит пуш "встал в очередь" на парковке Терминала D.
+                {'coords': (55.961860, 37.409638), 'radius_km': 0.15, 'point_label': 'D'},
             ],
         },
     },
@@ -10529,6 +10533,32 @@ def map_webapp_html():
   // ступени, что и у старой единой схемы). Для остальных городов/категорий
   // (без такой детализации) - прежнее поведение loadDemandCloud ниже.
   const DISTRICT_CLOUD_RADIUS_METERS = 3000;
+  // ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя - "два независимых
+  // слоя облаков одновременно - эконом отдельно, комфорт+комфорт+
+  // отдельно", позже та же логика распространена и на Ultima - "в
+  // категории Ultima тоже разделим на бизнес... и на премьер и элит"):
+  // у 'taxi' и 'ultima' теперь по ДВА независимых слоя районных облаков,
+  // каждый со своими порогами показа (см. MOSCOW_DISTRICT_CLOUD_THRESHOLDS_*
+  // в Python) и своим цветом, чтобы слои были визуально различимы -
+  // читается прямо из ответа /map/district_demand (свои поля demand_*
+  // на каждый слой, см. handle_map_district_demand_api).
+  const DISTRICT_CLOUD_LAYERS = {{
+    taxi: [
+      {{ field: 'demand_econom', thresholds: [60, 80, 100], color: '#9b30ff', label: 'Эконом' }},
+      {{ field: 'demand_comfort', thresholds: [70, 90, 100], color: '#00b8a9', label: 'Комфорт/Комфорт+' }},
+    ],
+    ultima: [
+      {{ field: 'demand_business', thresholds: [80, 90, 100], color: '#9b30ff', label: 'Бизнес' }},
+      {{ field: 'demand_premium', thresholds: [90, 95, 100], color: '#ff9f1c', label: 'Премьер/Элит' }},
+    ],
+  }};
+  function districtLayerOpacity(demand, thresholds) {{
+    const [t1, t2, t3] = thresholds;
+    if (demand >= t3) return 0.28;
+    if (demand >= t2) return 0.20;
+    if (demand >= t1) return 0.12;
+    return 0;
+  }}
   async function loadDistrictDemandClouds() {{
     try {{
       const resp = await fetch(`/map/district_demand?city=${{encodeURIComponent(city)}}&category=${{encodeURIComponent(myCategory)}}`);
@@ -10536,20 +10566,24 @@ def map_webapp_html():
       districtDemandMarkers = [];
       if (!resp.ok) return;
       const data = await resp.json();
-      const threshold = demandCloudThreshold(myCategory);
+      const layers = DISTRICT_CLOUD_LAYERS[myCategory] || [];
+      const timeBucket = demandCloudTimeBucket();
       (data.districts || []).forEach(d => {{
-        if (d.demand === null || d.demand === undefined || d.demand < threshold) return;
-        const seed = demandCloudSeed(d.name + '::' + myCategory + '::' + demandCloudTimeBucket());
-        const marker = L.polygon(cityCloudLatLngs(d.lat, d.lon, DISTRICT_CLOUD_RADIUS_METERS, seed), {{
-          color: '#9b30ff',
-          weight: 0,
-          fillColor: '#9b30ff',
-          fillOpacity: demandCloudOpacity(d.demand, myCategory),
-          smoothFactor: 3,
-        }}).addTo(map);
-        if (marker._path) {{ ensureCloudGrainFilter(); marker._path.style.filter = 'blur(20px)' + CLOUD_FILTER_SUFFIX; }}
-        marker.bindTooltip(`${{d.name}} · ${{d.demand}}%`, {{ direction: 'top', offset: [0, -6], className: 'airport-label' }});
-        districtDemandMarkers.push(marker);
+        layers.forEach(layer => {{
+          const demand = d[layer.field];
+          if (demand === null || demand === undefined || demand < layer.thresholds[0]) return;
+          const seed = demandCloudSeed(d.name + '::' + myCategory + '::' + layer.field + '::' + timeBucket);
+          const marker = L.polygon(cityCloudLatLngs(d.lat, d.lon, DISTRICT_CLOUD_RADIUS_METERS, seed), {{
+            color: layer.color,
+            weight: 0,
+            fillColor: layer.color,
+            fillOpacity: districtLayerOpacity(demand, layer.thresholds),
+            smoothFactor: 3,
+          }}).addTo(map);
+          if (marker._path) {{ ensureCloudGrainFilter(); marker._path.style.filter = 'blur(20px)' + CLOUD_FILTER_SUFFIX; }}
+          marker.bindTooltip(`${{d.name}} · ${{layer.label}} · ${{demand}}%`, {{ direction: 'top', offset: [0, -6], className: 'airport-label' }});
+          districtDemandMarkers.push(marker);
+        }});
       }});
     }} catch (e) {{ /* тихо */ }}
   }}
@@ -12124,20 +12158,68 @@ def get_moscow_district_demand():
         _moscow_district_demand_cache = False  # False, не None - чтобы не пытаться перечитать на каждый запрос
     return _moscow_district_demand_cache or None
 
-# Индексы колонок tariff_order (['Эконом','Комфорт','Комфорт+','Бизнес','Премиум'])
-# для каждой категории - такси смотрит на первые 3 (эконом/комфорт/комфорт+),
-# Ultima - на последние 2 (бизнес/премиум), берём МАКСИМУМ среди своих (та
-# же логика "общий спрос по городу", что и в handle_map_demand_api выше).
-MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES = {'taxi': (0, 1, 2), 'ultima': (3, 4)}
+# Индексы колонок tariff_order (['Эконом','Комфорт','Комфорт+','Бизнес','Премиум']).
+# ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя - "два независимых слоя
+# облаков одновременно - эконом отдельно, комфорт+комфорт+ отдельно, у них
+# разные пороги показа") - категория 'taxi' больше не сводится к ОДНОМУ
+# максимуму по всем трём тарифам: эконом (индекс 0) и комфорт+комфорт+
+# (индексы 1,2 - максимум между ними) считаются и отдаются ОТДЕЛЬНО, чтобы
+# на карте могли одновременно рисоваться два независимых слоя облаков с
+# разными порогами/прозрачностью (см. MOSCOW_DISTRICT_CLOUD_THRESHOLDS
+# ниже и loadDistrictDemandClouds в map_webapp_html). ЕЩЁ РАЗ ИЗМЕНЕНО
+# 22.09.2026 (прямая просьба пользователя - "в категории Ultima тоже
+# разделим ... на бизнес у нас будет порог 80 90 100, на премьер и элит
+# будет у нас 90 95 100") - Ultima теперь ТОЖЕ два независимых слоя, как
+# и 'taxi': бизнес (индекс 3) отдельно, премиум/элит (индекс 4) отдельно
+# (в данных только один "премиум"-тариф - под него и заведён "премьер и
+# элит" пользователя).
+MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_ECONOM = (0,)
+MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_COMFORT = (1, 2)
+MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_BUSINESS = (3,)
+MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_PREMIUM = (4,)
+
+# Комбинированные индексы (максимум по всем тарифам категории) - используются
+# ТОЛЬКО для общего ранжирования районов в "Куда ехать" (score_district_candidates),
+# где нужен один общий балл района на категорию, а не отдельные слои облаков.
+MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES = {
+    'taxi': (0, 1, 2),
+    'ultima': (3, 4),
+}
+
+# Пороги показа облака (первое значение) и "ступени" непрозрачности (все три
+# значения) для КАЖДОГО слоя районных облаков - ДОБАВЛЕНО/ИЗМЕНЕНО
+# 22.09.2026 по прямой просьбе пользователя: "для эконом 60, 80, 100", "для
+# комфорт/комфорт+ 70, 90, 100", "для бизнес 80, 90, 100", "для премьер и
+# элит 90, 95, 100". Раньше был всего один порог на всю категорию 'taxi'
+# (60%) и другой на всю 'ultima' (85%, шаг 5% до 100) - теперь у каждого
+# тарифного слоя СВОИ 3 порога.
+MOSCOW_DISTRICT_CLOUD_THRESHOLDS_ECONOM = (60, 80, 100)
+MOSCOW_DISTRICT_CLOUD_THRESHOLDS_COMFORT = (70, 90, 100)
+MOSCOW_DISTRICT_CLOUD_THRESHOLDS_BUSINESS = (80, 90, 100)
+MOSCOW_DISTRICT_CLOUD_THRESHOLDS_PREMIUM = (90, 95, 100)
 
 MAP_DISTRICT_DEMAND_API_PATH = '/map/district_demand'
+
+def _district_slot_value(slots, hour, indices):
+    for slot in slots:
+        start_h, end_h = slot[0], slot[1]
+        if start_h <= hour < end_h:
+            return max(slot[2 + i] for i in indices)
+    return None
 
 async def handle_map_district_demand_api(request):
     """JSON API для районных облаков спроса Москвы (см. loadDistrictDemandClouds
     в map_webapp_html) - только city=moscow и category in (taxi, ultima), для
     остальных город/категорий отдаёт пустой список (карта в этом случае
     использует прежнюю единую схему, см. handle_map_demand_api). Публичные
-    агрегированные данные, initData не проверяется (как и у /map/demand)."""
+    агрегированные данные, initData не проверяется (как и у /map/demand).
+
+    ИЗМЕНЕНО 22.09.2026 (см. MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_ECONOM/
+    _COMFORT/_BUSINESS/_PREMIUM выше) - и для category='taxi', и для
+    'ultima' каждый район теперь отдаёт ДВА отдельных значения
+    ('demand_econom'/'demand_comfort' для taxi, 'demand_business'/
+    'demand_premium' для ultima), а не один максимум по всем тарифам
+    категории - JS рисует их как два независимых слоя облаков каждый."""
     city = request.query.get('city', '')
     category = request.query.get('category', '') or None
     result = {'districts': []}
@@ -12149,7 +12231,6 @@ async def handle_map_district_demand_api(request):
     try:
         now = get_city_now(city)
         weekday = str(now.weekday())
-        indices = MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES[category]
         # Тот же "дождевой пол", что и у общегородского облака - см.
         # комментарий в handle_map_demand_api выше.
         rain_now = False
@@ -12161,17 +12242,32 @@ async def handle_map_district_demand_api(request):
             pass
         for name, entry in table.get('districts', {}).items():
             slots = entry.get('weekday', {}).get(weekday, [])
-            demand = None
-            for slot in slots:
-                start_h, end_h = slot[0], slot[1]
-                if start_h <= now.hour < end_h:
-                    demand = max(slot[2 + i] for i in indices)
-                    break
-            if demand is None:
-                continue
-            if rain_now:
-                demand = max(demand, MAP_DEMAND_RAIN_FLOOR_PERCENT)
-            result['districts'].append({'name': name, 'lat': entry['lat'], 'lon': entry['lon'], 'demand': demand})
+            item = {'name': name, 'lat': entry['lat'], 'lon': entry['lon']}
+            if category == 'taxi':
+                econom = _district_slot_value(slots, now.hour, MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_ECONOM)
+                comfort = _district_slot_value(slots, now.hour, MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_COMFORT)
+                if econom is None and comfort is None:
+                    continue
+                if rain_now:
+                    if econom is not None:
+                        econom = max(econom, MAP_DEMAND_RAIN_FLOOR_PERCENT)
+                    if comfort is not None:
+                        comfort = max(comfort, MAP_DEMAND_RAIN_FLOOR_PERCENT)
+                item['demand_econom'] = econom
+                item['demand_comfort'] = comfort
+            else:
+                business = _district_slot_value(slots, now.hour, MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_BUSINESS)
+                premium = _district_slot_value(slots, now.hour, MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_PREMIUM)
+                if business is None and premium is None:
+                    continue
+                if rain_now:
+                    if business is not None:
+                        business = max(business, MAP_DEMAND_RAIN_FLOOR_PERCENT)
+                    if premium is not None:
+                        premium = max(premium, MAP_DEMAND_RAIN_FLOOR_PERCENT)
+                item['demand_business'] = business
+                item['demand_premium'] = premium
+            result['districts'].append(item)
     except Exception:
         logger.exception("❌ Ошибка при получении районного спроса для карты водителей (Москва)")
         result = {'districts': []}
