@@ -1218,19 +1218,24 @@ def save_last_reply_keyboard_message(chat_id, message_id):
         logger.error(f"❌ Не удалось сохранить последнее menu-сообщение чата {chat_id}: {e}")
 
 def load_all_last_reply_keyboard_messages():
-    """Восстанавливает _last_reply_keyboard_msg_id из БД при старте - без
-    этого после каждого редеплоя сообщение с меню, отправленное в прошлом
-    запуске, никогда бы не удалялось следующим таким сообщением (см.
-    комментарий у CREATE TABLE last_reply_keyboard_messages в init_db)."""
+    """Восстанавливает _last_reply_keyboard_msg_id (и _last_reply_keyboard_sent_at
+    - см. комментарий у REPLY_KEYBOARD_STALE_HOURS выше по файлу) из БД при
+    старте - без этого после каждого редеплоя сообщение с меню, отправленное
+    в прошлом запуске, никогда бы не удалялось следующим таким сообщением
+    (см. комментарий у CREATE TABLE last_reply_keyboard_messages в init_db)."""
     try:
         init_db()
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute('SELECT chat_id, message_id FROM last_reply_keyboard_messages')
+        cursor.execute('SELECT chat_id, message_id, updated_at FROM last_reply_keyboard_messages')
         rows = cursor.fetchall()
         conn.close()
-        for chat_id, message_id in rows:
+        for chat_id, message_id, updated_at in rows:
             _last_reply_keyboard_msg_id[chat_id] = message_id
+            try:
+                _last_reply_keyboard_sent_at[chat_id] = datetime.strptime(updated_at, '%Y-%m-%d %H:%M:%S')
+            except Exception:
+                pass  # старая строка без парсибельного updated_at - просто не заполняем TTL, кнопка-подстраховка появится раньше срока, не страшно
         logger.info(f"✅ Восстановлены последние menu-сообщения для {len(rows)} чатов из БД")
     except Exception as e:
         logger.error(f"❌ Не удалось восстановить последние menu-сообщения: {e}")
@@ -3320,6 +3325,20 @@ async def set_cabinet_menu_button(user_id, cabinet_url):
 MAIN_MENU_INLINE_BUTTON_TEXT = "🚕 МЕНЮ TAXI HELPER"
 MAIN_MENU_INLINE_BUTTON_CALLBACK = "open_services_menu"
 
+# ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "надо чтобы бот
+# проверял, если вдруг [нижнее меню] пропала, то выкидывал это сообщение [с
+# кнопкой]") - у Telegram Bot API нет способа спросить "жива ли ещё нижняя
+# ReplyKeyboardMarkup у пользователя" (её можно потерять, если пользователь
+# сам очистил историю чата/удалил сообщение с меню - бот об этом никак не
+# узнаёт). Подстраховка: считаем нижнее меню "точно ещё на месте" только
+# REPLY_KEYBOARD_STALE_HOURS часов после последней отправки - после этого
+# инлайн-кнопка "МЕНЮ TAXI HELPER" на обычных сообщениях включается снова
+# (см. reply_keyboard_already_open ниже), даже если меню технически всё ещё
+# никуда не делось - лишняя кнопка раз в сутки не мешает, а вот полное
+# отсутствие способа вернуться в меню - серьёзный тупик для пользователя.
+REPLY_KEYBOARD_STALE_HOURS = 12
+_last_reply_keyboard_sent_at = {}  # chat_id -> datetime последней отправки сообщения с ReplyKeyboardMarkup
+
 def _with_main_menu_button(reply_markup):
     """Возвращает reply_markup с добавленной строкой "МЕНЮ TAXI HELPER" -
     ReplyKeyboardMarkup не трогаем (возвращаем как есть), к
@@ -3349,7 +3368,16 @@ class SingleMessageMiddleware(BaseRequestMiddleware):
             # (_last_reply_keyboard_msg_id ещё пусто для chat_id) - как
             # только оно появилось, дублировать доступ к меню инлайн-кнопкой
             # на каждом сообщении больше не нужно.
-            reply_keyboard_already_open = chat_id in _last_reply_keyboard_msg_id
+            # См. REPLY_KEYBOARD_STALE_HOURS выше - "открыто" не навсегда, а
+            # только пока последняя отправка не устарела (подстраховка на
+            # случай, если меню у пользователя реально пропало, а бот об
+            # этом узнать не может).
+            last_sent_at = _last_reply_keyboard_sent_at.get(chat_id)
+            reply_keyboard_already_open = (
+                chat_id in _last_reply_keyboard_msg_id
+                and last_sent_at is not None
+                and (datetime.utcnow() - last_sent_at) < timedelta(hours=REPLY_KEYBOARD_STALE_HOURS)
+            )
             if not has_reply_keyboard and not reply_keyboard_already_open:
                 method.reply_markup = _with_main_menu_button(method.reply_markup)
             skip_trim = _skip_message_trim.get()
@@ -3364,6 +3392,7 @@ class SingleMessageMiddleware(BaseRequestMiddleware):
                     # его полностью заменяет.
                     prev_id = _last_reply_keyboard_msg_id.get(chat_id)
                     _last_reply_keyboard_msg_id[chat_id] = result.message_id
+                    _last_reply_keyboard_sent_at[chat_id] = datetime.utcnow()
                     # ИСПРАВЛЕНО 22.09.2026 - без записи в БД это значение
                     # терялось при каждом рестарте Railway, и первое
                     # menu-сообщение после рестарта никогда не удаляло то,
