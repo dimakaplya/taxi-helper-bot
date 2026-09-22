@@ -8442,7 +8442,10 @@ def map_webapp_html():
         let popup = `<div class="road-popup">`;
         if (ev.address) popup += `<b>${{ev.address}}</b><br>`;
         popup += `${{(ev.text || '').replace(/\\n/g, '<br>')}}`;
-        if (ev.link) popup += `<br><a href="${{ev.link}}" target="_blank">Открыть пост</a>`;
+        // УБРАНО 23.09.2026 (прямая просьба пользователя - "убери ссылку на
+        // исходный код/пост, источник это мы") - ссылка "Открыть пост" на
+        // исходный Telegram-пост убрана из попапа, сама метка/адрес/текст/
+        // время остаются как были.
         if (ev.time) {{
           const t = new Date(ev.time);
           popup += `<div class="time">${{t.toLocaleTimeString('ru-RU', {{ hour: '2-digit', minute: '2-digit' }})}}</div>`;
@@ -8476,7 +8479,9 @@ def map_webapp_html():
         if (ev.title) popup += `<h4>${{ev.title}}</h4>`;
         if (ev.place) popup += `<div class="place">${{ev.place}}</div>`;
         if (ev.start) popup += `<div class="time">${{formatEventStart(ev)}}</div>`;
-        if (ev.link) popup += `<br><a href="${{ev.link}}" target="_blank">Подробнее</a>`;
+        // УБРАНО 23.09.2026 (та же просьба пользователя, что и у дорожных
+        // событий выше - "убери ссылку на исходный код/пост") - ссылка
+        // "Подробнее" на исходный пост/страницу TimePad убрана.
         popup += `</div>`;
         const marker = L.marker([ev.lat, ev.lon], {{ icon }}).bindPopup(popup).addTo(map);
         cityEventMarkers.push(marker);
