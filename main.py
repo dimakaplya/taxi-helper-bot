@@ -9485,6 +9485,13 @@ def map_webapp_html():
   renderTariffPanel();
   renderLegend();
   const map = L.map('map').setView([55.7558, 37.6173], 11);
+  // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "добавить какой-то
+  // лёгкой зернистости, прям лёгкой-лёгкой") - L.svg().addTo(map) заранее
+  // создаёт SVG-рендерер Leaflet (иначе он появляется только при первом
+  // добавленном полигоне) - нужно, чтобы сразу вставить в него <defs> с
+  // фильтром зернистости (см. ensureCloudGrainFilter ниже), который потом
+  // переиспользуют ВСЕ "облака" спроса (аэропорты/вокзалы/город/районы).
+  L.svg().addTo(map);
   // ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя, прислал API-ключ
   // Яндекс.Карт - "ключ яндекса подложка ключ апи" / "перейти на Яндекс
   // Карты полностью"): подложка (тайлы) карты теперь Яндекс.Карты через
@@ -9792,6 +9799,48 @@ def map_webapp_html():
     for (let i = 0; i < (s || '').length; i++) {{ h = (h * 31 + s.charCodeAt(i)) % 10000; }}
     return h;
   }}
+  // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "добавить какой-то
+  // лёгкой зернистости, прям лёгкой-лёгкой, чтобы... более смотрелось
+  // хорошо") - один общий SVG-фильтр (feTurbulence -> едва заметный
+  // чёрный шум с альфой ~0.05 -> накладывается ПОВЕРХ уже размытой заливки
+  // облака, см. CLOUD_FILTER_SUFFIX ниже) - вставляется в DOM один раз
+  // (idempotent, проверка по id), переиспользуется всеми "облаками"
+  // спроса. numOctaves=1 (не 2-3) - дешевле для телефона, заметной разницы
+  // на таком лёгком эффекте всё равно не видно.
+  function ensureCloudGrainFilter() {{
+    if (document.getElementById('cloudGrainFilter')) return;
+    const svg = document.querySelector('#map svg');
+    if (!svg) return;
+    const ns = 'http://www.w3.org/2000/svg';
+    const defs = document.createElementNS(ns, 'defs');
+    const filter = document.createElementNS(ns, 'filter');
+    filter.setAttribute('id', 'cloudGrainFilter');
+    filter.setAttribute('x', '-50%');
+    filter.setAttribute('y', '-50%');
+    filter.setAttribute('width', '200%');
+    filter.setAttribute('height', '200%');
+    const turb = document.createElementNS(ns, 'feTurbulence');
+    turb.setAttribute('type', 'fractalNoise');
+    turb.setAttribute('baseFrequency', '0.85');
+    turb.setAttribute('numOctaves', '1');
+    turb.setAttribute('stitchTiles', 'stitch');
+    turb.setAttribute('result', 'noise');
+    const cm = document.createElementNS(ns, 'feColorMatrix');
+    cm.setAttribute('in', 'noise');
+    cm.setAttribute('type', 'matrix');
+    cm.setAttribute('values', '0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 0.05 0');
+    cm.setAttribute('result', 'fadedNoise');
+    const comp = document.createElementNS(ns, 'feComposite');
+    comp.setAttribute('in', 'fadedNoise');
+    comp.setAttribute('in2', 'SourceGraphic');
+    comp.setAttribute('operator', 'over');
+    filter.appendChild(turb);
+    filter.appendChild(cm);
+    filter.appendChild(comp);
+    defs.appendChild(filter);
+    svg.insertBefore(defs, svg.firstChild);
+  }}
+  const CLOUD_FILTER_SUFFIX = ' url(#cloudGrainFilter)';
   function demandCloudTimeBucket() {{
     return Math.floor(Date.now() / (5 * 60 * 1000));
   }}
@@ -9801,20 +9850,45 @@ def map_webapp_html():
   // min (заметные острые вмятины/выступы), теперь колебания формы заметно
   // более пологие, силуэт визуально круглее и мягче ещё ДО blur() (см.
   // комментарий у CATMULL_ROM_SEGMENTS выше и значения blur() ниже).
+  // РАСШИРЕНО 22.09.2026 (прямая просьба пользователя - "сделай их, может
+  // быть, 30 штук разной формы... миксуй, чередуй") - было 13 профилей,
+  // теперь 30, чтобы у 30 районных облаков Москвы (см. cityCloudLatLngs
+  // ниже - теперь тоже берёт форму из этого общего пула, а не из одной
+  // фиксированной формулы волны) не повторялся один и тот же силуэт.
+  // Общий пул используется и аэропортами/вокзалами (blobLatLngs), и
+  // городскими/районными облаками (cityCloudLatLngs) - один и тот же
+  // принцип "неровного, но мягкого" силуэта везде.
   const CLOUD_SHAPE_PROFILES = [
-    {{base: 0.62, min: 0.53, terms: [[2, 0.132], [5, 0.066], [3, 0.05]]}},
-    {{base: 0.58, min: 0.5, terms: [[3, 0.121], [7, 0.077], [1, 0.055]]}},
-    {{base: 0.66, min: 0.58, terms: [[4, 0.099], [2, 0.083], [6, 0.044]]}},
-    {{base: 0.55, min: 0.46, terms: [[2, 0.154], [9, 0.055], [4, 0.039]]}},
-    {{base: 0.64, min: 0.56, terms: [[5, 0.11], [3, 0.072], [8, 0.033]]}},
-    {{base: 0.6, min: 0.48, terms: [[3, 0.143], [6, 0.061], [2, 0.05]]}},
-    {{base: 0.63, min: 0.58, terms: [[4, 0.088], [7, 0.066], [1, 0.044]]}},
-    {{base: 0.57, min: 0.51, terms: [[2, 0.11], [4, 0.099], [9, 0.028]]}},
-    {{base: 0.65, min: 0.54, terms: [[6, 0.105], [2, 0.077], [5, 0.039]]}},
-    {{base: 0.59, min: 0.47, terms: [[3, 0.132], [8, 0.072], [1, 0.033]]}},
-    {{base: 0.61, min: 0.56, terms: [[5, 0.094], [2, 0.066], [7, 0.05]]}},
-    {{base: 0.56, min: 0.49, terms: [[4, 0.127], [3, 0.083], [6, 0.033]]}},
-    {{base: 0.67, min: 0.62, terms: [[2, 0.088], [6, 0.072], [4, 0.044]]}},
+    {{base: 0.633, min: 0.572, terms: [[5, 0.047], [4, 0.042], [2, 0.119]]}},
+    {{base: 0.621, min: 0.531, terms: [[1, 0.056], [9, 0.091], [8, 0.033]]}},
+    {{base: 0.576, min: 0.484, terms: [[9, 0.084], [7, 0.063], [2, 0.134]]}},
+    {{base: 0.649, min: 0.581, terms: [[7, 0.049], [6, 0.145], [3, 0.07]]}},
+    {{base: 0.562, min: 0.497, terms: [[6, 0.035], [5, 0.085], [7, 0.045]]}},
+    {{base: 0.67, min: 0.606, terms: [[5, 0.053], [6, 0.038], [9, 0.109]]}},
+    {{base: 0.65, min: 0.541, terms: [[4, 0.063], [2, 0.106], [9, 0.074]]}},
+    {{base: 0.598, min: 0.528, terms: [[5, 0.106], [2, 0.094], [9, 0.059]]}},
+    {{base: 0.61, min: 0.537, terms: [[9, 0.069], [4, 0.122], [6, 0.037]]}},
+    {{base: 0.657, min: 0.557, terms: [[7, 0.055], [5, 0.143], [1, 0.135]]}},
+    {{base: 0.591, min: 0.498, terms: [[7, 0.062], [8, 0.06], [2, 0.097]]}},
+    {{base: 0.584, min: 0.495, terms: [[7, 0.15], [6, 0.047], [2, 0.089]]}},
+    {{base: 0.648, min: 0.545, terms: [[3, 0.112], [9, 0.102], [7, 0.076]]}},
+    {{base: 0.627, min: 0.544, terms: [[5, 0.116], [1, 0.112], [6, 0.094]]}},
+    {{base: 0.585, min: 0.493, terms: [[2, 0.049], [5, 0.03], [4, 0.117]]}},
+    {{base: 0.644, min: 0.535, terms: [[3, 0.105], [2, 0.131], [7, 0.091]]}},
+    {{base: 0.576, min: 0.497, terms: [[3, 0.069], [1, 0.032], [5, 0.141]]}},
+    {{base: 0.664, min: 0.562, terms: [[5, 0.059], [4, 0.098], [1, 0.039]]}},
+    {{base: 0.645, min: 0.544, terms: [[9, 0.109], [3, 0.144], [2, 0.05]]}},
+    {{base: 0.619, min: 0.529, terms: [[4, 0.067], [9, 0.149], [6, 0.108]]}},
+    {{base: 0.607, min: 0.521, terms: [[2, 0.038], [4, 0.033], [9, 0.096]]}},
+    {{base: 0.626, min: 0.566, terms: [[1, 0.139], [4, 0.133], [9, 0.039]]}},
+    {{base: 0.581, min: 0.488, terms: [[4, 0.142], [3, 0.099], [6, 0.087]]}},
+    {{base: 0.652, min: 0.552, terms: [[4, 0.109], [2, 0.073], [1, 0.079]]}},
+    {{base: 0.662, min: 0.599, terms: [[2, 0.117], [1, 0.126], [4, 0.043]]}},
+    {{base: 0.575, min: 0.488, terms: [[3, 0.063], [7, 0.06], [2, 0.141]]}},
+    {{base: 0.608, min: 0.505, terms: [[9, 0.108], [2, 0.095], [1, 0.032]]}},
+    {{base: 0.562, min: 0.464, terms: [[4, 0.088], [3, 0.056], [9, 0.078]]}},
+    {{base: 0.558, min: 0.479, terms: [[7, 0.124], [5, 0.064], [9, 0.114]]}},
+    {{base: 0.645, min: 0.546, terms: [[8, 0.066], [3, 0.146], [2, 0.1]]}},
   ];
   function blobLatLngs(lat, lon, maxRadiusM, seed, pointsCount) {{
     pointsCount = pointsCount || 24;
@@ -9904,7 +9978,7 @@ def map_webapp_html():
             fillOpacity: highDemandBlobOpacity(a.load),
             smoothFactor: 3,
           }}).addTo(map);
-          if (blob._path) blob._path.style.filter = 'blur(30px)';
+          if (blob._path) {{ ensureCloudGrainFilter(); blob._path.style.filter = 'blur(30px)' + CLOUD_FILTER_SUFFIX; }}
           airportMarkers.push(blob);
           // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - см. общий
           // комментарий у SATELLITE_DISTANCE_BASE_METERS в loadDemandCloud) -
@@ -9925,7 +9999,7 @@ def map_webapp_html():
               fillOpacity: highDemandBlobOpacity(a.load) * 0.85,
               smoothFactor: 3,
             }}).addTo(map);
-            if (satBlob._path) satBlob._path.style.filter = 'blur(24px)';
+            if (satBlob._path) {{ ensureCloudGrainFilter(); satBlob._path.style.filter = 'blur(24px)' + CLOUD_FILTER_SUFFIX; }}
             airportMarkers.push(satBlob);
           }}
         }}
@@ -10078,7 +10152,7 @@ def map_webapp_html():
             fillOpacity: 0.18,
             smoothFactor: 3,
           }}).addTo(map);
-          if (blob._path) blob._path.style.filter = 'blur(22px)';
+          if (blob._path) {{ ensureCloudGrainFilter(); blob._path.style.filter = 'blur(22px)' + CLOUD_FILTER_SUFFIX; }}
           stationMarkers.push(blob);
         }}
         const icon = L.divIcon({{ className: 'airport-icon', html: '🚆', iconSize: [26, 26] }});
@@ -10166,7 +10240,7 @@ def map_webapp_html():
         fillOpacity: 0.16,
         smoothFactor: 3,
       }}).addTo(map);
-      if (rainCloudMarker._path) rainCloudMarker._path.style.filter = 'blur(34px)';
+      if (rainCloudMarker._path) {{ ensureCloudGrainFilter(); rainCloudMarker._path.style.filter = 'blur(34px)' + CLOUD_FILTER_SUFFIX; }}
     }} catch (e) {{ /* тихо */ }}
   }}
   // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "у тебя же есть в
@@ -10259,11 +10333,22 @@ def map_webapp_html():
   // центру/радиусу/seed теперь отдельная функция, чтобы её же переиспользовать
   // для спутников (см. SATELLITE_DISTANCE_BASE_METERS выше) - раньше эта
   // логика была только инлайн-циклом под основное облако.
+  // ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя - "сделай их, может
+  // быть, 30 штук разной формы, миксуй, чередуй") - раньше городское/
+  // районное облако рисовалось ОДНОЙ фиксированной формулой волны (только
+  // фаза менялась по seed - все 30 районов выглядели по сути одинаково,
+  // просто повёрнуто). Теперь форма тоже берётся из общего пула
+  // CLOUD_SHAPE_PROFILES (тот же, что у аэропортов/вокзалов, см.
+  // blobLatLngs выше) - seed выбирает один из 30 профилей, так что у
+  // районных облаков теперь настоящее разнообразие силуэтов, а не только
+  // поворот одной и той же формы.
   function cityCloudLatLngs(lat, lon, radiusM, seed) {{
     const metersPerDegLat = 111320;
+    const profile = CLOUD_SHAPE_PROFILES[seed % CLOUD_SHAPE_PROFILES.length];
     const p1 = (seed % 628) / 100;
     const p2 = ((seed * 3) % 628) / 100;
     const p3 = ((seed * 7) % 628) / 100;
+    const phases = [p1, p2, p3];
     const offsetAngle = ((seed * 13) % 628) / 100;
     const offsetDist = radiusM * 0.22;
     const cLat = lat + (offsetDist * Math.cos(offsetAngle)) / metersPerDegLat;
@@ -10272,16 +10357,11 @@ def map_webapp_html():
     const latLngs = [];
     for (let i = 0; i < pointsCount; i++) {{
       const angle = (i / pointsCount) * Math.PI * 2;
-      // ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя - "и края и сами
-      // облака мягче прям") - амплитуды волн уменьшены примерно вдвое (было
-      // 0.23/0.11/0.08), нижняя граница поднята с 0.38 к базе (было резче
-      // "проваливалось") - контур городского облака заметно более пологий и
-      // круглый, тот же приём, что у CLOUD_SHAPE_PROFILES выше.
-      const wobble = 0.68
-        + 0.12 * Math.sin(angle * 2 + p1)
-        + 0.06 * Math.sin(angle * 6 + p2)
-        + 0.04 * Math.sin(angle * 4 + p3);
-      const r = radiusM * Math.max(0.56, Math.min(1, wobble));
+      let wobble = profile.base;
+      profile.terms.forEach(([freq, amp], idx) => {{
+        wobble += amp * Math.sin(angle * freq + phases[idx % phases.length]);
+      }});
+      const r = radiusM * Math.max(profile.min, Math.min(1, wobble));
       const dLat = (r * Math.cos(angle)) / metersPerDegLat;
       const dLon = (r * Math.sin(angle)) / (metersPerDegLat * Math.cos(cLat * Math.PI / 180));
       latLngs.push([cLat + dLat, cLon + dLon]);
@@ -10319,7 +10399,7 @@ def map_webapp_html():
           fillOpacity: demandCloudOpacity(d.demand, myCategory),
           smoothFactor: 3,
         }}).addTo(map);
-        if (marker._path) marker._path.style.filter = 'blur(20px)';
+        if (marker._path) {{ ensureCloudGrainFilter(); marker._path.style.filter = 'blur(20px)' + CLOUD_FILTER_SUFFIX; }}
         marker.bindTooltip(`${{d.name}} · ${{d.demand}}%`, {{ direction: 'top', offset: [0, -6], className: 'airport-label' }});
         districtDemandMarkers.push(marker);
       }});
@@ -10357,7 +10437,7 @@ def map_webapp_html():
         fillOpacity: demandCloudOpacity(data.demand, myCategory),
         smoothFactor: 3,
       }}).addTo(map);
-      if (demandCloudMarker._path) demandCloudMarker._path.style.filter = 'blur(34px)';
+      if (demandCloudMarker._path) {{ ensureCloudGrainFilter(); demandCloudMarker._path.style.filter = 'blur(34px)' + CLOUD_FILTER_SUFFIX; }}
       // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя) - 2-3 облака-
       // спутника вполовину меньше основного, на расстоянии ~7 км (с
       // разбросом), каждое своей формы (свой seed -> свой профиль wobble) и
@@ -10429,7 +10509,7 @@ def map_webapp_html():
           fillOpacity: demandCloudOpacity(data.demand, myCategory) * 0.85,
           smoothFactor: 3,
         }}).addTo(map);
-        if (satMarker._path) satMarker._path.style.filter = 'blur(28px)';
+        if (satMarker._path) {{ ensureCloudGrainFilter(); satMarker._path.style.filter = 'blur(28px)' + CLOUD_FILTER_SUFFIX; }}
         demandSatelliteMarkers.push(satMarker);
       }}
     }} catch (e) {{ /* тихо */ }}
