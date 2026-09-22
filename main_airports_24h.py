@@ -9993,6 +9993,42 @@ def map_webapp_html():
     svg.insertBefore(defs, svg.firstChild);
   }}
   const CLOUD_FILTER_SUFFIX = ' url(#cloudGrainFilter)';
+  // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "можешь облака
+  // сделать объёмными") - радиальный градиент на заливке облака вместо
+  // плоского цвета: яркое "ядро" смещено к верхнему левому краю (имитация
+  // подсветки), плавно уходит в прозрачность к краям - вместе с уже
+  // существующим blur/зернистостью создаёт ощущение объёма вместо плоского
+  // цветного пятна. Один градиент на цвет, idempotent по id (переиспользуется
+  // всеми облаками того же цвета, как и ensureCloudGrainFilter выше).
+  function ensureCloudGradient(color) {{
+    const gid = 'cloudGrad_' + color.replace('#', '');
+    if (document.getElementById(gid)) return gid;
+    const svg = document.querySelector('#map svg');
+    if (!svg) return gid;
+    const ns = 'http://www.w3.org/2000/svg';
+    let defs = svg.querySelector('defs');
+    if (!defs) {{
+      defs = document.createElementNS(ns, 'defs');
+      svg.insertBefore(defs, svg.firstChild);
+    }}
+    const grad = document.createElementNS(ns, 'radialGradient');
+    grad.setAttribute('id', gid);
+    grad.setAttribute('cx', '35%');
+    grad.setAttribute('cy', '32%');
+    grad.setAttribute('r', '75%');
+    [['0%', '1'], ['55%', '0.6'], ['100%', '0']].forEach(([offset, opacity]) => {{
+      const stop = document.createElementNS(ns, 'stop');
+      stop.setAttribute('offset', offset);
+      stop.setAttribute('stop-color', color);
+      stop.setAttribute('stop-opacity', opacity);
+      grad.appendChild(stop);
+    }});
+    defs.appendChild(grad);
+    return gid;
+  }}
+  function cloudFill(color) {{
+    return 'url(#' + ensureCloudGradient(color) + ')';
+  }}
   function demandCloudTimeBucket() {{
     return Math.floor(Date.now() / (5 * 60 * 1000));
   }}
@@ -10126,7 +10162,7 @@ def map_webapp_html():
           const blob = L.polygon(blobLatLngs(a.lat, a.lon, HIGH_DEMAND_RADIUS_METERS, cloudSeed), {{
             color: '#9b30ff',
             weight: 0,
-            fillColor: '#9b30ff',
+            fillColor: cloudFill('#9b30ff'),
             fillOpacity: highDemandBlobOpacity(a.load),
             smoothFactor: 3,
           }}).addTo(map);
@@ -10147,7 +10183,7 @@ def map_webapp_html():
             const satBlob = L.polygon(blobLatLngs(satLat, satLon, HIGH_DEMAND_RADIUS_METERS / 2, satSeed), {{
               color: '#9b30ff',
               weight: 0,
-              fillColor: '#9b30ff',
+              fillColor: cloudFill('#9b30ff'),
               fillOpacity: highDemandBlobOpacity(a.load) * 0.85,
               smoothFactor: 3,
             }}).addTo(map);
@@ -10300,7 +10336,7 @@ def map_webapp_html():
           const blob = L.polygon(blobLatLngs(s.lat, s.lon, STATION_CLOUD_RADIUS_METERS, stationSeed), {{
             color: '#2e7d32',
             weight: 0,
-            fillColor: '#2e7d32',
+            fillColor: cloudFill('#2e7d32'),
             fillOpacity: 0.18,
             smoothFactor: 3,
           }}).addTo(map);
@@ -10388,7 +10424,7 @@ def map_webapp_html():
       rainCloudMarker = L.polygon(latLngs, {{
         color: '#9b30ff',
         weight: 0,
-        fillColor: '#9b30ff',
+        fillColor: cloudFill('#9b30ff'),
         fillOpacity: 0.16,
         smoothFactor: 3,
       }}).addTo(map);
@@ -10576,7 +10612,7 @@ def map_webapp_html():
           const marker = L.polygon(cityCloudLatLngs(d.lat, d.lon, DISTRICT_CLOUD_RADIUS_METERS, seed), {{
             color: layer.color,
             weight: 0,
-            fillColor: layer.color,
+            fillColor: cloudFill(layer.color),
             fillOpacity: districtLayerOpacity(demand, layer.thresholds),
             smoothFactor: 3,
           }}).addTo(map);
@@ -10615,7 +10651,7 @@ def map_webapp_html():
       demandCloudMarker = L.polygon(cityCloudLatLngs(data.lat, data.lon, DEMAND_CLOUD_RADIUS_METERS, seed), {{
         color: '#9b30ff',
         weight: 0,
-        fillColor: '#9b30ff',
+        fillColor: cloudFill('#9b30ff'),
         fillOpacity: demandCloudOpacity(data.demand, myCategory),
         smoothFactor: 3,
       }}).addTo(map);
@@ -10687,7 +10723,7 @@ def map_webapp_html():
         const satMarker = L.polygon(cityCloudLatLngs(satLat, satLon, DEMAND_CLOUD_RADIUS_METERS / satRadiusDivisor, satSeed), {{
           color: '#9b30ff',
           weight: 0,
-          fillColor: '#9b30ff',
+          fillColor: cloudFill('#9b30ff'),
           fillOpacity: demandCloudOpacity(data.demand, myCategory) * 0.85,
           smoothFactor: 3,
         }}).addTo(map);
