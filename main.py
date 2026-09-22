@@ -6500,12 +6500,22 @@ def get_nearby_road_closures(city, lat, lon, radius_km=CANDIDATE_CLOSURE_RADIUS_
             nearby.append(e)
     return nearby
 
-# ICAO Шереметьево - по просьбе пользователя (22.09.2026) получает
-# небольшой множитель к score в "Куда ехать" (см. score_airport_candidate
-# ниже), т.к. по факту там стабильно больше общего трафика/заказов, чем
-# отражает голая загрузка прилётов на текущий час.
-SVO_PRIORITY_ICAO = {'UUEE'}
-SVO_PRIORITY_BONUS_MULTIPLIER = 1.2
+# ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя, уточнение голосовым) -
+# приоритет аэропортов Москвы в "Куда ехать" теперь явно завязан на
+# icao+категорию, а не только на голой загрузке прилётов текущего часа:
+# для Ultima - Шереметьево (UUEE) приоритетнее Внуково (UUWW), а Внуково
+# приоритетнее Домодедово (UUDD) - "Внуково терминалы Б/Ц дают неплохо
+# заказов, но Шереметьево всё равно приоритетнее"; для обычного такси
+# (эконом/комфорт/комфорт+ и прочие пассажирские тарифы, категория 'taxi')
+# аэропорты примерно равны, но Шереметьево всё равно немного впереди.
+AIRPORT_PRIORITY_MULTIPLIERS = {
+    'ultima': {'UUEE': 1.35, 'UUWW': 1.15, 'UUDD': 1.0},
+    'taxi': {'UUEE': 1.1},
+}
+AIRPORT_PRIORITY_MULTIPLIER_DEFAULT = 1.0
+
+def airport_priority_multiplier(icao, category):
+    return AIRPORT_PRIORITY_MULTIPLIERS.get(category, {}).get(icao, AIRPORT_PRIORITY_MULTIPLIER_DEFAULT)
 
 async def score_airport_candidate(city, airport, category, user_lat=None, user_lon=None):
     """Считает балл и обоснование для одного аэропорта города. Возвращает
@@ -6583,16 +6593,23 @@ async def score_airport_candidate(city, airport, category, user_lat=None, user_l
     if penalty < 1.0:
         score *= penalty
 
-    # ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя) - Шереметьево
-    # (SVO) в Москве стабильно даёт больше заказов, чем показывает голая
-    # загрузка прилётов на текущий час (у него больше терминалов и общий
-    # трафик заметно выше DME/VKO) - поэтому даём ему небольшую прибавку
-    # к баллу, чтобы он не проигрывал другому аэропорту только из-за
-    # разницы в 1 час по числу прилётов, даже если формально рейсов
-    # сейчас меньше.
-    if icao in SVO_PRIORITY_ICAO:
-        score *= SVO_PRIORITY_BONUS_MULTIPLIER
-        reasons.append("⭐ обычно больше заказов")
+    # ИЗМЕНЕНО 22.09.2026 (см. AIRPORT_PRIORITY_MULTIPLIERS выше) - фиксированный
+    # приоритет аэропортов Москвы по icao+категории (Ultima: SVO>VKO>DME;
+    # такси: примерно равны, SVO чуть впереди), не привязанный к голой
+    # загрузке прилётов текущего часа.
+    priority_mult = airport_priority_multiplier(icao, category)
+    if priority_mult != 1.0:
+        score *= priority_mult
+        if icao == 'UUEE':
+            reasons.append("⭐ обычно больше заказов")
+
+    # ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "будни день -
+    # аэропорты, воскресенье днём - аэропорты/районы") - дневная/ночная
+    # логика приоритетов Ultima (см. ultima_time_bias ниже) в отдельные
+    # часы дополнительно поднимает балл аэропортов.
+    _center_mult, airport_time_mult = ultima_time_bias(city, category)
+    if airport_time_mult != 1.0:
+        score *= airport_time_mult
 
     airport_coords = AIRPORT_COORDS.get(icao)
     return {
@@ -6730,6 +6747,66 @@ def get_city_advice(city, level, category=None):
             return _CITY_ADVICE_WORKDAY_EVENING
     return _CITY_ADVICE_DEFAULT
 
+# ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя, голосовое про логику
+# Ultima по дням/часам) - координаты "Центра" Москвы для отдельного
+# кандидата "Куда ехать" (Красная площадь/Охотный ряд) - НЕ то же самое,
+# что RAIN_CITY_COORDS (условный центр для fallback-происхождения штрафов
+# за расстояние, используется и для других целей) - это именно место, куда
+# кандидат "Центр" ведёт кнопкой "Поехали".
+MOSCOW_CENTER_COORDS = (55.7539, 37.6208)
+
+def _is_weekend_night_window(weekday, hour):
+    """Пятница/суббота ночь (21:00-06:00, через полночь на следующий день -
+    weekday 4=пятница, 5=суббота, 6=воскресенье, как в get_city_now().weekday())."""
+    return (weekday in (4, 5) and hour >= 21) or (weekday in (5, 6) and hour < 6)
+
+def ultima_time_bias(city, category):
+    """Дневная/ночная логика приоритетов ТОЛЬКО для Ultima в Москве -
+    ДОБАВЛЕНО 22.09.2026 по прямой просьбе пользователя (голосовое):
+    пятница/суббота ночью (21:00-06:00) - явный приоритет центру (клубы/
+    бары/рестораны/отели у Красной площади/Охотного ряда); воскресенье
+    днём - приоритет районам/аэропортам (люди прилетают/разъезжаются по
+    районам); будни (и суббота) вечером (17:00-24:00) - приоритет центру
+    (деловые ужины/рестораны/отели); будни днём, в затишье между утренним
+    и вечерним пиком (10:00-17:00) - приоритет аэропортам. Возвращает
+    (множитель_центра, множитель_аэропортов) - для остальных city/category
+    всегда (1.0, 1.0), без изменений."""
+    if city != 'moscow' or category != 'ultima':
+        return 1.0, 1.0
+    now = get_city_now(city)
+    weekday, hour = now.weekday(), now.hour
+    if _is_weekend_night_window(weekday, hour):
+        return 2.2, 1.0
+    if weekday == 6 and 6 <= hour < 21:
+        return 0.85, 1.3
+    if weekday != 6 and 17 <= hour < 24:
+        return 1.5, 1.0
+    if weekday <= 4 and 10 <= hour < 17:
+        return 1.0, 1.3
+    return 1.0, 1.0
+
+def where_to_go_banner(city, category):
+    """Короткая текстовая рекомендация сверху сводки "Куда ехать" -
+    ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "давайте будем
+    писать именно рекомендации для водителя на ближайший день"). Для
+    Ultima в Москве привязана к той же логике, что ultima_time_bias выше -
+    держать в синхроне при правках там. Для остальных - общая фраза по
+    текущему часу пик (см. get_current_peak_level/PEAK_LEVEL_LABEL)."""
+    if city == 'moscow' and category == 'ultima':
+        now = get_city_now(city)
+        weekday, hour = now.weekday(), now.hour
+        if _is_weekend_night_window(weekday, hour):
+            return "🌃 Пятница-суббота, ночь: держись центра - клубы, бары, рестораны и отели дают сейчас максимум заказов."
+        if weekday == 6 and 6 <= hour < 21:
+            return "🛬 Воскресенье, день: приоритет районам и аэропортам - люди прилетают и разъезжаются по районам."
+        if weekday != 6 and 17 <= hour < 24:
+            return "🌆 Вечер: держись центра - деловые ужины, рестораны и отели дают основной поток."
+        if weekday <= 4 and 10 <= hour < 17:
+            return "✈️ Дневное затишье между пиками: сейчас выгоднее держаться аэропортов."
+        return "🧭 Ориентируйся по вариантам ниже - вот что сейчас выгоднее всего."
+    level = get_current_peak_level(city, category=category)
+    return f"🧭 {PEAK_LEVEL_LABEL.get(level, 'Сейчас обычный спрос')} - вот что выгоднее всего прямо сейчас."
+
 # Радиус "бесплатной" близости для районного кандидата "Куда ехать" -
 # заметно меньше, чем у аэропортов (AIRPORT_DISTANCE_PENALTY_FREE_KM=30),
 # т.к. районы внутри одного города и разница даже в 10-15 км уже заметно
@@ -6811,7 +6888,7 @@ async def score_district_candidates(city, category, user_lat=None, user_lon=None
         advice = get_city_advice(city, level, category=category)
         result.append({
             'label': f"Район {d['name']}", 'score': d['adjusted'], 'reasons': reasons, 'closed': False,
-            'advice': advice, 'lat': d['lat'], 'lon': d['lon'],
+            'advice': advice, 'lat': d['lat'], 'lon': d['lon'], 'kind': 'district',
         })
     return result
 
@@ -6866,7 +6943,31 @@ async def score_city_candidate(city, category=None):
         'label': 'Город / центр', 'score': score, 'reasons': reasons, 'closed': False, 'advice': advice,
         'lat': city_coords[0] if city_coords else None,
         'lon': city_coords[1] if city_coords else None,
+        'kind': 'center',
     }
+
+async def score_moscow_center_candidate(city, category):
+    """Кандидат "Центр" для Москвы такси/Ultima - ДОБАВЛЕНО 22.09.2026
+    (прямая просьба пользователя): раньше "Город/центр" был ПОЛНОСТЬЮ
+    заменён на районы (score_district_candidates), но пользователь
+    уточнил, что реальный центр (Красная площадь/Охотный ряд - вне списка
+    30 спальных районов из его файла, см. MOSCOW_CENTER_COORDS) должен
+    остаться отдельным кандидатом наравне с районами, с явным приоритетом
+    для Ultima в определённые часы/дни (см. ultima_time_bias). Использует
+    ту же базовую логику (час пик + погода), что и score_city_candidate,
+    только переопределяет метку/координаты на реальный центр и, для
+    Ultima, домножает score по временной логике."""
+    base = await score_city_candidate(city, category=category)
+    base['label'] = 'Центр города'
+    base['lat'], base['lon'] = MOSCOW_CENTER_COORDS
+    center_mult, _airport_mult = ultima_time_bias(city, category)
+    if center_mult != 1.0:
+        base['score'] *= center_mult
+        if center_mult > 1.0:
+            base['reasons'].append("⭐ сейчас приоритет центру")
+        else:
+            base['reasons'].append("сейчас приоритет районам/аэропортам")
+    return base
 
 # Концертное событие начинает давать всплеск спроса ЗА CONCERT_EVENT_LEAD_HOURS
 # часов до начала (люди подъезжают заранее) и ОСТАЁТСЯ актуальным ещё
@@ -6991,15 +7092,17 @@ async def compute_where_to_go(city, category, user_lat=None, user_lon=None):
     # format_where_to_go_text уже умеет корректно показать "нет данных" в
     # этом случае, не падая).
     try:
-        # ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя) - для Москвы
-        # такси/Ultima кандидат "Город/центр" заменён на ТОП-3 реальных
-        # района (см. score_district_candidates - изначально была версия с
-        # одним лучшим районом, пользователь попросил "хотя бы три"),
-        # посчитанных по загруженной пользователем матрице спроса +
-        # удалённости от текущей позиции водителя. Для остальных городов/
-        # категорий - прежняя эвристика по часу пика (score_city_candidate).
+        # ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя, уточнение
+        # голосовым) - для Москвы такси/Ultima ТОП-3 реальных района (см.
+        # score_district_candidates) дополняются ОТДЕЛЬНЫМ кандидатом
+        # "Центр" (Красная площадь/Охотный ряд - вне списка 30 спальных
+        # районов из файла пользователя, см. score_moscow_center_candidate),
+        # а не заменяются им полностью, как было в первой версии этой фичи
+        # в тот же день. Для остальных городов/категорий - прежняя
+        # эвристика по часу пика (score_city_candidate).
         if city == 'moscow' and category in ('taxi', 'ultima'):
             candidates.extend(await score_district_candidates(city, category, user_lat=user_lat, user_lon=user_lon, limit=3))
+            candidates.append(await score_moscow_center_candidate(city, category))
         else:
             candidates.append(await score_city_candidate(city, category=category))
     except Exception:
@@ -7031,6 +7134,12 @@ async def compute_where_to_go(city, category, user_lat=None, user_lon=None):
             dist_km = haversine_km(origin_lat, origin_lon, lat, lon)
             eta_min = eta_minutes_from_distance(dist_km)
             c['reasons'].append(f"🚗 ~{round(dist_km)} км {origin_label} · ~{eta_min} мин в пути")
+            # ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя) - числовое
+            # расстояние сохраняется отдельно от текста реплики, чтобы
+            # список "Рекомендуемые районы" можно было отсортировать ПО
+            # УДАЛЁННОСТИ (ближе - выше), а не по баллу спроса - см.
+            # format_where_to_go_text/handle_where_to_go_data_api.
+            c['dist_km'] = dist_km
         try:
             if get_nearby_road_closures(city, lat, lon):
                 c['reasons'].append("⚠️ рядом возможны перекрытия - см. «⛔ Дорожные события»")
@@ -7060,25 +7169,34 @@ def where_to_go_keyboard(candidates):
     """Инлайн-кнопки "🚗 ПОЕХАЛИ" под текстовой сводкой "Куда ехать" -
     ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "аэропорты и
     районы помечай кнопкой поехали чтобы переводила на Яндекс.Навигатор").
-    По одной кнопке на каждый ОТКРЫТЫЙ кандидат с известными координатами
-    (см. 'lat'/'lon' в каждой score_*_candidate - у части концертных
-    событий координат может не быть, если адрес не удалось геокодировать,
-    см. fetch_concert_events.py, для них кнопки просто не будет). Номер и
-    эмодзи у кнопки совпадают с тем, что показано в тексте сводки (см.
-    WHERE_TO_GO_RANK_EMOJI ниже), чтобы кнопка X по порядку соответствовала
-    варианту X в тексте выше."""
+    ИЗМЕНЕНО 22.09.2026 (та же просьба, что у format_where_to_go_text -
+    призовые места топ-3 + отдельный блок районов по удалённости): кнопки
+    строятся из ТОГО ЖЕ набора, что показан в тексте - топ-3 призовых
+    места + районы из блока "Рекомендуемые районы" (без повтора кнопки,
+    если район уже был в топ-3). По одной кнопке на кандидата с известными
+    координатами (у части концертных событий координат может не быть,
+    см. fetch_concert_events.py - для них кнопки просто не будет)."""
     open_candidates = [c for c in candidates if not c['closed']]
+    podium = open_candidates[:3]
+    district_candidates = [c for c in open_candidates if c.get('kind') == 'district' and c.get('dist_km') is not None]
+    district_candidates.sort(key=lambda c: c['dist_km'])
+    shown = list(podium)
+    podium_ids = {id(c) for c in podium}
+    for c in district_candidates:
+        if id(c) not in podium_ids:
+            shown.append(c)
+
     rows = []
-    for i, c in enumerate(open_candidates):
+    for i, c in enumerate(shown):
         lat, lon = c.get('lat'), c.get('lon')
         if lat is None or lon is None:
             continue
         if i == 0:
             rank = '🏆'
-        elif i - 1 < len(WHERE_TO_GO_RANK_EMOJI):
+        elif i < len(podium) and i - 1 < len(WHERE_TO_GO_RANK_EMOJI):
             rank = WHERE_TO_GO_RANK_EMOJI[i - 1]
         else:
-            rank = f"{i + 1}."
+            rank = '🏘'
         label = c['label']
         if len(label) > 26:
             label = label[:25] + "…"
@@ -7111,7 +7229,19 @@ def format_where_to_go_text(city, category, candidates, extra_header=None):
         lines.append("⛔ Все аэропорты города сейчас закрыты - ориентируйся на центр города и часы пика (см. «📅 Часы пика»).")
         return '\n'.join(lines)
 
-    best = open_candidates[0]
+    # ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "давайте будем
+    # писать именно рекомендации для водителя на ближайшие грубо говоря
+    # день") - короткий совет-баннер сверху, ДО призовых мест (см.
+    # where_to_go_banner).
+    lines.append("")
+    lines.append(where_to_go_banner(city, category))
+
+    # ИЗМЕНЕНО 22.09.2026 (та же просьба - "первое место, второе, третье, а
+    # дальше уже рекомендуемые районы") - призовые места теперь СТРОГО
+    # топ-3 по баллу (микс аэропортов/центра/районов), а не весь список
+    # открытых кандидатов подряд.
+    podium = open_candidates[:3]
+    best = podium[0]
     reasons_str = ', '.join(best['reasons'])
     lines.append("▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓")
     lines.append(f"🏆 *{best['label']}*")
@@ -7120,10 +7250,10 @@ def format_where_to_go_text(city, category, candidates, extra_header=None):
         lines.append(f"💡 {best['advice'][0].upper()}{best['advice'][1:]}.")
     lines.append("▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓")
 
-    if len(open_candidates) > 1:
+    if len(podium) > 1:
         lines.append("")
         lines.append("*Остальные варианты:*")
-        for i, c in enumerate(open_candidates[1:]):
+        for i, c in enumerate(podium[1:]):
             rank_emoji = WHERE_TO_GO_RANK_EMOJI[i] if i < len(WHERE_TO_GO_RANK_EMOJI) else '▫️'
             lines.append("")
             lines.append(f"{rank_emoji} *{c['label']}*")
@@ -7135,6 +7265,24 @@ def format_where_to_go_text(city, category, candidates, extra_header=None):
             # пропадал, если аэропорт набирал больше баллов).
             if c.get('advice'):
                 lines.append(f"💡 _{c['advice'][0].upper()}{c['advice'][1:]}._")
+
+    # ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "дальше идут
+    # рекомендуемые районы, сортировать по удалённости - чем ближе, тем
+    # выше") - отдельный блок ПОД призовыми местами, только районы
+    # (kind='district', см. score_district_candidates), отсортированные
+    # ПО РАССТОЯНИЮ (не по баллу спроса, в отличие от призовых мест выше).
+    # Район может повториться и в призовых местах, и здесь - это осознанно:
+    # призовые места - "что выгоднее всего по баллу", этот блок - "что
+    # ближе всего физически", разные вопросы.
+    district_candidates = [c for c in open_candidates if c.get('kind') == 'district' and c.get('dist_km') is not None]
+    district_candidates.sort(key=lambda c: c['dist_km'])
+    if district_candidates:
+        lines.append("")
+        lines.append("*🏘 Рекомендуемые районы (по удалённости):*")
+        for c in district_candidates:
+            lines.append("")
+            lines.append(f"▫️ *{c['label']}*")
+            lines.append(f"{_where_to_go_score_bar(c['score'])}  {', '.join(c['reasons'])}")
 
     closed = [c for c in candidates if c['closed']]
     if closed:
@@ -11296,6 +11444,11 @@ def where_to_go_webapp_html():
     font-size: 13px; color: #FFC400; line-height: 1.45;
   }
   .list-title { font-size: 12.5px; font-weight: 700; color: #9a9a9a; text-transform: uppercase; letter-spacing: .04em; margin: 4px 0 8px; }
+  .banner {
+    font-size: 13.5px; color: #FFC400; background: rgba(255,196,0,.1);
+    border: 1px solid rgba(255,196,0,.25); border-radius: 10px; padding: 10px 12px;
+    margin-bottom: 14px; line-height: 1.45;
+  }
   .cand {
     background: #131313; border: 1px solid rgba(255,255,255,.08); border-radius: 12px;
     padding: 12px 13px; margin-bottom: 8px; display: flex; gap: 10px; align-items: flex-start;
@@ -11417,13 +11570,27 @@ def where_to_go_webapp_html():
       const content = document.getElementById('content');
       content.innerHTML = '';
 
-      if (!data.open || !data.open.length) {
+      // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "рекомендации
+      // для водителя на ближайший день сверху") - короткий совет-баннер
+      // ПЕРЕД призовыми местами (см. banner в handle_where_to_go_data_api).
+      if (data.banner) {
+        const bannerBox = document.createElement('div');
+        bannerBox.className = 'banner';
+        bannerBox.textContent = data.banner;
+        content.appendChild(bannerBox);
+      }
+
+      const podium = data.podium || [];
+      if (!podium.length) {
         const warn = document.createElement('div');
         warn.className = 'warn';
         warn.textContent = '⛔ Все аэропорты города сейчас закрыты - ориентируйся на центр города и часы пика.';
         content.appendChild(warn);
       } else {
-        const best = data.open[0];
+        // ИЗМЕНЕНО 22.09.2026 (та же просьба - "первое, второе, третье
+        // место, дальше рекомендуемые районы") - призовые места теперь
+        // СТРОГО топ-3 по баллу (data.podium с сервера), а не весь список.
+        const best = podium[0];
         const bestBox = document.createElement('div');
         bestBox.className = 'best';
         bestBox.innerHTML =
@@ -11435,7 +11602,7 @@ def where_to_go_webapp_html():
           renderGoButton(best);
         content.appendChild(bestBox);
 
-        const rest = data.open.slice(1);
+        const rest = podium.slice(1);
         if (rest.length) {
           const title = document.createElement('div');
           title.className = 'list-title';
@@ -11457,6 +11624,34 @@ def where_to_go_webapp_html():
             content.appendChild(row);
           });
         }
+      }
+
+      // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "дальше идут
+      // рекомендуемые районы, сортировать по удалённости - чем ближе, тем
+      // выше") - отдельный блок ПОД призовыми местами, районы уже
+      // отсортированы по удалённости сервером (см. data.districts в
+      // handle_where_to_go_data_api - НЕ по баллу спроса, в отличие от
+      // призовых мест выше). Район может повториться и в призовых местах,
+      // и здесь - это осознанно (разные вопросы: "что выгоднее" и "что
+      // ближе").
+      if (data.districts && data.districts.length) {
+        const districtsTitle = document.createElement('div');
+        districtsTitle.className = 'list-title';
+        districtsTitle.textContent = '🏘 Рекомендуемые районы (по удалённости)';
+        content.appendChild(districtsTitle);
+        data.districts.forEach((c) => {
+          const row = document.createElement('div');
+          row.className = 'cand';
+          row.innerHTML =
+            '<div class="rank">🏘</div>' +
+            '<div class="body">' +
+              '<div class="label">' + c.label + '</div>' +
+              '<div class="bar">' + scoreBar(c.score) + '</div>' +
+              '<div class="reasons">' + c.reasons.join(', ') + '</div>' +
+              renderGoButton(c) +
+            '</div>';
+          content.appendChild(row);
+        });
       }
 
       if (data.closed && data.closed.length) {
@@ -11541,9 +11736,25 @@ async def handle_where_to_go_data_api(request):
             'lat': c.get('lat'), 'lon': c.get('lon'),
         }
 
+    # ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя - "рекомендации на
+    # день сверху, потом призовые места 1-2-3, дальше рекомендуемые районы
+    # по удалённости") - тот же принцип, что и в format_where_to_go_text
+    # (текстовая версия): 'podium' - строго топ-3 по баллу, 'districts' -
+    # ОТДЕЛЬНО районы (kind='district'), отсортированные ПО УДАЛЁННОСТИ
+    # (ближе - выше), не по баллу. 'open'/'closed' оставлены как раньше
+    # (полный список) - для обратной совместимости и на случай, если
+    # где-то ещё используется старый формат.
+    podium = open_candidates[:3]
+    district_candidates = [c for c in open_candidates if c.get('kind') == 'district' and c.get('dist_km') is not None]
+    district_candidates.sort(key=lambda c: c['dist_km'])
+    banner = where_to_go_banner(city, category)
+
     return web.json_response({
         'city_name': city_name,
         'time_label': time_label,
+        'banner': banner,
+        'podium': [_pack(c) for c in podium],
+        'districts': [_pack(c) for c in district_candidates],
         'open': [_pack(c) for c in open_candidates],
         'closed': [_pack(c) for c in closed_candidates],
         'footnote': footnote,
