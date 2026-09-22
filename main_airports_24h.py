@@ -5,6 +5,8 @@ import contextvars
 import sqlite3
 import json
 import re
+import html
+import io
 import time
 import functools
 import hashlib
@@ -16,7 +18,7 @@ from zoneinfo import ZoneInfo
 from math import radians, sin, cos, asin, sqrt
 from aiogram import Bot, Dispatcher, Router, types, BaseMiddleware
 from aiogram.filters import Command
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo, FSInputFile, MenuButtonWebApp, MenuButtonDefault
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo, FSInputFile, BufferedInputFile, MenuButtonWebApp, MenuButtonDefault
 from aiogram.client.session.middlewares.base import BaseRequestMiddleware
 from aiogram.methods import SendMessage, TelegramMethod
 from aiogram.methods.base import TelegramType
@@ -369,7 +371,14 @@ def rain_impact_score(code, category):
 # включать после обновления бота).
 NOTIFICATION_TYPES = {
     'weather': {'label': 'ПОГОДА/ОСАДКИ', 'emoji': '🌤'},
-    'airport_status': {'label': 'СТАТУС АЭРОПОРТА', 'emoji': '✈️'},
+    # "СТАТУС АЭРОПОРТА" (airport_status) убрана из списка переключаемых
+    # 22.09.2026 по прямой просьбе пользователя - "уведомление о аэропорту
+    # приближения отключить нельзя его можешь вообще убрать он всегда у всех
+    # должен быть включен автоматом". Тумблер больше нигде не отображается
+    # (ни в Telegram-клавиатуре notification_settings_keyboard, ни в кабинете
+    # WebApp - оба строят список из NOTIFICATION_TYPES), а
+    # notifications_enabled() ниже форсирует True для этого ключа независимо
+    # от того, что могло быть сохранено в notif_prefs у старых пользователей.
     'high_demand': {'label': 'ПОВЫШЕННЫЙ СПРОС', 'emoji': '📈'},
     'holidays': {'label': 'ПРАЗДНИКИ', 'emoji': '🎉'},
     'peak_hours': {'label': 'ЧАСЫ ПИКА', 'emoji': '📅'},
@@ -387,6 +396,11 @@ def notifications_enabled(state, notif_key):
     """True, если пользователь не выключал явно этот тип пуша - отсутствие
     записи в notif_prefs (новый пользователь или пуш добавлен позже, чем
     пользователь в последний раз открывал настройки) трактуется как ON."""
+    if notif_key == 'airport_status':
+        # Принудительно включено для всех - см. комментарий у NOTIFICATION_TYPES
+        # выше (22.09.2026). Даже если у старого пользователя в notif_prefs
+        # сохранено False с тех времён, когда это был обычный тумблер.
+        return True
     if not isinstance(state, dict):
         return True
     prefs = state.get('notif_prefs') or {}
@@ -17075,6 +17089,15 @@ def referral_menu_keyboard(referral_link, current_type=REFERRAL_DEFAULT_TYPE):
         [InlineKeyboardButton(text=individual_label, callback_data="referral_category_individual")],
         [InlineKeyboardButton(text=legal_label, callback_data="referral_category_legal_start")],
         [InlineKeyboardButton(text="🔗 МОЯ ССЫЛКА", callback_data="referral_link_show")],
+        # "📱 QR-КОД ССЫЛКИ" - по прямой просьбе пользователя (22.09.2026,
+        # после подготовки презентации бота - "добавить возможность каждому
+        # загружать свою презентацию со своим QR-кодом со своей ссылкой по
+        # кнопке чтобы люди могли подключаться") - каждый пользователь может
+        # получить QR-код СВОЕЙ персональной реферальной ссылки одним нажатием
+        # (см. referral_qr_show/build_referral_qr_png ниже), чтобы показывать
+        # его на встречах/презентациях или клеить на авто - не нужно ничего
+        # генерировать вручную на стороне.
+        [InlineKeyboardButton(text="📱 QR-КОД ССЫЛКИ", callback_data="referral_qr_show")],
         [InlineKeyboardButton(text="📤 ПОДЕЛИТЬСЯ ССЫЛКОЙ", switch_inline_query=share_text)],
         [InlineKeyboardButton(text="📋 МОИ РЕФЕРАЛЫ", callback_data="referral_list")],
         [InlineKeyboardButton(text="💸 ВЫВЕСТИ СРЕДСТВА", callback_data="referral_withdraw_start")],
@@ -17290,6 +17313,60 @@ async def referral_link_show(callback_query: types.CallbackQuery):
     me = await bot.get_me()
     link = get_referral_link(me.username, user_id)
     await callback_query.message.answer(f"`{link}`", parse_mode='Markdown')
+
+
+def build_referral_qr_png(link):
+    """Рисует QR-код персональной реферальной ссылки в PNG (bytes) - по
+    просьбе пользователя (22.09.2026): "добавить возможность каждому
+    загружать свою презентацию со своим QR-кодом со своей ссылкой по кнопке
+    чтобы люди могли подключаться". Используем библиотеку qrcode (см.
+    requirements.txt) - генерация полностью локальная, без внешних сервисов
+    (никакие персональные ссылки никуда не уходят)."""
+    import qrcode
+    from qrcode.image.pil import PilImage
+    qr = qrcode.QRCode(
+        error_correction=qrcode.constants.ERROR_CORRECT_M,
+        box_size=12,
+        border=4,
+    )
+    qr.add_data(link)
+    qr.make(fit=True)
+    img = qr.make_image(image_factory=PilImage, fill_color=(20, 33, 61), back_color=(251, 251, 248))
+    buf = io.BytesIO()
+    img.save(buf, format='PNG')
+    return buf.getvalue()
+
+
+@router.callback_query(lambda c: c.data == "referral_qr_show")
+async def referral_qr_show(callback_query: types.CallbackQuery):
+    """QR-код персональной реферальной ссылки - см. build_referral_qr_png
+    выше и комментарий у кнопки "📱 QR-КОД ССЫЛКИ" в referral_menu_keyboard."""
+    user_id = callback_query.from_user.id
+    try:
+        await callback_query.answer()
+    except Exception:
+        pass
+    me = await bot.get_me()
+    link = get_referral_link(me.username, user_id)
+    try:
+        png_bytes = build_referral_qr_png(link)
+    except Exception:
+        logger.exception("❌ Не удалось сгенерировать QR-код реферальной ссылки")
+        await callback_query.message.answer(
+            "❌ Не получилось сформировать QR-код, попробуй ещё раз чуть позже."
+        )
+        return
+    photo = BufferedInputFile(png_bytes, filename=f"taxi_helper_ref_{user_id}.png")
+    await callback_query.message.answer_photo(
+        photo,
+        caption=(
+            "📱 *QR-код твоей реферальной ссылки*\n\n"
+            "Покажи его на встрече, презентации или расклей на авто - "
+            "человек наводит камеру и сразу попадает в бота по твоей ссылке.\n\n"
+            f"🔗 Ссылка: `{link}`"
+        ),
+        parse_mode='Markdown',
+    )
 
 
 @router.callback_query(lambda c: c.data == "referral_list")
@@ -17876,8 +17953,44 @@ def format_admin_overview_text():
 
 def admin_panel_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔄 Обновить", callback_data="admin_panel_refresh")]
+        [InlineKeyboardButton(text="🔄 Обновить", callback_data="admin_panel_refresh")],
+        [InlineKeyboardButton(text="📄 Отчёт в файл (.txt)", callback_data="admin_panel_export_txt")],
     ])
+
+
+# ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "надо ещё чтобы бот по
+# кнопке в админке готовил отчёт в файле тхт по нажатию формировал") -
+# простой html.unescape + regex-снятие тегов: format_admin_overview_text
+# собирает разметку под parse_mode='HTML' (<b>...</b> и т.п.), для .txt
+# файла эти теги не нужны - убираем их, оставляя только читаемый текст с
+# теми же переносами строк.
+_HTML_TAG_RE = re.compile(r'<[^>]+>')
+
+
+def format_admin_overview_plain_text():
+    html_text = format_admin_overview_text()
+    return html.unescape(_HTML_TAG_RE.sub('', html_text))
+
+
+@router.callback_query(lambda c: c.data == "admin_panel_export_txt")
+async def admin_panel_export_txt(callback_query: types.CallbackQuery):
+    """Кнопка "📄 Отчёт в файл (.txt)" под админ-панелью - формирует ТЕ ЖЕ
+    данные (format_admin_overview_text), что и сама панель на экране, но как
+    .txt-файл, который можно переслать/сохранить/открыть в другом
+    приложении. Пароль уже проверен при открытии панели (это кнопка ПОД уже
+    показанным сообщением), повторно не спрашиваем."""
+    try:
+        await callback_query.answer()
+    except Exception:
+        pass
+    plain_text = format_admin_overview_plain_text()
+    filename = f"admin_report_{_sub_now().strftime('%Y-%m-%d_%H-%M')}.txt"
+    document = BufferedInputFile(plain_text.encode('utf-8'), filename=filename)
+    try:
+        await callback_query.message.answer_document(document, caption="🔐 Админ-отчёт")
+    except Exception:
+        logger.exception("❌ Не удалось сформировать .txt-отчёт админ-панели")
+        await callback_query.message.answer("❌ Не получилось сформировать файл, попробуй ещё раз.")
 
 
 # ПЕРЕНЕСЕНО 23.09.2026 (прямая просьба пользователя - "занеси кнопку админ
