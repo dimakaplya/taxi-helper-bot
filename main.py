@@ -19304,7 +19304,10 @@ async def push_peak_hour_alert(city, category, target_date, target_hour, label, 
         return
     city_name = CITY_DISPLAY_NAMES.get(city, city)
     peak_color_emoji = '🟣'  # та же палитра, что у аэропортов (get_load_emoji) - фиолетовый = максимальный спрос
-    peak_bar = '⬛⬛⬛⬛⬛'  # 5-балльная шкала, чёрно-белая по просьбе пользователя - у пуша "час пик" всегда максимум (5/5)
+    # ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя - "давай фиолетовый и
+    # белый бар загрузки", было чёрно-белое ⬛⬛⬛⬛⬛): 🟪 - фиолетовый квадрат,
+    # ⬜ - белый (незаполненный). У этого пуша всегда максимум (5/5).
+    peak_bar = '🟪🟪🟪🟪🟪'
     elevated = find_elevated_airport_for_push(city, category)
     if elevated:
         airport, airport_load = elevated
