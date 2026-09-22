@@ -843,20 +843,21 @@ AIRPORT_PARKING_ZONE_POLYGONS = {
                 (55.978863, 37.392317),
                 (55.977854, 37.388241),
             ],
-            # P20 - вершины по прямой просьбе пользователя 22.09.2026 (4-я
-            # точка исходного списка дублировала 3-ю, убрана как вырожденная.
-            # ЕЩЁ РАЗ ИСПРАВЛЕНО 22.09.2026 (прямая просьба пользователя -
-            # "координаты парковки P20 неверные", прислал уточнённые вершины
-            # по одной подряд) - вершины 2-5 полностью пересобраны, 1-я
-            # (общий угол с P22) не менялась.
+            # P20 - вершины по прямой просьбе пользователя 22.09.2026, прислал
+            # уточнённые точки по одной подряд, ПОРЯДОК присылки не совпадал
+            # с обходом периметра - контур самопересекался (виден "бантик"
+            # на скриншоте пользователя 22.09.2026, "обрати внимание на
+            # полигоны"). ИСПРАВЛЕНО 22.09.2026: те же 7 точек отсортированы
+            # по углу вокруг центра (простой контур без самопересечений),
+            # координаты не менялись, только порядок обхода.
             'P20': [
                 (55.977854, 37.388241),
-                (55.980891, 37.397371),
                 (55.979976, 37.397659),
                 (55.980323, 37.399912),
                 (55.980840, 37.399599),
                 (55.980731, 37.398353),
                 (55.980982, 37.398144),
+                (55.980891, 37.397371),
             ],
         },
         # Парковка Терминала D - вершины по прямой просьбе пользователя
@@ -8715,16 +8716,12 @@ MAP_CHROME_CSS = """
   /* ИЗМЕНЕНО 22.09.2026: CartoDB (basemaps.cartocdn.com) закрыли бесплатный
      анонимный доступ без API-ключа - тайлы перестали грузиться ("API key
      required", см. скриншот пользователя). Вернулись к обычным тайлам
-     OpenStreetMap (гарантированно без ключей и рисков), а тёмный вид
-     держим CSS-фильтром инверсии цветов поверх тайлового слоя - тот же
-     трюк, что используют многие карты без своего тёмного сервера тайлов.
-     Маркеры/попапы/легенду фильтр не трогает - он навешен только на
-     .leaflet-tile-pane, а не на весь #map. */
-  /* ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя - "подложку карты
-     сделай посветлее"): brightness поднят с 0.95 до 1.25 - тайлы светлее,
-     детали дорог/подписей читаются лучше (особенно новые значки заправок/
-     зарядок/парковок на них), инверсия и общая тёмная тема карты сохранены. */
-  .leaflet-tile-pane { filter: invert(1) hue-rotate(180deg) brightness(1.25) contrast(0.9); }
+     OpenStreetMap (гарантированно без ключей и рисков); тёмный вид какое-то
+     время держался CSS-фильтром инверсии цветов поверх тайлового слоя.
+     ЕЩЁ РАЗ ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя - "верни
+     обратно карту которая была стандартная по обработке"): фильтр
+     инверсии убран целиком - подложка карты снова обычные "дневные" цвета
+     OpenStreetMap, без чёрно-инверсной темы. */
   .legend { position: absolute; top: 10px; right: 10px; z-index: 1000; background: #1c1c1c; color: #fff; border: 1px solid rgba(255,196,0,.4); border-radius: 8px; padding: 8px 10px; font-family: -apple-system, sans-serif; font-size: 12px; box-shadow: 0 1px 4px rgba(0,0,0,.35); }
   .legend div { display: flex; align-items: center; gap: 6px; margin: 3px 0; }
   .legend .dot { width: 11px; height: 11px; border-radius: 50%; border: 1px solid rgba(255,255,255,.5); display: inline-block; }
@@ -8736,11 +8733,23 @@ MAP_CHROME_CSS = """
      штатный отступ Leaflet ~10px от края). */
   .filter-toggle { position: absolute; top: 10px; left: 56px; z-index: 1000; background: #FFC400; color: #000; border-radius: 8px; padding: 8px 12px; font-family: -apple-system, sans-serif; font-size: 12.5px; font-weight: 600; box-shadow: 0 1px 4px rgba(0,0,0,.35); cursor: pointer; user-select: none; text-transform: uppercase; }
   .airport-icon { display: flex; align-items: center; justify-content: center; font-size: 20px; filter: drop-shadow(0 1px 2px rgba(0,0,0,.5)); }
-  /* .car-icon-wrap/.car-icon-inner/.car-icon-arrow УБРАНЫ 22.09.2026 (прямая
-     просьба пользователя - "сделай для всех тарифов один в один как
-     стрелка") - все маркеры водителей (не только свой) теперь используют
-     .self-icon-wrap/.self-icon-rotate + navArrowIconHtml, кружка с эмодзи
-     больше нет. */
+  /* ВОЗВРАЩЕНО 22.09.2026 (прямая просьба пользователя - на карте
+     оказались ДВЕ стрелки друг на друге вместо своей стрелки + кружков
+     остальных: "почему две метки, другие пользователи должны быть как
+     раньше - просто смайлики в кругах, а пользователь конкретно стрелка"):
+     22.09.2026 эти классы были ненадолго убраны в пользу единой формы
+     navArrowIconHtml для всех - откат, ОСТАЛЬНЫЕ водители снова кружок с
+     эмодзи + маленькая стрелка-индикатор сбоку, ТОЛЬКО свой маркер -
+     стрелка-дротик (.self-icon-wrap/.self-icon-rotate). Причина путаницы с
+     "двумя метками": свой маркер рисуется ОТДЕЛЬНО (updateSelfMarker, из
+     геолокации браузера), а /map/positions (loadPositions) ВСЕГДА включает
+     и свою же позицию тоже (анонимно, сервер не исключает "себя" из общего
+     списка) - раньше это была лишняя обычная точка/кружок рядом со своей
+     стрелкой, теперь после отката снова так же, а не второй такой же
+     стрелкой поверх. */
+  .car-icon-wrap { position: relative; width: 36px; height: 36px; }
+  .car-icon-inner { position: absolute; top: 6px; left: 6px; width: 24px; height: 24px; border-radius: 50%; border: 1.5px solid #333; display: flex; align-items: center; justify-content: center; font-size: 13px; box-shadow: 0 1px 3px rgba(0,0,0,.4); }
+  .car-icon-arrow { position: absolute; top: 0; left: 14px; width: 0; height: 0; border-left: 4px solid transparent; border-right: 4px solid transparent; border-bottom: 7px solid #222; transform-origin: 4px 18px; filter: drop-shadow(0 1px 1px rgba(0,0,0,.4)); }
   .airport-popup h4 { margin: 0 0 4px; font-family: -apple-system, sans-serif; font-size: 13.5px; color: #000; }
   .airport-popup .row { font-family: -apple-system, sans-serif; font-size: 12.5px; margin: 2px 0; color: #333; }
   .airport-label { background: rgba(20,20,20,.92); color: #fff; border: 1px solid rgba(255,196,0,.55); border-radius: 6px; padding: 3px 6px; font-family: -apple-system, sans-serif; font-size: 11px; line-height: 1.35; white-space: nowrap; box-shadow: 0 1px 3px rgba(0,0,0,.35); }
@@ -9010,8 +9019,9 @@ def map_webapp_html():
   // домена (хотлинк-защита), без него отдаёт 403. Для WebApp бота (Referer
   // будет с PUBLIC_URL, не с wikimedia.org) это сломалось бы точно так же,
   // как раньше CartoDB - поэтому остались на единственном проверенном
-  // рабочем источнике, tile.openstreetmap.org. Тёмный вид даёт CSS-фильтр
-  // инверсии на .leaflet-tile-pane (см. MAP_CHROME_CSS выше).
+  // рабочем источнике, tile.openstreetmap.org. Тайлы теперь в стандартных
+  // цветах OSM, без CSS-инверсии (см. MAP_CHROME_CSS выше - убрана
+  // 22.09.2026 по прямой просьбе пользователя).
   L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
     attribution: '© OpenStreetMap',
     maxZoom: 19,
@@ -9174,22 +9184,23 @@ def map_webapp_html():
       data.positions.filter(isPositionVisible).forEach(p => {{
         const style = CATEGORY_STYLE[p.category] || {{ color: '#888', label: p.category, icon: '🚗' }};
         const popupText = (p.tariffs && p.tariffs.length) ? `${{style.label}} (${{p.tariffs.join(', ')}})` : style.label;
-        // ЕЩЁ РАЗ ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя, со
-        // скриншотом навигационной стрелки - "сделай для всех тарифов прям
-        // один в один чтобы было"): вместо кружка с эмодзи + маленькой
-        // стрелкой сбоку (.car-icon-inner/.car-icon-arrow, теперь не
-        // используются) - ТА ЖЕ форма "дротика" (kite), что и у своего
-        // маркера (см. navArrowIconHtml/selfIconHtml выше), цвета по
-        // категории из SELF_MARKER_STYLE (fill/stroke, та же палитра, что
-        // на референсе). Без heading стрелка просто не повёрнута (смотрит
-        // "вверх", как и у своего маркера при heading=0).
-        const navSt = SELF_MARKER_STYLE[p.category] || SELF_MARKER_STYLE['taxi'];
-        const heading = (p.heading !== null && p.heading !== undefined) ? p.heading : 0;
+        // ОТКАЧЕНО 22.09.2026 (прямая просьба пользователя - на карте
+        // оказались две стрелки друг на друге вместо своей стрелки и
+        // кружков остальных): 22.09.2026 тут ненадолго была ТА ЖЕ форма
+        // "дротика", что у своего маркера (navArrowIconHtml) - вернули
+        // обратно кружок с эмодзи по категории + маленькую стрелку-
+        // индикатор направления сбоку (.car-icon-inner/.car-icon-arrow),
+        // как было исходно. ТОЛЬКО свой маркер (selfIconHtml выше) - форма
+        // "дротика"; остальные водители - кружки, как раньше.
+        const hasHeading = p.heading !== null && p.heading !== undefined;
+        const arrowHtml = hasHeading
+          ? `<div class="car-icon-arrow" style="transform:rotate(${{p.heading}}deg)"></div>`
+          : '';
         const icon = L.divIcon({{
           className: 'car-icon',
-          html: navArrowIconHtml(navSt.fill, navSt.stroke, heading),
-          iconSize: [42, 42],
-          iconAnchor: [21, 21],
+          html: `<div class="car-icon-wrap"><div class="car-icon-inner" style="background:${{style.color}}">${{style.icon || '🚗'}}</div>${{arrowHtml}}</div>`,
+          iconSize: [36, 36],
+          iconAnchor: [18, 18],
         }});
         const marker = L.marker([p.lat, p.lon], {{ icon }}).bindPopup(popupText).addTo(map);
         markers.push(marker);
