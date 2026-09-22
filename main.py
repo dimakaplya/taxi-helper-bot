@@ -9562,6 +9562,67 @@ def map_webapp_html():
       if (rainCloudMarker._path) rainCloudMarker._path.style.filter = 'blur(18px)';
     }} catch (e) {{ /* тихо */ }}
   }}
+  // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "у тебя же есть в
+  // процентном соотношении проценты спроса до 100%... когда 80% и выше эти
+  // часы ты будешь над городом произвольно рисовать зоны спроса вот эти
+  // облака фиолетовым... такие облака рисуют над теми городами, которые
+  // люди выбирают в тех тарифах и в тех городах, которых они будут
+  // ездить"): облако (то же асимметричное, фиолетовое, что у аэропортов/
+  // дождя) над ВСЕМ городом, но только своим - city/category берутся из
+  // URL WebApp (то есть ровно тот город и тариф, который выбрал сам
+  // водитель), см. /map/demand. Порог появления - 80% (MAP_DEMAND_CLOUD_
+  // THRESHOLD на сервере), 3 ступени непрозрачности 80/90/100%+.
+  let demandCloudMarker = null;
+  function demandCloudSeed(s) {{
+    let h = 17;
+    for (let i = 0; i < (s || '').length; i++) {{ h = (h * 31 + s.charCodeAt(i)) % 10000; }}
+    return h;
+  }}
+  function demandCloudOpacity(demand) {{
+    if (demand >= 100) return 0.26;
+    if (demand >= 90) return 0.19;
+    return 0.13; // 80-89%
+  }}
+  async function loadDemandCloud() {{
+    try {{
+      const resp = await fetch(`/map/demand?city=${{encodeURIComponent(city)}}&category=${{encodeURIComponent(myCategory)}}`);
+      if (!resp.ok) return;
+      const data = await resp.json();
+      if (demandCloudMarker) {{ map.removeLayer(demandCloudMarker); demandCloudMarker = null; }}
+      if (data.demand === null || data.demand === undefined || data.demand < 80 || data.lat === null || data.lon === null) return;
+      const DEMAND_CLOUD_RADIUS_METERS = 12000;
+      const metersPerDegLat = 111320;
+      const seed = demandCloudSeed(city + '::' + myCategory);
+      const p1 = (seed % 628) / 100;
+      const p2 = ((seed * 3) % 628) / 100;
+      const p3 = ((seed * 7) % 628) / 100;
+      const offsetAngle = ((seed * 13) % 628) / 100;
+      const offsetDist = DEMAND_CLOUD_RADIUS_METERS * 0.22;
+      const cLat = data.lat + (offsetDist * Math.cos(offsetAngle)) / metersPerDegLat;
+      const cLon = data.lon + (offsetDist * Math.sin(offsetAngle)) / (metersPerDegLat * Math.cos(data.lat * Math.PI / 180));
+      const pointsCount = 28;
+      const latLngs = [];
+      for (let i = 0; i < pointsCount; i++) {{
+        const angle = (i / pointsCount) * Math.PI * 2;
+        const wobble = 0.63
+          + 0.23 * Math.sin(angle * 2 + p1)
+          + 0.11 * Math.sin(angle * 6 + p2)
+          + 0.08 * Math.sin(angle * 4 + p3);
+        const r = DEMAND_CLOUD_RADIUS_METERS * Math.max(0.38, Math.min(1, wobble));
+        const dLat = (r * Math.cos(angle)) / metersPerDegLat;
+        const dLon = (r * Math.sin(angle)) / (metersPerDegLat * Math.cos(cLat * Math.PI / 180));
+        latLngs.push([cLat + dLat, cLon + dLon]);
+      }}
+      demandCloudMarker = L.polygon(latLngs, {{
+        color: '#9b30ff',
+        weight: 0,
+        fillColor: '#9b30ff',
+        fillOpacity: demandCloudOpacity(data.demand),
+        smoothFactor: 3,
+      }}).addTo(map);
+      if (demandCloudMarker._path) demandCloudMarker._path.style.filter = 'blur(18px)';
+    }} catch (e) {{ /* тихо */ }}
+  }}
   async function loadRoadEvents() {{
     try {{
       const resp = await fetch(`/map/road_events?city=${{encodeURIComponent(city)}}`);
@@ -9842,6 +9903,7 @@ def map_webapp_html():
   loadAirports();
   loadStations();
   loadRainCloud();
+  loadDemandCloud();
   loadRoadEvents();
   loadCityEvents();
   setInterval(loadPositions, 15000);
@@ -9854,6 +9916,7 @@ def map_webapp_html():
   setInterval(loadAirports, 60000);
   setInterval(loadStations, 60000);
   setInterval(loadRainCloud, 60000);
+  setInterval(loadDemandCloud, 60000);
   setInterval(loadCityEvents, 300000);
 </script>
 </body>
@@ -10632,6 +10695,61 @@ async def handle_map_stations_api(request):
         logger.exception("❌ Ошибка при получении вокзалов для карты водителей")
         result = []
     return web.json_response({'stations': result})
+
+MAP_DEMAND_API_PATH = '/map/demand'
+# Порог, с которого над городом рисуется облако спроса (см.
+# handle_map_demand_api/loadDemandCloud) - по прямой просьбе пользователя
+# ("когда 80% и выше эти часы ты будешь над городом произвольно рисовать
+# зоны спроса... получается 80 90 и 100").
+MAP_DEMAND_CLOUD_THRESHOLD = 80
+
+async def handle_map_demand_api(request):
+    """ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "у тебя же есть в
+    процентном соотношении проценты спроса до 100%... когда 80% и выше эти
+    часы ты будешь над городом произвольно рисовать зоны спроса вот эти
+    облака фиолетовым... такие облака рисуют над теми городами, которые
+    люди выбирают в тех тарифах и в тех городах, которых они будут
+    ездить"): JSON API - текущий % спроса ПРЯМО СЕЙЧАС для конкретных
+    (город, категория) - водитель видит облако только над своим городом и
+    только когда ОН сам выбрал этот город/категорию (WebApp карты передаёт
+    свои city/category, см. myCategory).
+
+    Для Москвы такси/Ultima есть реальные проценты по тарифам
+    (MOSCOW_TAXI_DEMAND_PERCENT/MOSCOW_ULTIMA_DEMAND_PERCENT) - берём
+    МАКСИМУМ среди тарифов категории на этот час (общий спрос по городу,
+    а не по одному тарифу). Для остальных город/категория таких данных нет
+    (только уровень low/mid/high/peak, см. WEEKDAY_HOUR_LOAD) - в этом
+    случае берём условный процент по уровню (peak->90, high->75 и т.д.),
+    чтобы хотя бы час пик тоже давал облако (порог 80% проходит только
+    peak)."""
+    city = request.query.get('city', '')
+    category = request.query.get('category', '') or None
+    result = {'demand': None, 'lat': None, 'lon': None}
+    coords = RAIN_CITY_COORDS.get(city)
+    if not coords or not city:
+        return web.json_response(result)
+    result['lat'], result['lon'] = coords
+    try:
+        now = get_city_now(city)
+        weekday = now.weekday()
+        demand = None
+        if city == 'moscow' and category in ('taxi', 'ultima'):
+            table = MOSCOW_TAXI_DEMAND_PERCENT if category == 'taxi' else MOSCOW_ULTIMA_DEMAND_PERCENT
+            for slot in table.get(weekday, []):
+                start_h, end_h = slot[0], slot[1]
+                if start_h <= now.hour < end_h:
+                    demand = max(slot[2:])
+                    break
+        else:
+            level = get_current_peak_level(city, category)
+            # Условное соответствие уровня и процента - только чтобы решить,
+            # рисовать ли облако (порог MAP_DEMAND_CLOUD_THRESHOLD=80), для
+            # городов/категорий без реальных цифр по тарифам.
+            demand = {'peak': 90, 'high': 75, 'mid': 55, 'low': 30}.get(level)
+        result['demand'] = demand
+    except Exception:
+        logger.exception("❌ Ошибка при получении текущего спроса для карты водителей")
+    return web.json_response(result)
 
 MAP_WEATHER_API_PATH = '/map/weather'
 
@@ -17572,6 +17690,7 @@ async def start_subscription_webhook_server():
     app.router.add_get(MAP_AIRPORTS_API_PATH, handle_map_airports_api)
     app.router.add_get(MAP_STATIONS_API_PATH, handle_map_stations_api)
     app.router.add_get(MAP_WEATHER_API_PATH, handle_map_weather_api)
+    app.router.add_get(MAP_DEMAND_API_PATH, handle_map_demand_api)
     app.router.add_get(MAP_FUEL_STATIONS_API_PATH, handle_map_fuel_stations_api)
     app.router.add_get(MAP_CHARGING_STATIONS_API_PATH, handle_map_charging_stations_api)
     app.router.add_get(MAP_PARKING_API_PATH, handle_map_parking_api)
