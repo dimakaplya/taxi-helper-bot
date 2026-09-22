@@ -9213,21 +9213,50 @@ def map_webapp_html():
       data.airports.forEach(a => {{
         // ИЗМЕНЕНО 21.09.2026 (прямая просьба пользователя): при высоком
         // спросе (загрузка >85% - тот же порог 🟣, что и в get_load_emoji
-        // на сервере) рисуем вокруг аэропорта круг радиусом 3км, полупрозрачную
-        // фиолетовую заливку - чтобы было видно ИЗДАЛЕКА на карте, не только
-        // при клике на маркер. HIGH_DEMAND_LOAD_THRESHOLD держим в синхроне
-        // с порогом >85 в get_load_emoji(main.py) - изменено 21.09.2026 (было 100).
+        // на сервере) рисуем вокруг аэропорта зону повышенного спроса,
+        // полупрозрачную фиолетовую заливку - чтобы было видно ИЗДАЛЕКА на
+        // карте, не только при клике на маркер. HIGH_DEMAND_LOAD_THRESHOLD
+        // держим в синхроне с порогом >85 в get_load_emoji(main.py) -
+        // изменено 21.09.2026 (было 100).
+        // ЕЩЁ РАЗ ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя, со
+        // скриншотом Яндекс.Карт - "можешь так же рисовать зону повышенного
+        // спроса как у яндекса, как облако бледное"): раньше был идеально
+        // ровный круг (L.circle) - теперь неровное "облако" (blobLatLngs
+        // ниже строит замкнутый многоугольник с органичным волнистым краем
+        // через сумму нескольких синусоид разной частоты/фазы - деталь
+        // ФИКСИРОВАННАЯ по углу, не меняется от кадра к кадру, чтобы форма
+        // не "дёргалась" при каждом опросе loadAirports) + CSS blur на сам
+        // SVG-путь для мягкого, размытого края без чёткой границы, как на
+        // референсе (weight:0 - обводки нет вовсе, только размытая заливка).
         const HIGH_DEMAND_LOAD_THRESHOLD = 85;
         const HIGH_DEMAND_RADIUS_METERS = 3000;
+        function blobLatLngs(lat, lon, baseRadiusM, pointsCount) {{
+          pointsCount = pointsCount || 20;
+          const metersPerDegLat = 111320;
+          const latLngs = [];
+          for (let i = 0; i < pointsCount; i++) {{
+            const angle = (i / pointsCount) * Math.PI * 2;
+            const wobble = 1
+              + 0.22 * Math.sin(angle * 3 + 1.1)
+              + 0.13 * Math.sin(angle * 5 + 2.7)
+              + 0.08 * Math.sin(angle * 7 + 0.4);
+            const r = baseRadiusM * wobble;
+            const dLat = (r * Math.cos(angle)) / metersPerDegLat;
+            const dLon = (r * Math.sin(angle)) / (metersPerDegLat * Math.cos(lat * Math.PI / 180));
+            latLngs.push([lat + dLat, lon + dLon]);
+          }}
+          return latLngs;
+        }}
         if (a.load !== null && a.load !== undefined && a.load > HIGH_DEMAND_LOAD_THRESHOLD) {{
-          const circle = L.circle([a.lat, a.lon], {{
-            radius: HIGH_DEMAND_RADIUS_METERS,
+          const blob = L.polygon(blobLatLngs(a.lat, a.lon, HIGH_DEMAND_RADIUS_METERS), {{
             color: '#9b30ff',
-            weight: 2,
+            weight: 0,
             fillColor: '#9b30ff',
-            fillOpacity: 0.15,
+            fillOpacity: 0.22,
+            smoothFactor: 3,
           }}).addTo(map);
-          airportMarkers.push(circle);
+          if (blob._path) blob._path.style.filter = 'blur(10px)';
+          airportMarkers.push(blob);
         }}
         // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "полигон для
         // карты отображения"): контуры конкретных парковок зоны (см.
