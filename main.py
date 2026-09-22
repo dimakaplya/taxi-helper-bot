@@ -15104,6 +15104,13 @@ SUBSCRIPTION_PRICE_RUB = 149
 SUBSCRIPTION_PRICE_KOPECKS = SUBSCRIPTION_PRICE_RUB * 100
 SUBSCRIPTION_PERIOD_DAYS = 30
 SUBSCRIPTION_CHECK_INTERVAL_MINUTES = 60
+# ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "сделай кнопку Фантом
+# и за пароль... означает что подписка действует бесплатно на месяц"):
+# скрытая кнопка "👻 ФАНТОМ" на экранах подписки (см.
+# subscription_paywall_keyboard) - по правильному паролю выдаёт
+# SUBSCRIPTION_PERIOD_DAYS дней подписки бесплатно, без оплаты (см.
+# grant_free_month/phantom_password_flow ниже).
+PHANTOM_SUBSCRIPTION_PASSWORD = "210795"
 
 # ==================== ПОДДЕРЖКА (FAQ) ====================
 # ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "запихнуть условно
@@ -15625,6 +15632,15 @@ def subscription_paywall_keyboard(pay_url):
     if pay_url:
         buttons.append([InlineKeyboardButton(text=f"💳 ОПЛАТИТЬ {SUBSCRIPTION_PRICE_RUB}₽", url=pay_url)])
     buttons.append([InlineKeyboardButton(text="🔄 Я ОПЛАТИЛ(А), ПРОВЕРИТЬ", callback_data="sub_pay_check")])
+    # "👻 ФАНТОМ" (по прямой просьбе пользователя, 23.09.2026 - "сделай
+    # кнопку Фантом и за пароль... означает что подписка действует бесплатно
+    # на месяц введи пароль") - скрытый способ выдать себе/кому-то бесплатный
+    # месяц подписки без оплаты, защищено паролем (см.
+    # PHANTOM_SUBSCRIPTION_PASSWORD/phantom_start/phantom_password_flow ниже).
+    # Показывается на обоих экранах подписки - и на статусе, и на экране-
+    # блокировке (SubscriptionMiddleware пропускает эту кнопку и ввод пароля
+    # даже когда доступ уже заблокирован - см. её код).
+    buttons.append([InlineKeyboardButton(text="👻 ФАНТОМ", callback_data="phantom_start")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
@@ -15692,6 +15708,46 @@ async def show_subscription_status(message: types.Message):
     await message.answer(text, reply_markup=subscription_paywall_keyboard(pay_url), parse_mode='Markdown')
 
 
+@router.callback_query(lambda c: c.data == "phantom_start")
+async def phantom_start(callback_query: types.CallbackQuery):
+    """См. PHANTOM_SUBSCRIPTION_PASSWORD/grant_free_month выше - просит
+    пароль текстом (тот же паттерн ожидания текста, что и у
+    referral_category_legal_start/referral_legal_password_flow). Работает
+    даже на экране-блокировке - см. исключение в SubscriptionMiddleware."""
+    user_id = callback_query.from_user.id
+    try:
+        await callback_query.answer()
+    except Exception:
+        pass
+    state = user_state.setdefault(user_id, {})
+    state['awaiting_phantom_password'] = True
+    await callback_query.message.answer("👻 Введи пароль:")
+
+
+@router.message(lambda message: user_state.get(message.from_user.id, {}).get('awaiting_phantom_password'))
+async def phantom_password_flow(message: types.Message):
+    """Ловит ЛЮБОЙ текст, пока ждём пароль "Фантома" - должен стоять РАНЬШЕ
+    остальных текстовых хендлеров (тот же приём, что и
+    referral_legal_password_flow/referral_withdraw_flow)."""
+    user_id = message.from_user.id
+    state = user_state[user_id]
+    text = (message.text or '').strip()
+
+    if text == PHANTOM_SUBSCRIPTION_PASSWORD:
+        state.pop('awaiting_phantom_password', None)
+        new_paid_until = grant_free_month(user_id)
+        await message.answer(
+            f"✅ Подписка активирована бесплатно на {SUBSCRIPTION_PERIOD_DAYS} дней, "
+            f"до *{new_paid_until.strftime('%d.%m.%Y')}*.",
+            parse_mode='Markdown',
+            reply_markup=services_keyboard(state.get('category'), state.get('city'), user_id)
+        )
+        return
+
+    state.pop('awaiting_phantom_password', None)
+    await message.answer("❌ Неверный пароль.")
+
+
 class SubscriptionMiddleware(BaseMiddleware):
     """Внешний (outer) middleware - проверяется РАНЬШЕ любого хендлера в
     router. Если у пользователя истёк и триал, и оплаченный период -
@@ -15712,6 +15768,14 @@ class SubscriptionMiddleware(BaseMiddleware):
             return await handler(event, data)
         if isinstance(event, types.CallbackQuery) and event.data == 'sub_pay_check':
             return await handler(event, data)
+        # "👻 ФАНТОМ" (см. PHANTOM_SUBSCRIPTION_PASSWORD/phantom_start/
+        # phantom_password_flow выше) должен работать даже на экране-
+        # блокировке - иначе кнопка/ввод пароля сами попадали бы под
+        # блокировку и подменялись бы повторным экраном оплаты.
+        if isinstance(event, types.CallbackQuery) and event.data == 'phantom_start':
+            return await handler(event, data)
+        if isinstance(event, types.Message) and user_state.get(user_id, {}).get('awaiting_phantom_password'):
+            return await handler(event, data)
         await send_subscription_paywall(event)
         return None
 
@@ -15730,6 +15794,33 @@ async def subscription_check_payment(callback_query: types.CallbackQuery):
             await callback_query.answer("Пока не вижу оплату. Если только что оплатил(а) - подожди минуту и попробуй снова.", show_alert=True)
         except Exception:
             pass
+
+
+def grant_free_month(user_id):
+    """См. PHANTOM_SUBSCRIPTION_PASSWORD выше - продлевает подписку на
+    SUBSCRIPTION_PERIOD_DAYS дней БЕСПЛАТНО, от текущего paid_until (если он
+    ещё не истёк) или от текущего момента - та же логика продления, что и в
+    confirm_subscription_payment, но БЕЗ записи в subscription_payments и
+    БЕЗ начисления реферальных процентов (это не реальный платёж, а
+    ручная/скрытая выдача доступа). Возвращает новую дату paid_until."""
+    ensure_subscription(user_id)
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT paid_until FROM subscriptions WHERE user_id = ?', (user_id,))
+    sub_row = cursor.fetchone()
+    base = _sub_now()
+    if sub_row and sub_row[0]:
+        current_paid_until = _sub_parse(sub_row[0])
+        if current_paid_until > base:
+            base = current_paid_until
+    new_paid_until = base + timedelta(days=SUBSCRIPTION_PERIOD_DAYS)
+    cursor.execute(
+        'UPDATE subscriptions SET paid_until = ?, expired_notified = 0 WHERE user_id = ?',
+        (_sub_format(new_paid_until), user_id)
+    )
+    conn.commit()
+    conn.close()
+    return new_paid_until
 
 
 def confirm_subscription_payment(order_id):
@@ -15980,6 +16071,23 @@ REFERRAL_RATES_PERCENT = {
 REFERRAL_DEFAULT_TYPE = 'individual'
 REFERRAL_WITHDRAWAL_FEE_PERCENT = 3
 REFERRAL_MIN_WITHDRAWAL_RUB = 1000  # по прямой просьбе пользователя, 20.09.2026
+# ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "сделай вывод в день
+# лимиты от 1000 до 10000 в день", уточнено через AskUserQuestion - лимит
+# НА КАЖДОГО ВОДИТЕЛЯ отдельно, не общий на всех): сколько один человек
+# может суммарно вывести за календарные сутки (UTC, тот же часовой пояс,
+# что и everywhere в файле) - см. get_referral_withdrawn_today_kopecks/
+# referral_withdraw_start/referral_withdraw_flow ниже. Учитываются заявки
+# в статусах 'pending' и 'paid' (уже реально запрошенные/выплаченные
+# деньги) - отменённых заявок в этой реализации пока не бывает.
+REFERRAL_MAX_WITHDRAWAL_PER_DAY_RUB = 10000
+# ЗАГЛУШКА НА БУДУЩЕЕ (по прямой просьбе пользователя - "давай настроим
+# авто перевод позже пока заглушка"): сейчас выплата по заявке делается
+# АДМИНОМ ВРУЧНУЮ (перевод на карту + команда /referral_paid, см. ниже).
+# Автоматический перевод денег потребует отдельного продукта Т-Банка
+# "Массовые выплаты" (отдельный договор/ключи, НЕ то же самое, что
+# TINKOFF_TERMINAL_KEY/TINKOFF_PASSWORD для приёма оплаты подписки) - когда
+# будет готово, сюда добавится реальный вызов API вместо ручной пометки.
+REFERRAL_AUTO_PAYOUT_LIVE = False
 ADMIN_TELEGRAM_ID = os.getenv('ADMIN_TELEGRAM_ID')  # для заявок на вывод и команд /referral_paid, /set_legal_referrer
 
 
@@ -16449,6 +16557,15 @@ async def referral_withdraw_start(callback_query: types.CallbackQuery):
             f"Минимальная сумма вывода - {REFERRAL_MIN_WITHDRAWAL_RUB}₽, у тебя на балансе {stats['balance'] / 100:.0f}₽."
         )
         return
+    # См. REFERRAL_MAX_WITHDRAWAL_PER_DAY_RUB выше - лимит НА КАЖДОГО
+    # ВОДИТЕЛЯ отдельно, за текущие календарные сутки.
+    withdrawn_today = get_referral_withdrawn_today_kopecks(user_id)
+    if withdrawn_today >= REFERRAL_MAX_WITHDRAWAL_PER_DAY_RUB * 100:
+        await callback_query.message.answer(
+            f"Дневной лимит на вывод - {REFERRAL_MAX_WITHDRAWAL_PER_DAY_RUB}₽, ты уже запросил(а) "
+            f"{withdrawn_today / 100:.0f}₽ сегодня. Попробуй завтра."
+        )
+        return
     state = user_state.setdefault(user_id, {})
     state['referral_withdraw'] = {'step': 'card', 'data': {}}
     await callback_query.message.answer(
@@ -16485,8 +16602,14 @@ async def referral_withdraw_flow(message: types.Message):
         draft['step'] = 'amount'
         state['referral_withdraw'] = draft
         stats = get_referral_stats(user_id)
+        # См. REFERRAL_MAX_WITHDRAWAL_PER_DAY_RUB - остаток дневного лимита
+        # именно НА ЭТОГО водителя (уже вычтено то, что запросил сегодня).
+        remaining_today = max(0, REFERRAL_MAX_WITHDRAWAL_PER_DAY_RUB * 100 - get_referral_withdrawn_today_kopecks(user_id))
+        max_now = min(stats['balance'], remaining_today)
         await message.answer(
-            f"Сколько вывести? Доступно {stats['balance'] / 100:.0f}₽ "
+            f"Сколько вывести? Доступно {stats['balance'] / 100:.0f}₽ на балансе, "
+            f"но за сегодня можно вывести ещё максимум {remaining_today / 100:.0f}₽ "
+            f"(дневной лимит {REFERRAL_MAX_WITHDRAWAL_PER_DAY_RUB}₽)"
             f"(комиссия {REFERRAL_WITHDRAWAL_FEE_PERCENT}% удержится из этой суммы). "
             f"Введи сумму в рублях или слово «всё»:"
         )
@@ -16494,8 +16617,9 @@ async def referral_withdraw_flow(message: types.Message):
 
     if step == 'amount':
         stats = get_referral_stats(user_id)
+        remaining_today = max(0, REFERRAL_MAX_WITHDRAWAL_PER_DAY_RUB * 100 - get_referral_withdrawn_today_kopecks(user_id))
         if text.lower() in ('всё', 'все', 'весь', 'all'):
-            amount_kopecks = stats['balance']
+            amount_kopecks = min(stats['balance'], remaining_today)
         else:
             digits = re.sub(r'[^\d]', '', text)
             if not digits:
@@ -16507,6 +16631,12 @@ async def referral_withdraw_flow(message: types.Message):
             return
         if amount_kopecks > stats['balance']:
             await message.answer(f"На балансе только {stats['balance'] / 100:.0f}₽. Введи сумму ещё раз:")
+            return
+        if amount_kopecks > remaining_today:
+            await message.answer(
+                f"Дневной лимит - {REFERRAL_MAX_WITHDRAWAL_PER_DAY_RUB}₽, за сегодня осталось "
+                f"{remaining_today / 100:.0f}₽. Введи сумму поменьше или попробуй завтра:"
+            )
             return
         draft['data']['amount_kopecks'] = amount_kopecks
         fee = amount_kopecks * REFERRAL_WITHDRAWAL_FEE_PERCENT // 100
@@ -16530,6 +16660,25 @@ async def referral_withdraw_flow(message: types.Message):
             ])
         )
         return
+
+
+def get_referral_withdrawn_today_kopecks(user_id):
+    """Сколько user_id уже запросил на вывод за ТЕКУЩИЕ календарные сутки
+    (UTC) - см. REFERRAL_MAX_WITHDRAWAL_PER_DAY_RUB. Считаем 'pending' и
+    'paid' (реально запрошенные/выплаченные деньги) - отклонённых заявок в
+    этой реализации не бывает, поэтому третьего статуса нет."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        '''
+        SELECT COALESCE(SUM(amount_kopecks), 0) FROM referral_withdrawals
+        WHERE user_id = ? AND status IN ('pending', 'paid') AND date(created_at) = date('now')
+        ''',
+        (user_id,)
+    )
+    total = cursor.fetchone()[0]
+    conn.close()
+    return total
 
 
 def create_referral_withdrawal(user_id, card, amount_kopecks, fee_kopecks, payout_kopecks):
