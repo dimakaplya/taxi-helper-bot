@@ -9536,7 +9536,8 @@ def map_webapp_html():
           return smoothClosedLatLngs(latLngs);
         }}
         if (a.load !== null && a.load !== undefined && a.load > HIGH_DEMAND_LOAD_THRESHOLD) {{
-          const blob = L.polygon(blobLatLngs(a.lat, a.lon, HIGH_DEMAND_RADIUS_METERS, seedFromString(a.icao + '::' + demandCloudTimeBucket())), {{
+          const cloudSeed = seedFromString(a.icao + '::' + demandCloudTimeBucket());
+          const blob = L.polygon(blobLatLngs(a.lat, a.lon, HIGH_DEMAND_RADIUS_METERS, cloudSeed), {{
             color: '#9b30ff',
             weight: 0,
             fillColor: '#9b30ff',
@@ -9545,6 +9546,28 @@ def map_webapp_html():
           }}).addTo(map);
           if (blob._path) blob._path.style.filter = 'blur(14px)';
           airportMarkers.push(blob);
+          // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - см. общий
+          // комментарий у SATELLITE_DISTANCE_BASE_METERS в loadDemandCloud) -
+          // 2-3 облака-спутника вполовину меньше основного, на расстоянии
+          // ~7 км от аэропорта, каждое своей формы/позиции, меняются вместе
+          // с основным раз в 5 минут (та же demandCloudTimeBucket() сидит
+          // внутри cloudSeed).
+          const satCount = satelliteCount(cloudSeed);
+          for (let s = 0; s < satCount; s++) {{
+            const satSeed = (cloudSeed * 97 + s * 311 + 1) % 100000;
+            const distM = SATELLITE_DISTANCE_BASE_METERS + (satSeed % SATELLITE_DISTANCE_SPREAD_METERS) - SATELLITE_DISTANCE_SPREAD_METERS / 2;
+            const angle = ((satSeed * 17) % 628) / 100;
+            const [satLat, satLon] = offsetLatLon(a.lat, a.lon, distM, angle);
+            const satBlob = L.polygon(blobLatLngs(satLat, satLon, HIGH_DEMAND_RADIUS_METERS / 2, satSeed), {{
+              color: '#9b30ff',
+              weight: 0,
+              fillColor: '#9b30ff',
+              fillOpacity: highDemandBlobOpacity(a.load) * 0.85,
+              smoothFactor: 3,
+            }}).addTo(map);
+            if (satBlob._path) satBlob._path.style.filter = 'blur(12px)';
+            airportMarkers.push(satBlob);
+          }}
         }}
         // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "полигон для
         // карты отображения"): контуры конкретных парковок зоны (см.
@@ -9783,6 +9806,29 @@ def map_webapp_html():
   // водитель), см. /map/demand. Порог появления - 80% (MAP_DEMAND_CLOUD_
   // THRESHOLD на сервере), 3 ступени непрозрачности 80/90/100%+.
   let demandCloudMarker = null;
+  // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "накидываю такие же
+  // облака спроса только поменьше размером в половину на удалении 7 км от
+  // основных, порядка двух-трёх, на разных расстояниях, разной формы,
+  // рандомно меняются каждые 5 минут") - спутники городского облака,
+  // отдельный массив, чтобы стирать и перерисовывать вместе с основным
+  // облаком на каждый опрос loadDemandCloud.
+  let demandSatelliteMarkers = [];
+  // Общий helper для смещения точки на distM метров под углом angleRad -
+  // используется и для спутников городского облака, и для спутников
+  // облаков у аэропортов (см. loadAirports).
+  function offsetLatLon(lat, lon, distM, angleRad) {{
+    const metersPerDegLat = 111320;
+    const dLat = (distM * Math.cos(angleRad)) / metersPerDegLat;
+    const dLon = (distM * Math.sin(angleRad)) / (metersPerDegLat * Math.cos(lat * Math.PI / 180));
+    return [lat + dLat, lon + dLon];
+  }}
+  // Параметры спутников - расстояние ~7 км (с разбросом 5-9 км, чтобы были
+  // "на разных расстояниях"), 2 или 3 штуки (зависит от seed, детерминированно).
+  const SATELLITE_DISTANCE_BASE_METERS = 7000;
+  const SATELLITE_DISTANCE_SPREAD_METERS = 2000;
+  function satelliteCount(seed) {{
+    return 2 + (seed % 2); // 2 или 3
+  }}
   function demandCloudSeed(s) {{
     let h = 17;
     for (let i = 0; i < (s || '').length; i++) {{ h = (h * 31 + s.charCodeAt(i)) % 10000; }}
@@ -9799,37 +9845,46 @@ def map_webapp_html():
     if (demand >= 90) return 0.19;
     return 0.13; // 80-89%
   }}
+  // ВЫНЕСЕНО 22.09.2026 из тела loadDemandCloud - генерация формы облака по
+  // центру/радиусу/seed теперь отдельная функция, чтобы её же переиспользовать
+  // для спутников (см. SATELLITE_DISTANCE_BASE_METERS выше) - раньше эта
+  // логика была только инлайн-циклом под основное облако.
+  function cityCloudLatLngs(lat, lon, radiusM, seed) {{
+    const metersPerDegLat = 111320;
+    const p1 = (seed % 628) / 100;
+    const p2 = ((seed * 3) % 628) / 100;
+    const p3 = ((seed * 7) % 628) / 100;
+    const offsetAngle = ((seed * 13) % 628) / 100;
+    const offsetDist = radiusM * 0.22;
+    const cLat = lat + (offsetDist * Math.cos(offsetAngle)) / metersPerDegLat;
+    const cLon = lon + (offsetDist * Math.sin(offsetAngle)) / (metersPerDegLat * Math.cos(lat * Math.PI / 180));
+    const pointsCount = 28;
+    const latLngs = [];
+    for (let i = 0; i < pointsCount; i++) {{
+      const angle = (i / pointsCount) * Math.PI * 2;
+      const wobble = 0.63
+        + 0.23 * Math.sin(angle * 2 + p1)
+        + 0.11 * Math.sin(angle * 6 + p2)
+        + 0.08 * Math.sin(angle * 4 + p3);
+      const r = radiusM * Math.max(0.38, Math.min(1, wobble));
+      const dLat = (r * Math.cos(angle)) / metersPerDegLat;
+      const dLon = (r * Math.sin(angle)) / (metersPerDegLat * Math.cos(cLat * Math.PI / 180));
+      latLngs.push([cLat + dLat, cLon + dLon]);
+    }}
+    return smoothClosedLatLngs(latLngs);
+  }}
   async function loadDemandCloud() {{
     try {{
       const resp = await fetch(`/map/demand?city=${{encodeURIComponent(city)}}&category=${{encodeURIComponent(myCategory)}}`);
       if (!resp.ok) return;
       const data = await resp.json();
       if (demandCloudMarker) {{ map.removeLayer(demandCloudMarker); demandCloudMarker = null; }}
+      demandSatelliteMarkers.forEach(m => map.removeLayer(m));
+      demandSatelliteMarkers = [];
       if (data.demand === null || data.demand === undefined || data.demand < 80 || data.lat === null || data.lon === null) return;
       const DEMAND_CLOUD_RADIUS_METERS = 12000;
-      const metersPerDegLat = 111320;
       const seed = demandCloudSeed(city + '::' + myCategory + '::' + cityDemandCloudTimeBucket());
-      const p1 = (seed % 628) / 100;
-      const p2 = ((seed * 3) % 628) / 100;
-      const p3 = ((seed * 7) % 628) / 100;
-      const offsetAngle = ((seed * 13) % 628) / 100;
-      const offsetDist = DEMAND_CLOUD_RADIUS_METERS * 0.22;
-      const cLat = data.lat + (offsetDist * Math.cos(offsetAngle)) / metersPerDegLat;
-      const cLon = data.lon + (offsetDist * Math.sin(offsetAngle)) / (metersPerDegLat * Math.cos(data.lat * Math.PI / 180));
-      const pointsCount = 28;
-      const latLngs = [];
-      for (let i = 0; i < pointsCount; i++) {{
-        const angle = (i / pointsCount) * Math.PI * 2;
-        const wobble = 0.63
-          + 0.23 * Math.sin(angle * 2 + p1)
-          + 0.11 * Math.sin(angle * 6 + p2)
-          + 0.08 * Math.sin(angle * 4 + p3);
-        const r = DEMAND_CLOUD_RADIUS_METERS * Math.max(0.38, Math.min(1, wobble));
-        const dLat = (r * Math.cos(angle)) / metersPerDegLat;
-        const dLon = (r * Math.sin(angle)) / (metersPerDegLat * Math.cos(cLat * Math.PI / 180));
-        latLngs.push([cLat + dLat, cLon + dLon]);
-      }}
-      demandCloudMarker = L.polygon(smoothClosedLatLngs(latLngs), {{
+      demandCloudMarker = L.polygon(cityCloudLatLngs(data.lat, data.lon, DEMAND_CLOUD_RADIUS_METERS, seed), {{
         color: '#9b30ff',
         weight: 0,
         fillColor: '#9b30ff',
@@ -9837,6 +9892,27 @@ def map_webapp_html():
         smoothFactor: 3,
       }}).addTo(map);
       if (demandCloudMarker._path) demandCloudMarker._path.style.filter = 'blur(18px)';
+      // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя) - 2-3 облака-
+      // спутника вполовину меньше основного, на расстоянии ~7 км (с
+      // разбросом), каждое своей формы (свой seed -> свой профиль wobble) и
+      // своей позиции (свой угол), меняются вместе с основным облаком раз в
+      // 5 минут (тот же cityDemandCloudTimeBucket сидит внутри seed).
+      const satCount = satelliteCount(seed);
+      for (let s = 0; s < satCount; s++) {{
+        const satSeed = (seed * 97 + s * 311 + 1) % 100000;
+        const distM = SATELLITE_DISTANCE_BASE_METERS + (satSeed % SATELLITE_DISTANCE_SPREAD_METERS) - SATELLITE_DISTANCE_SPREAD_METERS / 2;
+        const angle = ((satSeed * 17) % 628) / 100;
+        const [satLat, satLon] = offsetLatLon(data.lat, data.lon, distM, angle);
+        const satMarker = L.polygon(cityCloudLatLngs(satLat, satLon, DEMAND_CLOUD_RADIUS_METERS / 2, satSeed), {{
+          color: '#9b30ff',
+          weight: 0,
+          fillColor: '#9b30ff',
+          fillOpacity: demandCloudOpacity(data.demand) * 0.85,
+          smoothFactor: 3,
+        }}).addTo(map);
+        if (satMarker._path) satMarker._path.style.filter = 'blur(16px)';
+        demandSatelliteMarkers.push(satMarker);
+      }}
     }} catch (e) {{ /* тихо */ }}
   }}
   // ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "вокруг такого
