@@ -16359,6 +16359,88 @@ def mark_referral_withdrawal_paid(withdrawal_id):
     return {'user_id': user_id, 'payout_kopecks': payout_kopecks}
 
 
+# ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "надо сделать механику
+# чтобы бот считал чистую прибыль кампании для моего аккаунта со всех
+# программ реферальных"): считает чистую прибыль по обеим реферальным
+# схемам вместе (individual + legal_entity - они делят одни и те же таблицы
+# subscription_payments/referral_earnings/referral_withdrawals, отдельного
+# разреза по схеме не просили). Формула (уточнена с пользователем через
+# AskUserQuestion):
+#   чистая прибыль = доход от подписок (subscription_payments, только
+#   реально подтверждённые - status='CONFIRMED') минус все начисленные
+#   рефералам выплаты (referral_earnings.amount_kopecks - списывается со
+#   счёта компании независимо от того, вывёл ли реферал деньги себе) плюс
+#   доход с комиссии за вывод (referral_withdrawals.fee_kopecks, только
+#   по факту ВЫПЛАЧЕННЫМ заявкам - status='paid', т.к. комиссия реально
+#   "оседает" только когда бот отправил деньги и удержал свои 3%).
+# period='all' - за всё время работы бота, period='month' - с 1-го числа
+# текущего месяца (UTC, тот же часовой пояс, что и everywhere в файле).
+def compute_campaign_profit(period='all'):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    if period == 'month':
+        period_start = datetime.utcnow().strftime('%Y-%m-01 00:00:00')
+        date_filter_payments = 'AND confirmed_at >= ?'
+        date_filter_earnings = 'AND created_at >= ?'
+        date_filter_withdrawals = 'AND processed_at >= ?'
+        params = (period_start,)
+    else:
+        date_filter_payments = ''
+        date_filter_earnings = ''
+        date_filter_withdrawals = ''
+        params = ()
+
+    cursor.execute(
+        f"SELECT COALESCE(SUM(amount_kopecks), 0) FROM subscription_payments WHERE status = 'CONFIRMED' {date_filter_payments}",
+        params
+    )
+    subscription_revenue_kopecks = cursor.fetchone()[0]
+
+    cursor.execute(
+        f"SELECT COALESCE(SUM(amount_kopecks), 0) FROM referral_earnings WHERE 1=1 {date_filter_earnings}",
+        params
+    )
+    referral_payouts_kopecks = cursor.fetchone()[0]
+
+    cursor.execute(
+        f"SELECT COALESCE(SUM(fee_kopecks), 0) FROM referral_withdrawals WHERE status = 'paid' {date_filter_withdrawals}",
+        params
+    )
+    withdrawal_fee_income_kopecks = cursor.fetchone()[0]
+
+    conn.close()
+    net_profit_kopecks = subscription_revenue_kopecks - referral_payouts_kopecks + withdrawal_fee_income_kopecks
+    return {
+        'subscription_revenue_kopecks': subscription_revenue_kopecks,
+        'referral_payouts_kopecks': referral_payouts_kopecks,
+        'withdrawal_fee_income_kopecks': withdrawal_fee_income_kopecks,
+        'net_profit_kopecks': net_profit_kopecks,
+    }
+
+
+def format_campaign_profit_text():
+    """Собирает текст отчёта сразу по двум периодам (всё время + текущий
+    месяц) - см. compute_campaign_profit."""
+    all_time = compute_campaign_profit('all')
+    this_month = compute_campaign_profit('month')
+
+    def _block(title, stats):
+        return (
+            f"<b>{title}</b>\n"
+            f"Доход с подписок: {stats['subscription_revenue_kopecks'] / 100:,.0f}₽\n"
+            f"Выплачено рефералам: -{stats['referral_payouts_kopecks'] / 100:,.0f}₽\n"
+            f"Комиссия за вывод: +{stats['withdrawal_fee_income_kopecks'] / 100:,.0f}₽\n"
+            f"<b>Чистая прибыль: {stats['net_profit_kopecks'] / 100:,.0f}₽</b>"
+        ).replace(',', ' ')
+
+    return (
+        "💰 <b>Прибыль кампании (все реферальные программы)</b>\n\n"
+        + _block("За всё время", all_time)
+        + "\n\n"
+        + _block("Текущий месяц", this_month)
+    )
+
+
 @router.message(Command("referral_paid"))
 async def admin_mark_referral_paid(message: types.Message):
     """Админская команда - отмечает заявку выплаченной и уведомляет
@@ -16414,6 +16496,15 @@ async def admin_set_individual_referrer(message: types.Message):
     target_id = int(parts[1])
     set_referrer_type(target_id, 'individual')
     await message.answer(f"✅ user_id={target_id} переключён на обычную схему (30%/15%/5%).")
+
+# ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - см. compute_campaign_profit
+# выше): команда по запросу + см. также campaign_profit_monthly_report ниже
+# для автоматической ежемесячной рассылки того же отчёта.
+@router.message(Command("campaign_profit"))
+async def admin_campaign_profit(message: types.Message):
+    if not ADMIN_TELEGRAM_ID or str(message.from_user.id) != str(ADMIN_TELEGRAM_ID):
+        return
+    await message.answer(format_campaign_profit_text(), parse_mode='HTML')
 
 # По просьбе пользователя (20.09.2026): "делай пуши перекрытий... и крупные
 # ДТП" - отдельный пуш-тип, независимый от статусов аэропортов/часов пика.
@@ -16820,6 +16911,46 @@ async def peak_hour_alert_checker():
             logger.error(f"❌ Ошибка фоновой проверки часов пика: {e}")
         await asyncio.sleep(PEAK_HOUR_CHECK_INTERVAL_MINUTES * 60)
 
+CAMPAIGN_PROFIT_REPORT_CHECK_INTERVAL_MINUTES = 60  # как часто проверяем, не настало ли 1-е число
+
+async def campaign_profit_monthly_report():
+    """Фоновая задача (прямая просьба пользователя - "и то, и другое" на
+    вопрос про формат вывода): раз в месяц, при первом наступлении 1-го
+    числа (проверяем раз в час, чтобы не пропустить и не задублировать),
+    сама присылает ADMIN_TELEGRAM_ID отчёт по чистой прибыли кампании -
+    см. compute_campaign_profit/format_campaign_profit_text. Дедуп по
+    последнему отправленному месяцу храним в admin_reports_sent (простая
+    key-value таблица, чтобы не дублировать при рестартах в тот же день)."""
+    if not ADMIN_TELEGRAM_ID:
+        return
+    while True:
+        try:
+            now = datetime.utcnow()
+            if now.day == 1:
+                current_month_key = now.strftime('%Y-%m')
+                conn = get_db_connection()
+                cursor = conn.cursor()
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS admin_reports_sent (
+                        report_key TEXT PRIMARY KEY,
+                        sent_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                    )
+                ''')
+                cursor.execute('SELECT 1 FROM admin_reports_sent WHERE report_key = ?', (f'campaign_profit_{current_month_key}',))
+                already_sent = cursor.fetchone() is not None
+                if not already_sent:
+                    cursor.execute('INSERT INTO admin_reports_sent (report_key) VALUES (?)', (f'campaign_profit_{current_month_key}',))
+                    conn.commit()
+                conn.close()
+                if not already_sent:
+                    try:
+                        await bot.send_message(int(ADMIN_TELEGRAM_ID), format_campaign_profit_text(), parse_mode='HTML')
+                    except Exception as e:
+                        logger.error(f"❌ Не удалось отправить ежемесячный отчёт по прибыли кампании: {e}")
+        except Exception as e:
+            logger.error(f"❌ Ошибка фоновой проверки ежемесячного отчёта по прибыли кампании: {e}")
+        await asyncio.sleep(CAMPAIGN_PROFIT_REPORT_CHECK_INTERVAL_MINUTES * 60)
+
 async def favt_notices_updater():
     """Фоновая задача: раз в FAVT_UPDATE_INTERVAL_MINUTES минут читает публичную
     веб-версию канала @favt_info (Росавиация) и обновляет favt_notices.json.
@@ -17045,6 +17176,7 @@ async def main():
     asyncio.create_task(holiday_checker())
     asyncio.create_task(airport_queue_checker())
     asyncio.create_task(peak_hour_alert_checker())
+    asyncio.create_task(campaign_profit_monthly_report())
     asyncio.create_task(check_long_shifts())
     asyncio.create_task(nearby_drivers_checker())
     asyncio.create_task(morning_greeting_checker())
