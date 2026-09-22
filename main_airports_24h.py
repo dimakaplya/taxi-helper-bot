@@ -9222,40 +9222,64 @@ def map_webapp_html():
         // скриншотом Яндекс.Карт - "можешь так же рисовать зону повышенного
         // спроса как у яндекса, как облако бледное"): раньше был идеально
         // ровный круг (L.circle) - теперь неровное "облако" (blobLatLngs
-        // ниже строит замкнутый многоугольник с органичным волнистым краем
-        // через сумму нескольких синусоид разной частоты/фазы - деталь
-        // ФИКСИРОВАННАЯ по углу, не меняется от кадра к кадру, чтобы форма
-        // не "дёргалась" при каждом опросе loadAirports) + CSS blur на сам
-        // SVG-путь для мягкого, размытого края без чёткой границы, как на
-        // референсе (weight:0 - обводки нет вовсе, только размытая заливка).
+        // ниже) + CSS blur на SVG-путь для мягкого размытого края без
+        // чёткой границы (weight:0 - обводки нет вовсе).
+        // ЕЩЁ РАЗ УТОЧНЕНО 22.09.2026 (прямая просьба пользователя - "не
+        // радиус вокруг точки, а произвольное облако над координатой
+        // аэропорта в радиусе 5 км"): раньше это была волнистая, но по сути
+        // всё ещё СИММЕТРИЧНАЯ фигура вокруг точки, радиус 3 км. Теперь
+        // HIGH_DEMAND_RADIUS_METERS - это МАКСИМАЛЬНЫЙ охват (5 км), а не
+        // средний радиус - форма явно АСИММЕТРИЧНАЯ (доли облака от ~35%
+        // до 100% максимума в разных направлениях) и центр самого облака
+        // слегка СМЕЩЁН от точки аэропорта (как на референсе - зона не
+        // центрирована точно на иконке), а не просто "точка с неровным
+        // краем". seedFromString(a.icao) - фаза волн/направление смещения
+        // свои у каждого аэропорта (детерминированно по ICAO, не дёргаются
+        // между опросами loadAirports), а не одна и та же форма у всех.
         const HIGH_DEMAND_LOAD_THRESHOLD = 85;
-        const HIGH_DEMAND_RADIUS_METERS = 3000;
-        function blobLatLngs(lat, lon, baseRadiusM, pointsCount) {{
-          pointsCount = pointsCount || 20;
+        const HIGH_DEMAND_RADIUS_METERS = 5000;
+        function seedFromString(s) {{
+          let h = 7;
+          for (let i = 0; i < (s || '').length; i++) {{ h = (h * 31 + s.charCodeAt(i)) % 10000; }}
+          return h;
+        }}
+        function blobLatLngs(lat, lon, maxRadiusM, seed, pointsCount) {{
+          pointsCount = pointsCount || 24;
           const metersPerDegLat = 111320;
+          // Детерминированные "случайные" фазы/смещение из seed - разные у
+          // каждого аэропорта, но стабильные между перерисовками.
+          const p1 = (seed % 628) / 100;
+          const p2 = ((seed * 3) % 628) / 100;
+          const p3 = ((seed * 7) % 628) / 100;
+          const offsetAngle = ((seed * 13) % 628) / 100;
+          const offsetDist = maxRadiusM * 0.28;
+          const cLat = lat + (offsetDist * Math.cos(offsetAngle)) / metersPerDegLat;
+          const cLon = lon + (offsetDist * Math.sin(offsetAngle)) / (metersPerDegLat * Math.cos(lat * Math.PI / 180));
           const latLngs = [];
           for (let i = 0; i < pointsCount; i++) {{
             const angle = (i / pointsCount) * Math.PI * 2;
-            const wobble = 1
-              + 0.22 * Math.sin(angle * 3 + 1.1)
-              + 0.13 * Math.sin(angle * 5 + 2.7)
-              + 0.08 * Math.sin(angle * 7 + 0.4);
-            const r = baseRadiusM * wobble;
+            // 0.35..1.0 от максимума - явно асимметричное облако, а не
+            // ровный круг с лёгкой рябью по краю.
+            const wobble = 0.62
+              + 0.24 * Math.sin(angle * 2 + p1)
+              + 0.12 * Math.sin(angle * 5 + p2)
+              + 0.09 * Math.sin(angle * 3 + p3);
+            const r = maxRadiusM * Math.max(0.35, Math.min(1, wobble));
             const dLat = (r * Math.cos(angle)) / metersPerDegLat;
-            const dLon = (r * Math.sin(angle)) / (metersPerDegLat * Math.cos(lat * Math.PI / 180));
-            latLngs.push([lat + dLat, lon + dLon]);
+            const dLon = (r * Math.sin(angle)) / (metersPerDegLat * Math.cos(cLat * Math.PI / 180));
+            latLngs.push([cLat + dLat, cLon + dLon]);
           }}
           return latLngs;
         }}
         if (a.load !== null && a.load !== undefined && a.load > HIGH_DEMAND_LOAD_THRESHOLD) {{
-          const blob = L.polygon(blobLatLngs(a.lat, a.lon, HIGH_DEMAND_RADIUS_METERS), {{
+          const blob = L.polygon(blobLatLngs(a.lat, a.lon, HIGH_DEMAND_RADIUS_METERS, seedFromString(a.icao)), {{
             color: '#9b30ff',
             weight: 0,
             fillColor: '#9b30ff',
             fillOpacity: 0.22,
             smoothFactor: 3,
           }}).addTo(map);
-          if (blob._path) blob._path.style.filter = 'blur(10px)';
+          if (blob._path) blob._path.style.filter = 'blur(14px)';
           airportMarkers.push(blob);
         }}
         // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "полигон для
