@@ -7927,6 +7927,21 @@ MAP_CATEGORY_STYLE = {
     'cargo': {'color': '#E53935', 'label': 'Грузовое такси', 'icon': '🚚'},
 }
 
+# ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "заливку смайлика
+# делай Такси желтый / Черный ультима / Желто-красный обводкой курьер /
+# Красной грузовой" - для СВОЕГО маркера-треугольника на карте, см.
+# self-icon-triangle/selfIconHtml в map_webapp_html). Отдельно от
+# MAP_CATEGORY_STYLE, потому что у курьера здесь заливка/обводка другая
+# (жёлтая заливка с красной обводкой), чем белый кружок у "чужих" курьеров
+# на карте (MAP_CATEGORY_STYLE['courier']['color'] - тот не трогаем, у
+# остальных водителей всё осталось по-старому, кружками).
+SELF_MARKER_STYLE = {
+    'taxi': {'fill': '#FFD400', 'stroke': '#B38600'},
+    'ultima': {'fill': '#1A1A1A', 'stroke': '#F2C230'},
+    'courier': {'fill': '#FFD400', 'stroke': '#D32F2F'},
+    'cargo': {'fill': '#E53935', 'stroke': '#7A1414'},
+}
+
 MAP_WEBAPP_PATH = '/map'
 MAP_POSITIONS_API_PATH = '/map/positions'
 MAP_AIRPORTS_API_PATH = '/map/airports'
@@ -8413,20 +8428,31 @@ MAP_CHROME_CSS = """
      показывает тебя как треугольник со смайликом с заливкой соответствующей
      и угол верхний треугольника это направления движения а остальных в
      кружке"): своя позиция - отдельный маркер-треугольник (не смешивается
-     с обычными кружками других водителей из CATEGORY_STYLE), залит цветом
-     СВОЕЙ категории (тем же CATEGORY_STYLE[myCategory]), верхний угол
-     треугольника (.self-icon-triangle, clip-path даёт остриё вверх при
-     повороте 0°) поворачивается на актуальный heading устройства - значит
-     "смотрит" в сторону движения. Смайлик - отдельный НЕ вращающийся слой
-     поверх треугольника (иначе кружился бы вместе с ним при повороте).
-     Источник координат/heading - браузерная navigator.geolocation.watchPosition
-     прямо в WebApp (см. updateSelfMarker ниже), а не общий /map/positions -
-     тот отдаёт позиции АНОНИМНО без user_id (см. get_map_positions), так что
-     клиент не может по нему отличить "себя" среди чужих точек. Остальные
-     водители по-прежнему кружки (.car-icon-inner ниже) - не менялось. */
-  .self-icon-wrap { position: relative; width: 40px; height: 40px; }
-  .self-icon-triangle { position: absolute; inset: 0; clip-path: polygon(50% 0%, 6% 100%, 94% 100%); box-shadow: 0 1px 4px rgba(0,0,0,.5); border: 2px solid rgba(255,255,255,.95); box-sizing: border-box; transform-origin: 50% 50%; }
-  .self-icon-emoji { position: absolute; left: 50%; top: 62%; transform: translate(-50%, -50%); font-size: 17px; filter: drop-shadow(0 1px 1px rgba(0,0,0,.6)); }
+     с обычными кружками других водителей), верхний угол треугольника
+     поворачивается на актуальный heading устройства - значит "смотрит" в
+     сторону движения. Источник координат/heading - браузерная
+     navigator.geolocation.watchPosition прямо в WebApp (см.
+     updateSelfMarker ниже), а не общий /map/positions - тот отдаёт позиции
+     АНОНИМНО без user_id (см. get_map_positions), клиент не может по нему
+     отличить "себя" среди чужих точек. Остальные водители по-прежнему
+     кружки (.car-icon-inner ниже) - не менялось.
+     ИЗМЕНЕНО 22.09.2026 (доп. просьба - "обрати внимание что заливка не
+     равномерная у треугольника и можешь треугольник сделать объёмным почти
+     3д", плюс "смайлик я имел в виду как было заложено ранее 🚕🤵🏽🚶🏽‍♂️🚚, к
+     ним делай заливку: такси жёлтый / чёрный ультима / жёлто-красный
+     обводкой курьер / красный грузовой"): первая версия рисовала
+     треугольник через CSS clip-path + border - border у clip-path
+     обрезается неровно, отсюда "неравномерная заливка" на скриншоте.
+     Теперь треугольник - inline SVG polygon с линейным градиентом (светлый
+     верх → базовый цвет → тёмный низ, имитация объёма/выпуклости) и
+     полупрозрачным бликом у вершины (гloss-хайлайт), plus drop-shadow для
+     "приподнятости" над картой - см. selfIconHtml/SELF_MARKER_STYLE ниже.
+     Эмодзи категории (та же иконка, что в CATEGORY_STYLE) - отдельный слой
+     поверх, НЕ вращается вместе с треугольником (иначе кружился бы при
+     повороте heading). */
+  .self-icon-wrap { position: relative; width: 42px; height: 42px; }
+  .self-icon-rotate { position: absolute; inset: 0; transform-origin: 50% 50%; }
+  .self-icon-emoji { position: absolute; left: 50%; top: 66%; transform: translate(-50%, -50%); font-size: 16px; filter: drop-shadow(0 1px 1px rgba(0,0,0,.6)); pointer-events: none; }
   .fuel-popup, .charging-popup { font-family: -apple-system, sans-serif; font-size: 12.5px; max-width: 230px; color: #000; }
   .fuel-popup h4, .charging-popup h4 { margin: 0 0 6px; font-size: 13.5px; }
   .fuel-popup .sub, .charging-popup .sub { color: #666; font-size: 11.5px; margin-bottom: 6px; }
@@ -8453,6 +8479,7 @@ def map_webapp_html():
     /map/positions?city=&category= с заголовком, содержащим initData, для
     проверки подписи на сервере (см. validate_telegram_webapp_init_data)."""
     style_json = json.dumps(MAP_CATEGORY_STYLE, ensure_ascii=False)
+    self_marker_style_json = json.dumps(SELF_MARKER_STYLE, ensure_ascii=False)
     fuel_type_labels_json = json.dumps(FUEL_TYPE_LABELS, ensure_ascii=False)
     charging_status_labels_json = json.dumps(CHARGING_STATUS_LABELS, ensure_ascii=False)
     # ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "тумблер
@@ -8614,25 +8641,63 @@ def map_webapp_html():
   let markers = [];
   let airportMarkers = [];
   let airportsLoaded = false;
-  // ДОБАВЛЕНО 22.09.2026 (см. .self-icon-wrap/.self-icon-triangle выше -
-  // прямая просьба пользователя показывать себя треугольником со
-  // смайликом, остриё которого указывает направление движения, а
-  // остальных - кружками) - берём координаты и heading прямо из браузера
+  // ДОБАВЛЕНО 22.09.2026 (см. .self-icon-wrap/.self-icon-rotate выше -
+  // прямая просьба пользователя показывать себя треугольником, остриё
+  // которого указывает направление движения, а остальных - кружками) -
+  // берём координаты и heading прямо из браузера
   // (navigator.geolocation.watchPosition), не из общего /map/positions:
   // та выдача анонимна (без user_id), так что определить "своя" ли точка
-  // среди чужих на клиенте нельзя. Треугольник залит цветом СВОЕЙ
-  // категории (myCategory), смайлик - фиксированный слой поверх, не
-  // вращается вместе с треугольником.
+  // среди чужих на клиенте нельзя.
+  // ИЗМЕНЕНО 22.09.2026 (доп. просьба - объёмный треугольник с ровной
+  // заливкой + своя эмодзи-иконка категории вместо общего смайлика, см.
+  // SELF_MARKER_STYLE/comment у .self-icon-wrap выше) - треугольник теперь
+  // SVG polygon с линейным градиентом (объём) и бликом у вершины, цвета из
+  // SELF_MARKER_STYLE (не из CATEGORY_STYLE - у курьера тут своя, отличная
+  // от кружка, заливка). lightenColor/darkenColor ниже - маленькие
+  // хелперы на чистом JS (без библиотек) для градиентных стопов.
+  const SELF_MARKER_STYLE = {self_marker_style_json};
   let selfMarker = null;
   let selfHeading = 0;
+  function clamp255(v) {{ return Math.max(0, Math.min(255, v)); }}
+  function hexToRgb(hex) {{
+    let h = hex.replace('#', '');
+    if (h.length === 3) h = h.split('').map(c => c + c).join('');
+    const num = parseInt(h, 16);
+    return [(num >> 16) & 255, (num >> 8) & 255, num & 255];
+  }}
+  function rgbToHex(r, g, b) {{
+    return '#' + [r, g, b].map(v => clamp255(Math.round(v)).toString(16).padStart(2, '0')).join('');
+  }}
+  function lightenColor(hex, pct) {{
+    const [r, g, b] = hexToRgb(hex);
+    const p = pct / 100;
+    return rgbToHex(r + (255 - r) * p, g + (255 - g) * p, b + (255 - b) * p);
+  }}
+  function darkenColor(hex, pct) {{
+    const [r, g, b] = hexToRgb(hex);
+    const p = pct / 100;
+    return rgbToHex(r * (1 - p), g * (1 - p), b * (1 - p));
+  }}
   function selfIconHtml(heading) {{
-    const style = CATEGORY_STYLE[myCategory] || {{ color: '#FFC629' }};
-    return `<div class="self-icon-wrap"><div class="self-icon-triangle" style="background:${{style.color}}; transform:rotate(${{heading}}deg)"></div><div class="self-icon-emoji">😊</div></div>`;
+    const st = SELF_MARKER_STYLE[myCategory] || SELF_MARKER_STYLE['taxi'];
+    const emoji = (CATEGORY_STYLE[myCategory] && CATEGORY_STYLE[myCategory].icon) || '🚕';
+    const top = lightenColor(st.fill, 40);
+    const bottom = darkenColor(st.fill, 20);
+    return `<div class="self-icon-wrap">` +
+      `<div class="self-icon-rotate" style="transform:rotate(${{heading}}deg)">` +
+      `<svg width="42" height="42" viewBox="0 0 42 42" style="filter:drop-shadow(0 3px 4px rgba(0,0,0,.55))">` +
+      `<defs><linearGradient id="selfTriGrad" x1="0" y1="0" x2="0" y2="1">` +
+      `<stop offset="0%" stop-color="${{top}}"/><stop offset="55%" stop-color="${{st.fill}}"/><stop offset="100%" stop-color="${{bottom}}"/>` +
+      `</linearGradient></defs>` +
+      `<polygon points="21,2 4,38 38,38" fill="url(#selfTriGrad)" stroke="${{st.stroke}}" stroke-width="2.5" stroke-linejoin="round"/>` +
+      `<polygon points="21,5 15,19 27,19" fill="rgba(255,255,255,0.30)"/>` +
+      `</svg></div>` +
+      `<div class="self-icon-emoji">${{emoji}}</div></div>`;
   }}
   function updateSelfMarker(lat, lon, heading) {{
     const h = (heading === null || heading === undefined || isNaN(heading)) ? selfHeading : heading;
     selfHeading = h;
-    const icon = L.divIcon({{ className: 'self-icon', html: selfIconHtml(h), iconSize: [40, 40], iconAnchor: [20, 20] }});
+    const icon = L.divIcon({{ className: 'self-icon', html: selfIconHtml(h), iconSize: [42, 42], iconAnchor: [21, 21] }});
     if (selfMarker) {{
       selfMarker.setLatLng([lat, lon]);
       selfMarker.setIcon(icon);
