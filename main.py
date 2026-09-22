@@ -4172,7 +4172,15 @@ def services_keyboard(category=None, city=None, user_id=None):
     # "🤝 РЕФЕРАЛЬНАЯ ПРОГРАММА" (по просьбе пользователя, 20.09.2026) - своей
     # строкой, под VPN - см. блок "РЕФЕРАЛЬНАЯ ПРОГРАММА" ниже
     # (show_referral_program и остальные хендлеры referral_*).
-    buttons.append([KeyboardButton(text="🤝 РЕФЕРАЛЬНАЯ ПРОГРАММА")])
+    # "💳 ОПЛАТИТЬ ПОДПИСКУ" (по прямой просьбе пользователя, 22.09.2026 -
+    # "а где в боте кнопка оплатить подписку то сделай ее с кнопкой рядом
+    # реферальная программа") - раньше кнопка "💳 ОПЛАТИТЬ" появлялась
+    # только на экране-блокировке после окончания пробного периода
+    # (SUBSCRIPTION_PAYWALL_TEXT/SubscriptionMiddleware), самостоятельной
+    # кнопки в меню не было. Теперь есть отдельный экран (см.
+    # show_subscription_status ниже) - можно оплатить/продлить заранее, не
+    # дожидаясь блокировки, в одном ряду с реферальной программой.
+    buttons.append([KeyboardButton(text="💳 ОПЛАТИТЬ ПОДПИСКУ"), KeyboardButton(text="🤝 РЕФЕРАЛЬНАЯ ПРОГРАММА")])
     # "❓ ПОДДЕРЖКА" (по просьбе пользователя, 22.09.2026 - "поддержка,
     # которая сама будет отвечать в боте") - простой FAQ без ИИ, см.
     # SUPPORT_FAQ_ITEMS/show_support_menu выше.
@@ -15577,6 +15585,37 @@ async def send_subscription_paywall(event):
         await event.message.answer(text, reply_markup=markup, parse_mode='Markdown')
     else:
         await event.answer(text, reply_markup=markup, parse_mode='Markdown')
+
+
+# ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - см. комментарий у
+# кнопки "💳 ОПЛАТИТЬ ПОДПИСКУ" в главном меню выше): отдельный экран -
+# показывает текущий статус (сколько дней триала/оплаты осталось) и даёт
+# оплатить/продлить ЗАРАНЕЕ, не дожидаясь блокировки от SubscriptionMiddleware
+# (та срабатывает только когда доступ уже истёк). Переиспользует
+# create_tinkoff_payment/subscription_paywall_keyboard - тот же платёж, что
+# и на экране-блокировке.
+@router.message(lambda message: message.text == "💳 ОПЛАТИТЬ ПОДПИСКУ")
+async def show_subscription_status(message: types.Message):
+    user_id = message.from_user.id
+    active_until = subscription_active_until(user_id)
+    sub = get_subscription(user_id)
+    if active_until and sub and sub['paid_until'] and _sub_parse(sub['paid_until']) >= active_until:
+        status_line = f"✅ Подписка оплачена до *{active_until.strftime('%d.%m.%Y')}*."
+    elif active_until:
+        days_left = max(0, (active_until - _sub_now()).days)
+        status_line = f"🎁 Пробный период, осталось *{days_left} дн.*"
+    else:
+        status_line = "Статус подписки пока не определён."
+    pay_url = await create_tinkoff_payment(user_id)
+    text = (
+        "💳 *Подписка*\n\n"
+        f"{status_line}\n\n"
+        f"Стоимость: *{SUBSCRIPTION_PRICE_RUB}₽/мес*. Оплата продлевает подписку на "
+        f"{SUBSCRIPTION_PERIOD_DAYS} дней от текущей даты окончания (даже если она ещё активна)."
+    )
+    if not pay_url:
+        text += "\n\n⚠️ Не получилось создать ссылку на оплату, попробуй ещё раз чуть позже."
+    await message.answer(text, reply_markup=subscription_paywall_keyboard(pay_url), parse_mode='Markdown')
 
 
 class SubscriptionMiddleware(BaseMiddleware):
