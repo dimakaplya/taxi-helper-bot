@@ -2413,6 +2413,18 @@ def init_db():
             PRIMARY KEY (user_id, threshold)
         )
     ''')
+    # ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "в чаевые добавь
+    # возможность загружать qr код для получения чаевых") - храним только
+    # Telegram file_id загруженного фото (см. get_tip_qr_file_id/
+    # set_tip_qr_file_id/build_tips_keyboard выше в файле) - саму картинку
+    # хранит Telegram, повторно загружать не нужно.
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS tip_qr_codes (
+            user_id INTEGER PRIMARY KEY,
+            file_id TEXT NOT NULL,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
     # Реферальная программа (по просьбе пользователя, 20.09.2026: "нужно
     # будет продумать в основном меню реферальная программа кнопка...") -
     # 2 уровня, привязка при первом /start?ref_<id> у НОВОГО пользователя
@@ -5879,19 +5891,109 @@ async def courier_stub_section(message: types.Message):
 TIPS_APP_URL_IOS = "https://apps.apple.com/us/app/%D1%8F%D0%BD%D0%B4%D0%B5%D0%BA%D1%81-%D1%87%D0%B0%D0%B5%D0%B2%D1%8B%D0%B5-%D0%BD%D0%B0-%D0%BA%D0%B0%D1%80%D1%82%D1%83-%D0%BF%D0%BE-qr/id1513175603?l=ru"
 TIPS_APP_URL_ANDROID = "https://play.google.com/store/apps/details?id=com.chaevieprosto.app"
 
+# ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "в чаевые добавь
+# возможность загружать qr код для получения чаевых чтобы водитель мог
+# нажать и показать загруженную фотку пользователю кто едет в такси") -
+# водитель один раз загружает СВОЙ QR (из приложения банка/Яндекс Чаевых/
+# СБП - любой), бот хранит только file_id (Telegram сам хранит саму
+# картинку на своих серверах, повторной загрузки не требует) и по кнопке
+# мгновенно присылает его обратно тем же сообщением - остаётся показать
+# экран телефона пассажиру, не открывая стороннее приложение каждый раз.
+def get_tip_qr_file_id(user_id):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT file_id FROM tip_qr_codes WHERE user_id = ?', (user_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return row[0] if row else None
+
+
+def set_tip_qr_file_id(user_id, file_id):
+    conn = get_db_connection()
+    conn.execute(
+        'INSERT INTO tip_qr_codes (user_id, file_id, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP) '
+        'ON CONFLICT(user_id) DO UPDATE SET file_id=excluded.file_id, updated_at=excluded.updated_at',
+        (user_id, file_id)
+    )
+    conn.commit()
+    conn.close()
+
+
 def build_tips_keyboard(user_id):
     """Строит клавиатуру для сообщения "Получить чаевые" - показывает
     только релевантную платформе кнопку (iOS/Android), если она известна
     (см. driver_platform_hint), иначе - обе, как раньше (безопасный
     дефолт). По прямой просьбе пользователя (22.09.2026). Общий helper для
-    show_tips_app и show_tips_app_main_menu, чтобы не дублировать логику."""
+    show_tips_app и show_tips_app_main_menu, чтобы не дублировать логику.
+
+    ДОБАВЛЕНО 23.09.2026 (см. get_tip_qr_file_id выше) - плюс кнопка своего
+    QR-кода: "📷 ЗАГРУЗИТЬ СВОЙ QR" если ещё не сохранён, иначе "📷 ПОКАЗАТЬ
+    МОЙ QR" + "🔁 ЗАМЕНИТЬ QR"."""
     hint = driver_platform_hint(user_id)
     rows = []
     if hint in (None, 'ios'):
         rows.append([InlineKeyboardButton(text="🍎 ПОЛУЧИТЬ ЧАЕВЫЕ НА IPHONE", url=TIPS_APP_URL_IOS)])
     if hint in (None, 'android'):
         rows.append([InlineKeyboardButton(text="🤖 ПОЛУЧИТЬ ЧАЕВЫЕ НА ANDROID", url=TIPS_APP_URL_ANDROID)])
+    if get_tip_qr_file_id(user_id):
+        rows.append([InlineKeyboardButton(text="📷 ПОКАЗАТЬ МОЙ QR", callback_data="tip_qr_show")])
+        rows.append([InlineKeyboardButton(text="🔁 ЗАМЕНИТЬ QR", callback_data="tip_qr_upload_start")])
+    else:
+        rows.append([InlineKeyboardButton(text="📷 ЗАГРУЗИТЬ СВОЙ QR", callback_data="tip_qr_upload_start")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@router.callback_query(lambda c: c.data == "tip_qr_upload_start")
+async def tip_qr_upload_start(callback_query: types.CallbackQuery):
+    try:
+        await callback_query.answer()
+    except Exception:
+        pass
+    state = user_state.setdefault(callback_query.from_user.id, {})
+    state['awaiting_tip_qr_photo'] = True
+    await callback_query.message.answer(
+        "📷 Пришли фото своего QR-кода для приёма чаевых (из приложения банка, СБП, «Яндекс Чаевые» - любой) - "
+        "сохраню его, и дальше сможешь показывать по кнопке, не открывая сторонние приложения."
+    )
+
+
+@router.message(lambda message: user_state.get(message.from_user.id, {}).get('awaiting_tip_qr_photo') and message.photo)
+async def tip_qr_photo_flow(message: types.Message):
+    """Ловит ФОТО, пока ждём QR - должен стоять РАНЬШЕ остальных хендлеров
+    (тот же приём, что и phantom_password_flow и т.п.), но фильтруется по
+    message.photo, а не по тексту - иначе перехватывал бы вообще любое
+    сообщение, включая случайный текст, пока водитель ищет нужное фото."""
+    user_id = message.from_user.id
+    state = user_state[user_id]
+    state.pop('awaiting_tip_qr_photo', None)
+    # Берём САМОЕ большое доступное разрешение (Telegram присылает
+    # message.photo как список размеров одного и того же фото, от меньшего
+    # к большему) - для QR это важно, чтобы код уверенно сканировался.
+    file_id = message.photo[-1].file_id
+    set_tip_qr_file_id(user_id, file_id)
+    await message.answer("✅ QR сохранён.", reply_markup=build_tips_keyboard(user_id))
+
+
+@router.message(lambda message: user_state.get(message.from_user.id, {}).get('awaiting_tip_qr_photo'))
+async def tip_qr_not_a_photo_flow(message: types.Message):
+    """Если во время ожидания QR пришёл не фото (текст/стикер/что угодно
+    ещё) - не сбрасываем флаг молча (человек мог просто отвлечься и прислать
+    что-то не то), а прямо объясняем, что нужно именно фото."""
+    await message.answer("Нужно именно фото (картинка) с QR-кодом - пришли его отдельным сообщением.")
+
+
+@router.callback_query(lambda c: c.data == "tip_qr_show")
+async def tip_qr_show(callback_query: types.CallbackQuery):
+    try:
+        await callback_query.answer()
+    except Exception:
+        pass
+    user_id = callback_query.from_user.id
+    file_id = get_tip_qr_file_id(user_id)
+    if not file_id:
+        await callback_query.message.answer("QR ещё не загружен.", reply_markup=build_tips_keyboard(user_id))
+        return
+    await callback_query.message.answer_photo(file_id, caption="📷 Твой QR для чаевых - покажи экран пассажиру.")
 
 @router.message(lambda message: message.text == "💳 ПОЛУЧИТЬ ЧАЕВЫЕ" and user_state.get(message.from_user.id, {}).get('in_courier_module'))
 async def show_tips_app(message: types.Message):
