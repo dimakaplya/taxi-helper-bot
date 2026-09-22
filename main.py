@@ -4706,6 +4706,9 @@ def parse_decimal(text):
 # питч больше не показывают - см. проверку user_id not in user_state в
 # обработчике start().
 WELCOME_PHOTO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'assets', 'welcome.jpg')
+# Презентация бота (без QR-кода) - см. кнопку "📥 СКАЧАТЬ ПРЕЗЕНТАЦИЮ" в
+# referral_menu_keyboard / хендлер referral_download_presentation ниже.
+PRESENTATION_PDF_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'assets', 'taxi_helper_presentation.pdf')
 
 # ОБНОВЛЕНО 21.09.2026 (прямая просьба пользователя - прислал готовый новый
 # текст питча целиком): позиционирование сменилось на "AI помощник" (было
@@ -17118,6 +17121,13 @@ def referral_menu_keyboard(referral_link, current_type=REFERRAL_DEFAULT_TYPE):
         # его на встречах/презентациях или клеить на авто - не нужно ничего
         # генерировать вручную на стороне.
         [InlineKeyboardButton(text="📱 QR-КОД ССЫЛКИ", callback_data="referral_qr_show")],
+        # "📥 СКАЧАТЬ ПРЕЗЕНТАЦИЮ" - по прямой просьбе пользователя (22.09.2026,
+        # "сделай без куар кода в рефералка скачать презентацию и загружай пдф
+        # файл") - отправляет готовый PDF презентации бота (без QR-кода, чтобы
+        # получатель подключался по персональной ссылке приглашающего, а не по
+        # QR с чужого CTA-слайда) прямо файлом в чат, см.
+        # PRESENTATION_PDF_PATH/referral_download_presentation ниже.
+        [InlineKeyboardButton(text="📥 СКАЧАТЬ ПРЕЗЕНТАЦИЮ", callback_data="referral_download_presentation")],
         [InlineKeyboardButton(text="📤 ПОДЕЛИТЬСЯ ССЫЛКОЙ", switch_inline_query=share_text)],
         [InlineKeyboardButton(text="📋 МОИ РЕФЕРАЛЫ", callback_data="referral_list")],
         [InlineKeyboardButton(text="💸 ВЫВЕСТИ СРЕДСТВА", callback_data="referral_withdraw_start")],
@@ -17387,6 +17397,41 @@ async def referral_qr_show(callback_query: types.CallbackQuery):
         ),
         parse_mode='Markdown',
     )
+
+
+@router.callback_query(lambda c: c.data == "referral_download_presentation")
+async def referral_download_presentation(callback_query: types.CallbackQuery):
+    """Отправляет PDF презентации бота (без QR-кода) - см. PRESENTATION_PDF_PATH
+    и комментарий у кнопки "📥 СКАЧАТЬ ПРЕЗЕНТАЦИЮ" в referral_menu_keyboard."""
+    user_id = callback_query.from_user.id
+    try:
+        await callback_query.answer()
+    except Exception:
+        pass
+    me = await bot.get_me()
+    link = get_referral_link(me.username, user_id)
+    if not os.path.exists(PRESENTATION_PDF_PATH):
+        logger.error("❌ Файл презентации не найден: %s", PRESENTATION_PDF_PATH)
+        await callback_query.message.answer(
+            "❌ Файл презентации сейчас недоступен, попробуй чуть позже."
+        )
+        return
+    try:
+        document = FSInputFile(PRESENTATION_PDF_PATH, filename="Taxi_Helper_presentation.pdf")
+        await callback_query.message.answer_document(
+            document,
+            caption=(
+                "📊 *Презентация Taxi Helper*\n\n"
+                "Покажи её тем, кого приглашаешь - все возможности бота одним файлом.\n\n"
+                f"После просмотра пусть подключаются по твоей ссылке:\n🔗 `{link}`"
+            ),
+            parse_mode='Markdown',
+        )
+    except Exception:
+        logger.exception("❌ Не удалось отправить PDF презентации")
+        await callback_query.message.answer(
+            "❌ Не получилось отправить файл, попробуй ещё раз чуть позже."
+        )
 
 
 @router.callback_query(lambda c: c.data == "referral_list")
