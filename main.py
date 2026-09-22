@@ -3264,7 +3264,10 @@ def _fire_and_forget(coro):
 # итоге удалить) не меняется - меняется только момент физического
 # bot.delete_message. fire-and-forget (через _fire_and_forget) - ждать
 # результат не нужно, это фоновая уборка.
-DELETE_MESSAGE_DELAY_SECONDS = 30
+# ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя - "оставлял на 5 минут"):
+# было 30 секунд, теперь 5 минут - больше времени прочитать сообщение,
+# прежде чем оно удалится из чата.
+DELETE_MESSAGE_DELAY_SECONDS = 300
 
 async def _delayed_delete_message(chat_id, message_id, delay=DELETE_MESSAGE_DELAY_SECONDS):
     await asyncio.sleep(delay)
@@ -3303,11 +3306,41 @@ async def set_cabinet_menu_button(user_id, cabinet_url):
     except Exception as e:
         logger.warning(f"⚠️ Не удалось выставить Menu Button личного кабинета для {user_id}: {e}")
 
+# ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "сделать чтобы всегда
+# ... снизу эта кнопка была всегда", уточнено в диалоге: кнопка должна жить
+# В САМИХ сообщениях, инлайн, НЕ в нижней reply-клавиатуре) - инлайн-кнопка
+# "🚕 МЕНЮ TAXI HELPER", которая всегда есть на исходящих сообщениях бота,
+# кроме тех, что уже несут ReplyKeyboardMarkup (её сюда специально не лезем -
+# reply-клавиатура и так уже даёт доступ к меню, и Telegram не разрешает
+# одному сообщению одновременно ReplyKeyboardMarkup и InlineKeyboardMarkup).
+# Реализовано ЦЕНТРАЛИЗОВАННО в SingleMessageMiddleware (а не в каждом из
+# ~285 message.answer() по файлу) - для сообщений без разметки кнопка
+# добавляется как единственная, для сообщений с уже своей InlineKeyboardMarkup
+# - отдельной строкой снизу существующих кнопок.
+MAIN_MENU_INLINE_BUTTON_TEXT = "🚕 МЕНЮ TAXI HELPER"
+MAIN_MENU_INLINE_BUTTON_CALLBACK = "open_services_menu"
+
+def _with_main_menu_button(reply_markup):
+    """Возвращает reply_markup с добавленной строкой "МЕНЮ TAXI HELPER" -
+    ReplyKeyboardMarkup не трогаем (возвращаем как есть), к
+    InlineKeyboardMarkup дописываем строку снизу, при отсутствии разметки
+    создаём новую с одной этой кнопкой. Всегда возвращает НОВЫЙ объект (не
+    мутирует переданный) - на случай, если markup переиспользуется где-то
+    ещё как общий объект."""
+    menu_row = [InlineKeyboardButton(text=MAIN_MENU_INLINE_BUTTON_TEXT, callback_data=MAIN_MENU_INLINE_BUTTON_CALLBACK)]
+    if reply_markup is None:
+        return InlineKeyboardMarkup(inline_keyboard=[menu_row])
+    if isinstance(reply_markup, InlineKeyboardMarkup):
+        return InlineKeyboardMarkup(inline_keyboard=list(reply_markup.inline_keyboard) + [menu_row])
+    return reply_markup  # ReplyKeyboardMarkup и прочее - без изменений
+
 class SingleMessageMiddleware(BaseRequestMiddleware):
     async def __call__(self, make_request, bot_instance: Bot, method: TelegramMethod[TelegramType]):
         if isinstance(method, SendMessage):
             chat_id = method.chat_id
             has_reply_keyboard = isinstance(method.reply_markup, ReplyKeyboardMarkup)
+            if not has_reply_keyboard:
+                method.reply_markup = _with_main_menu_button(method.reply_markup)
             skip_trim = _skip_message_trim.get()
             result = await make_request(bot_instance, method)
             try:
@@ -4702,6 +4735,31 @@ async def start(message: types.Message):
     if is_new_user:
         await send_welcome_pitch(message)
     await send_start_screen(message)
+
+# ДОБАВЛЕНО 23.09.2026 (см. MAIN_MENU_INLINE_BUTTON_TEXT/_with_main_menu_button
+# выше) - хендлер инлайн-кнопки "🚕 МЕНЮ TAXI HELPER", которая теперь висит
+# почти на каждом сообщении бота. Открывает главное меню сервисов (те же
+# кнопки, что и после старта смены/выбора города - services_keyboard) для
+# уже выбранных города/категории; если пользователь их ещё не выбрал (самое
+# первое сообщение, "первое /start"), откатывается на send_start_screen -
+# экран выбора города.
+@router.callback_query(lambda c: c.data == MAIN_MENU_INLINE_BUTTON_CALLBACK)
+async def open_services_menu(callback_query: types.CallbackQuery):
+    try:
+        await callback_query.answer()
+    except Exception:
+        pass
+    user_id = callback_query.from_user.id
+    state = user_state.get(user_id, {})
+    category = state.get('category')
+    city = state.get('city')
+    if not category or not city:
+        await send_start_screen(callback_query.message)
+        return
+    await callback_query.message.answer(
+        "📋 Меню",
+        reply_markup=services_keyboard(category, city, user_id),
+    )
 
 # ДОБАВЛЕНО 21.09.2026 (прямая просьба пользователя - "ждать нет времени",
 # нужно было прямо сейчас проверить сырой ответ Yandex Rasp API на предмет
