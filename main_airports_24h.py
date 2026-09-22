@@ -6459,6 +6459,13 @@ def airport_distance_penalty(icao, origin_lat, origin_lon):
         return 1.0, dist_km
     return AIRPORT_DISTANCE_PENALTY_FREE_KM / dist_km, dist_km
 
+# ICAO Шереметьево - по просьбе пользователя (22.09.2026) получает
+# небольшой множитель к score в "Куда ехать" (см. score_airport_candidate
+# ниже), т.к. по факту там стабильно больше общего трафика/заказов, чем
+# отражает голая загрузка прилётов на текущий час.
+SVO_PRIORITY_ICAO = {'UUEE'}
+SVO_PRIORITY_BONUS_MULTIPLIER = 1.2
+
 async def score_airport_candidate(city, airport, category, user_lat=None, user_lon=None):
     """Считает балл и обоснование для одного аэропорта города. Возвращает
     dict {label, score, reasons: [str, ...], closed: bool}. relevant_class -
@@ -6532,6 +6539,17 @@ async def score_airport_candidate(city, airport, category, user_lat=None, user_l
     if dist_km is not None and penalty < 1.0:
         score *= penalty
         reasons.append(f"🚗 ~{round(dist_km)} км {origin_label} - дальше ехать")
+
+    # ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя) - Шереметьево
+    # (SVO) в Москве стабильно даёт больше заказов, чем показывает голая
+    # загрузка прилётов на текущий час (у него больше терминалов и общий
+    # трафик заметно выше DME/VKO) - поэтому даём ему небольшую прибавку
+    # к баллу, чтобы он не проигрывал другому аэропорту только из-за
+    # разницы в 1 час по числу прилётов, даже если формально рейсов
+    # сейчас меньше.
+    if icao in SVO_PRIORITY_ICAO:
+        score *= SVO_PRIORITY_BONUS_MULTIPLIER
+        reasons.append("⭐ обычно больше заказов")
 
     return {'label': airport['name'], 'score': score, 'reasons': reasons, 'closed': False, 'advice': None}
 
@@ -6663,6 +6681,87 @@ def get_city_advice(city, level, category=None):
         if hour >= 18:
             return _CITY_ADVICE_WORKDAY_EVENING
     return _CITY_ADVICE_DEFAULT
+
+# Радиус "бесплатной" близости для районного кандидата "Куда ехать" -
+# заметно меньше, чем у аэропортов (AIRPORT_DISTANCE_PENALTY_FREE_KM=30),
+# т.к. районы внутри одного города и разница даже в 10-15 км уже заметно
+# сказывается на времени подачи. За пределами этого радиуса штраф линейно
+# режет скорректированный балл района - см. score_district_candidate.
+DISTRICT_DEMAND_PENALTY_FREE_KM = 8
+
+def district_distance_penalty(dist_km):
+    if dist_km is None:
+        return 1.0
+    if dist_km <= DISTRICT_DEMAND_PENALTY_FREE_KM:
+        return 1.0
+    return DISTRICT_DEMAND_PENALTY_FREE_KM / dist_km
+
+async def score_district_candidate(city, category, user_lat=None, user_lon=None):
+    """Кандидат "Город/центр" для Москвы такси/Ultima (ДОБАВЛЕНО 22.09.2026,
+    прямая просьба пользователя): вместо общей эвристики по часу пика
+    (score_city_candidate) теперь берём РЕАЛЬНЫЙ лучший район из
+    загруженной пользователем матрицы спроса (см. get_moscow_district_demand/
+    moscow_district_demand.json), с учётом расстояния от текущей позиции
+    водителя - район выбирается по спросу, скорректированному на удалённость
+    (см. district_distance_penalty), чтобы не отправлять водителя на другой
+    конец города ради района с чуть более высоким % спроса. Если данных нет
+    (файл не загрузился) или подходящего района на текущий час/день не
+    нашлось - откатываемся на старый score_city_candidate, чтобы "Куда
+    ехать" не осталась без кандидата "Город/центр" вообще."""
+    table = get_moscow_district_demand()
+    indices = MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES.get(category) if table else None
+    if not table or not indices:
+        return await score_city_candidate(city, category=category)
+
+    now = get_city_now(city)
+    weekday = str(now.weekday())
+    rain_now = False
+    try:
+        forecast = get_cached_weather_forecast(city)
+        current_code = (forecast or {}).get('current', {}).get('weathercode')
+        rain_now = current_code in PRECIP_WEATHERCODES
+    except Exception:
+        pass
+
+    if user_lat is not None and user_lon is not None:
+        origin_lat, origin_lon, origin_label = user_lat, user_lon, "от тебя"
+    else:
+        city_coords = RAIN_CITY_COORDS.get(city)
+        origin_lat, origin_lon = (city_coords or (None, None))
+        origin_label = "от центра города"
+
+    best = None
+    for name, entry in table.get('districts', {}).items():
+        slots = entry.get('weekday', {}).get(weekday, [])
+        demand = None
+        for slot in slots:
+            start_h, end_h = slot[0], slot[1]
+            if start_h <= now.hour < end_h:
+                demand = max(slot[2 + i] for i in indices)
+                break
+        if demand is None:
+            continue
+        if rain_now:
+            demand = max(demand, MAP_DEMAND_RAIN_FLOOR_PERCENT)
+        dist_km = None
+        if origin_lat is not None and origin_lon is not None:
+            dist_km = haversine_km(origin_lat, origin_lon, entry['lat'], entry['lon'])
+        adjusted = demand * district_distance_penalty(dist_km)
+        if best is None or adjusted > best['adjusted']:
+            best = {'name': name, 'demand': demand, 'dist_km': dist_km, 'adjusted': adjusted}
+
+    if best is None:
+        return await score_city_candidate(city, category=category)
+
+    reasons = [f"{best['demand']}% спроса в районе"]
+    if rain_now:
+        reasons.append("🌧 осадки сейчас - спрос выше обычного")
+    if best['dist_km'] is not None and best['dist_km'] > DISTRICT_DEMAND_PENALTY_FREE_KM:
+        reasons.append(f"🚗 ~{round(best['dist_km'])} км {origin_label} - дальше ехать")
+
+    level = 'peak' if best['demand'] >= 90 else ('high' if best['demand'] >= 70 else ('mid' if best['demand'] >= 40 else 'low'))
+    advice = get_city_advice(city, level, category=category)
+    return {'label': f"Район {best['name']}", 'score': best['adjusted'], 'reasons': reasons, 'closed': False, 'advice': advice}
 
 async def score_city_candidate(city, category=None):
     """Балл для обобщённого "Город/центр" - на основе часа пика + погоды.
@@ -6832,7 +6931,16 @@ async def compute_where_to_go(city, category, user_lat=None, user_lon=None):
     # format_where_to_go_text уже умеет корректно показать "нет данных" в
     # этом случае, не падая).
     try:
-        candidates.append(await score_city_candidate(city, category=category))
+        # ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя) - для Москвы
+        # такси/Ultima кандидат "Город/центр" заменён на реальный лучший
+        # район (см. score_district_candidate), посчитанный по загруженной
+        # пользователем матрице спроса + удалённости от текущей позиции
+        # водителя. Для остальных городов/категорий - прежняя эвристика по
+        # часу пика (score_city_candidate).
+        if city == 'moscow' and category in ('taxi', 'ultima'):
+            candidates.append(await score_district_candidate(city, category, user_lat=user_lat, user_lon=user_lon))
+        else:
+            candidates.append(await score_city_candidate(city, category=category))
     except Exception:
         logger.exception(f"❌ Не удалось посчитать кандидата 'Город/центр' для 'Куда ехать' ({city}/{category})")
     candidates.sort(key=lambda c: c['score'], reverse=True)
