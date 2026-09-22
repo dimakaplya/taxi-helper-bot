@@ -2396,8 +2396,28 @@ def init_db():
             total_withdrawn_kopecks INTEGER DEFAULT 0
         )
     ''')
+    # ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "2 реферальные
+    # системы: юр.лицо приглашает водителей 40/20/10%, обычная реферальная
+    # 30/15/5%, 3 уровня вместо 2"): таблица уже существует в проде, поэтому
+    # новые колонки добавляем через ALTER TABLE (CREATE TABLE IF NOT EXISTS
+    # выше не трогает уже созданную таблицу) - referred_by_level3 для
+    # третьего уровня начислений (см. register_referral), referrer_type
+    # ('individual' по умолчанию/'legal_entity' - см. REFERRAL_RATES_PERCENT
+    # и admin_set_referrer_type) определяет, по какой шкале процентов этот
+    # человек получает начисления со своих рефералов. ALTER TABLE ADD COLUMN
+    # падает, если колонка уже есть - оборачиваем в try/except, чтобы
+    # повторный запуск init_db (при каждом старте бота) не ронял процесс.
+    for _migration_sql in (
+        'ALTER TABLE referrals ADD COLUMN referred_by_level3 INTEGER',
+        "ALTER TABLE referrals ADD COLUMN referrer_type TEXT DEFAULT 'individual'",
+    ):
+        try:
+            cursor.execute(_migration_sql)
+        except Exception:
+            pass  # колонка уже существует - обычная ситуация при каждом рестарте
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_referrals_by1 ON referrals (referred_by)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_referrals_by2 ON referrals (referred_by_level2)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_referrals_by3 ON referrals (referred_by_level3)')
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS referral_earnings (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -15810,18 +15830,28 @@ async def subscription_expiry_checker():
 # SUBSCRIPTION_ENFORCEMENT_LIVE = False. Включать оба флага - отдельное
 # решение пользователя, когда Tinkoff будет настроен.
 REFERRAL_PROGRAM_LIVE = False
-REFERRAL_LEVEL1_PERCENT = 40
-# Уточнение механики (по прямой просьбе пользователя, 20.09.2026): 2 уровень
-# считается НЕ как отдельный процент от платежа, а как доля ОТ НАЧИСЛЕНИЯ
-# 1 уровня - "он с тех 40% получает 50%". Итоговое число то же самое (50% от
-# 40% = 20% от платежа), но так это выглядит как "делится половиной своего
-# дохода с тем, кто его привёл", а не как отдельная выплата от сервиса - см.
-# distribute_referral_earnings ниже (level2_amount считается от
-# level1_amount, а не от amount_kopecks напрямую).
-REFERRAL_LEVEL2_SHARE_OF_LEVEL1_PERCENT = 50
+# ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя): теперь ДВЕ схемы
+# начислений на выбор, по 3 уровня в каждой (было 2 уровня, единая схема
+# 40%/50%-от-1-уровня). Какую схему применять к КОНКРЕТНОМУ человеку -
+# решает его собственный referrer_type в таблице referrals (по умолчанию
+# 'individual', на 'legal_entity' переключает админ - см.
+# admin_set_referrer_type/команду /set_legal_referrer):
+#   'legal_entity' - юр.лицо приглашает водителей/курьеров напрямую и
+#   через них дальше по цепочке: 40% с платежа 1-го уровня, 20% со 2-го,
+#   10% с 3-го.
+#   'individual' (обычные пользователи, дефолт) - 30%/15%/5% по тем же
+#   трём уровням.
+# В обоих случаях это ПРЯМОЙ процент от суммы платежа плательщика на каждом
+# уровне (не "доля от начисления уровня выше", как было раньше) - см.
+# distribute_referral_earnings ниже.
+REFERRAL_RATES_PERCENT = {
+    'individual': [30, 15, 5],
+    'legal_entity': [40, 20, 10],
+}
+REFERRAL_DEFAULT_TYPE = 'individual'
 REFERRAL_WITHDRAWAL_FEE_PERCENT = 3
 REFERRAL_MIN_WITHDRAWAL_RUB = 1000  # по прямой просьбе пользователя, 20.09.2026
-ADMIN_TELEGRAM_ID = os.getenv('ADMIN_TELEGRAM_ID')  # для заявок на вывод и команды /referral_paid
+ADMIN_TELEGRAM_ID = os.getenv('ADMIN_TELEGRAM_ID')  # для заявок на вывод и команд /referral_paid, /set_legal_referrer
 
 
 def ensure_referral_row(user_id):
@@ -15838,7 +15868,12 @@ def ensure_referral_row(user_id):
 def register_referral(user_id, referrer_id):
     """Вызывается один раз - при первом /start?start=ref_<id> у пользователя,
     у которого ЕЩЁ НЕТ привязанного реферера (не переписывает существующую
-    связь, не даёт указать самого себя рефералом)."""
+    связь, не даёт указать самого себя рефералом).
+
+    ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя - 3 уровня вместо 2):
+    теперь фиксируется ещё и referred_by_level3 (реферер реферера
+    реферера) - тот же принцип, что и у level2: считается ОДИН раз на
+    момент регистрации, не пересчитывается задним числом."""
     if referrer_id == user_id:
         return
     ensure_referral_row(user_id)
@@ -15850,12 +15885,13 @@ def register_referral(user_id, referrer_id):
     if row and row[0] is not None:
         conn.close()
         return
-    cursor.execute('SELECT referred_by FROM referrals WHERE user_id = ?', (referrer_id,))
+    cursor.execute('SELECT referred_by, referred_by_level2 FROM referrals WHERE user_id = ?', (referrer_id,))
     r = cursor.fetchone()
     level2 = r[0] if r else None
+    level3 = r[1] if r else None
     cursor.execute(
-        'UPDATE referrals SET referred_by = ?, referred_by_level2 = ? WHERE user_id = ?',
-        (referrer_id, level2, user_id)
+        'UPDATE referrals SET referred_by = ?, referred_by_level2 = ?, referred_by_level3 = ? WHERE user_id = ?',
+        (referrer_id, level2, level3, user_id)
     )
     conn.commit()
     conn.close()
@@ -15898,6 +15934,9 @@ def get_referral_stats(user_id):
     level1_count = cursor.fetchone()[0]
     cursor.execute('SELECT COUNT(*) FROM referrals WHERE referred_by_level2 = ?', (user_id,))
     level2_count = cursor.fetchone()[0]
+    # ДОБАВЛЕНО 23.09.2026 (3 уровня вместо 2, см. REFERRAL_RATES_PERCENT)
+    cursor.execute('SELECT COUNT(*) FROM referrals WHERE referred_by_level3 = ?', (user_id,))
+    level3_count = cursor.fetchone()[0]
     conn.close()
     downline_total = get_referral_downline_count(user_id)
     return {
@@ -15906,7 +15945,8 @@ def get_referral_stats(user_id):
         'total_withdrawn': (row[2] or 0) if row else 0,
         'level1_count': level1_count,
         'level2_count': level2_count,
-        'downline_total': downline_total,  # видимость на всю глубину, без денег (3+ уровень)
+        'level3_count': level3_count,
+        'downline_total': downline_total,  # видимость на всю глубину, без денег (4+ уровень)
     }
 
 
@@ -15954,32 +15994,65 @@ def _credit_referral_earning(earner_id, source_id, level, amount_kopecks, order_
     return amount_kopecks
 
 
-def distribute_referral_earnings(payer_user_id, amount_kopecks, order_id):
-    """Вызывается из confirm_subscription_payment при каждом подтверждённом
-    платеже - начисляет 1 и 2 уровню (если у плательщика есть реферер(ы)).
-    Возвращает список (earner_id, level, начислено_копеек) для рассылки
-    уведомлений вызывающим кодом (сам ничего не шлёт - синхронная функция)."""
+def get_referrer_type(user_id):
+    """'legal_entity' или 'individual' (дефолт) - см. комментарий у
+    REFERRAL_RATES_PERCENT. Определяет, по какой шкале процентов ЭТОТ
+    человек получает начисления со своих рефералов (не зависит от того,
+    кто его самого пригласил)."""
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute('SELECT referred_by, referred_by_level2 FROM referrals WHERE user_id = ?', (payer_user_id,))
+    cursor.execute('SELECT referrer_type FROM referrals WHERE user_id = ?', (user_id,))
+    row = cursor.fetchone()
+    conn.close()
+    referrer_type = row[0] if row else None
+    return referrer_type if referrer_type in REFERRAL_RATES_PERCENT else REFERRAL_DEFAULT_TYPE
+
+def set_referrer_type(user_id, referrer_type):
+    if referrer_type not in REFERRAL_RATES_PERCENT:
+        return False
+    ensure_referral_row(user_id)
+    conn = get_db_connection()
+    conn.execute('UPDATE referrals SET referrer_type = ? WHERE user_id = ?', (referrer_type, user_id))
+    conn.commit()
+    conn.close()
+    return True
+
+def distribute_referral_earnings(payer_user_id, amount_kopecks, order_id):
+    """Вызывается из confirm_subscription_payment при каждом подтверждённом
+    платеже - начисляет 1, 2 и 3 уровню (если у плательщика есть
+    реферер(ы) на этой глубине). Возвращает список (earner_id, level,
+    начислено_копеек) для рассылки уведомлений вызывающим кодом (сам ничего
+    не шлёт - синхронная функция).
+
+    ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя - 2 схемы начислений,
+    3 уровня): раньше был фиксированный процент 1 уровня + доля от него на
+    2 уровне, один на всех. Теперь на каждом уровне берётся ПРЯМОЙ процент
+    от суммы платежа - какой именно, зависит от referrer_type КОНКРЕТНОГО
+    получателя на этом уровне (см. get_referrer_type/REFERRAL_RATES_PERCENT) -
+    так что юр.лицо и обычный пользователь, стоящие на одном и том же
+    уровне цепочки, получат разные суммы с одного и того же платежа."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        'SELECT referred_by, referred_by_level2, referred_by_level3 FROM referrals WHERE user_id = ?',
+        (payer_user_id,)
+    )
     row = cursor.fetchone()
     conn.close()
     if not row:
         return []
-    referrer1, referrer2 = row
     notifications = []
-    level1_amount = amount_kopecks * REFERRAL_LEVEL1_PERCENT // 100
-    if referrer1:
-        credited = _credit_referral_earning(referrer1, payer_user_id, 1, level1_amount, order_id)
+    for level, earner_id in enumerate(row, start=1):
+        if not earner_id:
+            continue
+        rates = REFERRAL_RATES_PERCENT[get_referrer_type(earner_id)]
+        rate_percent = rates[level - 1]
+        if rate_percent <= 0:
+            continue
+        amount = amount_kopecks * rate_percent // 100
+        credited = _credit_referral_earning(earner_id, payer_user_id, level, amount, order_id)
         if credited:
-            notifications.append((referrer1, 1, credited))
-    if referrer2:
-        # 2 уровень = доля ОТ начисления 1 уровня (не отдельный % от
-        # платежа) - см. комментарий у REFERRAL_LEVEL2_SHARE_OF_LEVEL1_PERCENT.
-        level2_amount = level1_amount * REFERRAL_LEVEL2_SHARE_OF_LEVEL1_PERCENT // 100
-        credited = _credit_referral_earning(referrer2, payer_user_id, 2, level2_amount, order_id)
-        if credited:
-            notifications.append((referrer2, 2, credited))
+            notifications.append((earner_id, level, credited))
     return notifications
 
 
@@ -16037,23 +16110,29 @@ async def show_referral_program(message: types.Message):
     # же общим разделителем WHERE_TO_GO_DIVIDER, что уже используется в
     # "Куда ехать"/"ДЕНЬ - ИТОГ" - ссылка / статистика рефералов / баланс /
     # как это работает, читается быстрее одним взглядом.
+    # ИЗМЕНЕНО 23.09.2026 (3 уровня + 2 схемы начислений, см.
+    # REFERRAL_RATES_PERCENT/get_referrer_type) - показываем СВОЮ шкалу
+    # процентов (обычную 30/15/5 или, для юр.лиц, 40/20/10), а не одну
+    # зашитую формулу на всех.
+    my_rates = REFERRAL_RATES_PERCENT[get_referrer_type(user_id)]
     text = (
         "🤝 *Реферальная программа*\n"
         f"{WHERE_TO_GO_DIVIDER}\n\n"
         f"🔗 Твоя ссылка (отправляй друзьям):\n`{link}`\n\n"
         f"👥 Рефералов 1-го уровня: {stats['level1_count']}\n"
         f"👥 Рефералов 2-го уровня: {stats['level2_count']}\n"
+        f"👥 Рефералов 3-го уровня: {stats['level3_count']}\n"
         f"🌳 Всего людей в твоей ветке (любая глубина): {stats['downline_total']}\n"
         f"{WHERE_TO_GO_DIVIDER}\n\n"
         f"💰 Баланс: {stats['balance'] / 100:.0f}₽\n"
         f"📈 Всего заработано: {stats['total_earned'] / 100:.0f}₽\n"
         f"📤 Всего выведено: {stats['total_withdrawn'] / 100:.0f}₽\n"
         f"{WHERE_TO_GO_DIVIDER}\n\n"
-        f"_Как это работает:_ {REFERRAL_LEVEL1_PERCENT}% с каждого ежемесячного платежа приглашённого "
-        f"тобой напрямую (1 уровень). Если у него самого есть реферер (2 уровень) - тот получает "
-        f"{REFERRAL_LEVEL2_SHARE_OF_LEVEL1_PERCENT}% от дохода реферала 1 уровня с этого платежа. "
-        f"Начисляется каждый месяц, пока реферал платит подписку. Дальше 2 уровня деньги "
-        f"не идут, но всю ветку целиком видно в «📋 Мои рефералы».\n\n"
+        f"_Как это работает:_ {my_rates[0]}% с каждого ежемесячного платежа приглашённого "
+        f"тобой напрямую (1 уровень), {my_rates[1]}% с платежей его рефералов (2 уровень) и "
+        f"{my_rates[2]}% с платежей рефералов 2 уровня (3 уровень) - прямой процент от суммы "
+        f"платежа на каждом уровне. Начисляется каждый месяц, пока реферал платит подписку. "
+        f"Дальше 3 уровня деньги не идут, но всю ветку целиком видно в «📋 Мои рефералы».\n\n"
         f"Вывод - только на карту, комиссия сервиса {REFERRAL_WITHDRAWAL_FEE_PERCENT}%, "
         f"минимум {REFERRAL_MIN_WITHDRAWAL_RUB}₽."
     )
@@ -16305,6 +16384,36 @@ async def admin_mark_referral_paid(message: types.Message):
         )
     except Exception:
         logger.warning(f"⚠️ Не удалось уведомить user_id={result['user_id']} о выплате #{withdrawal_id}")
+
+# ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - 2 схемы реферальных
+# начислений): переключает referrer_type пользователя на 'legal_entity' -
+# он и его рефералы дальше по цепочке начинают получать по схеме юр.лица
+# (40%/20%/10%, см. REFERRAL_RATES_PERCENT), вместо обычной 30%/15%/5%.
+# Обратная команда возвращает 'individual'. Доступны только ADMIN_TELEGRAM_ID -
+# как /referral_paid, тот же паттерн проверки.
+@router.message(Command("set_legal_referrer"))
+async def admin_set_legal_referrer(message: types.Message):
+    if not ADMIN_TELEGRAM_ID or str(message.from_user.id) != str(ADMIN_TELEGRAM_ID):
+        return
+    parts = (message.text or '').split()
+    if len(parts) != 2 or not parts[1].isdigit():
+        await message.answer("Использование: /set_legal_referrer <user_id>")
+        return
+    target_id = int(parts[1])
+    set_referrer_type(target_id, 'legal_entity')
+    await message.answer(f"✅ user_id={target_id} переключён на схему юр.лица (40%/20%/10%).")
+
+@router.message(Command("set_individual_referrer"))
+async def admin_set_individual_referrer(message: types.Message):
+    if not ADMIN_TELEGRAM_ID or str(message.from_user.id) != str(ADMIN_TELEGRAM_ID):
+        return
+    parts = (message.text or '').split()
+    if len(parts) != 2 or not parts[1].isdigit():
+        await message.answer("Использование: /set_individual_referrer <user_id>")
+        return
+    target_id = int(parts[1])
+    set_referrer_type(target_id, 'individual')
+    await message.answer(f"✅ user_id={target_id} переключён на обычную схему (30%/15%/5%).")
 
 # По просьбе пользователя (20.09.2026): "делай пуши перекрытий... и крупные
 # ДТП" - отдельный пуш-тип, независимый от статусов аэропортов/часов пика.
