@@ -18479,14 +18479,36 @@ async def update_weather_data():
         json.dump(result, f, ensure_ascii=False)
     logger.info(f"💾 weather_data.json обновлён ({len(cities)}/{len(RAIN_CITY_COORDS)} городов)")
 
+# С 00:00 до 06:00 по Москве спрос и активность минимальны - по прямой
+# просьбе пользователя (23.09.2026, "чтобы не нагружать") ночью опрашиваем
+# WeatherAPI реже, раз в WEATHER_UPDATE_INTERVAL_MINUTES_NIGHT вместо
+# WEATHER_UPDATE_INTERVAL_MINUTES. Ориентируемся на Europe/Moscow, а не на
+# локальное время каждого из 12 городов - тот же ориентир, что уже
+# используется для других ночных окон в боте (см. ZoneInfo('Europe/Moscow')
+# в _minutes_until_next_target/check_long_shifts и т.п.), плюс почти все
+# города бота живут в одном часовом поясе или близко к нему.
+WEATHER_UPDATE_INTERVAL_MINUTES_NIGHT = 30
+WEATHER_NIGHT_START_HOUR = 0  # 00:00 МСК
+WEATHER_NIGHT_END_HOUR = 6    # 06:00 МСК (опрос раз в WEATHER_UPDATE_INTERVAL_MINUTES_NIGHT ДО этого часа)
+
+def _current_weather_update_interval_minutes():
+    """WEATHER_UPDATE_INTERVAL_MINUTES_NIGHT с 00:00 до 06:00 по Москве,
+    иначе обычный WEATHER_UPDATE_INTERVAL_MINUTES - см. комментарий выше."""
+    hour_msk = datetime.now(ZoneInfo('Europe/Moscow')).hour
+    if WEATHER_NIGHT_START_HOUR <= hour_msk < WEATHER_NIGHT_END_HOUR:
+        return WEATHER_UPDATE_INTERVAL_MINUTES_NIGHT
+    return WEATHER_UPDATE_INTERVAL_MINUTES
+
 async def weather_data_updater():
     """Фоновая задача - собирает погоду по всем городам раз в
     WEATHER_UPDATE_INTERVAL_MINUTES (по прямой просьбе пользователя,
-    21.09.2026, после инцидента с 429 от Open-Meteo). Запускается сразу при
+    21.09.2026, после инцидента с 429 от Open-Meteo), а с 00:00 до 06:00 по
+    Москве - реже, раз в WEATHER_UPDATE_INTERVAL_MINUTES_NIGHT (см.
+    _current_weather_update_interval_minutes выше). Запускается сразу при
     старте бота, НО ТОЛЬКО если снепшот реально устарел - тот же принцип
     защиты от лишних запросов при частых редеплоях, что у airports_data_updater/
     trains_data_updater (см. их комментарии, инцидент 19.09.2026)."""
-    MIN_FRESH_AGE_MINUTES = 5  # меньше половины WEATHER_UPDATE_INTERVAL_MINUTES (10мин) - см. её комментарий
+    MIN_FRESH_AGE_MINUTES = 5  # меньше половины даже дневного WEATHER_UPDATE_INTERVAL_MINUTES (10мин) - см. её комментарий
     while True:
         age_min = _data_file_age_minutes(WEATHER_DATA_FILE)
         if age_min is not None and age_min < MIN_FRESH_AGE_MINUTES:
@@ -18502,7 +18524,9 @@ async def weather_data_updater():
             await update_weather_data()
         except Exception as e:
             logger.error(f"❌ Ошибка фонового обновления weather_data.json: {e}")
-        await asyncio.sleep(WEATHER_UPDATE_INTERVAL_MINUTES * 60)
+        interval_min = _current_weather_update_interval_minutes()
+        logger.info(f"💤 Следующее обновление погоды через {interval_min}мин ({'ночной' if interval_min == WEATHER_UPDATE_INTERVAL_MINUTES_NIGHT else 'дневной'} режим)")
+        await asyncio.sleep(interval_min * 60)
 
 def _current_hour_index(forecast, city):
     """ИСПРАВЛЕНО 23.09.2026 (жалоба пользователя - "идёт дождь, а бот
