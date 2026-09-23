@@ -7581,14 +7581,32 @@ async def score_airport_candidate(city, airport, category, user_lat=None, user_l
 # центр/офисы/ТЦ. Формулировки водитель дал сам (пятница-суббота = ночная
 # жизнь, будни = обычный деловой трафик) - остальное подобрано по аналогии,
 # не строгий факт, а ориентир ("держись центра и этих заведений").
-_CITY_ADVICE_WEEKEND_NIGHT = (
+#
+# РАЗДЕЛЕНО ПО КАТЕГОРИЯМ 23.09.2026 (прямая просьба пользователя - "на
+# пятницу и субботу для такси то же самое, что и Ultima, просто разные
+# заведения - обычные и премиальные/более дорогие"): логика ВРЕМЕНИ
+# (окна ночь/вечер пятницы-субботы, см. get_city_advice) осталась общей для
+# такси и Ultima, как уже было для Ultima (ultima_time_bias) - меняется
+# только ТЕКСТ совета: такси едет к обычным заведениям ночной жизни,
+# Ultima - к премиальным/дорогим (см. get_city_advice - выбор по category).
+_CITY_ADVICE_WEEKEND_NIGHT_TAXI = (
     "ночь клубов, баров и ресторанов - держись центра и заведений ночной "
     "жизни (клубы, бары, рестораны, стриптиз-клубы): люди разъезжаются "
     "поздно и часто берут такси именно от входа"
 )
-_CITY_ADVICE_WEEKEND_EVENING = (
+_CITY_ADVICE_WEEKEND_NIGHT_ULTIMA = (
+    "ночь премиальных заведений - держись центра и элитных заведений ночной "
+    "жизни (дорогие рестораны, VIP-клубы, премиальные бары, отели 5*): гости "
+    "разъезжаются поздно и часто заказывают именно Ultima прямо от входа"
+)
+_CITY_ADVICE_WEEKEND_EVENING_TAXI = (
     "вечер пятницы/субботы - люди едут в центр в рестораны, бары и клубы: "
     "держись районов с заведениями, спрос будет расти к ночи"
+)
+_CITY_ADVICE_WEEKEND_EVENING_ULTIMA = (
+    "вечер пятницы/субботы - гости едут в дорогие рестораны, премиальные бары "
+    "и элитные клубы в центре: держись районов с такими заведениями и "
+    "отелей 5*, спрос будет расти к ночи"
 )
 _CITY_ADVICE_WORKDAY_EVENING = (
     "вечер буднего дня - спрос из бизнес-центров/офисов и ресторанов/баров "
@@ -7691,9 +7709,9 @@ def get_city_advice(city, level, category=None):
     )
     is_weekend_evening = weekday in (4, 5) and 18 <= hour < 22
     if is_weekend_night_zone:
-        return _CITY_ADVICE_WEEKEND_NIGHT
+        return _CITY_ADVICE_WEEKEND_NIGHT_ULTIMA if category == 'ultima' else _CITY_ADVICE_WEEKEND_NIGHT_TAXI
     if is_weekend_evening:
-        return _CITY_ADVICE_WEEKEND_EVENING
+        return _CITY_ADVICE_WEEKEND_EVENING_ULTIMA if category == 'ultima' else _CITY_ADVICE_WEEKEND_EVENING_TAXI
     if weekday <= 3:  # будни (пн-чт)
         if level == 'peak':
             return _CITY_ADVICE_WORKDAY_PEAK
