@@ -538,9 +538,6 @@ NOTIFICATION_TYPES = {
     # "всем в городе, у кого включены пуши"), не привязана к
     # активной смене - см. push_road_incident_alerts ниже.
     'road_events': {'label': 'ПЕРЕКРЫТИЯ И КРУПНЫЕ ДТП', 'emoji': '⛔'},
-    # По просьбе пользователя (20.09.2026): "сделай приветственное сообщение
-    # утром каждый день в 9.00" - см. morning_greeting_checker ниже.
-    'morning_greeting': {'label': 'УТРЕННЕЕ ПРИВЕТСТВИЕ 9:00', 'emoji': '☀️'},
 }
 
 def notifications_enabled(state, notif_key):
@@ -21509,135 +21506,23 @@ def format_weather_forecast_text(city_name, forecast):
             lines.append(f"{hour_label} — {emoji} {temp_label}")
     return '\n'.join(lines)
 
-# ==================== УТРЕННЕЕ ПРИВЕТСТВИЕ (9:00) ====================
-# По просьбе пользователя (20.09.2026): "сделай приветственное сообщение
-# утром каждый день в 9.00 доброе утро сегодня такое-то число день такой-то
-# погода такая-то хорошего дня и побольше хороших клиентов. Предлагаю
-# ознакомиться с вкладкой куда поехать" - шлётся 9:00 ПО МЕСТНОМУ ВРЕМЕНИ
-# КАЖДОГО ГОРОДА (город уже определяет часовой пояс через get_city_now, как
-# и остальные почасовые фичи бота), с кнопкой "Да" -> сразу показывает
-# сводку "Куда ехать" (тот же расчёт, что и по кнопке "💰 КУДА ЕХАТЬ",
-# работает и для courier/cargo - у них своя версия, см. compute_where_to_go).
-MORNING_GREETING_HOUR = 9
-MORNING_GREETING_CHECK_MINUTES = 5  # как часто проверяем "наступило ли 9:00 в каком-то городе" - с запасом относительно часа
+# УДАЛЕНО 23.09.2026 (прямая просьба пользователя - "утренний пуш убери
+# вообще из бота сотри везде") - раньше здесь была фича "Утреннее
+# приветствие 9:00" (доброе утро/дата/погода/пожелание + кнопка "Куда
+# ехать") целиком: MORNING_GREETING_HOUR/_CHECK_MINUTES,
+# ULTIMA_NO_OUTERWEAR_TEMP_C, build_morning_greeting_text,
+# morning_greeting_keyboard, push_morning_greeting,
+# morning_greeting_show_where_to_go (callback-хендлер),
+# check_morning_greetings, morning_greeting_checker (фоновая задача, была
+# зарегистрирована в asyncio.create_task ниже по файлу) - удалены полностью,
+# как и пункт 'morning_greeting' в NOTIFICATION_TYPES выше (тумблер в
+# настройках уведомлений). RU_MONTHS_GENITIVE оставлен - используется и в
+# другом месте (см. ниже по файлу).
 
 RU_MONTHS_GENITIVE = (
     'января', 'февраля', 'марта', 'апреля', 'мая', 'июня',
     'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря',
 )
-
-# По просьбе пользователя (20.09.2026): "пропиши чтобы одевались по погоде и
-# напомни водителям ультима в тарифах что премьер и элит что если +25 то
-# верхняя одежда не требуется" - общая фраза "одевайся по погоде" идёт всем
-# категориям, а конкретное напоминание про дресс-код Премьер/Элит (верхняя
-# одежда не обязательна при +25 и выше) - ТОЛЬКО категории Ultima (у
-# Такси/Курьера/Грузового такси нет тарифов Премьер/Элит с таким дресс-кодом).
-ULTIMA_NO_OUTERWEAR_TEMP_C = 25
-
-async def build_morning_greeting_text(city, category=None):
-    """Текст "Доброе утро" - число/день недели по местному времени города,
-    текущая погода (тот же источник Open-Meteo, что и у "🌤 ПОГОДА"/пушей о
-    дожде), пожелание хорошего дня и побольше клиентов - по формулировке
-    пользователя. Погода - best-effort: если Open-Meteo недоступен,
-    сообщение всё равно уходит, просто без строки о погоде (лучше приветствие
-    без погоды, чем не прийти вообще). category='ultima' - добавляет
-    напоминание про дресс-код Премьер/Элит при +25° и выше (см.
-    ULTIMA_NO_OUTERWEAR_TEMP_C)."""
-    now = get_city_now(city)
-    date_label = f"{now.day} {RU_MONTHS_GENITIVE[now.month - 1]}, {WEEKDAY_NAMES[now.weekday()].lower()}"
-    lines = [
-        "☀️ *Доброе утро!*",
-        f"📅 Сегодня {date_label}",
-    ]
-    cur_temp = None
-    forecast = get_cached_weather_forecast(city)  # берём из часового кэша, не бьём Open-Meteo на каждое приветствие
-    if forecast:
-        current = forecast.get('current', {})
-        cur_code = current.get('weathercode')
-        cur_temp = current.get('temperature_2m')
-        if cur_code is not None:
-            cur_name, _, cur_emoji = describe_weathercode(cur_code)
-            temp_str = f", {round(cur_temp)}°C" if cur_temp is not None else ""
-            lines.append(f"{cur_emoji} Погода: {cur_name}{temp_str}")
-    lines.append("👕 Одевайся по погоде.")
-    if category == 'ultima' and cur_temp is not None and cur_temp >= ULTIMA_NO_OUTERWEAR_TEMP_C:
-        lines.append(
-            f"ℹ️ Напоминание по дресс-коду: при +{ULTIMA_NO_OUTERWEAR_TEMP_C}° и выше "
-            "верхняя одежда для тарифов *Премьер* и *Элит* не обязательна."
-        )
-    # Разделитель WHERE_TO_GO_DIVIDER перед пожеланием/призывом к действию -
-    # тот же общий стиль по боту (визуальный проход, 22.09.2026, прямая
-    # просьба пользователя), раньше это была просто ещё одна строка подряд.
-    lines.append(f"\n{WHERE_TO_GO_DIVIDER}\n")
-    lines.append("Хорошего дня и побольше хороших клиентов! 🚕")
-    lines.append("\nПредлагаю ознакомиться с вкладкой «Куда ехать» - подскажет, где сейчас выгоднее всего работать.")
-    return '\n'.join(lines)
-
-def morning_greeting_keyboard():
-    return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="✅ ДА, ПОКАЗАТЬ", callback_data="morning_greeting_show_where_to_go"),
-    ]])
-
-async def push_morning_greeting(user_id, city, category=None):
-    if not bot:
-        return
-    try:
-        text = await build_morning_greeting_text(city, category=category)
-        await bot.send_message(user_id, text, reply_markup=morning_greeting_keyboard(), parse_mode='Markdown')
-    except Exception as e:
-        logger.error(f"❌ Не удалось отправить утреннее приветствие пользователю {user_id}: {e}")
-
-@router.callback_query(lambda c: c.data == "morning_greeting_show_where_to_go")
-async def morning_greeting_show_where_to_go(callback_query: types.CallbackQuery):
-    """Кнопка "✅ ДА, ПОКАЗАТЬ" на утреннем приветствии - сразу показывает
-    сводку "Куда ехать" в ответ (по прямому уточнению пользователя), тем же
-    вызовом, что и кнопка "💰 КУДА ЕХАТЬ" в главном меню (см. send_where_to_go)."""
-    await callback_query.answer()
-    user_id = callback_query.from_user.id
-    state = user_state.get(user_id, {})
-    city = state.get('city')
-    category = state.get('category')
-    if not city:
-        await callback_query.message.answer("Сначала выбери город 🏙")
-        return
-    await send_where_to_go(callback_query.message, user_id, city, category)
-
-async def check_morning_greetings():
-    """Проверяет каждого известного пользователя: наступило ли у него в
-    городе MORNING_GREETING_HOUR:00 сегодня, и не отправляли ли мы уже
-    приветствие сегодня (state['last_morning_greeting_date'], сравнение по
-    ЛОКАЛЬНОЙ дате города - дедуп на пользователя, не на город, т.к. у
-    каждого пользователя своё поле в state). Проверяем каждые
-    MORNING_GREETING_CHECK_MINUTES минут окно [9:00, 9:00+CHECK_MINUTES) -
-    один пользователь получит пуш один раз за прогон, в котором окно
-    сработало."""
-    for user_id, state in list(user_state.items()):
-        if not isinstance(state, dict):
-            continue
-        city = state.get('city')
-        if not city:
-            continue
-        if not notifications_enabled(state, 'morning_greeting'):
-            continue
-        now = get_city_now(city)
-        today_str = now.strftime('%Y-%m-%d')
-        if state.get('last_morning_greeting_date') == today_str:
-            continue
-        if now.hour != MORNING_GREETING_HOUR:
-            continue
-        await push_morning_greeting(user_id, city, category=state.get('category'))
-        state['last_morning_greeting_date'] = today_str
-
-async def morning_greeting_checker():
-    """Фоновая задача: раз в MORNING_GREETING_CHECK_MINUTES минут проверяет,
-    не наступило ли 9:00 по местному времени у кого-то из известных
-    пользователей (см. check_morning_greetings)."""
-    while True:
-        try:
-            await check_morning_greetings()
-        except Exception as e:
-            logger.error(f"❌ Ошибка в morning_greeting_checker: {e}")
-        await asyncio.sleep(MORNING_GREETING_CHECK_MINUTES * 60)
 
 async def rain_checker():
     """Фоновая задача: раз в RAIN_CHECK_INTERVAL_MINUTES минут опрашивает
@@ -26594,7 +26479,6 @@ async def main():
     asyncio.create_task(fuel_reminder_checker())
     asyncio.create_task(legal_entity_rent_reminder_checker())
     asyncio.create_task(db_backup_checker())
-    asyncio.create_task(morning_greeting_checker())
     asyncio.create_task(user_state_flusher())  # write-behind для user_state - см. комментарий у PersistentUserDict
     # Прогрев кэша telegram-web-app.js (21.09.2026, см. "ЛОКАЛЬНАЯ РАЗДАЧА
     # telegram-web-app.js" выше) - скачиваем сразу при старте, а не ждём
