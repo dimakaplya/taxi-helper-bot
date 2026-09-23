@@ -7281,11 +7281,35 @@ async def switch_peak_hours_day(callback_query: types.CallbackQuery):
 # Разные единицы измерения (% загрузки аэропорта vs уровень пика города) -
 # ЗНАЧИТ, это не физически точный расчёт, а понятный водителю ориентир с
 # объяснением "почему" - как и WEEKDAY_HOUR_LOAD выше, ориентир, не прогноз.
-# "Длинная" очередь для целей этого скоринга - от 21 машины (5-й диапазон
-# QUEUE_RANGES и дальше). Строится из самого QUEUE_RANGES, а не захардкожена
-# отдельным списком строк - чтобы не разъехаться, если шаг/границы диапазонов
-# когда-нибудь изменятся (см. QUEUE_RANGES выше по файлу).
-WHERE_TO_GO_QUEUE_LONG_RANGES = {f'{lo}-{hi}' for lo, hi in QUEUE_RANGES if lo >= 21}
+# "Длинная" очередь для целей этого скоринга - ИЗМЕНЕНО 23.09.2026 (прямая
+# просьба пользователя): раньше порог был один общий на всё (от 21 машины,
+# 5-й диапазон QUEUE_RANGES) - для тарифов с изначально другим обычным
+# трафиком (Элит/Cruise почти никогда не видят 21+ машину даже в спокойный
+# момент, а Эконом стабильно видит 40-50+ в обычный день) это давало
+# неверную картину. Теперь порог свой по каждому тарифу (подобран
+# пользователем по ощущению от реального трафика) - TARIFF_QUEUE_LONG_MIN:
+# значение - нижняя граница ПЕРВОГО диапазона QUEUE_RANGES, который уже
+# считается "длинным" (сам диапазон-порог ещё НЕ длинный, длинная строго
+# больше него - например "Бизнес 46" значит диапазон 41-45 - ещё не
+# длинная, длинная начинается с 46-50). Тарифы, для которых порог явно не
+# задан (сейчас таких нет среди CATEGORIES, но на случай новых), используют
+# DEFAULT_QUEUE_LONG_MIN - прежнее общее значение 21.
+TARIFF_QUEUE_LONG_MIN = {
+    # Такси
+    'Эконом': 66, 'Комфорт': 61, 'Комфорт+': 46, 'Минивэн': 16, 'Детский': 46,
+    # Ultima
+    'Business': 46, 'Premier': 26, 'Elite': 16, 'Cruise': 16,
+}
+DEFAULT_QUEUE_LONG_MIN = 21
+
+def is_long_queue_range(tariff, range_str):
+    """True, если диапазон range_str (например "41-45") уже считается
+    "длинной" очередью для данного тарифа - см. TARIFF_QUEUE_LONG_MIN."""
+    try:
+        lo = int(range_str.split('-')[0])
+    except (ValueError, AttributeError, IndexError):
+        return False
+    return lo >= TARIFF_QUEUE_LONG_MIN.get(tariff, DEFAULT_QUEUE_LONG_MIN)
 
 def pluralize_ru(n, one, few, many):
     """Русское склонение по числу: 1 рейс / 2 рейса / 5 рейсов. Стандартное
@@ -7469,25 +7493,36 @@ async def score_airport_candidate(city, airport, category, user_lat=None, user_l
     # зависит от длины. Ключ в БД - "{category}:{tariff}" (см.
     # queue_class_key) - без category без тарифа тоже проверяем (вдруг
     # отмечали без выбора конкретного тарифа).
+    #
+    # ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя): раньше штраф ×0.6
+    # применялся ко ВСЕЙ категории, если ХОТЯ БЫ ОДИН тариф внутри неё был в
+    # длинной очереди - даже если остальные тарифы были совершенно
+    # свободны (например "Детский" в длинной очереди, а "Эконом" - нет).
+    # Теперь штраф применяется только "по лучшему тарифу": если среди
+    # тарифов с отметками есть хотя бы один НЕ в длинной очереди (по СВОЕМУ
+    # порогу - см. TARIFF_QUEUE_LONG_MIN), водитель может встать именно в
+    # него - штрафа нет. Штраф ставится, только когда ВСЕ тарифы с
+    # отметками - длинные.
     tariffs = CATEGORIES.get(category, {}).get('tariffs') or []
-    worst_range = None
+    all_tariffs_long = None  # None = нет ни одной отметки вообще - штраф не применяется
     if tariffs:
         queue_parts = []
+        long_flags = []
         for tariff in tariffs:
             range_str, _ts = queue_latest_report(city, icao, f"{category}:{tariff}", zone_key=zone_key)
             if range_str:
                 queue_parts.append(f"{tariff}: {range_str}")
-                if range_str in WHERE_TO_GO_QUEUE_LONG_RANGES:
-                    worst_range = range_str
+                long_flags.append(is_long_queue_range(tariff, range_str))
         if queue_parts:
             reasons.append("очередь - " + ", ".join(queue_parts))
+        if long_flags:
+            all_tariffs_long = all(long_flags)
     else:
         range_str, _ts = queue_latest_report(city, icao, category, zone_key=zone_key)
         if range_str:
             reasons.append(f"очередь - {range_str}")
-            if range_str in WHERE_TO_GO_QUEUE_LONG_RANGES:
-                worst_range = range_str
-    if worst_range:
+            all_tariffs_long = is_long_queue_range(category, range_str)
+    if all_tariffs_long:
         score *= 0.6
 
     if user_lat is not None and user_lon is not None:
