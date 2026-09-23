@@ -6050,29 +6050,37 @@ def share_order_webapp_html(category=None):
   label { display: block; font-size: 12.5px; color: #9a9a9a; margin: 14px 0 6px; }
   input[type=text], input[type=number], input[type=tel] {
     width: 100%; padding: 11px 12px; border-radius: 12px; border: 1px solid rgba(255,255,255,.14);
-    background: #141414; color: #fff; font-size: 15px;
+    background: #141414; color: #fff; font-size: 15px; transition: border-color .15s;
   }
+  input:focus { outline: none; border-color: rgba(255,196,0,.55); }
   input::placeholder { color: #666; }
   .pills { display: flex; flex-wrap: wrap; gap: 8px; }
   .pill {
     padding: 8px 14px; border-radius: 20px; background: #1c1c1c; border: 1px solid rgba(255,255,255,.1);
-    color: #ccc; font-size: 13.5px; cursor: pointer;
+    color: #ccc; font-size: 13.5px; cursor: pointer; transition: transform .12s, background .15s, border-color .15s;
   }
+  .pill:active { transform: scale(.94); }
   .pill.active { background: rgba(255,196,0,.16); border-color: #FFC400; color: #FFC400; font-weight: 700; }
   .stepper { display: flex; align-items: center; gap: 14px; }
   .stepper button {
     width: 36px; height: 36px; border-radius: 50%; border: 1px solid rgba(255,255,255,.14);
-    background: #1c1c1c; color: #FFC400; font-size: 18px; font-weight: 700;
+    background: #1c1c1c; color: #FFC400; font-size: 18px; font-weight: 700; transition: transform .12s;
   }
+  .stepper button:active { transform: scale(.88); }
   .stepper span { font-size: 17px; font-weight: 700; min-width: 24px; text-align: center; }
   #submitBtn {
     width: 100%; margin-top: 22px; padding: 14px; border-radius: 14px; border: none;
-    background: #FFC400; color: #000; font-size: 15.5px; font-weight: 800;
+    background: #FFC400; color: #000; font-size: 15.5px; font-weight: 800; transition: transform .12s;
   }
+  #submitBtn:active:not(:disabled) { transform: scale(.97); }
   #submitBtn:disabled { opacity: .5; }
   #err { color: #ff6b6b; font-size: 12.5px; margin-top: 10px; min-height: 16px; }
-  #done { display: none; text-align: center; padding: 60px 16px; }
+  #done { display: none; text-align: center; padding: 60px 16px; animation: doneIn .35s ease both; }
   #done .ok { font-size: 44px; margin-bottom: 10px; }
+  @keyframes doneIn { from { opacity: 0; transform: scale(.9); } to { opacity: 1; transform: scale(1); } }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation-duration: .001ms !important; transition-duration: .001ms !important; }
+  }
 </style>
 </head>
 <body>
@@ -10310,7 +10318,14 @@ MAP_CHROME_CSS = """
      сами переносятся на вторую строку (right: 10px ограничивает ряд
      правым краем карты), а не обрезаются/наезжают на другие элементы. */
   .map-toggles-row { position: absolute; top: 10px; left: 56px; right: 10px; z-index: 1000; display: flex; flex-direction: row; flex-wrap: wrap; align-items: flex-start; gap: 8px; }
-  .layer-toggle-btn { display: inline-block; background: #1c1c1c; color: #fff; border: 1px solid rgba(255,196,0,.4); border-radius: 8px; padding: 6px 10px; font-family: -apple-system, sans-serif; font-size: 12px; font-weight: 600; box-shadow: 0 1px 4px rgba(0,0,0,.35); cursor: pointer; user-select: none; white-space: nowrap; }
+  .layer-toggle-btn { display: inline-block; background: #1c1c1c; color: #fff; border: 1px solid rgba(255,196,0,.4); border-radius: 8px; padding: 6px 10px; font-family: -apple-system, sans-serif; font-size: 12px; font-weight: 600; box-shadow: 0 1px 4px rgba(0,0,0,.35); cursor: pointer; user-select: none; white-space: nowrap; transition: transform .12s; }
+  .layer-toggle-btn:active, .filter-toggle:active { transform: scale(.94); }
+  /* ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - редизайн
+     распространён на все WebApp'ы бота) - лёгкая тактильная отдача кнопок
+     карты, без изменения самой логики слоёв/фильтров. */
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation-duration: .001ms !important; transition-duration: .001ms !important; }
+  }
   /* ДОБАВЛЕНО 23.09.2026 (уточнение пользователя - "включи тумблер пробки") -
      подсветка кнопки "🚦 Пробки", когда слой пробок включён. */
   .layer-toggle-btn.active { background: #ffc400; color: #1c1c1c; border-color: #ffc400; }
@@ -12229,6 +12244,11 @@ def weather_webapp_html():
     position: relative; z-index: 1; height: 100%; display: flex; flex-direction: column;
     padding: max(18px, env(safe-area-inset-top, 0px)) 18px 18px;
     color: #fff; text-shadow: 0 1px 6px rgba(0,0,0,.25);
+    animation: wxIn .4s ease both;
+  }
+  @keyframes wxIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation-duration: .001ms !important; transition-duration: .001ms !important; }
   }
   #state { text-align: center; padding: 60px 16px; opacity: .8; font-size: 14px; }
   .city { font-size: 15px; font-weight: 600; opacity: .85; text-align: center; }
@@ -12269,8 +12289,10 @@ def weather_webapp_html():
   .hcard {
     flex-shrink: 0; min-width: 58px; background: rgba(0,0,0,.32); backdrop-filter: blur(6px);
     border: 1px solid rgba(255,255,255,.12); border-radius: 14px; padding: 10px 8px; text-align: center;
+    transition: border-color .2s, background .2s;
   }
   .hcard.now-hour { background: rgba(0,0,0,.5); border-color: rgba(255,196,0,.75); }
+  .dcard, .hcard { animation: wxIn .4s ease both; }
   .hcard .t { font-size: 11px; opacity: .85; }
   .hcard .e { font-size: 22px; margin: 4px 0; }
   .hcard .v { font-size: 13px; font-weight: 700; font-variant-numeric: tabular-nums; color: #FFC400; }
@@ -12615,6 +12637,11 @@ def where_to_go_webapp_html():
   .best {
     background: linear-gradient(135deg, #1c1c1c, #000); border: 1.5px solid #FFC400;
     border-radius: 16px; padding: 16px; margin-bottom: 16px; box-shadow: 0 4px 16px rgba(255,196,0,.15);
+    animation: wtgIn .35s ease both;
+  }
+  @keyframes wtgIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation-duration: .001ms !important; transition-duration: .001ms !important; }
   }
   .best .tag { font-size: 12px; font-weight: 700; color: #FFC400; letter-spacing: .04em; text-transform: uppercase; }
   .best .label { font-size: 19px; font-weight: 700; margin: 4px 0 8px; }
@@ -12655,6 +12682,7 @@ def where_to_go_webapp_html():
   .cand {
     background: #131313; border: 1px solid rgba(255,255,255,.08); border-radius: 12px;
     padding: 12px 13px; margin-bottom: 8px; display: flex; gap: 10px; align-items: flex-start;
+    animation: wtgIn .35s ease both;
   }
   .cand .rank { font-size: 18px; flex-shrink: 0; width: 22px; text-align: center; }
   .cand .body { min-width: 0; flex: 1; }
@@ -12665,8 +12693,9 @@ def where_to_go_webapp_html():
   .go-btn {
     display: block; text-align: center; margin-top: 10px; padding: 10px 12px;
     background: #FFC400; color: #000; font-weight: 700; font-size: 13.5px;
-    border-radius: 10px; text-decoration: none;
+    border-radius: 10px; text-decoration: none; transition: transform .12s;
   }
+  .go-btn:active { transform: scale(.96); }
   .cand .go-btn { margin-top: 8px; padding: 8px 10px; font-size: 12.5px; }
   .closed-box {
     margin-top: 14px; font-size: 12.5px; color: #999; background: #131313;
@@ -13989,15 +14018,16 @@ def events_webapp_html():
   .tab {
     flex: 1; text-align: center; padding: 10px 6px; border-radius: 12px;
     background: #1c1c1c; border: 1px solid rgba(255,255,255,.08); color: #9a9a9a;
-    font-size: 13px; font-weight: 600; cursor: pointer;
+    font-size: 13px; font-weight: 600; cursor: pointer; transition: transform .12s, background .15s, border-color .15s;
   }
+  .tab:active { transform: scale(.95); }
   .tab.active { background: rgba(255,196,0,.14); border-color: rgba(255,196,0,.6); color: #FFC400; }
   .section { display: none; }
-  .section.active { display: block; }
+  .section.active { display: block; animation: evIn .28s ease both; }
   .empty { text-align: center; padding: 40px 16px; opacity: .6; font-size: 13.5px; }
   .card {
     background: #141414; border: 1px solid rgba(255,255,255,.08); border-radius: 14px;
-    padding: 12px 14px; margin-bottom: 10px;
+    padding: 12px 14px; margin-bottom: 10px; animation: evIn .28s ease both;
   }
   .card .title { font-size: 14.5px; font-weight: 700; margin-bottom: 4px; }
   .card .row { font-size: 12.5px; color: #b8b8b8; margin-top: 2px; }
@@ -14006,12 +14036,18 @@ def events_webapp_html():
   .card a.go {
     display: inline-block; margin-top: 8px; padding: 6px 12px; border-radius: 20px;
     background: #FFC400; color: #000; font-size: 12.5px; font-weight: 700; text-decoration: none;
+    transition: transform .12s;
   }
+  .card a.go:active { transform: scale(.94); }
   .closure-badge {
     display: inline-block; background: rgba(255,68,68,.18); color: #ff6b6b;
     border-radius: 8px; padding: 2px 8px; font-size: 11px; font-weight: 700; margin-bottom: 6px;
   }
   .legend { font-size: 11px; color: #8a8a8a; margin: 6px 0 14px; }
+  @keyframes evIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation-duration: .001ms !important; transition-duration: .001ms !important; }
+  }
 </style>
 </head>
 <body>
@@ -14265,17 +14301,20 @@ def transport_webapp_html():
   .tab {
     flex: 1; text-align: center; padding: 10px 6px; border-radius: 12px;
     background: #1c1c1c; border: 1px solid rgba(255,255,255,.08); color: #9a9a9a;
-    font-size: 13px; font-weight: 600; cursor: pointer;
+    font-size: 13px; font-weight: 600; cursor: pointer; transition: transform .12s, background .15s, border-color .15s;
   }
+  .tab:active { transform: scale(.95); }
   .tab.active { background: rgba(255,196,0,.14); border-color: rgba(255,196,0,.6); color: #FFC400; }
   .section { display: none; }
-  .section.active { display: block; }
+  .section.active { display: block; animation: trIn .28s ease both; }
   .legend { font-size: 11px; color: #8a8a8a; margin: 0 0 14px; }
   .empty { text-align: center; padding: 40px 16px; opacity: .6; font-size: 13.5px; }
   .item {
     background: #141414; border: 1px solid rgba(255,255,255,.08); border-radius: 14px;
-    padding: 12px 14px; margin-bottom: 10px; cursor: pointer;
+    padding: 12px 14px; margin-bottom: 10px; cursor: pointer; transition: transform .12s;
+    animation: trIn .28s ease both;
   }
+  .item:active { transform: scale(.98); }
   .item .head { display: flex; justify-content: space-between; align-items: center; font-size: 14.5px; font-weight: 700; }
   .item .sub { font-size: 12px; color: #9a9a9a; margin-top: 3px; }
   .item .load { font-variant-numeric: tabular-nums; color: #FFC400; font-weight: 700; }
@@ -14298,27 +14337,34 @@ def transport_webapp_html():
   .queue-toggle-main {
     margin-top: 14px; text-align: center; padding: 16px; border-radius: 14px;
     background: rgba(255,196,0,.14); border: 1.5px solid #FFC400;
-    color: #FFC400; font-size: 15.5px; font-weight: 800; cursor: pointer;
+    color: #FFC400; font-size: 15.5px; font-weight: 800; cursor: pointer; transition: transform .12s;
   }
+  .queue-toggle-main:active { transform: scale(.97); }
   .queue-form-main { display: none; margin-top: 12px; padding: 12px 14px; background: #141414; border: 1px solid rgba(255,255,255,.08); border-radius: 14px; }
-  .queue-form-main.open { display: block; }
+  .queue-form-main.open { display: block; animation: trIn .25s ease both; }
   .lbl { font-size: 11px; color: #9a9a9a; margin: 8px 0 5px; }
   .pills { display: flex; flex-wrap: wrap; gap: 6px; }
   .pill {
     padding: 6px 10px; border-radius: 8px; background: #1c1c1c; border: 1px solid rgba(255,255,255,.12);
-    color: #ccc; font-size: 12px; cursor: pointer; user-select: none;
+    color: #ccc; font-size: 12px; cursor: pointer; user-select: none; transition: transform .12s, background .15s, border-color .15s;
   }
+  .pill:active { transform: scale(.93); }
   .pill.sel { background: rgba(255,196,0,.16); border-color: #FFC400; color: #FFC400; font-weight: 700; }
   .range-block { margin-top: 6px; }
   .range-block .rt { font-size: 11.5px; color: #FFC400; margin-bottom: 4px; }
   .queue-submit {
     width: 100%; margin-top: 10px; padding: 10px; border: none; border-radius: 10px;
-    background: #FFC400; color: #111; font-size: 13px; font-weight: 800; cursor: pointer;
+    background: #FFC400; color: #111; font-size: 13px; font-weight: 800; cursor: pointer; transition: transform .12s;
   }
+  .queue-submit:active:not(:disabled) { transform: scale(.97); }
   .queue-submit:disabled { opacity: .5; }
   .queue-msg { font-size: 12px; margin-top: 6px; text-align: center; }
   .queue-msg.ok { color: #4caf50; }
   .queue-msg.err { color: #ff6b6b; }
+  @keyframes trIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation-duration: .001ms !important; transition-duration: .001ms !important; }
+  }
 </style>
 </head>
 <body>
@@ -16216,14 +16262,45 @@ def cabinet_webapp_html():
   }
   h2.section-title { font-size: 14px; font-weight: 600; opacity: .8; margin: 20px 0 8px; }
 
+  /* ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "давай ещё в целом
+     подумаем над стилистикой личных кабинетов... переработать чтобы было
+     супер красивое и современно... анимации... переходы", распространено
+     на весь личный кабинет водителя тем же набором приёмов, что уже
+     применён в кабинете юрлица, см. legal_cabinet_webapp_html): плавное
+     появление вкладок/карточек, "дышащий" блик на карточке профиля,
+     тактильная отдача кнопок при нажатии - палитра чёрный/серый/жёлтый/
+     белый не меняется, только движение и глубина. */
+  @keyframes heroSheen {
+    0%, 100% { opacity: .5; transform: translate(-10%, -10%) rotate(0deg); }
+    50% { opacity: .9; transform: translate(6%, 6%) rotate(8deg); }
+  }
+  @keyframes tabIn {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  @keyframes rowIn {
+    from { opacity: 0; transform: translateY(6px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition-duration: .001ms !important; }
+  }
+
   /* Карточка профиля - градиентная "визитка" вверху страницы */
   .profile-card {
+    position: relative; overflow: hidden;
     display: flex; align-items: center; gap: 12px; border-radius: 18px; padding: 16px;
     background: linear-gradient(135deg, #1c1c1c, #000); color: #fff; margin-bottom: 16px;
-    box-shadow: 0 4px 14px rgba(0,0,0,.4); border: 1px solid rgba(255,196,0,.35);
+    box-shadow: 0 6px 20px rgba(0,0,0,.4); border: 1px solid rgba(255,196,0,.35);
+    animation: tabIn .35s ease both;
+  }
+  .profile-card::before {
+    content: ''; position: absolute; inset: -40%; pointer-events: none;
+    background: radial-gradient(circle, rgba(255,196,0,.35), transparent 65%);
+    animation: heroSheen 9s ease-in-out infinite;
   }
   .avatar {
-    width: 52px; height: 52px; border-radius: 50%; background: rgba(255,255,255,.22);
+    position: relative; width: 52px; height: 52px; border-radius: 50%; background: rgba(255,255,255,.22);
     display: flex; align-items: center; justify-content: center; font-size: 22px; font-weight: 700;
     flex-shrink: 0;
   }
@@ -16250,13 +16327,16 @@ def cabinet_webapp_html():
   .profile-form .save-btn {
     width: 100%; margin-top: 14px; padding: 11px; border: none; border-radius: 10px;
     background: #FFC400; color: #000; font-size: 14.5px; font-weight: 700; text-transform: uppercase;
+    transition: transform .12s;
   }
+  .profile-form .save-btn:active { transform: scale(.96); }
   .profile-form .save-msg { text-align: center; font-size: 12.5px; margin-top: 8px; min-height: 16px; }
 
   .tiles { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
   .tiles.cols-3 { grid-template-columns: repeat(3, 1fr); }
   .tile {
     background: var(--tg-theme-secondary-bg-color, #fff); border-radius: 14px; padding: 12px 13px;
+    box-shadow: 0 1px 3px rgba(0,0,0,.06); animation: rowIn .28s ease both;
   }
   .tile .label { font-size: 11.5px; opacity: .6; margin-bottom: 4px; }
   .tile .value { font-size: 18px; font-weight: 700; font-variant-numeric: tabular-nums; }
@@ -16266,6 +16346,7 @@ def cabinet_webapp_html():
 
   .chart-card {
     background: var(--tg-theme-secondary-bg-color, #fff); border-radius: 14px; padding: 12px 10px 6px;
+    box-shadow: 0 1px 3px rgba(0,0,0,.06);
   }
   #state { text-align: center; padding: 60px 16px; opacity: .6; font-size: 14px; }
   canvas { max-width: 100%; }
@@ -16283,13 +16364,16 @@ def cabinet_webapp_html():
     flex-shrink: 0; border: none; border-radius: 999px; padding: 8px 13px; font-size: 12.5px;
     font-weight: 600; background: var(--tg-theme-secondary-bg-color, #fff);
     color: var(--tg-theme-text-color, #000); opacity: .65; white-space: nowrap; text-transform: uppercase;
+    transition: transform .12s, opacity .15s, background .15s;
   }
   .nav-pill.active { background: #FFC400; color: #000; opacity: 1; }
+  .nav-pill:active { transform: scale(.94); }
   .tab-pane { display: none; }
-  .tab-pane.active { display: block; }
+  .tab-pane.active { display: block; animation: tabIn .28s ease both; }
   .card {
     background: var(--tg-theme-secondary-bg-color, #fff); border-radius: 14px; padding: 14px;
-    margin-bottom: 12px;
+    margin-bottom: 12px; box-shadow: 0 1px 3px rgba(0,0,0,.06);
+    animation: rowIn .28s ease both;
   }
   .card p { margin: 0 0 8px; font-size: 14px; line-height: 1.5; }
   .card p:last-child { margin-bottom: 0; }
@@ -16302,21 +16386,27 @@ def cabinet_webapp_html():
   .btn {
     width: 100%; padding: 11px; border: none; border-radius: 10px; background: #FFC400;
     color: #000; font-size: 14.5px; font-weight: 700; margin-top: 4px; text-transform: uppercase;
+    transition: transform .12s;
   }
+  .btn:active, .link-btn:active, .edit-btn:active, .pc-go:active, .mo-btn:active { transform: scale(.96); }
   .btn.secondary { background: rgba(127,127,127,.18); color: var(--tg-theme-text-color, #000); }
   .link-btn {
     display: block; text-decoration: none; text-align: center; padding: 12px; border-radius: 10px;
     background: #FFC400; color: #000 !important; font-weight: 700; font-size: 14.5px; margin-bottom: 8px;
-    text-transform: uppercase;
+    text-transform: uppercase; transition: transform .12s;
   }
   .pill-row { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
   .pill-btn {
     border: none; border-radius: 999px; padding: 8px 12px; font-size: 12.5px; font-weight: 600;
     background: var(--tg-theme-secondary-bg-color, #fff); color: var(--tg-theme-text-color, #000);
-    opacity: .75; text-transform: uppercase;
+    opacity: .75; text-transform: uppercase; transition: transform .12s, opacity .15s, background .15s;
   }
   .pill-btn.active { background: #FFC400; color: #000; opacity: 1; }
-  .point-card { background: var(--tg-theme-secondary-bg-color, #fff); border-radius: 12px; padding: 11px 12px; margin-bottom: 8px; }
+  .pill-btn:active { transform: scale(.94); }
+  .point-card {
+    background: var(--tg-theme-secondary-bg-color, #fff); border-radius: 12px; padding: 11px 12px; margin-bottom: 8px;
+    animation: rowIn .28s ease both;
+  }
   .point-card .pc-title { font-size: 14px; font-weight: 700; margin-bottom: 3px; }
   .point-card .pc-sub { font-size: 12px; opacity: .65; margin-bottom: 8px; }
   .point-card .pc-go {
@@ -16330,12 +16420,12 @@ def cabinet_webapp_html():
   .switch-row:last-child { border-bottom: none; }
   .switch-toggle {
     width: 44px; height: 26px; border-radius: 999px; border: none; position: relative; flex-shrink: 0;
-    background: rgba(127,127,127,.35);
+    background: rgba(127,127,127,.35); transition: background .18s;
   }
   .switch-toggle.on { background: #FFC400; }
   .switch-toggle::after {
     content: ''; position: absolute; top: 3px; left: 3px; width: 20px; height: 20px; border-radius: 50%;
-    background: #fff; transition: left .15s;
+    background: #fff; transition: left .18s cubic-bezier(.34,1.56,.64,1);
   }
   .switch-toggle.on::after { left: 21px; }
   .peak-line { font-size: 13.5px; padding: 6px 0; border-bottom: 1px solid rgba(127,127,127,.12); }
