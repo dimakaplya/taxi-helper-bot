@@ -22,6 +22,10 @@ from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMar
 from aiogram.client.session.middlewares.base import BaseRequestMiddleware
 from aiogram.methods import SendMessage, TelegramMethod
 from aiogram.methods.base import TelegramType
+# ДОБАВЛЕНО 23.09.2026 (см. send_push_with_retry ниже, по просьбе пользователя
+# разобраться с пушами на Android) - flood-control исключение от Telegram
+# Bot API (429 Too Many Requests, "retry after N seconds").
+from aiogram.exceptions import TelegramRetryAfter
 import os
 import aiohttp  # прямой запрос к Open-Meteo (публичный API без ключа) - см. блок "ДОЖДЬ" ниже
 from aiohttp import web  # лёгкий HTTP-сервер для приёма webhook об оплате подписки Tinkoff - см. блок "ПЛАТНАЯ ПОДПИСКА"
@@ -20732,6 +20736,90 @@ def is_rain_push_quiet_hours(city):
         return minutes_now >= start or minutes_now < end
     return start <= minutes_now < end
 
+# ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "пуши на Android плохо
+# приходят", аудит цикловых пуш-рассылок): общий helper для ВСЕХ функций,
+# которые рассылают пуши по списку получателей в цикле (push_rain_alert,
+# push_district_rain_alert, push_holiday_alert, push_airport_status_change,
+# push_road_incident_alert, push_high_demand_alert, push_green_demand_alert,
+# push_peak_hour_alert). До этого при flood-control (TelegramRetryAfter -
+# Telegram сам просит подождать N секунд, до этого случалось просто молча
+# в except Exception) сообщение терялось НАВСЕГДА - засчитывалось обычной
+# ошибкой без повтора. Теперь ждём ровно то время, что просит Telegram, и
+# пробуем ОДИН раз повторно, прежде чем считать провалом. Также считает
+# провалы в разрезе платформы (tg_platform, см. handle_platform_report_api/
+# driver_platform_hint выше) - раньше не было ФАКТИЧЕСКИХ данных, действительно
+# ли Android проваливает пуши чаще iOS, только предположение - см. /pushstats
+# ниже у ADMIN_USER_ID.
+PUSH_FAILURE_STATS = {}  # {(platform_or_'unknown', reason): count} - только в памяти, сбрасывается при рестарте бота
+
+def _record_push_failure(platform, reason):
+    key = (platform or 'unknown', reason)
+    PUSH_FAILURE_STATS[key] = PUSH_FAILURE_STATS.get(key, 0) + 1
+
+def _push_recipient_platform(user_id, state):
+    """tg_platform у водителя, если известен (см. handle_platform_report_api -
+    заполняется, когда водитель открывает любой WebApp) - иначе фолбэк на
+    driver_platform_hint (тот же источник, что уже использует кнопка чаевых/
+    парковки)."""
+    if isinstance(state, dict) and state.get('tg_platform'):
+        return state['tg_platform']
+    return driver_platform_hint(user_id)
+
+async def send_push_with_retry(user_id, text, *, state=None, parse_mode=None, reply_markup=None, **extra):
+    """Отправляет один пуш одному получателю с одним повтором при
+    flood-control (TelegramRetryAfter). Возвращает True при успехе, False
+    при провале (после исчерпания повтора) - вызывающий код по-прежнему сам
+    считает sent/failed и шлёт asyncio.sleep(0.05) между получателями, как
+    раньше, это не меняется. **extra - любые дополнительные kwargs для
+    bot.send_message (например disable_web_page_preview=True у пуша про
+    дорожные события)."""
+    if not bot:
+        return False
+    platform = _push_recipient_platform(user_id, state)
+    try:
+        await bot.send_message(user_id, text, parse_mode=parse_mode, reply_markup=reply_markup, **extra)
+        return True
+    except TelegramRetryAfter as e:
+        wait_s = e.retry_after + 0.5
+        logger.info(f"⏳ Flood control при пуше {user_id} (platform={platform}) - жду {wait_s:.1f}с и пробую ещё раз")
+        await asyncio.sleep(wait_s)
+        try:
+            await bot.send_message(user_id, text, parse_mode=parse_mode, reply_markup=reply_markup, **extra)
+            return True
+        except Exception as e2:
+            logger.warning(f"⚠️ Не удалось отправить пуш {user_id} (platform={platform}) после повтора на flood-control: {e2}")
+            _record_push_failure(platform, type(e2).__name__)
+            return False
+    except Exception as e:
+        logger.warning(f"⚠️ Не удалось отправить пуш {user_id} (platform={platform}): {e}")
+        _record_push_failure(platform, type(e).__name__)
+        return False
+
+@router.message(Command("pushstats"))
+async def push_stats_command(message: types.Message):
+    """Скрытая админская команда (см. ADMIN_USER_ID/forcefetch выше) -
+    показывает накопленные с последнего рестарта провалы отправки пушей в
+    разрезе платформы, чтобы по факту увидеть, действительно ли Android
+    проваливает пуши чаще iOS (см. комментарий у send_push_with_retry выше),
+    а не гадать. Сбрасывается при каждом рестарте бота - это ожидаемо, это
+    просто счётчик наблюдения, а не постоянная аналитика."""
+    if message.from_user.id != ADMIN_USER_ID:
+        return
+    if not PUSH_FAILURE_STATS:
+        await message.answer("📊 Провалов отправки пушей с последнего рестарта бота нет.")
+        return
+    by_platform = {}
+    for (platform, reason), count in PUSH_FAILURE_STATS.items():
+        by_platform[platform] = by_platform.get(platform, 0) + count
+    lines = ["📊 *Провалы отправки пушей с последнего рестарта (по платформам):*", ""]
+    for platform, total in sorted(by_platform.items(), key=lambda x: -x[1]):
+        lines.append(f"{platform}: {total}")
+    lines.append("")
+    lines.append("*По причинам:*")
+    for (platform, reason), count in sorted(PUSH_FAILURE_STATS.items(), key=lambda x: -x[1]):
+        lines.append(f"{platform} / {reason}: {count}")
+    await message.answer("\n".join(lines), parse_mode='Markdown')
+
 async def push_rain_alert(city, event):
     """Рассылает упреждающий пуш водителям и курьерам выбранного города о
     скором начале (или усилении) осадков - в отличие от
@@ -20831,15 +20919,16 @@ async def push_rain_alert(city, event):
     logger.info(f"{event['emoji']} В городе {city} ожидаются осадки ({event['name']}) - рассылаю {len(recipients)} пользователям")
     sent, failed = 0, 0
     for user_id, state in recipients:
-        try:
-            await bot.send_message(
-                user_id, text, parse_mode='Markdown',
-                reply_markup=_rain_push_keyboard(state),
-            )
+        # ИЗМЕНЕНО 23.09.2026 (см. send_push_with_retry выше) - flood-control
+        # теперь ждёт и пробует повторно, провалы считаются по платформе.
+        ok = await send_push_with_retry(
+            user_id, text, state=state, parse_mode='Markdown',
+            reply_markup=_rain_push_keyboard(state),
+        )
+        if ok:
             sent += 1
-        except Exception as e:
+        else:
             failed += 1
-            logger.warning(f"⚠️ Не удалось отправить пуш о погоде пользователю {user_id}: {e}")
         await asyncio.sleep(0.05)
     logger.info(f"{event['emoji']} Пуш о погоде в {city} разослан: {sent} успешно, {failed} ошибок")
 
@@ -20953,12 +21042,11 @@ async def push_district_rain_alert(district_name, event, user_ids):
     logger.info(f"{event['emoji']} Район {district_name} (Москва): осадки ({event['name']}) - точечно рассылаю {len(recipients)} водителям в этом районе")
     sent, failed = 0, 0
     for user_id, state in recipients:
-        try:
-            await bot.send_message(user_id, text, parse_mode='Markdown', reply_markup=_rain_push_keyboard(state))
+        ok = await send_push_with_retry(user_id, text, state=state, parse_mode='Markdown', reply_markup=_rain_push_keyboard(state))
+        if ok:
             sent += 1
-        except Exception as e:
+        else:
             failed += 1
-            logger.warning(f"⚠️ Не удалось отправить районный пуш о погоде пользователю {user_id}: {e}")
         await asyncio.sleep(0.05)
     logger.info(f"{event['emoji']} Районный пуш ({district_name}) разослан: {sent} успешно, {failed} ошибок")
 
@@ -21301,15 +21389,14 @@ async def push_holiday_alert(holiday, kind):
     logger.info(f"{holiday['emoji']} {holiday['name']} ({kind}) - рассылаю {len(recipients)} пользователям {where}")
     sent, failed = 0, 0
     for user_id, state in recipients:
-        try:
-            await bot.send_message(
-                user_id, text, parse_mode='Markdown',
-                reply_markup=services_keyboard(state.get('category'), state.get('city'), user_id),
-            )
+        ok = await send_push_with_retry(
+            user_id, text, state=state, parse_mode='Markdown',
+            reply_markup=services_keyboard(state.get('category'), state.get('city'), user_id),
+        )
+        if ok:
             sent += 1
-        except Exception as e:
+        else:
             failed += 1
-            logger.warning(f"⚠️ Не удалось отправить пуш о празднике пользователю {user_id}: {e}")
         await asyncio.sleep(0.05)
     logger.info(f"{holiday['emoji']} Пуш о празднике «{holiday['name']}» ({kind}) разослан: {sent} успешно, {failed} ошибок")
 
@@ -21492,18 +21579,17 @@ async def push_airport_status_change(icao, airport, old_status, new_status, noti
         category = state.get('category')
         text = base_text + format_queue_breakdown(city, icao, category)
         text += "\n\n_Подробности во вкладке «Доступность»._"
-        try:
-            # ИЗМЕНЕНО 22.09.2026 (см. комментарий в push_rain_alert - "кнопки
-            # нет, поломалось после рестарта") - приложена актуальная Reply-
-            # клавиатура, чтобы пуш сам "чинил" пропавшее меню.
-            await bot.send_message(
-                user_id, text, parse_mode='Markdown',
-                reply_markup=services_keyboard(category, city, user_id),
-            )
+        # ИЗМЕНЕНО 22.09.2026 (см. комментарий в push_rain_alert - "кнопки
+        # нет, поломалось после рестарта") - приложена актуальная Reply-
+        # клавиатура, чтобы пуш сам "чинил" пропавшее меню.
+        ok = await send_push_with_retry(
+            user_id, text, state=state, parse_mode='Markdown',
+            reply_markup=services_keyboard(category, city, user_id),
+        )
+        if ok:
             sent += 1
-        except Exception as e:
+        else:
             failed += 1
-            logger.warning(f"⚠️ Не удалось отправить пуш пользователю {user_id}: {e}")
         # Telegram допускает ~30 сообщений/сек в разные чаты - берём с запасом
         await asyncio.sleep(0.05)
     logger.info(f"📢 Пуш по {icao} разослан: {sent} успешно, {failed} ошибок")
@@ -25476,15 +25562,14 @@ async def push_road_incident_alert(city, notice):
     logger.info(f"⛔ Пуш о дорожном событии в {city} - рассылаю {len(recipients)} водителям")
     sent, failed = 0, 0
     for user_id, state in recipients:
-        try:
-            await bot.send_message(
-                user_id, text, parse_mode='Markdown', disable_web_page_preview=True,
-                reply_markup=services_keyboard(state.get('category'), city, user_id),
-            )
+        ok = await send_push_with_retry(
+            user_id, text, state=state, parse_mode='Markdown', disable_web_page_preview=True,
+            reply_markup=services_keyboard(state.get('category'), city, user_id),
+        )
+        if ok:
             sent += 1
-        except Exception as e:
+        else:
             failed += 1
-            logger.warning(f"⚠️ Не удалось отправить пуш о дорожном событии пользователю {user_id}: {e}")
         await asyncio.sleep(0.05)  # Telegram допускает ~30 сообщений/сек в разные чаты
     logger.info(f"⛔ Пуш о дорожном событии в {city} разослан: {sent} успешно, {failed} ошибок")
 
@@ -25596,17 +25681,16 @@ async def push_high_demand_alert(icao, airport, relevant_class, hour_from, hour_
         driver_category = state.get('category')
         text = base_text + format_queue_breakdown(city, icao, driver_category)
         text += "\n\n_Подробности во вкладке «Доступность»._"
-        try:
-            # см. комментарий в push_rain_alert - "кнопки нет, поломалось
-            # после рестарта" - reply_markup самовосстанавливает меню.
-            await bot.send_message(
-                user_id, text, parse_mode='Markdown',
-                reply_markup=services_keyboard(driver_category, city, user_id),
-            )
+        # см. комментарий в push_rain_alert - "кнопки нет, поломалось
+        # после рестарта" - reply_markup самовосстанавливает меню.
+        ok = await send_push_with_retry(
+            user_id, text, state=state, parse_mode='Markdown',
+            reply_markup=services_keyboard(driver_category, city, user_id),
+        )
+        if ok:
             sent += 1
-        except Exception as e:
+        else:
             failed += 1
-            logger.warning(f"⚠️ Не удалось отправить пуш о спросе пользователю {user_id}: {e}")
         # Telegram допускает ~30 сообщений/сек в разные чаты - берём с запасом
         await asyncio.sleep(0.05)
     logger.info(f"📢 Пуш о спросе по {icao} разослан: {sent} успешно, {failed} ошибок")
@@ -25708,17 +25792,16 @@ async def push_green_demand_alert(icao, airport, relevant_class, hour_from, hour
         driver_category = state.get('category')
         text = base_text + format_queue_breakdown(city, icao, driver_category)
         text += "\n\n_Подробности во вкладке «Доступность»._"
-        try:
-            # см. комментарий в push_rain_alert - "кнопки нет, поломалось
-            # после рестарта".
-            await bot.send_message(
-                user_id, text, parse_mode='Markdown',
-                reply_markup=services_keyboard(driver_category, city, user_id),
-            )
+        # см. комментарий в push_rain_alert - "кнопки нет, поломалось
+        # после рестарта".
+        ok = await send_push_with_retry(
+            user_id, text, state=state, parse_mode='Markdown',
+            reply_markup=services_keyboard(driver_category, city, user_id),
+        )
+        if ok:
             sent += 1
-        except Exception as e:
+        else:
             failed += 1
-            logger.warning(f"⚠️ Не удалось отправить пуш о зелёном спросе пользователю {user_id}: {e}")
         await asyncio.sleep(0.05)
     logger.info(f"📢 Пуш о зелёном спросе по {icao} разослан: {sent} успешно, {failed} ошибок")
 
@@ -25867,17 +25950,16 @@ async def push_peak_hour_alert(city, category, target_date, target_hour, label, 
     logger.info(f"📅 Час пика через {PEAK_HOUR_PUSH_LEAD_MINUTES} мин в городе {city} ({target_date} {target_hour:02d}:00) для категории {category} - рассылаю {len(recipients)} водителям")
     sent, failed = 0, 0
     for user_id in recipients:
-        try:
-            # см. комментарий в push_rain_alert - "кнопки нет, поломалось
-            # после рестарта".
-            await bot.send_message(
-                user_id, text, parse_mode='Markdown',
-                reply_markup=services_keyboard(category, city, user_id),
-            )
+        # см. комментарий в push_rain_alert - "кнопки нет, поломалось
+        # после рестарта".
+        ok = await send_push_with_retry(
+            user_id, text, state=user_state.get(user_id), parse_mode='Markdown',
+            reply_markup=services_keyboard(category, city, user_id),
+        )
+        if ok:
             sent += 1
-        except Exception as e:
+        else:
             failed += 1
-            logger.warning(f"⚠️ Не удалось отправить пуш о часе пика пользователю {user_id}: {e}")
         await asyncio.sleep(0.05)  # Telegram допускает ~30 сообщений/сек в разные чаты
     logger.info(f"📅 Пуш о часе пика по городу {city} разослан: {sent} успешно, {failed} ошибок")
 
