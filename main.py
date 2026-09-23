@@ -14592,8 +14592,20 @@ MAP_CITY_EVENTS_API_PATH = '/map/city_events'
 # (могло быть за дни/недели до начала) и висела до самого начала. Теперь
 # метка появляется на карте только за MAP_EVENT_ADVANCE_HOURS до начала -
 # не раньше, чтобы не захламлять карту событиями, которые будут ещё очень
-# нескоро. Исчезает по-прежнему ровно в момент начала (now_ts >= start).
-MAP_EVENT_ADVANCE_HOURS = 3
+# нескоро.
+# ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя - "выводи на карту
+# события афиш за 2 часа до начала события и после окончания убирай его с
+# карты"): было 3 часа lead и метка пропадала РОВНО В МОМЕНТ НАЧАЛА
+# события (now_ts >= start), то есть метка вообще не была видна, пока
+# мероприятие идёт - явно не то, что нужно водителю (событие продолжает
+# генерировать спрос на такси всё время, пока идёт, и ещё какое-то время
+# после). Теперь: lead уменьшен до 2 часов, и метка остаётся на карте ВЕСЬ
+# ход события, пропадая только после его окончания (see 'end'/'ends_at' -
+# TimePad считает end_ts при сборе, см. fetch_timepad_data.py; Telegram-
+# афиша даёт ISO 'end' или None, см. fetch_concert_events.py - если end
+# неизвестен, используется start как фолбэк, тогда метка пропадает в
+# момент начала, как было раньше, для событий без известной длительности).
+MAP_EVENT_ADVANCE_HOURS = 2
 
 async def handle_map_city_events_api(request):
     """JSON API для меток афиши (концерты/мероприятия) на карте - по просьбе
@@ -14604,19 +14616,21 @@ async def handle_map_city_events_api(request):
     площадку/адрес (см. geocode_posts в fetch_concert_events.py и
     geocode_events в fetch_timepad_data.py) - события без координат на карту
     не попадают, но остаются в обычном разделе "🎭 СОБЫТИЯ ГОРОДА" внутри
-    бота. На карте видны только события в окне [сейчас; +MAP_EVENT_ADVANCE_HOURS]
-    (см. MAP_EVENT_ADVANCE_HOURS выше) - не раньше и не позже, чтобы не
-    захламлять карту метками далёких во времени мероприятий."""
+    бота. На карте видны только события в окне [начало - MAP_EVENT_ADVANCE_HOURS;
+    конец события] (см. MAP_EVENT_ADVANCE_HOURS и комментарий у него выше) -
+    не раньше и не позже, чтобы не захламлять карту метками далёких во
+    времени мероприятий, но при этом не терять метку, пока событие идёт."""
     city = request.query.get('city', '')
     now_ts = datetime.now(ZoneInfo('UTC')).timestamp()
-    advance_cutoff_ts = now_ts + MAP_EVENT_ADVANCE_HOURS * 3600
+    lead_seconds = MAP_EVENT_ADVANCE_HOURS * 3600
     result = []
     try:
         timepad_data = load_timepad_data()
         for ev in (timepad_data or {}).get('cities', {}).get(city, []):
             lat, lon = ev.get('place_lat'), ev.get('place_lon')
             start = ev.get('start') or 0
-            if lat is None or lon is None or start < now_ts or start > advance_cutoff_ts:
+            end = ev.get('end') or start
+            if lat is None or lon is None or now_ts < start - lead_seconds or now_ts > end:
                 continue
             result.append({
                 'lat': lat, 'lon': lon, 'title': ev.get('title') or '',
@@ -14631,7 +14645,9 @@ async def handle_map_city_events_api(request):
             if start_iso:
                 try:
                     start_ts = datetime.fromisoformat(start_iso).timestamp()
-                    if start_ts < now_ts or start_ts > advance_cutoff_ts:
+                    end_iso = post.get('end')
+                    end_ts = datetime.fromisoformat(end_iso).timestamp() if end_iso else start_ts
+                    if now_ts < start_ts - lead_seconds or now_ts > end_ts:
                         continue
                 except Exception:
                     pass
