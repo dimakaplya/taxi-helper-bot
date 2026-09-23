@@ -11920,37 +11920,25 @@ def map_webapp_html():
   // водитель), см. /map/demand. Порог появления - 80% (MAP_DEMAND_CLOUD_
   // THRESHOLD на сервере), 3 ступени непрозрачности 80/90/100%+.
   let demandCloudMarker = null;
-  // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "накидываю такие же
-  // облака спроса только поменьше размером в половину на удалении 7 км от
-  // основных, порядка двух-трёх, на разных расстояниях, разной формы,
-  // рандомно меняются каждые 5 минут") - спутники городского облака,
-  // отдельный массив, чтобы стирать и перерисовывать вместе с основным
-  // облаком на каждый опрос loadDemandCloud.
-  let demandSatelliteMarkers = [];
+  // УБРАНО 23.09.2026 (прямая просьба пользователя - "убери спутники
+  // облаков вообще из проекта показывает облака только реальных данных"):
+  // раньше здесь рисовались 2-3 процедурных "облака-спутника" вокруг
+  // основного городского облака - чисто декоративные, без реальных данных
+  // за ними (случайная форма/позиция по seed). Убраны полностью вместе со
+  // всей инфраструктурой генерации (demandSatelliteMarkers, offsetLatLon,
+  // SATELLITE_DISTANCE_*, satelliteCount) - на карте остаются только
+  // облака, посчитанные из реальных данных: районные облака спроса
+  // (loadDistrictDemandClouds, реальная матрица по районам) и единое
+  // городское облако-фолбэк (loadDemandCloud, посчитано из часа
+  // пика/погоды) для городов/категорий без районной матрицы.
   // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - прислал файл
   // moscow_taxi_demand_baseline_inside_mkad.xlsx с реальной матрицей спроса
   // по 30 районам Москвы) - облака для Москвы в категориях такси/Ultima
   // теперь рисуются ПО РЕАЛЬНЫМ РАЙОНАМ (см. loadDistrictDemandClouds
   // ниже), а не процедурными случайными спутниками вокруг центра - свой
-  // массив маркеров, отдельный от demandCloudMarker/demandSatelliteMarkers
-  // (те используются как fallback для остальных городов/категорий).
+  // массив маркеров, отдельный от demandCloudMarker (тот используется как
+  // fallback для остальных городов/категорий).
   let districtDemandMarkers = [];
-  // Общий helper для смещения точки на distM метров под углом angleRad -
-  // используется и для спутников городского облака, и для спутников
-  // облаков у аэропортов (см. loadAirports).
-  function offsetLatLon(lat, lon, distM, angleRad) {{
-    const metersPerDegLat = 111320;
-    const dLat = (distM * Math.cos(angleRad)) / metersPerDegLat;
-    const dLon = (distM * Math.sin(angleRad)) / (metersPerDegLat * Math.cos(lat * Math.PI / 180));
-    return [lat + dLat, lon + dLon];
-  }}
-  // Параметры спутников - расстояние ~7 км (с разбросом 5-9 км, чтобы были
-  // "на разных расстояниях"), 2 или 3 штуки (зависит от seed, детерминированно).
-  const SATELLITE_DISTANCE_BASE_METERS = 7000;
-  const SATELLITE_DISTANCE_SPREAD_METERS = 2000;
-  function satelliteCount(seed) {{
-    return 2 + (seed % 2); // 2 или 3
-  }}
   function demandCloudSeed(s) {{
     let h = 17;
     for (let i = 0; i < (s || '').length; i++) {{ h = (h * 31 + s.charCodeAt(i)) % 10000; }}
@@ -12013,9 +12001,11 @@ def map_webapp_html():
     return demand >= strong ? DEMAND_CLOUD_OPACITY_STRONG : DEMAND_CLOUD_OPACITY_WEAK;
   }}
   // ВЫНЕСЕНО 22.09.2026 из тела loadDemandCloud - генерация формы облака по
-  // центру/радиусу/seed теперь отдельная функция, чтобы её же переиспользовать
-  // для спутников (см. SATELLITE_DISTANCE_BASE_METERS выше) - раньше эта
-  // логика была только инлайн-циклом под основное облако.
+  // центру/радиусу/seed теперь отдельная функция, переиспользуется главным
+  // городским облаком и районными облаками (см. loadDistrictDemandClouds) -
+  // раньше логика была только инлайн-циклом под основное облако. Спутники,
+  // которые тоже переиспользовали эту функцию, убраны 23.09.2026 (см.
+  // комментарий у demandCloudMarker выше).
   // ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя - "сделай их, может
   // быть, 30 штук разной формы, миксуй, чередуй") - раньше городское/
   // районное облако рисовалось ОДНОЙ фиксированной формулой волны (только
@@ -12165,13 +12155,9 @@ def map_webapp_html():
     try {{
       // Города с реальными районными облаками (DISTRICT_DEMAND_CITIES) +
       // такси/Ultima -> реальные районные облака (см. выше), а не
-      // процедурная схема ниже. Старые demandCloudMarker/demandSatelliteMarkers
-      // на всякий случай тоже очищаются, чтобы не оставалось "хвостов" при
-      // переключении категории/города внутри одной сессии карты.
+      // единое городское облако ниже.
       if (DISTRICT_DEMAND_CITIES.includes(city) && (myCategory === 'taxi' || myCategory === 'ultima')) {{
         if (demandCloudMarker) {{ map.removeLayer(demandCloudMarker); demandCloudMarker = null; }}
-        demandSatelliteMarkers.forEach(m => map.removeLayer(m));
-        demandSatelliteMarkers = [];
         await loadDistrictDemandClouds();
         return;
       }}
@@ -12181,8 +12167,6 @@ def map_webapp_html():
       if (!resp.ok) return;
       const data = await resp.json();
       if (demandCloudMarker) {{ map.removeLayer(demandCloudMarker); demandCloudMarker = null; }}
-      demandSatelliteMarkers.forEach(m => map.removeLayer(m));
-      demandSatelliteMarkers = [];
       if (data.demand === null || data.demand === undefined || data.demand < DEMAND_CLOUD_SHOW_THRESHOLD_PERCENT || data.lat === null || data.lon === null) return;
       const DEMAND_CLOUD_RADIUS_METERS = 12000;
       const seed = demandCloudSeed(city + '::' + myCategory + '::' + cityDemandCloudTimeBucket());
@@ -12195,80 +12179,6 @@ def map_webapp_html():
         smoothFactor: 3,
       }}).addTo(map);
       if (demandCloudMarker._path) {{ demandCloudMarker._path.style.filter = ensureCloudFilter(34); }}
-      // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя) - 2-3 облака-
-      // спутника вполовину меньше основного, на расстоянии ~7 км (с
-      // разбросом), каждое своей формы (свой seed -> свой профиль wobble) и
-      // своей позиции (свой угол), меняются вместе с основным облаком раз в
-      // 5 минут (тот же cityDemandCloudTimeBucket сидит внутри seed).
-      //
-      // ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя - "в Москве спрос
-      // больше в центре, на севере Москвы и на северо-западе, в такси
-      // Ultima"): раньше угол спутника был ПОЛНОСТЬЮ случайным (от seed) -
-      // спутники могли оказаться в любой стороне от города, без всякой
-      // географической логики. Для Москвы в категориях такси/Ultima первый
-      // спутник целился на север, второй - на северо-запад.
-      // ЕЩЁ РАЗ ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя - "ультима
-      // центральный северный и северозападный и югозападный в облаках
-      // спутники произвольно, такси обычный весь город спутники
-      // произвольно"): теперь направленность ТОЛЬКО у Ultima (у обычного
-      // такси убрали совсем - спутники снова могут оказаться в любой части
-      // города, без привязки к сторонам света). У Ultima сторон стало три -
-      // север/северо-запад/юго-запад - и каждый спутник НЕЗАВИСИМО выбирает
-      // одну из них по своему seed (а не жёстко "первый на север, второй на
-      // северо-запад", как раньше), т.е. "произвольно" среди этих трёх
-      // направлений. Основное облако и так уже держится близко к центру
-      // города (небольшой offsetDist в cityCloudLatLngs) - вместе выходит
-      // "центр + север/северо-запад/юго-запад произвольно" для Ultima. Для
-      // остальных городов/категорий угол по-прежнему полностью случайный.
-      const CITY_DEMAND_DIRECTION_OPTIONS_DEG = {{ moscow: [0, -45, -135] }}; // север, северо-запад, юго-запад
-      const directionOptions = (city === 'moscow' && myCategory === 'ultima')
-        ? CITY_DEMAND_DIRECTION_OPTIONS_DEG[city] : null;
-      // ИЗМЕНЕНО 22.09.2026 (жалоба пользователя - "город почти весь спросом
-      // закрыт в дождь и часы спроса от 70%", уточнение - "спутники на
-      // эконом/комфорт/комфорт+ сделать меньше, основные облака развести
-      // подальше друг от друга, чтобы не накладывались и не захватывали весь
-      // город, а спутники относить за пределы МКАДа, в разные части
-      // города"): раньше спутники были ровно в 2 раза меньше основного
-      // облака и в ~7 км от него - для Москвы это укладывалось ЦЕЛИКОМ
-      // внутри МКАД и визуально сливалось с основным облаком (12 км
-      // радиусом) в сплошное фиолетовое пятно на весь город. Теперь:
-      // - для Москвы спутники относятся на MOSCOW_SATELLITE_DISTANCE_METERS
-      //   (~20 км, за пределы МКАД) вместо стандартных 7 км - визуально
-      //   разносится "город/центр" (основное облако) и отдельные более
-      //   слабые всплески на севере/северо-западе за кольцом, а не единое
-      //   пятно;
-      // - для тарифа "такси" (эконом/комфорт/комфорт+, в отличие от Ultima)
-      //   спутники дополнительно уменьшены (радиус не половина, а треть
-      //   основного облака) - в этом тарифе выше плотность заказов и без
-      //   того субъективно "многолюднее", поэтому сильнее сокращаем площадь.
-      const MOSCOW_SATELLITE_DISTANCE_METERS = 20000;
-      const MOSCOW_SATELLITE_DISTANCE_SPREAD_METERS = 4000;
-      const satDistanceBase = city === 'moscow' ? MOSCOW_SATELLITE_DISTANCE_METERS : SATELLITE_DISTANCE_BASE_METERS;
-      const satDistanceSpread = city === 'moscow' ? MOSCOW_SATELLITE_DISTANCE_SPREAD_METERS : SATELLITE_DISTANCE_SPREAD_METERS;
-      const satRadiusDivisor = myCategory === 'taxi' ? 3.5 : 2;
-      const satCount = satelliteCount(seed);
-      for (let s = 0; s < satCount; s++) {{
-        const satSeed = (seed * 97 + s * 311 + 1) % 100000;
-        const distM = satDistanceBase + (satSeed % satDistanceSpread) - satDistanceSpread / 2;
-        let angle;
-        if (directionOptions) {{
-          const dirIdx = satSeed % directionOptions.length;
-          const jitterDeg = ((satSeed % 2000) / 100) - 10; // ±10°
-          angle = (directionOptions[dirIdx] + jitterDeg) * Math.PI / 180;
-        }} else {{
-          angle = ((satSeed * 17) % 628) / 100;
-        }}
-        const [satLat, satLon] = offsetLatLon(data.lat, data.lon, distM, angle);
-        const satMarker = L.polygon(cityCloudLatLngs(satLat, satLon, DEMAND_CLOUD_RADIUS_METERS / satRadiusDivisor, satSeed), {{
-          color: cloudColor,
-          weight: 0,
-          fillColor: cloudFill(cloudColor),
-          fillOpacity: demandCloudOpacityByLevel(data.demand) * 0.85,
-          smoothFactor: 3,
-        }}).addTo(map);
-        if (satMarker._path) {{ satMarker._path.style.filter = ensureCloudFilter(28); }}
-        demandSatelliteMarkers.push(satMarker);
-      }}
     }} catch (e) {{ /* тихо */ }}
   }}
   // ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "вокруг такого
