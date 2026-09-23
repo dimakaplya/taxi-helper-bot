@@ -10754,18 +10754,20 @@ def map_webapp_html():
   // скриншотами iOS/Android - "по разному отрисовывает облака спроса,
   // давай как-то едино сделаем") - раньше размытие и зернистость были
   // ДВУМЯ отдельными CSS filter-функциями, склеенными в одну строку
-  // (`style.filter = 'blur(30px) url(#cloudGrainFilter)'`). Такая связка
-  // "растровый blur() + ссылка на SVG-фильтр" по-разному (и не полностью)
-  // поддерживается в WebView на iOS и Android - отсюда на Android блюр
-  // либо не применялся вовсе, либо применялся иначе, и вместо мягкого
-  // облака была видна резкая/сетчатая текстура шума (feTurbulence без
-  // сглаживания). Теперь ОДИН цельный SVG-фильтр на каждый радиус
-  // размытия (feGaussianBlur + зернистость внутри одного <filter>,
-  // применяется единственной ссылкой `filter: url(#cloudFilter_NN)`) -
-  // это уже чистый SVG-filter-граф без смешивания с CSS-функцией blur(),
-  // одинаково рендерится и в WebKit (iOS), и в Chromium-based WebView
-  // (Android). Кэш по id (idempotent) - один фильтр на каждое уникальное
-  // значение blurPx, переиспользуется всеми облаками с этим радиусом.
+  // (`style.filter = 'blur(30px) url(#cloudGrainFilter)'`), теперь один
+  // цельный SVG-фильтр. ЕЩЁ РАЗ ПЕРЕДЕЛАНО 23.09.2026 (жалоба пользователя
+  // со скриншотом - "рисует квадратами, надо плавнее") - зернистость
+  // (feTurbulence с stitchTiles=stitch) на большом облаке (крупный
+  // географический полигон при таком масштабе карты) рендерилась именно
+  // крупными видимыми квадратами - WebKit (iOS) считает feTurbulence по
+  // тайлам, и на большой area это давало грубую блочную текстуру вместо
+  // незаметного шума. Эффект был еле заметен (альфа 0.05) и никак не стоил
+  // такой ценой - убрали turbulence/colorMatrix/composite полностью,
+  // оставили ТОЛЬКО feGaussianBlur (единственный примитив в фильтре - самый
+  // безопасный и предсказуемый вариант, одинаково гладко рендерится и в
+  // WebKit, и в Chromium). Кэш по id (idempotent) - один фильтр на каждое
+  // уникальное значение blurPx, переиспользуется всеми облаками с этим
+  // радиусом.
   function ensureCloudFilter(blurPx) {{
     const fid = 'cloudFilter_' + blurPx;
     if (document.getElementById(fid)) return 'url(#' + fid + ')';
@@ -10786,26 +10788,7 @@ def map_webapp_html():
     const blur = document.createElementNS(ns, 'feGaussianBlur');
     blur.setAttribute('in', 'SourceGraphic');
     blur.setAttribute('stdDeviation', String(blurPx / 2));
-    blur.setAttribute('result', 'blurred');
-    const turb = document.createElementNS(ns, 'feTurbulence');
-    turb.setAttribute('type', 'fractalNoise');
-    turb.setAttribute('baseFrequency', '0.85');
-    turb.setAttribute('numOctaves', '1');
-    turb.setAttribute('stitchTiles', 'stitch');
-    turb.setAttribute('result', 'noise');
-    const cm = document.createElementNS(ns, 'feColorMatrix');
-    cm.setAttribute('in', 'noise');
-    cm.setAttribute('type', 'matrix');
-    cm.setAttribute('values', '0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 0.05 0');
-    cm.setAttribute('result', 'fadedNoise');
-    const comp = document.createElementNS(ns, 'feComposite');
-    comp.setAttribute('in', 'fadedNoise');
-    comp.setAttribute('in2', 'blurred');
-    comp.setAttribute('operator', 'over');
     filter.appendChild(blur);
-    filter.appendChild(turb);
-    filter.appendChild(cm);
-    filter.appendChild(comp);
     defs.appendChild(filter);
     return 'url(#' + fid + ')';
   }}
