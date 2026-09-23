@@ -10199,19 +10199,15 @@ def map_webapp_html():
 {map_preconnect_hints}
 <script src="{TG_WEBAPP_JS_PROXY_PATH}"></script>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
-<!-- ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя - "сделай стрелку и
-     север": ориентация карты по направлению движения + режим следования
-     за собой) - вместо минифицированного leaflet.min.js теперь ПОЛНЫЙ
-     исходник leaflet-src.js: плагин leaflet-rotate (ниже) патчит Leaflet
-     через L.Class.include() и по своим собственным примерам грузится
-     именно поверх несжатой сборки. Версия та же (1.9.4), поведение самого
-     Leaflet не меняется - только поворот подложки/маркеров становится
-     доступен. Если сеть не даст загрузить leaflet-rotate (например,
-     заблокирован unpkg) - основная карта продолжит работать как раньше,
-     просто без поворота (все вызовы map.setBearing/getBearing ниже
-     обёрнуты в проверку typeof и try/catch). -->
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet-src.js"></script>
-<script src="https://unpkg.com/leaflet-rotate@0.2.8/dist/leaflet-rotate-src.js"></script>
+<!-- УБРАНО 23.09.2026 (прямая просьба пользователя - "вообще убери
+     слежение и на север", после жалобы "херня получилась") - фича
+     поворота карты по направлению движения + автослежение за собой
+     (leaflet-rotate) убрана целиком: вернули обычный минифицированный
+     leaflet.min.js вместо несжатого leaflet-src.js (тот был нужен только
+     для патча leaflet-rotate), кнопки "🧭 Север"/"🎯 Следить" и вся их
+     логика (navModeOn/followModeOn/followMapOnSelf/map.setBearing) тоже
+     удалены - см. историю коммитов при необходимости вернуть. -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 {yandex_maps_scripts}
 <!-- ДОБАВЛЕНО 23.09.2026 (жалоба пользователя - "тормозит когда включаю заправки"):
      861 отдельных L.marker в Москве без кластеризации рендерились/перерисовывались
@@ -10242,8 +10238,6 @@ def map_webapp_html():
     </div>
   </div>
   <div class="layer-toggle-btn" id="trafficToggleBtn">🚦 Пробки</div>
-  <div class="layer-toggle-btn" id="navModeToggleBtn">🧭 Север</div>
-  <div class="layer-toggle-btn" id="followModeToggleBtn">🎯 Следить</div>
 </div>
 <script>
   const CATEGORY_STYLE = {style_json};
@@ -10339,15 +10333,7 @@ def map_webapp_html():
   // раза.
   const CITY_CENTERS = {city_centers_json};
   const initialCenter = CITY_CENTERS[city] || [55.7558, 37.6173];
-  // ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "добавь на карту
-  // возможность ориентировать по северу и привязываться за стрелкой
-  // сзади" -> "делай стрелку и север") - rotate:true/touchRotate:true
-  // включают плагин leaflet-rotate (см. подключение скрипта выше),
-  // bearing:0 - карта открывается как обычно, повёрнутая на север.
-  // rotateControl:false - свой штатный виджет-компас плагина не рисуем,
-  // вместо него две собственные кнопки в общем ряду ниже ("🧭 Север" и
-  // "🎯 Следить"), в едином визуальном стиле с остальными кнопками карты.
-  const map = L.map('map', {{ rotate: true, bearing: 0, touchRotate: true, rotateControl: false }}).setView(initialCenter, 11);
+  const map = L.map('map').setView(initialCenter, 11);
   // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "добавить какой-то
   // лёгкой зернистости, прям лёгкой-лёгкой") - L.svg().addTo(map) заранее
   // создаёт SVG-рендерер Leaflet (иначе он появляется только при первом
@@ -10424,27 +10410,6 @@ def map_webapp_html():
   const SELF_MARKER_STYLE = {self_marker_style_json};
   let selfMarker = null;
   let selfHeading = 0;
-  // ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "делай стрелку и
-  // север") - navModeOn: карта поворачивается вслед за heading (режим
-  // навигатора), а не всегда смотрит на север. followModeOn: карта сама
-  // подъезжает вслед за координатой водителя при каждом обновлении, а не
-  // только один раз при первом GPS-фиксе. Обе кнопки полностью независимы
-  // друг от друга (по явному ответу пользователя на уточняющий вопрос -
-  // "две отдельные кнопки"), обе выключены по умолчанию (карта открывается
-  // как раньше - смотрит на север, без автослежения).
-  let navModeOn = false;
-  let followModeOn = false;
-  const ROTATE_SUPPORTED = typeof map.setBearing === 'function';
-  if (!ROTATE_SUPPORTED) {{
-    // Плагин leaflet-rotate не загрузился (например, сеть не пустила
-    // unpkg) - прячем кнопку "Север" вместо того, чтобы она молча ничего
-    // не делала, как это уже было с пробками (см. фикс кнопки "Пробки"
-    // выше). "🎯 Следить" от этого плагина не зависит (использует только
-    // штатные методы Leaflet), поэтому её оставляем работать в любом
-    // случае.
-    const navBtnHide = document.getElementById('navModeToggleBtn');
-    if (navBtnHide) navBtnHide.style.display = 'none';
-  }}
   // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "убери чёрный
   // смайлик, который меня преследует за моим жёлтым, залитый фон должен
   // быть только у других пользователей") - серверное исключение своей же
@@ -10574,54 +10539,15 @@ def map_webapp_html():
     }} catch (e) {{ /* тихо - карта просто останется без попапа у своей стрелки */ }}
   }}
   loadMyProfile();
-  // ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "делай стрелку и
-  // север", режим следования "привязываться за стрелкой сзади") - при
-  // включённом followModeOn карта на каждое обновление координаты сама
-  // подъезжает за водителем, но НЕ центрирует его строго посередине
-  // экрана, а смещает точку в нижнюю часть (75% высоты) - вперёд по ходу
-  // движения остаётся больше видимого пространства карты, как в обычных
-  // навигаторах ("камера сзади"). Смещение считаем в экранных пикселях
-  // (latLngToContainerPoint/containerPointToLatLng у leaflet-rotate уже
-  // учитывают текущий поворот карты, поэтому работает корректно и вместе
-  // с navModeOn).
-  function followMapOnSelf(lat, lon) {{
-    if (!followModeOn) return;
-    try {{
-      const size = map.getSize();
-      const desired = L.point(size.x / 2, size.y * 0.75);
-      const center = L.point(size.x / 2, size.y / 2);
-      const selfPoint = map.latLngToContainerPoint([lat, lon]);
-      const newCenterPoint = selfPoint.add(center.subtract(desired));
-      const newCenter = map.containerPointToLatLng(newCenterPoint);
-      map.setView(newCenter, map.getZoom(), {{ animate: true, duration: 0.3 }});
-    }} catch (e) {{ /* тихо */ }}
-  }}
   function updateSelfMarker(lat, lon, heading) {{
     const h = (heading === null || heading === undefined || isNaN(heading)) ? selfHeading : heading;
     selfHeading = h;
-    // ДОБАВЛЕНО 23.09.2026 (режим "🧭 Север") - когда navModeOn включён,
-    // карта сама повёрнута на h градусов (map.setBearing(h) ниже), поэтому
-    // ЗНАЧОК стрелки на экране должен показывать (h - bearing) = 0, т.е.
-    // всегда "смотреть" строго вверх экрана - сама подложка карты уже
-    // повёрнута в сторону движения. Когда navModeOn выключен, bearing
-    // всегда 0, и иконка по-прежнему поворачивается на абсолютный heading,
-    // как было раньше.
-    let displayHeading = h;
-    if (ROTATE_SUPPORTED) {{
-      if (navModeOn) {{
-        try {{ map.setBearing(h); }} catch (e) {{ /* тихо */ }}
-        displayHeading = 0;
-      }} else {{
-        displayHeading = h - (map.getBearing ? map.getBearing() : 0);
-      }}
-    }}
-    const icon = L.divIcon({{ className: 'self-icon', html: selfIconHtml(displayHeading), iconSize: [42, 42], iconAnchor: [21, 21] }});
+    const icon = L.divIcon({{ className: 'self-icon', html: selfIconHtml(h), iconSize: [42, 42], iconAnchor: [21, 21] }});
     selfLat = lat;
     selfLon = lon;
     if (selfMarker) {{
       selfMarker.setLatLng([lat, lon]);
       selfMarker.setIcon(icon);
-      followMapOnSelf(lat, lon);
     }} else {{
       selfMarker = L.marker([lat, lon], {{ icon, zIndexOffset: 1000 }}).addTo(map);
       if (myProfilePopupHtml) selfMarker.bindPopup(myProfilePopupHtml);
@@ -11897,32 +11823,6 @@ def map_webapp_html():
         }}
       }} catch (e) {{ /* тихо */ }}
       trafficToggleBtn.classList.toggle('active', trafficShownState);
-    }});
-  }}
-  // ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "делай стрелку и
-  // север") - две независимые кнопки-тумблера (см. navModeOn/followModeOn/
-  // ROTATE_SUPPORTED выше). "🧭 Север" - при выключении карта плавно
-  // возвращается к bearing 0 (обычная ориентация на север), при включении
-  // начинает поворачиваться за heading при следующем обновлении координаты
-  // в updateSelfMarker. "🎯 Следить" - при включении сразу же центрирует
-  // карту (со смещением вниз) на последней известной позиции, если она уже
-  // есть, дальше подхватывается в followMapOnSelf на каждое обновление.
-  const navModeToggleBtn = document.getElementById('navModeToggleBtn');
-  if (navModeToggleBtn && ROTATE_SUPPORTED) {{
-    navModeToggleBtn.addEventListener('click', () => {{
-      navModeOn = !navModeOn;
-      navModeToggleBtn.classList.toggle('active', navModeOn);
-      if (!navModeOn) {{
-        try {{ map.setBearing(0); }} catch (e) {{ /* тихо */ }}
-      }}
-    }});
-  }}
-  const followModeToggleBtn = document.getElementById('followModeToggleBtn');
-  if (followModeToggleBtn) {{
-    followModeToggleBtn.addEventListener('click', () => {{
-      followModeOn = !followModeOn;
-      followModeToggleBtn.classList.toggle('active', followModeOn);
-      if (followModeOn && selfLat !== null && selfLon !== null) followMapOnSelf(selfLat, selfLon);
     }});
   }}
   const fuelCheckbox = document.getElementById('fuelLayerCheckbox');
