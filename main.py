@@ -10903,6 +10903,10 @@ def map_webapp_html():
         }});
         renderTariffPanel();
         loadPositions();
+        // ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - тумблеры
+        // тарифов должны скрывать/показывать и облака спроса, не только
+        // маркеры водителей, см. DISTRICT_CLOUD_LAYERS/selectedTariffs выше).
+        loadDemandCloud();
       }});
       tariffPanel.appendChild(groupTitle);
       tariffs.forEach(t => {{
@@ -10915,6 +10919,7 @@ def map_webapp_html():
           else selectedTariffs.delete(tariffKey(cat, t));
           renderTariffPanel();
           loadPositions();
+          loadDemandCloud();
         }});
         tariffPanel.appendChild(row);
       }});
@@ -12086,14 +12091,14 @@ def map_webapp_html():
   // API читать) и label (подпись в тултипе).
   const DISTRICT_CLOUD_LAYERS = {{
     taxi: [
-      {{ field: 'demand_econom', label: 'Эконом' }},
-      {{ field: 'demand_comfort', label: 'Комфорт' }},
-      {{ field: 'demand_comfort_plus', label: 'Комфорт+' }},
+      {{ field: 'demand_econom', label: 'Эконом', tariff: 'Эконом' }},
+      {{ field: 'demand_comfort', label: 'Комфорт', tariff: 'Комфорт' }},
+      {{ field: 'demand_comfort_plus', label: 'Комфорт+', tariff: 'Комфорт+' }},
     ],
     ultima: [
-      {{ field: 'demand_business', label: 'Бизнес' }},
-      {{ field: 'demand_premier', label: 'Премьер' }},
-      {{ field: 'demand_elite', label: 'Элит' }},
+      {{ field: 'demand_business', label: 'Бизнес', tariff: 'Business' }},
+      {{ field: 'demand_premier', label: 'Премьер', tariff: 'Premier' }},
+      {{ field: 'demand_elite', label: 'Элит', tariff: 'Elite' }},
     ],
   }};
   async function loadDistrictDemandClouds() {{
@@ -12103,7 +12108,15 @@ def map_webapp_html():
       districtDemandMarkers = [];
       if (!resp.ok) return;
       const data = await resp.json();
-      const layers = DISTRICT_CLOUD_LAYERS[myCategory] || [];
+      // ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "на эти кнопки
+      // не только отображение [водителей], а ещё и спрос облаков - при
+      // включённой галочке показывает, отключаешь - не показывает тот или
+      // иной тариф") - тумблеры тарифов (selectedTariffs, см. выше) теперь
+      // фильтруют и слои облаков спроса, а не только маркеры водителей на
+      // карте: снят галочка "Элит" - облако спроса Элит не рисуется.
+      const layers = (DISTRICT_CLOUD_LAYERS[myCategory] || []).filter(
+        layer => selectedTariffs.has(tariffKey(myCategory, layer.tariff))
+      );
       const timeBucket = demandCloudTimeBucket();
       (data.districts || []).forEach(d => {{
         layers.forEach(layer => {{
@@ -12124,7 +12137,17 @@ def map_webapp_html():
             smoothFactor: 3,
           }}).addTo(map);
           if (marker._path) {{ marker._path.style.filter = ensureCloudFilter(20); }}
-          marker.bindTooltip(`${{d.name}} · ${{layer.label}} · ${{demand}}%`, {{ direction: 'top', offset: [0, -6], className: 'airport-label' }});
+          // УБРАНО 23.09.2026 (прямая просьба пользователя - "не
+          // информировать при нажатие на спрос в цифрах на облоко потому
+          // что щас 1 ночи и реально нет такого спроса"): точный % из
+          // тултипа убран - число из сырой таблицы (по часу/дню недели) не
+          // всегда совпадает с реальной картиной в моменте (особенно
+          // ночью), и выглядело как "облако показывает 85%, а на деле
+          // спроса нет" - вводило в заблуждение. Остаётся только
+          // название района и тариф, сама яркость/насыщенность облака
+          // по-прежнему передаёт уровень (см. demandCloudColorByLevel/
+          // demandCloudOpacityByLevel).
+          marker.bindTooltip(`${{d.name}} · ${{layer.label}}`, {{ direction: 'top', offset: [0, -6], className: 'airport-label' }});
           districtDemandMarkers.push(marker);
         }});
       }});
@@ -14346,9 +14369,22 @@ async def handle_map_district_demand_api(request):
                 if econom is None and comfort is None and comfort_plus is None and not district_raining:
                     continue
                 if district_raining:
-                    econom = max(econom or 0, MAP_DEMAND_RAIN_FLOOR_PERCENT)
-                    comfort = max(comfort or 0, MAP_DEMAND_RAIN_FLOOR_PERCENT)
-                    comfort_plus = max(comfort_plus or 0, MAP_DEMAND_RAIN_FLOOR_PERCENT)
+                    # ИСПРАВЛЕНО 23.09.2026 (прямая просьба пользователя,
+                    # реальный баг со скриншотом - "1 ночи и реально нет
+                    # такого спроса", облако Элит светило 85%): раньше
+                    # ОДИН И ТОТ ЖЕ дождевой пол MAP_DEMAND_RAIN_FLOOR_PERCENT
+                    # (85%) применялся ко ВСЕМ тарифам без разбора - для
+                    # Эконома (реальный диапазон до 100%) это нормально, но
+                    # для Элит (реальный максимум по таблице всего 16-19%,
+                    # см. подсчёт percentile выше в сессии) 85% - абсурдное,
+                    # никогда не встречающееся в реальных данных значение.
+                    # Теперь пол свой на тариф - "strong"-порог ИЗ ЕГО ЖЕ
+                    # DISTRICT_CLOUD_THRESHOLDS_BY_FIELD (тот порог, после
+                    # которого облако и так уже считается "ярким" для этого
+                    # тарифа), а не общий 85% для всех.
+                    econom = max(econom or 0, DISTRICT_CLOUD_THRESHOLDS_BY_FIELD['demand_econom'][1])
+                    comfort = max(comfort or 0, DISTRICT_CLOUD_THRESHOLDS_BY_FIELD['demand_comfort'][1])
+                    comfort_plus = max(comfort_plus or 0, DISTRICT_CLOUD_THRESHOLDS_BY_FIELD['demand_comfort_plus'][1])
                 item['demand_econom'] = econom
                 item['demand_comfort'] = comfort
                 item['demand_comfort_plus'] = comfort_plus
@@ -14366,9 +14402,11 @@ async def handle_map_district_demand_api(request):
                 if business is None and premium is None and elite is None and not district_raining:
                     continue
                 if district_raining:
-                    business = max(business or 0, MAP_DEMAND_RAIN_FLOOR_PERCENT)
-                    premium = max(premium or 0, MAP_DEMAND_RAIN_FLOOR_PERCENT)
-                    elite = max(elite or 0, MAP_DEMAND_RAIN_FLOOR_PERCENT)
+                    # См. комментарий у "дождевого пола" для такси выше -
+                    # та же правка: свой floor на тариф вместо общего 85%.
+                    business = max(business or 0, DISTRICT_CLOUD_THRESHOLDS_BY_FIELD['demand_business'][1])
+                    premium = max(premium or 0, DISTRICT_CLOUD_THRESHOLDS_BY_FIELD['demand_premier'][1])
+                    elite = max(elite or 0, DISTRICT_CLOUD_THRESHOLDS_BY_FIELD['demand_elite'][1])
                 item['demand_business'] = business
                 item['demand_premier'] = premium
                 item['demand_elite'] = elite
