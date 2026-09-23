@@ -799,6 +799,105 @@ HOLIDAYS = [
     {'date': (2027, 9, 25), 'name': 'День города', 'emoji': '🎉', 'city': 'krasnodar'},  # TODO: последняя суббота сентября, уточнить
     {'date': (2027, 5, 29), 'name': 'День города', 'emoji': '🎉', 'city': 'sochi'},  # TODO: дата плавает год от года без правила, уточнить
 ]
+# ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - собрать единую формулу
+# спроса для "Куда ехать"/карты: "день недели и время, городские и
+# государственные праздники, погода, статистический спрос по районам,
+# афиша города, текущая локация водителя, температура, пятница-суббота
+# ночная жизнь центра") - праздник раньше влиял ТОЛЬКО на отдельный пуш
+# (push_holiday_alert), но никак не поднимал балл конкретных районов/
+# аэропортов/вокзалов в самом ранжировании "Куда ехать". Теперь
+# is_city_holiday_today даёт простой True/False, который score_district_
+# candidates (см. ниже) использует как множитель ко ВСЕМ кандидатам города
+# сразу (праздник поднимает спрос по всему городу, а не в одном районе).
+HOLIDAY_DEMAND_BOOST = 1.15
+
+def is_city_holiday_today(city):
+    """True, если СЕГОДНЯ (по местному времени города) идёт праздник -
+    национальный (is_national=True, для любого города) или городской (свой
+    День города). Тот же список HOLIDAYS, что использует push_holiday_alert/
+    check_holidays, здесь просто отдельная лёгкая проверка "да/нет" без
+    пуша и без дедупа."""
+    today = get_city_now(city).date()
+    for holiday in HOLIDAYS:
+        y, m, d = holiday['date']
+        if (y, m, d) != (today.year, today.month, today.day):
+            continue
+        if holiday.get('is_national') or holiday.get('city') == city:
+            return True
+    return False
+
+# Экстремальная температура (очень холодно ИЛИ очень жарко) увеличивает
+# спрос на такси - люди меньше ходят пешком/ездят на самокатах и т.п.
+# Пороги в °C, множитель - тот же принцип, что у праздника/погоды выше.
+TEMP_EXTREME_COLD_C = -15
+TEMP_EXTREME_HOT_C = 30
+TEMP_EXTREME_DEMAND_BOOST = 1.10
+
+def temperature_demand_multiplier(city):
+    """1.0 в обычном диапазоне температур, TEMP_EXTREME_DEMAND_BOOST - если
+    сейчас (по кэшированному городскому прогнозу погоды, тот же источник,
+    что и у дождя - get_cached_weather_forecast) температура выходит за
+    TEMP_EXTREME_COLD_C/TEMP_EXTREME_HOT_C. Если данных о температуре нет
+    (прогноз ещё не собран) - тихо считаем множитель 1.0, не роняем расчёт."""
+    try:
+        forecast = get_cached_weather_forecast(city)
+        temp = (forecast or {}).get('current', {}).get('temperature_2m')
+        if temp is None:
+            return 1.0
+        if temp <= TEMP_EXTREME_COLD_C or temp >= TEMP_EXTREME_HOT_C:
+            return TEMP_EXTREME_DEMAND_BOOST
+    except Exception:
+        pass
+    return 1.0
+
+# Радиус, в котором мероприятие из афиши (TimePad/подборка концертов, см.
+# load_timepad_data/get_concert_events_for_city) считается "рядом" с
+# конкретным районом-кандидатом - события начинающиеся в ближайшие
+# EVENT_DEMAND_LOOKAHEAD_HOURS часов рядом с районом поднимают его балл
+# (люди едут на мероприятие/с мероприятия - спрос на такси растёт именно
+# в этой точке города, а не по всему городу, в отличие от праздника выше).
+EVENT_DEMAND_RADIUS_KM = 3
+EVENT_DEMAND_LOOKAHEAD_HOURS = 3
+EVENT_DEMAND_BOOST = 1.20
+
+def nearby_event_demand_multiplier(city, lat, lon):
+    """1.0 если рядом с (lat, lon) в ближайшие EVENT_DEMAND_LOOKAHEAD_HOURS
+    часов нет мероприятий с известными координатами, иначе EVENT_DEMAND_BOOST.
+    Источники те же, что у карты (см. handle_map_events_api) - TimePad
+    (load_timepad_data) и подборка концертов (get_concert_events_for_city).
+    Событие без геокоординат (place_lat/place_lon = None) в эту проверку не
+    попадает - оно всё равно остаётся видно в обычной афише внутри бота."""
+    if lat is None or lon is None:
+        return 1.0
+    try:
+        now_ts = datetime.now(ZoneInfo('UTC')).timestamp()
+        cutoff_ts = now_ts + EVENT_DEMAND_LOOKAHEAD_HOURS * 3600
+        timepad_data = load_timepad_data()
+        for ev in (timepad_data or {}).get('cities', {}).get(city, []):
+            ev_lat, ev_lon = ev.get('place_lat'), ev.get('place_lon')
+            start = ev.get('start') or 0
+            if ev_lat is None or ev_lon is None or start < now_ts or start > cutoff_ts:
+                continue
+            if haversine_km(lat, lon, ev_lat, ev_lon) <= EVENT_DEMAND_RADIUS_KM:
+                return EVENT_DEMAND_BOOST
+        for post in get_concert_events_for_city(city):
+            ev_lat, ev_lon = post.get('lat'), post.get('lon')
+            if ev_lat is None or ev_lon is None:
+                continue
+            start_iso = post.get('start')
+            if start_iso:
+                try:
+                    start_ts = datetime.fromisoformat(start_iso).timestamp()
+                    if start_ts < now_ts or start_ts > cutoff_ts:
+                        continue
+                except Exception:
+                    pass
+            if haversine_km(lat, lon, ev_lat, ev_lon) <= EVENT_DEMAND_RADIUS_KM:
+                return EVENT_DEMAND_BOOST
+    except Exception:
+        pass
+    return 1.0
+
 # За сколько дней ДО праздника слать разовый пуш-напоминание.
 HOLIDAY_LEAD_DAYS = 1
 # Как часто (в минутах) проверять праздничный календарь - раз в прогон
@@ -7223,9 +7322,16 @@ def score_station_candidate(city, code, station, category):
     label = get_train_load_label(load)
     if label == 'ЕХАТЬ':
         reasons.append("стоит подъехать")
+    # ДОБАВЛЕНО 23.09.2026 (единая формула спроса - см. is_city_holiday_today/
+    # temperature_demand_multiplier выше) - те же городские множители, что у
+    # районов/аэропортов, чтобы шкалы оставались сопоставимы при сортировке
+    # всех кандидатов "Куда ехать" вместе.
+    score = load * (HOLIDAY_DEMAND_BOOST if is_city_holiday_today(city) else 1.0) * temperature_demand_multiplier(city)
+    if is_city_holiday_today(city):
+        reasons.append("🎉 сегодня праздник - спрос по городу выше обычного")
     coords = station.get('coords')
     return {
-        'label': f"🚆 {station['name']}", 'score': load, 'reasons': reasons, 'closed': False, 'advice': None,
+        'label': f"🚆 {station['name']}", 'score': score, 'reasons': reasons, 'closed': False, 'advice': None,
         'lat': coords[0] if coords else None,
         'lon': coords[1] if coords else None,
     }
@@ -7417,6 +7523,15 @@ async def score_airport_candidate(city, airport, category, user_lat=None, user_l
     _center_mult, airport_time_mult = ultima_time_bias(city, category)
     if airport_time_mult != 1.0:
         score *= airport_time_mult
+
+    # ДОБАВЛЕНО 23.09.2026 (единая формула спроса - см. is_city_holiday_today/
+    # temperature_demand_multiplier выше) - те же городские множители, что у
+    # районов/вокзалов, чтобы шкалы оставались сопоставимы при сортировке
+    # всех кандидатов "Куда ехать" вместе.
+    if is_city_holiday_today(city):
+        score *= HOLIDAY_DEMAND_BOOST
+        reasons.append("🎉 сегодня праздник - спрос по городу выше обычного")
+    score *= temperature_demand_multiplier(city)
 
     airport_coords = AIRPORT_COORDS.get(icao)
     return {
@@ -7658,6 +7773,16 @@ async def score_district_candidates(city, category, user_lat=None, user_lon=None
     except Exception:
         pass
 
+    # ДОБАВЛЕНО 23.09.2026 (см. is_city_holiday_today/temperature_demand_
+    # multiplier/nearby_event_demand_multiplier выше, единая формула спроса
+    # по просьбе пользователя) - праздник и температурный экстремум влияют
+    # на ВЕСЬ город одинаково, считаем один раз до цикла по районам; афиша
+    # (nearby_event_demand_multiplier) - за пределами цикла её посчитать
+    # нельзя, она зависит от координат каждого конкретного района, поэтому
+    # вызывается внутри цикла ниже.
+    holiday_mult = HOLIDAY_DEMAND_BOOST if is_city_holiday_today(city) else 1.0
+    temp_mult = temperature_demand_multiplier(city)
+
     if user_lat is not None and user_lon is not None:
         origin_lat, origin_lon = user_lat, user_lon
     else:
@@ -7688,10 +7813,15 @@ async def score_district_candidates(city, category, user_lat=None, user_lon=None
         dist_km = None
         if origin_lat is not None and origin_lon is not None:
             dist_km = haversine_km(origin_lat, origin_lon, entry['lat'], entry['lon'])
-        adjusted = demand * district_distance_penalty(dist_km)
+        event_mult = nearby_event_demand_multiplier(city, entry['lat'], entry['lon'])
+        adjusted = (
+            demand * district_distance_penalty(dist_km)
+            * holiday_mult * temp_mult * event_mult
+        )
         scored.append({
             'name': name, 'demand': demand, 'lat': entry['lat'], 'lon': entry['lon'],
             'adjusted': adjusted, 'raining': district_raining,
+            'holiday': holiday_mult != 1.0, 'temp_extreme': temp_mult != 1.0, 'event_nearby': event_mult != 1.0,
         })
 
     if not scored:
@@ -7703,6 +7833,12 @@ async def score_district_candidates(city, category, user_lat=None, user_lon=None
         reasons = [f"{d['demand']}% спроса в районе"]
         if d['raining']:
             reasons.append("🌧 осадки сейчас в этом районе - спрос выше обычного")
+        if d['holiday']:
+            reasons.append("🎉 сегодня праздник - спрос по городу выше обычного")
+        if d['temp_extreme']:
+            reasons.append("🌡 экстремальная температура - спрос на такси выше обычного")
+        if d['event_nearby']:
+            reasons.append("🎭 рядом скоро крупное мероприятие - спрос выше обычного")
         level = 'peak' if d['demand'] >= 90 else ('high' if d['demand'] >= 70 else ('mid' if d['demand'] >= 40 else 'low'))
         advice = get_city_advice(city, level, category=category)
         result.append({
