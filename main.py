@@ -1936,10 +1936,7 @@ def get_upcoming_concert_events_for_category(city, category, limit=10):
        которым размечены сами события в fetch_concert_events.py).
        ИЗМЕНЕНО 23.09.2026 (повторная прямая просьба пользователя -
        "публикуй события афиши только того дня который они будут
-       проходить" - сужено обратно с "сегодня+завтра" до строго "сегодня",
-       после того как окно "сегодня+завтра" вводили 19.09.2026 против
-       пустого экрана - см. fallback ниже, который остаётся для этого
-       случая);
+       проходить" - сужено обратно с "сегодня+завтра" до строго "сегодня");
     2) события БЕЗ явно указанного в посте времени начала
        (start_has_explicit_time=False - у них start это заглушка 20:00 UTC,
        см. parse_event_datetime в fetch_concert_events.py) - НЕ исключаются
@@ -1950,13 +1947,21 @@ def get_upcoming_concert_events_for_category(city, category, limit=10):
        build_concert_event_message) - как было изначально, ещё до этого
        фильтра. Отбор по дате (пункт 1) для таких событий делаем по
        заглушке start (20:00 UTC), что для сравнения календарной даты
-       достаточно точно."""
+       достаточно точно.
+
+    УБРАН 24.09.2026 (прямая просьба пользователя, скриншот - "надо
+    условить отображение только текущую дату") - раньше при пустой афише
+    на сегодня функция откатывалась на ближайшие БУДУЩИЕ даты (25.09,
+    27.09, 04.10...) с пометкой "на ближайшие дни ничего не нашлось",
+    введённый 20.09.2026 против пустого экрана. Пользователь теперь явно
+    просит показывать СТРОГО сегодняшний день и никакого отката на
+    будущее - пустой раздел афиши, если на сегодня в канале ничего нет,
+    честнее, чем список дат через неделю вперёд."""
     posts = get_concert_events_for_city(city)
     tz = ZoneInfo(EVENT_CITY_TIMEZONE.get(city, 'Europe/Moscow'))
     now_local = datetime.now(tz)
-    allowed_dates = {now_local.date()}
+    today = now_local.date()
     upcoming = []
-    later = []  # события позже сегодня - запасной вариант, см. ниже
     for post in posts:
         if not post.get('start'):
             continue
@@ -1970,27 +1975,14 @@ def get_upcoming_concert_events_for_category(city, category, limit=10):
         # рискованно (можно скрыть ещё не начавшееся вечернее событие).
         if post.get('start_has_explicit_time') and start_local < now_local:
             continue
-        if not post.get('start_has_explicit_time') and start_local.date() < now_local.date():
+        if start_local.date() != today:
             continue
         price_category = post.get('price_category', 'taxi_only')
         if category == 'ultima' and price_category != 'all':
             continue
-        if start_local.date() in allowed_dates:
-            upcoming.append(post)
-        elif start_local.date() > now_local.date():
-            later.append(post)
+        upcoming.append(post)
     upcoming.sort(key=lambda p: p['start'])
-    if upcoming:
-        return upcoming[:limit]
-
-    # По жалобе пользователя (20.09.2026, "события города опять пустые"):
-    # если на сегодня в канале ничего нет (канал мог просто не постить
-    # несколько дней - это данные, а не баг), не показываем пустой экран -
-    # лучше честно показать ближайшие события ПОЗЖЕ, чем сегодня, с явной
-    # пометкой в тексте (см. build_concert_event_message -
-    # 'is_fallback_later'), чем оставить раздел без единого события.
-    later.sort(key=lambda p: p['start'])
-    return [dict(p, is_fallback_later=True) for p in later[:limit]]
+    return upcoming[:limit]
 
 _mos_road_data_cache = None
 _mos_road_data_mtime = None
@@ -14906,7 +14898,18 @@ def events_webapp_html():
 
   function renderConcerts(concerts, timepad) {
     const sec = document.getElementById('secConcerts');
-    const all = (concerts || []).concat(timepad || []);
+    // ИЗМЕНЕНО 24.09.2026 (прямая просьба пользователя - "сортировать по
+    // времени начала события от времени юзера") - раньше два источника
+    // (Telegram-афиша/TimePad) просто склеивались друг за другом, теперь
+    // объединённый список сортируется ОДНИМ ключом start_ts (unix-время
+    // начала, см. _pack в handle_events_data_api) - ближайшее по времени
+    // событие всегда сверху, независимо из какого источника оно пришло.
+    // Событие без start_ts (не должно случаться) уходит в конец списка.
+    const all = (concerts || []).concat(timepad || []).sort((a, b) => {
+      const ta = (a.start_ts === null || a.start_ts === undefined) ? Infinity : a.start_ts;
+      const tb = (b.start_ts === null || b.start_ts === undefined) ? Infinity : b.start_ts;
+      return ta - tb;
+    });
     if (!all.length) {
       sec.innerHTML = '<div class="empty">На ближайшее время подходящих событий не нашлось. Загляни позже.</div>';
       return;
@@ -15025,11 +15028,19 @@ async def handle_events_data_api(request):
                     price_str = 'вход свободный'
                 place = post.get('place')
                 maps_url = f"https://yandex.ru/maps/?text={urllib.parse.quote(place)}" if place else None
+                # ДОБАВЛЕНО 24.09.2026 (прямая просьба пользователя -
+                # "сортировать по времени начала события от времени юзера") -
+                # start_ts (unix-время начала) нужен, чтобы объединённый
+                # список concerts+timepad можно было отсортировать ОДНИМ
+                # ключом по фактическому времени начала - раньше два
+                # источника просто склеивались (concerts, потом timepad) без
+                # общей сортировки по времени, см. renderConcerts ниже.
                 concerts_out.append({
                     'title': post.get('title') or 'Мероприятие',
                     'place': place.capitalize() if place else '',
                     'date_str': date_str, 'price_str': price_str, 'note': note,
                     'maps_url': maps_url,
+                    'start_ts': datetime.fromisoformat(post['start']).timestamp() if post.get('start') else None,
                 })
 
             timepad_events, _ = get_events_for_user(city, category, limit=10)
@@ -15042,6 +15053,7 @@ async def handle_events_data_api(request):
                     'title': event['title'], 'place': address or '',
                     'date_str': date_str, 'attendance': f"{lo}–{hi}",
                     'maps_url': maps_url,
+                    'start_ts': event.get('start'),  # уже unix-время, см. fetch_timepad_data.py
                 })
         except Exception:
             logger.exception(f"❌ Ошибка сборки афиши для /events/data city={city} category={category}")
