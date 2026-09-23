@@ -3047,6 +3047,99 @@ def init_db():
             reported_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    # ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "делаем личный
+    # кабинет юрлица") - таблицы для личного кабинета юр.лица. password
+    # UNIQUE, owner_user_id проставляется ПЕРВОМУ, кто успешно ввёл этот
+    # пароль (claim по факту первого входа - см. find_or_claim_legal_entity),
+    # остальные, вводящие тот же пароль, просто получают переключатель типа
+    # рефералки 'legal_entity' (как раньше), но НЕ доступ к самому кабинету.
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS legal_entities (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            password TEXT NOT NULL UNIQUE,
+            owner_user_id INTEGER,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_legal_entities_owner ON legal_entities (owner_user_id)')
+    # Машины юрлица - привязка к конкретному водителю (driver_user_id,
+    # может быть NULL, если машина пока никому не привязана), пробег и
+    # последняя поездка обновляются водителем через карту/личный кабинет
+    # (в этой версии - вручную владельцем/водителем, без авто-подсчёта GPS).
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS legal_entity_cars (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            entity_id INTEGER NOT NULL,
+            plate TEXT,
+            model TEXT,
+            driver_user_id INTEGER,
+            mileage_km REAL DEFAULT 0,
+            last_trip_at DATETIME,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_legal_entity_cars_entity ON legal_entity_cars (entity_id)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_legal_entity_cars_driver ON legal_entity_cars (driver_user_id)')
+    # Аренда по машине за период - is_paid отмечает ТОЛЬКО владелец кабинета
+    # (прямая просьба пользователя 23.09.2026 - "водитель видел только
+    # аренду... не мог ничего нажимать", "у главного... возможность
+    # отмечать какие юзеры оплатили"). due_date - когда должен был оплатить,
+    # используется как в личном кабинете, так и планировщиком пуш-напоминаний
+    # (см. legal_entity_rent_reminder_checker). driver_user_id ДОБАВЛЕНО по
+    # уточнению пользователя (23.09.2026 - "аренда привязывается к юзеру и
+    # к автомобилю... непонятно будет цена на автомобиле висеть либо на
+    # юзере") - цена/запись аренды хранится ЗА КОНКРЕТНЫМ водителем на
+    # конкретной машине (снимок driver_user_id на момент создания записи), а
+    # НЕ пересчитывается автоматически, если машину потом перепривязали к
+    # другому водителю - так сохраняется история, кто именно должен был
+    # платить за этот период.
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS legal_entity_car_rent_payments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            car_id INTEGER NOT NULL,
+            driver_user_id INTEGER,
+            period TEXT NOT NULL,
+            amount_kopecks INTEGER DEFAULT 0,
+            due_date DATE,
+            is_paid INTEGER DEFAULT 0,
+            paid_at DATETIME,
+            marked_by INTEGER,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_le_rent_car ON legal_entity_car_rent_payments (car_id)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_le_rent_driver ON legal_entity_car_rent_payments (driver_user_id)')
+    # Лог push-уведомлений от владельца кабинета своим водителям (см.
+    # handle_cabinet_send_notification) - текст и/или фото/файл (Telegram
+    # file_id), просто журнал отправок для вкладки "Уведомления".
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS legal_entity_notifications (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            entity_id INTEGER NOT NULL,
+            sender_user_id INTEGER,
+            text TEXT,
+            photo_file_id TEXT,
+            document_file_id TEXT,
+            recipients_count INTEGER DEFAULT 0,
+            sent_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    # Счётчик напоминаний об аренде за текущий день по машине с неоплаченной
+    # арендой (прямая просьба пользователя 23.09.2026 - "присылать три раза
+    # в сутки push уведомления что оплатить аренду") - сбрасывается сам
+    # собой, т.к. считаем по due_date; last_sent_at нужен, чтобы не слать
+    # чаще, чем раз в ~8 часов (сутки / 3).
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS legal_entity_rent_reminders_sent (
+            car_id INTEGER NOT NULL,
+            rent_payment_id INTEGER NOT NULL,
+            sent_count_today INTEGER DEFAULT 0,
+            last_sent_at DATETIME,
+            reminder_date DATE,
+            PRIMARY KEY (rent_payment_id)
+        )
+    ''')
     conn.commit()
     conn.close()
     _db_initialized = True
@@ -9523,7 +9616,7 @@ def delete_map_position(user_id):
     conn.commit()
     conn.close()
 
-def get_map_positions(city, category=None, exclude_user_id=None):
+def get_map_positions(city, category=None, exclude_user_id=None, only_user_ids=None):
     """Отдаёт список позиций для карты конкретного города - только
     категория/тарифы/координаты, БЕЗ user_id и имени (приватность, по
     просьбе пользователя - подпись маркера только "какой тариф").
@@ -9551,6 +9644,18 @@ def get_map_positions(city, category=None, exclude_user_id=None):
     if exclude_user_id is not None:
         where += ' AND user_id != ?'
         params.append(exclude_user_id)
+    # ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - фильтр карты "свои
+    # водители/все" для владельца кабинета юрлица, см.
+    # get_referral_downline_user_ids/handle_map_positions_api ?mine=1) -
+    # user_id по-прежнему НЕ отдаётся в ответе (приватность не нарушена),
+    # только используется для фильтрации набора точек на уровне SQL.
+    if only_user_ids is not None:
+        if not only_user_ids:
+            conn.close()
+            return []
+        placeholders = ','.join('?' for _ in only_user_ids)
+        where += f' AND user_id IN ({placeholders})'
+        params.extend(only_user_ids)
     cursor.execute(f'SELECT category, lat, lon, tariffs, heading FROM map_positions WHERE {where}', params)
     rows = cursor.fetchall()
     conn.close()
@@ -10238,6 +10343,11 @@ def map_webapp_html():
     </div>
   </div>
   <div class="layer-toggle-btn" id="trafficToggleBtn">🚦 Пробки</div>
+  <!-- ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - фильтр карты "свои
+       водители/все" для владельца кабинета юрлица) - скрыта по умолчанию,
+       показывается только если /map/my_profile отдал is_legal_entity_owner
+       (см. loadMyProfile ниже). -->
+  <div class="layer-toggle-btn" id="mineToggleBtn" style="display:none">👥 Все</div>
 </div>
 <script>
   const CATEGORY_STYLE = {style_json};
@@ -10536,6 +10646,13 @@ def map_webapp_html():
       if (!resp.ok) return;
       const data = await resp.json();
       myShiftActive = !!data.shift_active;
+      // ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - фильтр карты
+      // "свои водители/все") - показываем кнопку-переключатель только
+      // владельцу кабинета юрлица (см. is_legal_entity_owner в
+      // handle_map_my_profile_api), остальным она вообще не видна.
+      if (data.is_legal_entity_owner && mineToggleBtn) {{
+        mineToggleBtn.style.display = '';
+      }}
       if (!myShiftActive && selfMarker) {{
         // Ответ пришёл ПОСЛЕ того, как watchPosition уже успел нарисовать
         // стрелку (пока проверка смены ещё не разрешилась) - убираем её.
@@ -10608,7 +10725,11 @@ def map_webapp_html():
       // Категорию у сервера больше не фильтруем (всегда запрашиваем все) -
       // отбор ПО ТАРИФАМ теперь делаем на клиенте (isPositionVisible), т.к.
       // выбор может охватывать несколько категорий сразу в любой комбинации.
-      const resp = await fetch(`/map/positions?city=${{encodeURIComponent(city)}}&category=`, {{
+      // mine=1 - ДОБАВЛЕНО 23.09.2026 (фильтр "свои водители/все" для
+      // владельца кабинета юрлица, см. mineToggleBtn/showMineOnly ниже) -
+      // сервер сам игнорирует параметр для всех, кто не владелец.
+      const mineParam = showMineOnly ? '&mine=1' : '';
+      const resp = await fetch(`/map/positions?city=${{encodeURIComponent(city)}}&category=${{mineParam}}`, {{
         headers: {{ 'X-Telegram-Init-Data': initData }},
       }});
       if (!resp.ok) return;
@@ -11858,6 +11979,19 @@ def map_webapp_html():
       trafficToggleBtn.classList.toggle('active', trafficShownState);
     }});
   }}
+  // ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - фильтр карты "свои
+  // водители/все" для владельца кабинета юрлица) - кнопка скрыта по
+  // умолчанию (см. loadMyProfile выше), появляется только владельцу.
+  const mineToggleBtn = document.getElementById('mineToggleBtn');
+  let showMineOnly = false;
+  if (mineToggleBtn) {{
+    mineToggleBtn.addEventListener('click', () => {{
+      showMineOnly = !showMineOnly;
+      mineToggleBtn.textContent = showMineOnly ? '👥 Свои' : '👥 Все';
+      mineToggleBtn.classList.toggle('active', showMineOnly);
+      loadPositions();
+    }});
+  }}
   const fuelCheckbox = document.getElementById('fuelLayerCheckbox');
   const chargingCheckbox = document.getElementById('chargingLayerCheckbox');
   const parkingCheckbox = document.getElementById('parkingLayerCheckbox');
@@ -12821,6 +12955,7 @@ async def handle_map_positions_api(request):
     category = request.query.get('category', '') or None
     init_data = request.headers.get('X-Telegram-Init-Data', '')
     exclude_user_id = None
+    requester_user_id = None
     if BOT_TOKEN and init_data:
         parsed = validate_telegram_webapp_init_data(init_data, BOT_TOKEN)
         if parsed is None:
@@ -12829,9 +12964,26 @@ async def handle_map_positions_api(request):
             # См. get_map_positions(exclude_user_id=...) - убираем СВОЮ же
             # позицию из общего списка, её рисует отдельный selfIconHtml.
             try:
-                exclude_user_id = json.loads(parsed.get('user', '{}')).get('id')
+                requester_user_id = json.loads(parsed.get('user', '{}')).get('id')
+                exclude_user_id = requester_user_id
             except Exception:
                 exclude_user_id = None
+    # ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "у юрлиц появляется
+    # возможность на карте поставить фильтр свои водители и отслеживать либо
+    # своих водителей либо всех водителей") - ?mine=1 работает ТОЛЬКО для
+    # владельца юр.лица (проверяем через get_legal_entity_owned_by), для
+    # остальных запрос просто игнорирует параметр и отдаёт карту как обычно.
+    only_user_ids = None
+    if request.query.get('mine') == '1' and requester_user_id:
+        try:
+            owned_entity = await asyncio.to_thread(get_legal_entity_owned_by, requester_user_id)
+        except Exception:
+            owned_entity = None
+        if owned_entity:
+            try:
+                only_user_ids = await asyncio.to_thread(get_referral_downline_user_ids, requester_user_id)
+            except Exception:
+                only_user_ids = []
     try:
         # ИЗМЕНЕНО 23.09.2026 (подготовка к росту до 5000 пользователей) -
         # каждый открытый WebApp карты опрашивает этот эндпоинт периодически
@@ -12839,7 +12991,7 @@ async def handle_map_positions_api(request):
         # async-хендлере блокировал бы event loop на время запроса при
         # каждом таком опросе от КАЖДОГО открытого окна карты одновременно.
         # asyncio.to_thread переносит сам SQL-запрос в отдельный поток.
-        positions = await asyncio.to_thread(get_map_positions, city, category, exclude_user_id) if city else []
+        positions = await asyncio.to_thread(get_map_positions, city, category, exclude_user_id, only_user_ids) if city else []
         # Тарифы уже человекочитаемые строки (см. CATEGORIES[cat]['tariffs'] /
         # shift_tariff_options) - WebApp просто склеивает их через запятую в
         # подписи маркера (см. map_webapp_html), переводить не нужно.
@@ -12886,7 +13038,15 @@ async def handle_map_my_profile_api(request):
         shift_active = is_shift_active(user_state.get(user_id) or {})
     except Exception:
         shift_active = False
-    return web.json_response({'profile': profile, 'shift_active': shift_active})
+    # ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - фильтр карты "свои
+    # водители/все" для владельца кабинета юрлица) - отдаём признак владения,
+    # чтобы клиент показал переключатель ТОЛЬКО таким пользователям (см.
+    # только_user_ids в handle_map_positions_api и toggle в map_webapp_html).
+    try:
+        is_legal_entity_owner = bool(get_legal_entity_owned_by(user_id))
+    except Exception:
+        is_legal_entity_owner = False
+    return web.json_response({'profile': profile, 'shift_active': shift_active, 'is_legal_entity_owner': is_legal_entity_owner})
 
 async def handle_map_airports_api(request):
     """JSON API для меток аэропортов на карте (по просьбе пользователя,
@@ -14990,6 +15150,518 @@ async def handle_cabinet_maintenance_api(request):
     cm = get_car_maintenance(user_id)
     return web.json_response(_car_maintenance_payload(cm))
 
+# ==================== ЛИЧНЫЙ КАБИНЕТ ЮРЛИЦА (WebApp) ====================
+# ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя, большое сообщение "делаем
+# личный кабинет у юрлица..."). Отдельный от CABINET_WEBAPP_PATH ("Личный
+# кабинет" обычного водителя) WebApp - доступен ТОЛЬКО владельцу юр.лица (см.
+# claim_legal_entity_ownership/get_legal_entity_owned_by). Вкладки: Сводка
+# (summary), Автомобили, Водители, Финансы (аренда), Уведомления, Настройки -
+# ровно как перечислено пользователем в исходном сообщении.
+LEGAL_CABINET_WEBAPP_PATH = '/legal_cabinet'
+LEGAL_CABINET_DATA_API_PATH = '/legal_cabinet/data'
+CABINET_RENT_API_PATH = '/cabinet/rent'  # вкладка "Аренда" в ОБЫЧНОМ кабинете водителя - см. cabinet_webapp_html
+
+
+def _legal_cabinet_require_owner(request):
+    """Как _cabinet_require_user, но дополнительно проверяет, что человек -
+    владелец какого-либо юр.лица. Возвращает (user_id, entity_dict) или
+    (None, None), если не авторизован/не владелец - вызывающий код отвечает
+    401/403 сам (сообщения разные, поэтому не роняем прямо здесь)."""
+    user_id = _cabinet_require_user(request)
+    if not user_id:
+        return None, None
+    entity = get_legal_entity_owned_by(user_id)
+    return user_id, entity
+
+
+async def handle_legal_cabinet_webapp(request):
+    return web.Response(
+        text=legal_cabinet_webapp_html(), content_type='text/html',
+        headers={'Cache-Control': 'no-store, no-cache, must-revalidate', 'Pragma': 'no-cache'},
+    )
+
+
+def _legal_cabinet_driver_label(uid):
+    """Короткая подпись водителя для списков в кабинете юрлица - пробуем
+    взять имя из анкеты личного кабинета (driver_profiles), иначе просто
+    показываем id."""
+    try:
+        profile = get_driver_profile(uid)
+    except Exception:
+        profile = None
+    name = (profile or {}).get('full_name') if isinstance(profile, dict) else None
+    return f"{name} (id{uid})" if name else f"id{uid}"
+
+
+async def handle_legal_cabinet_data_api(request):
+    """GET -> вся сводка кабинета сразу (summary/cars/drivers/rent/
+    notifications history) - страница простая, отдельные эндпоинты на
+    каждую вкладку излишни. POST {action: ...} -> действия владельца
+    (добавить машину, привязать водителя, отметить пробег, добавить/отметить
+    аренду, отправить push-уведомление своей ветке рефералов)."""
+    user_id, entity = _legal_cabinet_require_owner(request)
+    if not user_id:
+        return web.json_response({'error': 'invalid_init_data'}, status=401)
+    if not entity:
+        return web.json_response({'error': 'not_owner'}, status=403)
+    entity_id = entity['id']
+
+    if request.method == 'POST':
+        try:
+            body = await request.json()
+            action = body.get('action')
+        except Exception:
+            return web.json_response({'error': 'invalid_body'}, status=400)
+
+        if action == 'add_car':
+            plate = str(body.get('plate') or '').strip()[:20]
+            model = str(body.get('model') or '').strip()[:60]
+            if not plate and not model:
+                return web.json_response({'error': 'empty_car'}, status=400)
+            add_legal_entity_car(entity_id, plate, model)
+        elif action == 'set_car_driver':
+            try:
+                car_id = int(body.get('car_id'))
+            except (TypeError, ValueError):
+                return web.json_response({'error': 'invalid_car_id'}, status=400)
+            driver_raw = body.get('driver_user_id')
+            try:
+                driver_id = int(driver_raw) if driver_raw not in (None, '') else None
+            except (TypeError, ValueError):
+                return web.json_response({'error': 'invalid_driver_id'}, status=400)
+            # Машина должна принадлежать ЭТОМУ юр.лицу - иначе владелец
+            # одного кабинета мог бы менять чужие машины по угаданному id.
+            cars = {c['id']: c for c in get_legal_entity_cars(entity_id)}
+            if car_id not in cars:
+                return web.json_response({'error': 'car_not_found'}, status=404)
+            set_legal_entity_car_driver(car_id, driver_id)
+        elif action == 'update_mileage':
+            try:
+                car_id = int(body.get('car_id'))
+                mileage_km = float(body.get('mileage_km'))
+            except (TypeError, ValueError):
+                return web.json_response({'error': 'invalid_params'}, status=400)
+            cars = {c['id']: c for c in get_legal_entity_cars(entity_id)}
+            if car_id not in cars:
+                return web.json_response({'error': 'car_not_found'}, status=404)
+            update_legal_entity_car_mileage(car_id, mileage_km)
+        elif action == 'add_rent':
+            # ДОБАВЛЕНО по уточнению пользователя (23.09.2026) - аренда
+            # привязывается И к машине, И к конкретному водителю (снимок
+            # driver_user_id на момент создания - см. комментарий у таблицы
+            # legal_entity_car_rent_payments в init_db).
+            try:
+                car_id = int(body.get('car_id'))
+                amount_rub = float(body.get('amount_rub') or 0)
+            except (TypeError, ValueError):
+                return web.json_response({'error': 'invalid_params'}, status=400)
+            cars = {c['id']: c for c in get_legal_entity_cars(entity_id)}
+            car = cars.get(car_id)
+            if not car:
+                return web.json_response({'error': 'car_not_found'}, status=404)
+            driver_raw = body.get('driver_user_id')
+            try:
+                driver_id = int(driver_raw) if driver_raw not in (None, '') else car.get('driver_user_id')
+            except (TypeError, ValueError):
+                driver_id = car.get('driver_user_id')
+            period = str(body.get('period') or '').strip()[:32] or datetime.now(timezone.utc).strftime('%Y-%m')
+            due_date = str(body.get('due_date') or '').strip()[:10] or datetime.now(timezone.utc).date().isoformat()
+            add_legal_entity_rent_payment(car_id, driver_id, period, round(amount_rub * 100), due_date)
+        elif action == 'set_rent_paid':
+            try:
+                payment_id = int(body.get('payment_id'))
+            except (TypeError, ValueError):
+                return web.json_response({'error': 'invalid_params'}, status=400)
+            is_paid = bool(body.get('is_paid'))
+            # Проверяем, что запись аренды реально принадлежит ЭТОМУ юр.лицу
+            payments = {p['id']: p for p in get_legal_entity_rent_payments(entity_id)}
+            if payment_id not in payments:
+                return web.json_response({'error': 'payment_not_found'}, status=404)
+            set_legal_entity_rent_paid(payment_id, is_paid, user_id)
+        elif action == 'send_notification':
+            text = str(body.get('text') or '').strip()[:2000]
+            if not text:
+                return web.json_response({'error': 'empty_text'}, status=400)
+            driver_ids = get_referral_downline_user_ids(user_id)
+            sent = 0
+            for uid in driver_ids:
+                try:
+                    await bot.send_message(uid, f"📢 *{entity['name']}*\n\n{text}", parse_mode='Markdown')
+                    sent += 1
+                except Exception:
+                    pass
+            conn = get_db_connection()
+            conn.execute(
+                'INSERT INTO legal_entity_notifications (entity_id, sender_user_id, text, recipients_count) VALUES (?, ?, ?, ?)',
+                (entity_id, user_id, text, sent)
+            )
+            conn.commit()
+            conn.close()
+            return web.json_response({'ok': True, 'sent': sent})
+        else:
+            return web.json_response({'error': 'invalid_action'}, status=400)
+
+    cars = get_legal_entity_cars(entity_id)
+    driver_ids = sorted(set(get_referral_downline_user_ids(user_id)))
+    drivers_payload = [
+        {'user_id': uid, 'label': _legal_cabinet_driver_label(uid), 'on_shift': bool((user_state.get(uid) or {}).get('shift'))}
+        for uid in driver_ids
+    ]
+    cars_payload = [
+        {**c, 'driver_label': _legal_cabinet_driver_label(c['driver_user_id']) if c['driver_user_id'] else None}
+        for c in cars
+    ]
+    rent_payments = get_legal_entity_rent_payments(entity_id)
+    for p in rent_payments:
+        p['driver_label'] = _legal_cabinet_driver_label(p['driver_user_id']) if p['driver_user_id'] else None
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        'SELECT text, recipients_count, sent_at FROM legal_entity_notifications WHERE entity_id = ? ORDER BY id DESC LIMIT 20',
+        (entity_id,)
+    )
+    notif_rows = cursor.fetchall()
+    conn.close()
+    notifications_payload = [{'text': r[0], 'recipients_count': r[1], 'sent_at': r[2]} for r in notif_rows]
+
+    return web.json_response({
+        'entity_name': entity['name'],
+        'summary': get_legal_entity_summary(entity_id),
+        'cars': cars_payload,
+        'drivers': drivers_payload,
+        'rent_payments': rent_payments,
+        'notifications': notifications_payload,
+    })
+
+
+async def handle_cabinet_rent_api(request):
+    """Вкладка "💳 Аренда" в ОБЫЧНОМ личном кабинете водителя - ТОЛЬКО
+    просмотр (прямая просьба пользователя 23.09.2026: "водитель видел
+    только аренду... не мог ничего нажимать что он там оплатил не
+    оплатил"). Никаких POST-действий у этого эндпоинта нет."""
+    user_id = _cabinet_require_user(request)
+    if not user_id:
+        return web.json_response({'error': 'invalid_init_data'}, status=401)
+    payments = get_rent_payments_for_driver(user_id)
+    return web.json_response({'rent_payments': payments})
+
+
+def legal_cabinet_webapp_html():
+    """HTML-страница кабинета юр.лица - тот же визуальный язык (карточки/
+    пилюли-табы/жёлтый акцент), что и обычный cabinet_webapp_html, но
+    отдельная страница со своими вкладками (см. комментарий у
+    LEGAL_CABINET_WEBAPP_PATH выше)."""
+    return """<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Кабинет юрлица</title>
+<script src=\"""" + TG_WEBAPP_JS_PROXY_PATH + """\"></script>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 16px; padding-bottom: max(16px, env(safe-area-inset-bottom, 0px));
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--tg-theme-bg-color, #f2f2f7); color: var(--tg-theme-text-color, #000);
+  }
+  h2.section-title { font-size: 14px; font-weight: 600; opacity: .8; margin: 20px 0 8px; }
+  .hero {
+    border-radius: 18px; padding: 18px; background: linear-gradient(135deg, #1c1c1c, #000);
+    color: #fff; margin-bottom: 16px; box-shadow: 0 4px 14px rgba(0,0,0,.4); border: 1px solid rgba(255,196,0,.35);
+  }
+  .hero .entity-name { font-size: 20px; font-weight: 800; margin-bottom: 10px; }
+  .hero .hero-tiles { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
+  .hero .hero-tile { background: rgba(255,255,255,.12); border-radius: 12px; padding: 10px 11px; }
+  .hero .hero-tile .label { font-size: 11px; opacity: .75; }
+  .hero .hero-tile .value { font-size: 20px; font-weight: 800; font-variant-numeric: tabular-nums; color: #FFC400; }
+  .cabinet-nav {
+    display: flex; gap: 6px; overflow-x: auto; padding-bottom: 4px; margin-bottom: 14px;
+    -webkit-overflow-scrolling: touch;
+  }
+  .cabinet-nav::-webkit-scrollbar { display: none; }
+  .nav-pill {
+    flex-shrink: 0; border: none; border-radius: 999px; padding: 8px 13px; font-size: 12.5px;
+    font-weight: 600; background: var(--tg-theme-secondary-bg-color, #fff);
+    color: var(--tg-theme-text-color, #000); opacity: .65; white-space: nowrap; text-transform: uppercase;
+  }
+  .nav-pill.active { background: #FFC400; color: #000; opacity: 1; }
+  .tab-pane { display: none; }
+  .tab-pane.active { display: block; }
+  .card {
+    background: var(--tg-theme-secondary-bg-color, #fff); border-radius: 14px; padding: 14px; margin-bottom: 12px;
+  }
+  .field-row { margin-bottom: 10px; }
+  .field-row label { display: block; font-size: 12px; opacity: .6; margin-bottom: 4px; }
+  .field-row input, .field-row select, .field-row textarea {
+    width: 100%; padding: 10px 11px; border-radius: 10px; border: 1px solid rgba(127,127,127,.3);
+    background: var(--tg-theme-bg-color, #f2f2f7); color: var(--tg-theme-text-color, #000); font-size: 14.5px;
+    font-family: inherit;
+  }
+  .btn {
+    width: 100%; padding: 11px; border: none; border-radius: 10px; background: #FFC400;
+    color: #000; font-size: 14.5px; font-weight: 700; margin-top: 4px; text-transform: uppercase;
+  }
+  .btn.secondary { background: rgba(127,127,127,.18); color: var(--tg-theme-text-color, #000); }
+  .list-item {
+    display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 0;
+    border-bottom: 1px solid rgba(127,127,127,.15);
+  }
+  .list-item:last-child { border-bottom: none; }
+  .li-title { font-size: 14px; font-weight: 700; }
+  .li-sub { font-size: 12px; opacity: .6; margin-top: 2px; }
+  .badge { border-radius: 999px; padding: 4px 10px; font-size: 11.5px; font-weight: 700; text-transform: uppercase; flex-shrink: 0; }
+  .badge.on { background: rgba(76,217,100,.18); color: #34C759; }
+  .badge.off { background: rgba(127,127,127,.18); color: var(--tg-theme-text-color, #000); opacity: .6; }
+  .badge.paid { background: rgba(76,217,100,.18); color: #34C759; }
+  .badge.unpaid { background: rgba(255,59,48,.18); color: #FF3B30; }
+  select.driver-select { max-width: 140px; }
+  .muted { opacity: .6; font-size: 13px; }
+  #state { text-align: center; padding: 60px 16px; opacity: .6; font-size: 14px; }
+</style>
+</head>
+<body>
+<div id="state">Загружаю данные…</div>
+<div id="app" style="display:none">
+
+  <div class="hero">
+    <div class="entity-name" id="entityName">—</div>
+    <div class="hero-tiles">
+      <div class="hero-tile"><div class="label">На линии</div><div class="value" id="tOn">0</div></div>
+      <div class="hero-tile"><div class="label">Не на линии</div><div class="value" id="tOff">0</div></div>
+      <div class="hero-tile"><div class="label">Машин</div><div class="value" id="tCars">0</div></div>
+      <div class="hero-tile"><div class="label">Пробег, км</div><div class="value" id="tKm">0</div></div>
+    </div>
+  </div>
+
+  <div class="cabinet-nav">
+    <button class="nav-pill active" data-tab="cars">🚗 Автомобили</button>
+    <button class="nav-pill" data-tab="drivers">👥 Водители</button>
+    <button class="nav-pill" data-tab="finance">💰 Финансы</button>
+    <button class="nav-pill" data-tab="notify">📢 Уведомления</button>
+    <button class="nav-pill" data-tab="settings">⚙️ Настройки</button>
+  </div>
+
+  <div class="tab-pane active" id="tab-cars">
+    <div class="card">
+      <h2 class="section-title" style="margin-top:0">Добавить машину</h2>
+      <div class="field-row"><label>Гос. номер</label><input type="text" id="carPlate" placeholder="А123БВ777"></div>
+      <div class="field-row"><label>Марка/модель</label><input type="text" id="carModel" placeholder="Kia Rio"></div>
+      <button class="btn" id="addCarBtn">Добавить</button>
+    </div>
+    <h2 class="section-title">Машины</h2>
+    <div class="card" id="carsList"><div class="muted">Пока нет машин</div></div>
+  </div>
+
+  <div class="tab-pane" id="tab-drivers">
+    <h2 class="section-title" style="margin-top:0">Водители (твоя реферальная ветка)</h2>
+    <div class="card" id="driversList"><div class="muted">Пока нет привязанных водителей</div></div>
+  </div>
+
+  <div class="tab-pane" id="tab-finance">
+    <div class="card">
+      <h2 class="section-title" style="margin-top:0">Добавить аренду</h2>
+      <div class="field-row"><label>Машина</label><select id="rentCar"></select></div>
+      <div class="field-row"><label>Водитель (кто платит)</label><select id="rentDriver"></select></div>
+      <div class="field-row"><label>Сумма, ₽</label><input type="number" id="rentAmount" placeholder="5000"></div>
+      <div class="field-row"><label>Период</label><input type="text" id="rentPeriod" placeholder="Например, 23-30 сентября"></div>
+      <div class="field-row"><label>Срок оплаты</label><input type="date" id="rentDue"></div>
+      <button class="btn" id="addRentBtn">Добавить</button>
+    </div>
+    <h2 class="section-title">Аренда по машинам</h2>
+    <div class="card" id="rentList"><div class="muted">Пока нет записей аренды</div></div>
+  </div>
+
+  <div class="tab-pane" id="tab-notify">
+    <div class="card">
+      <h2 class="section-title" style="margin-top:0">Отправить уведомление всем своим водителям</h2>
+      <div class="field-row"><textarea id="notifyText" rows="4" placeholder="Текст сообщения"></textarea></div>
+      <button class="btn" id="sendNotifyBtn">Отправить</button>
+      <div class="muted" id="notifyResult" style="margin-top:8px"></div>
+    </div>
+    <h2 class="section-title">История отправок</h2>
+    <div class="card" id="notifyHistory"><div class="muted">Пока ничего не отправлялось</div></div>
+  </div>
+
+  <div class="tab-pane" id="tab-settings">
+    <div class="card">
+      <p class="muted">Кабинет юр.лица «<span id="entityNameSettings">—</span>». Добавление новых машин, водителей и
+      уведомлений - на соответствующих вкладках выше. По вопросам новых компаний/паролей обращайся к администратору бота.</p>
+    </div>
+  </div>
+
+</div>
+<script>
+const tg = window.Telegram && window.Telegram.WebApp;
+if (tg) { tg.ready(); tg.expand(); }
+const API = '""" + LEGAL_CABINET_DATA_API_PATH + """';
+let STATE = null;
+
+function fmtMoney(kop) { return Math.round((kop||0)/100).toLocaleString('ru-RU') + '₽'; }
+
+async function apiCall(body) {
+  const initData = tg ? tg.initData : '';
+  const opts = { headers: { 'X-Telegram-Init-Data': initData } };
+  if (body) {
+    opts.method = 'POST';
+    opts.headers['Content-Type'] = 'application/json';
+    opts.body = JSON.stringify(body);
+  }
+  const res = await fetch(API, opts);
+  if (!res.ok) throw new Error('http_' + res.status);
+  return res.json();
+}
+
+function renderAll() {
+  document.getElementById('entityName').textContent = STATE.entity_name;
+  document.getElementById('entityNameSettings').textContent = STATE.entity_name;
+  const s = STATE.summary;
+  document.getElementById('tOn').textContent = s.drivers_on_line;
+  document.getElementById('tOff').textContent = s.drivers_off_line;
+  document.getElementById('tCars').textContent = s.cars_count;
+  document.getElementById('tKm').textContent = Math.round(s.total_mileage_km).toLocaleString('ru-RU');
+
+  const carsList = document.getElementById('carsList');
+  const rentCarSel = document.getElementById('rentCar');
+  rentCarSel.innerHTML = '';
+  if (!STATE.cars.length) {
+    carsList.innerHTML = '<div class="muted">Пока нет машин</div>';
+  } else {
+    carsList.innerHTML = STATE.cars.map(c => {
+      const driverOptions = ['<option value="">— без водителя —</option>'].concat(
+        STATE.drivers.map(d => `<option value="${d.user_id}" ${d.user_id === c.driver_user_id ? 'selected' : ''}>${d.label}</option>`)
+      ).join('');
+      return `<div class="list-item">
+        <div>
+          <div class="li-title">${c.plate || '(без номера)'} ${c.model ? '· ' + c.model : ''}</div>
+          <div class="li-sub">Пробег: ${Math.round(c.mileage_km || 0).toLocaleString('ru-RU')} км ${c.driver_label ? '· Водитель: ' + c.driver_label : ''}</div>
+        </div>
+        <select class="driver-select" onchange="setCarDriver(${c.id}, this.value)">${driverOptions}</select>
+      </div>`;
+    }).join('');
+    STATE.cars.forEach(c => {
+      const opt = document.createElement('option');
+      opt.value = c.id; opt.textContent = (c.plate || '') + ' ' + (c.model || '');
+      rentCarSel.appendChild(opt);
+    });
+  }
+
+  const driversList = document.getElementById('driversList');
+  const rentDriverSel = document.getElementById('rentDriver');
+  rentDriverSel.innerHTML = '<option value="">— по машине —</option>';
+  if (!STATE.drivers.length) {
+    driversList.innerHTML = '<div class="muted">Пока нет привязанных водителей (появятся здесь, как только кто-то зарегистрируется по твоей реферальной ссылке)</div>';
+  } else {
+    driversList.innerHTML = STATE.drivers.map(d => `<div class="list-item">
+      <div class="li-title">${d.label}</div>
+      <span class="badge ${d.on_shift ? 'on' : 'off'}">${d.on_shift ? 'На линии' : 'Не на линии'}</span>
+    </div>`).join('');
+    STATE.drivers.forEach(d => {
+      const opt = document.createElement('option');
+      opt.value = d.user_id; opt.textContent = d.label;
+      rentDriverSel.appendChild(opt);
+    });
+  }
+
+  const rentList = document.getElementById('rentList');
+  if (!STATE.rent_payments.length) {
+    rentList.innerHTML = '<div class="muted">Пока нет записей аренды</div>';
+  } else {
+    rentList.innerHTML = STATE.rent_payments.map(p => `<div class="list-item">
+      <div>
+        <div class="li-title">${p.plate || ''} ${p.model || ''} ${p.driver_label ? '· ' + p.driver_label : ''}</div>
+        <div class="li-sub">${p.period} · ${fmtMoney(p.amount_kopecks)} · до ${p.due_date || '—'}</div>
+      </div>
+      <span class="badge ${p.is_paid ? 'paid' : 'unpaid'}" style="cursor:pointer" onclick="toggleRentPaid(${p.id}, ${p.is_paid ? 'false' : 'true'})">${p.is_paid ? 'Оплачено' : 'Не оплачено'}</span>
+    </div>`).join('');
+  }
+
+  const notifyHistory = document.getElementById('notifyHistory');
+  if (!STATE.notifications.length) {
+    notifyHistory.innerHTML = '<div class="muted">Пока ничего не отправлялось</div>';
+  } else {
+    notifyHistory.innerHTML = STATE.notifications.map(n => `<div class="list-item">
+      <div>
+        <div class="li-title">${(n.text || '').slice(0, 80)}</div>
+        <div class="li-sub">Доставлено: ${n.recipients_count} · ${n.sent_at || ''}</div>
+      </div>
+    </div>`).join('');
+  }
+}
+
+async function refresh() {
+  STATE = await apiCall(null);
+  renderAll();
+}
+
+async function setCarDriver(carId, driverId) {
+  await apiCall({ action: 'set_car_driver', car_id: carId, driver_user_id: driverId || null });
+  await refresh();
+}
+
+async function toggleRentPaid(paymentId, isPaid) {
+  await apiCall({ action: 'set_rent_paid', payment_id: paymentId, is_paid: isPaid });
+  await refresh();
+}
+
+document.getElementById('addCarBtn').addEventListener('click', async () => {
+  const plate = document.getElementById('carPlate').value.trim();
+  const model = document.getElementById('carModel').value.trim();
+  if (!plate && !model) return;
+  await apiCall({ action: 'add_car', plate, model });
+  document.getElementById('carPlate').value = '';
+  document.getElementById('carModel').value = '';
+  await refresh();
+});
+
+document.getElementById('addRentBtn').addEventListener('click', async () => {
+  const car_id = document.getElementById('rentCar').value;
+  const driver_user_id = document.getElementById('rentDriver').value;
+  const amount_rub = document.getElementById('rentAmount').value;
+  const period = document.getElementById('rentPeriod').value.trim();
+  const due_date = document.getElementById('rentDue').value;
+  if (!car_id || !amount_rub) return;
+  await apiCall({ action: 'add_rent', car_id, driver_user_id: driver_user_id || null, amount_rub, period, due_date });
+  document.getElementById('rentAmount').value = '';
+  document.getElementById('rentPeriod').value = '';
+  await refresh();
+});
+
+document.getElementById('sendNotifyBtn').addEventListener('click', async () => {
+  const text = document.getElementById('notifyText').value.trim();
+  if (!text) return;
+  const btn = document.getElementById('sendNotifyBtn');
+  btn.disabled = true;
+  try {
+    const res = await apiCall({ action: 'send_notification', text });
+    document.getElementById('notifyResult').textContent = 'Отправлено: ' + res.sent + ' водителям';
+    document.getElementById('notifyText').value = '';
+    await refresh();
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+document.querySelectorAll('.nav-pill').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.nav-pill').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
+  });
+});
+
+refresh().then(() => {
+  document.getElementById('state').style.display = 'none';
+  document.getElementById('app').style.display = 'block';
+}).catch(() => {
+  document.getElementById('state').textContent = 'Не удалось загрузить данные. Попробуй закрыть и открыть кабинет заново.';
+});
+</script>
+</body>
+</html>"""
+
 def cabinet_webapp_html():
     # По просьбе пользователя (21.09.2026, "цвета сделай черный желтые белые
     # серые во всех аппсах") - фирменный акцент такси-чекера вместо зелёного:
@@ -15178,6 +15850,7 @@ def cabinet_webapp_html():
   <button class="nav-pill" data-tab="nearby">📍 Рядом</button>
   <button class="nav-pill" data-tab="fuel">⛽ Бензин</button>
   <button class="nav-pill" data-tab="maintenance">🛠 ТО</button>
+  <button class="nav-pill" data-tab="rent">💳 Аренда</button>
   <button class="nav-pill" data-tab="settings">⚙️ Настройки</button>
 </div>
 
@@ -15339,6 +16012,16 @@ def cabinet_webapp_html():
     <p>Народная карта наличия топлива на АЗС по России - отдельный бот. Нажми кнопку ниже, чтобы открыть его.</p>
     <a class="link-btn" href="https://t.me/gde_benzin_rubot" target="_blank">⛽ Открыть «Где бензин»</a>
   </div>
+</div>
+
+<!-- ==================== АРЕНДА ====================
+     ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "водитель видел
+     только аренду... не мог ничего нажимать что он там оплатил не
+     оплатил") - ТОЛЬКО просмотр статуса аренды по машинам юр.лица, к
+     которым водитель привязан. Отмечать оплачено/не оплачено может
+     только владелец кабинета юрлица (см. LEGAL_CABINET_WEBAPP_PATH). -->
+<div class="tab-pane" id="tab-rent">
+  <div class="card" id="rentTabBody"><div class="muted">Загружаю…</div></div>
 </div>
 
 <!-- ==================== НАСТРОЙКИ ====================
@@ -15612,8 +16295,35 @@ def cabinet_webapp_html():
       if (tab === 'nearby') initNearbyTab();
       if (tab === 'settings') loadSettingsTab();
       if (tab === 'maintenance') initMaintenanceTab();
+      if (tab === 'rent') loadRentTab();
     }
   });
+
+  // ---- АРЕНДА (ДОБАВЛЕНО 23.09.2026, только просмотр - см. комментарий
+  // у tab-rent выше) ----
+  async function loadRentTab() {
+    const body = document.getElementById('rentTabBody');
+    try {
+      const initData = tg ? tg.initData : '';
+      const resp = await fetch('""" + CABINET_RENT_API_PATH + """', { headers: { 'X-Telegram-Init-Data': initData } });
+      const data = await resp.json();
+      const payments = data.rent_payments || [];
+      if (!payments.length) {
+        body.innerHTML = '<div class="muted">Аренда пока не привязана - записи появятся здесь, когда владелец компании добавит их.</div>';
+        return;
+      }
+      body.innerHTML = payments.map(p => {
+        const sum = Math.round((p.amount_kopecks || 0) / 100).toLocaleString('ru-RU') + '₽';
+        const statusColor = p.is_paid ? '#34C759' : '#FF3B30';
+        const statusText = p.is_paid ? '✅ Оплачено' : '❌ Не оплачено';
+        return '<div class="mo-item"><div><div class="mo-label">' + (p.plate || '') + ' ' + (p.model || '') +
+          '</div><div class="mo-sub">' + p.entity_name + ' · ' + p.period + ' · ' + sum + ' · до ' + (p.due_date || '—') +
+          '</div></div><div style="color:' + statusColor + ';font-weight:700;font-size:12.5px;flex-shrink:0">' + statusText + '</div></div>';
+      }).join('');
+    } catch (e) {
+      body.innerHTML = '<div class="muted">Не удалось загрузить данные об аренде.</div>';
+    }
+  }
 
   // ---- ФИНАНСЫ ----
   async function initFinanceTab() {
@@ -20912,6 +21622,12 @@ async def start_subscription_webhook_server():
     app.router.add_post(CABINET_SETTINGS_API_PATH, handle_cabinet_settings_api)
     app.router.add_get(CABINET_MAINTENANCE_API_PATH, handle_cabinet_maintenance_api)
     app.router.add_post(CABINET_MAINTENANCE_API_PATH, handle_cabinet_maintenance_api)
+    # Кабинет юр.лица + вкладка "Аренда" в обычном кабинете водителя (см.
+    # блок "ЛИЧНЫЙ КАБИНЕТ ЮРЛИЦА (WebApp)" выше, ДОБАВЛЕНО 23.09.2026).
+    app.router.add_get(LEGAL_CABINET_WEBAPP_PATH, handle_legal_cabinet_webapp)
+    app.router.add_get(LEGAL_CABINET_DATA_API_PATH, handle_legal_cabinet_data_api)
+    app.router.add_post(LEGAL_CABINET_DATA_API_PATH, handle_legal_cabinet_data_api)
+    app.router.add_get(CABINET_RENT_API_PATH, handle_cabinet_rent_api)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', SUBSCRIPTION_WEBHOOK_PORT)
@@ -21314,6 +22030,369 @@ def set_referrer_type(user_id, referrer_type):
     conn.close()
     return True
 
+# ==================== ЛИЧНЫЙ КАБИНЕТ ЮРЛИЦА ====================
+# ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - большое сообщение про
+# "делаем личный кабинет у юрлица"). Механика привязки: у каждого юр.лица
+# (строка в legal_entities) есть УНИКАЛЬНЫЙ пароль. Первый человек, который
+# успешно ввёл этот пароль в диалоге "🏢 ЮРЛИЦО" (см.
+# referral_legal_password_flow), становится owner_user_id - ТОЛЬКО он
+# получает доступ к кнопке "🏛 КАБИНЕТ ЮРЛИЦА" (WebApp) и вообще к данным
+# кабинета. Любой следующий, кто введёт ТОТ ЖЕ пароль, просто получает
+# переключение своей персональной схемы начислений на 'legal_entity' (как
+# было раньше), но НЕ становится владельцем кабинета и НЕ видит чужие
+# данные. Пароли/названия компаний пользователь передаёт позже без
+# редеплоя - через команду /add_legal_entity (см. admin_add_legal_entity
+# ниже), ADMIN_TELEGRAM_ID-only.
+def find_legal_entity_by_password(password):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT id, name, password, owner_user_id FROM legal_entities WHERE password = ?', (password,))
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        return None
+    return {'id': row[0], 'name': row[1], 'password': row[2], 'owner_user_id': row[3]}
+
+
+def claim_legal_entity_ownership(entity_id, user_id):
+    """Если у юр.лица ещё нет владельца - закрепляет user_id владельцем
+    (первый успешный ввод пароля). Если владелец уже есть - ничего не
+    трогает (в т.ч. если владелец - тот же user_id, это просто no-op)."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT owner_user_id FROM legal_entities WHERE id = ?', (entity_id,))
+    row = cursor.fetchone()
+    if row and row[0] is None:
+        cursor.execute('UPDATE legal_entities SET owner_user_id = ? WHERE id = ?', (user_id, entity_id))
+        conn.commit()
+    conn.close()
+
+
+def get_legal_entity_owned_by(user_id):
+    """Юр.лицо, которым владеет этот user_id (создатель/первый введший
+    пароль), или None, если он не владелец ни одного кабинета."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT id, name, password, owner_user_id, created_at FROM legal_entities WHERE owner_user_id = ?', (user_id,))
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        return None
+    return {'id': row[0], 'name': row[1], 'password': row[2], 'owner_user_id': row[3], 'created_at': row[4]}
+
+
+def add_legal_entity(name, password):
+    """Создаёт новую запись юр.лица (пока без владельца - им станет первый,
+    кто введёт этот пароль). Возвращает id или None, если такой пароль уже
+    занят (UNIQUE)."""
+    init_db()
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute('INSERT INTO legal_entities (name, password) VALUES (?, ?)', (name, password))
+        conn.commit()
+        new_id = cursor.lastrowid
+    except sqlite3.IntegrityError:
+        new_id = None
+    conn.close()
+    return new_id
+
+
+def get_referral_downline_user_ids(user_id):
+    """Тот же обход дерева, что get_referral_downline_count, но возвращает
+    список конкретных user_id (любая глубина) - используется для вкладки
+    "Водители" кабинета юрлица, фильтра карты "свои водители" и адресной
+    рассылки push-уведомлений (см. handle_legal_cabinet_send_notification)."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        '''
+        WITH RECURSIVE downline(uid) AS (
+            SELECT user_id FROM referrals WHERE referred_by = ?
+            UNION ALL
+            SELECT r.user_id FROM referrals r JOIN downline d ON r.referred_by = d.uid
+        )
+        SELECT uid FROM downline
+        ''',
+        (user_id,)
+    )
+    ids = [r[0] for r in cursor.fetchall()]
+    conn.close()
+    return ids
+
+
+def get_legal_entity_cars(entity_id):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        'SELECT id, plate, model, driver_user_id, mileage_km, last_trip_at, created_at '
+        'FROM legal_entity_cars WHERE entity_id = ? ORDER BY id DESC',
+        (entity_id,)
+    )
+    rows = cursor.fetchall()
+    conn.close()
+    return [
+        {'id': r[0], 'plate': r[1], 'model': r[2], 'driver_user_id': r[3],
+         'mileage_km': r[4] or 0, 'last_trip_at': r[5], 'created_at': r[6]}
+        for r in rows
+    ]
+
+
+def add_legal_entity_car(entity_id, plate, model, driver_user_id=None):
+    init_db()
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        'INSERT INTO legal_entity_cars (entity_id, plate, model, driver_user_id) VALUES (?, ?, ?, ?)',
+        (entity_id, plate, model, driver_user_id)
+    )
+    conn.commit()
+    new_id = cursor.lastrowid
+    conn.close()
+    return new_id
+
+
+def set_legal_entity_car_driver(car_id, driver_user_id):
+    conn = get_db_connection()
+    conn.execute('UPDATE legal_entity_cars SET driver_user_id = ? WHERE id = ?', (driver_user_id, car_id))
+    conn.commit()
+    conn.close()
+
+
+def update_legal_entity_car_mileage(car_id, mileage_km):
+    conn = get_db_connection()
+    conn.execute(
+        'UPDATE legal_entity_cars SET mileage_km = ?, last_trip_at = CURRENT_TIMESTAMP WHERE id = ?',
+        (mileage_km, car_id)
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_legal_entity_rent_payments(entity_id):
+    """Все записи аренды по всем машинам юр.лица - джойним car для
+    plate/model, нужно для вкладки "Финансы"/"Автомобили" кабинета."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        'SELECT p.id, p.car_id, p.driver_user_id, p.period, p.amount_kopecks, p.due_date, '
+        'p.is_paid, p.paid_at, c.plate, c.model '
+        'FROM legal_entity_car_rent_payments p '
+        'JOIN legal_entity_cars c ON c.id = p.car_id '
+        'WHERE c.entity_id = ? ORDER BY p.due_date DESC, p.id DESC',
+        (entity_id,)
+    )
+    rows = cursor.fetchall()
+    conn.close()
+    return [
+        {'id': r[0], 'car_id': r[1], 'driver_user_id': r[2], 'period': r[3],
+         'amount_kopecks': r[4] or 0, 'due_date': r[5], 'is_paid': bool(r[6]),
+         'paid_at': r[7], 'plate': r[8], 'model': r[9]}
+        for r in rows
+    ]
+
+
+def get_rent_payments_for_driver(driver_user_id):
+    """Вкладка "Аренда" для САМОГО водителя (только просмотр - см. прямую
+    просьбу пользователя 23.09.2026: "водитель видел только аренду...
+    не мог ничего нажимать")."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        'SELECT p.id, p.period, p.amount_kopecks, p.due_date, p.is_paid, p.paid_at, '
+        'c.plate, c.model, e.name '
+        'FROM legal_entity_car_rent_payments p '
+        'JOIN legal_entity_cars c ON c.id = p.car_id '
+        'JOIN legal_entities e ON e.id = c.entity_id '
+        'WHERE p.driver_user_id = ? ORDER BY p.due_date DESC, p.id DESC LIMIT 24',
+        (driver_user_id,)
+    )
+    rows = cursor.fetchall()
+    conn.close()
+    return [
+        {'id': r[0], 'period': r[1], 'amount_kopecks': r[2] or 0, 'due_date': r[3],
+         'is_paid': bool(r[4]), 'paid_at': r[5], 'plate': r[6], 'model': r[7], 'entity_name': r[8]}
+        for r in rows
+    ]
+
+
+def add_legal_entity_rent_payment(car_id, driver_user_id, period, amount_kopecks, due_date):
+    init_db()
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        'INSERT INTO legal_entity_car_rent_payments (car_id, driver_user_id, period, amount_kopecks, due_date) '
+        'VALUES (?, ?, ?, ?, ?)',
+        (car_id, driver_user_id, period, amount_kopecks, due_date)
+    )
+    conn.commit()
+    new_id = cursor.lastrowid
+    conn.close()
+    return new_id
+
+
+def set_legal_entity_rent_paid(payment_id, is_paid, marked_by):
+    """Отметку "оплачено/не оплачено" ставит ТОЛЬКО владелец кабинета (см.
+    handle_legal_cabinet_data_api - проверка entity.owner_user_id ДО вызова
+    этой функции)."""
+    conn = get_db_connection()
+    conn.execute(
+        'UPDATE legal_entity_car_rent_payments SET is_paid = ?, paid_at = ?, marked_by = ? WHERE id = ?',
+        (1 if is_paid else 0, datetime.now(timezone.utc).isoformat() if is_paid else None, marked_by, payment_id)
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_legal_entity_summary(entity_id):
+    """Сводка для главного экрана кабинета - число машин, водителей на
+    линии/не на линии (по shift в user_state, как и метка на карте), общий
+    пробег (сумма mileage_km по всем машинам)."""
+    cars = get_legal_entity_cars(entity_id)
+    driver_ids = {c['driver_user_id'] for c in cars if c['driver_user_id']}
+    on_line = 0
+    off_line = 0
+    for uid in driver_ids:
+        state = user_state.get(uid) or {}
+        if state.get('shift'):
+            on_line += 1
+        else:
+            off_line += 1
+    total_mileage = sum(c['mileage_km'] or 0 for c in cars)
+    return {
+        'cars_count': len(cars),
+        'drivers_on_line': on_line,
+        'drivers_off_line': off_line,
+        'total_mileage_km': round(total_mileage, 1),
+    }
+
+
+# ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "если аренда будет не
+# оплачена он будет присылать три раза в сутки push уведомления что оплатить
+# аренду и присылать ссылку на... главного кто будет следить кому надо будет
+# оплачивать") - фоновая проверка (см. legal_entity_rent_reminder_checker,
+# зарегистрирована в main() рядом с fuel_reminder_checker) - для каждой
+# неоплаченной записи аренды шлёт водителю пуш, не чаще 3 раз в календарные
+# сутки (~раз в LEGAL_ENTITY_RENT_REMINDER_CHECK_INTERVAL_MINUTES * N),
+# со ссылкой на владельца кабинета (tg://user?id=), кому нужно платить.
+LEGAL_ENTITY_RENT_REMINDER_CHECK_INTERVAL_MINUTES = 20
+LEGAL_ENTITY_RENT_REMINDERS_PER_DAY = 3
+LEGAL_ENTITY_RENT_REMINDER_MIN_GAP_HOURS = 7  # чуть меньше 24/3=8, чтобы не промахнуться мимо третьего окна
+
+
+def get_unpaid_legal_entity_rent_payments():
+    """Все неоплаченные записи аренды (по всем юр.лицам сразу), с
+    driver_user_id и данными владельца/машины - используется только
+    планировщиком напоминаний."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        'SELECT p.id, p.driver_user_id, p.period, p.amount_kopecks, p.due_date, '
+        'c.plate, c.model, e.name, e.owner_user_id '
+        'FROM legal_entity_car_rent_payments p '
+        'JOIN legal_entity_cars c ON c.id = p.car_id '
+        'JOIN legal_entities e ON e.id = c.entity_id '
+        'WHERE p.is_paid = 0 AND p.driver_user_id IS NOT NULL'
+    )
+    rows = cursor.fetchall()
+    conn.close()
+    return [
+        {'id': r[0], 'driver_user_id': r[1], 'period': r[2], 'amount_kopecks': r[3] or 0,
+         'due_date': r[4], 'plate': r[5], 'model': r[6], 'entity_name': r[7], 'owner_user_id': r[8]}
+        for r in rows
+    ]
+
+
+def _legal_entity_rent_reminder_tracker(payment_id):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        'SELECT sent_count_today, last_sent_at, reminder_date FROM legal_entity_rent_reminders_sent WHERE rent_payment_id = ?',
+        (payment_id,)
+    )
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        return {'sent_count_today': 0, 'last_sent_at': None, 'reminder_date': None}
+    return {'sent_count_today': row[0] or 0, 'last_sent_at': row[1], 'reminder_date': row[2]}
+
+
+def _legal_entity_rent_reminder_mark_sent(payment_id, car_id, sent_count_today, today_str):
+    conn = get_db_connection()
+    conn.execute(
+        'INSERT INTO legal_entity_rent_reminders_sent (rent_payment_id, car_id, sent_count_today, last_sent_at, reminder_date) '
+        'VALUES (?, ?, ?, ?, ?) '
+        'ON CONFLICT(rent_payment_id) DO UPDATE SET sent_count_today = excluded.sent_count_today, '
+        'last_sent_at = excluded.last_sent_at, reminder_date = excluded.reminder_date',
+        (payment_id, car_id, sent_count_today, datetime.now(timezone.utc).isoformat(), today_str)
+    )
+    conn.commit()
+    conn.close()
+
+
+async def _send_legal_entity_rent_reminder(payment):
+    amount_rub = round((payment['amount_kopecks'] or 0) / 100)
+    car_label = (payment['plate'] or '') + (f" {payment['model']}" if payment['model'] else '')
+    text = (
+        f"⚠️ *Не оплачена аренда*\n\n"
+        f"🚗 {car_label.strip() or 'машина'}\n"
+        f"🏢 {payment['entity_name']}\n"
+        f"📅 Период: {payment['period']}\n"
+        f"💰 Сумма: {amount_rub}₽\n"
+        f"⏰ Срок: {payment['due_date'] or '—'}\n\n"
+        f"Пожалуйста, оплати аренду и сообщи об этом."
+    )
+    markup = None
+    if payment.get('owner_user_id'):
+        markup = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="✍️ Написать по аренде", url=f"tg://user?id={payment['owner_user_id']}")
+        ]])
+    try:
+        await bot.send_message(payment['driver_user_id'], text, parse_mode='Markdown', reply_markup=markup)
+    except Exception:
+        logger.warning(f"⚠️ Не удалось отправить напоминание об аренде user_id={payment['driver_user_id']}")
+
+
+async def check_legal_entity_rent_reminders():
+    if not bot:
+        return
+    today_str = datetime.now(timezone.utc).date().isoformat()
+    for payment in get_unpaid_legal_entity_rent_payments():
+        tracker = _legal_entity_rent_reminder_tracker(payment['id'])
+        sent_count_today = tracker['sent_count_today'] if tracker['reminder_date'] == today_str else 0
+        if sent_count_today >= LEGAL_ENTITY_RENT_REMINDERS_PER_DAY:
+            continue
+        last_sent_at = tracker['last_sent_at']
+        if last_sent_at:
+            try:
+                elapsed_hours = (datetime.now(timezone.utc) - datetime.fromisoformat(last_sent_at)).total_seconds() / 3600
+            except Exception:
+                elapsed_hours = LEGAL_ENTITY_RENT_REMINDER_MIN_GAP_HOURS + 1
+            if elapsed_hours < LEGAL_ENTITY_RENT_REMINDER_MIN_GAP_HOURS:
+                continue
+        await _send_legal_entity_rent_reminder(payment)
+        # car_id не нужен для самой логики выше, но храним для наглядности в БД
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT car_id FROM legal_entity_car_rent_payments WHERE id = ?', (payment['id'],))
+        car_row = cursor.fetchone()
+        conn.close()
+        _legal_entity_rent_reminder_mark_sent(payment['id'], car_row[0] if car_row else None, sent_count_today + 1, today_str)
+
+
+async def legal_entity_rent_reminder_checker():
+    """Фоновая задача (см. asyncio.create_task в main(), рядом с
+    fuel_reminder_checker) - раз в LEGAL_ENTITY_RENT_REMINDER_CHECK_INTERVAL_MINUTES
+    проверяет неоплаченную аренду и шлёт напоминания (см.
+    check_legal_entity_rent_reminders)."""
+    while True:
+        try:
+            await check_legal_entity_rent_reminders()
+        except Exception:
+            logger.exception("❌ Ошибка фоновой проверки напоминаний об аренде юрлица")
+        await asyncio.sleep(LEGAL_ENTITY_RENT_REMINDER_CHECK_INTERVAL_MINUTES * 60)
+
+
 def distribute_referral_earnings(payer_user_id, amount_kopecks, order_id):
     """Вызывается из confirm_subscription_payment при каждом подтверждённом
     платеже - начисляет 1, 2 и 3 уровню (если у плательщика есть
@@ -21360,7 +22439,7 @@ REFERRAL_SHARE_TEXT_TEMPLATE = (
 )
 
 
-def referral_menu_keyboard(referral_link, current_type=REFERRAL_DEFAULT_TYPE):
+def referral_menu_keyboard(referral_link, current_type=REFERRAL_DEFAULT_TYPE, user_id=None):
     # "🔗 МОЯ ССЫЛКА"/"📤 ПОДЕЛИТЬСЯ ССЫЛКОЙ" - по прямой просьбе пользователя
     # (20.09.2026: "нужна кнопка... чтобы люди понимали какую ссылку давать
     # чтобы делиться"). "Поделиться" - через switch_inline_query: открывает
@@ -21383,10 +22462,24 @@ def referral_menu_keyboard(referral_link, current_type=REFERRAL_DEFAULT_TYPE):
     # должны видеть, насколько она выгоднее). У "Обычной" проценты оставлены -
     # это ставка самого пользователя, её скрывать незачем.
     individual_label = ("✅ " if current_type == 'individual' else "") + "👤 Обычная (30/15/5%)"
-    legal_label = ("✅ " if current_type == 'legal_entity' else "") + "🏢 Юр.лицо"
-    return InlineKeyboardMarkup(inline_keyboard=[
+    # ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя - "по кнопке юрлицо
+    # его надо с большими буквами сделать ЮРЛИЦО") - заглавные буквы.
+    legal_label = ("✅ " if current_type == 'legal_entity' else "") + "🏢 ЮРЛИЦО"
+    rows = [
         [InlineKeyboardButton(text=individual_label, callback_data="referral_category_individual")],
         [InlineKeyboardButton(text=legal_label, callback_data="referral_category_legal_start")],
+    ]
+    # ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "там ещё будет
+    # кнопка Личный кабинет заходя в эту кнопку они попадают в Telegram
+    # приложения") - кнопка видна ТОЛЬКО владельцу конкретного юр.лица
+    # (первому, кто ввёл его пароль - см. claim_legal_entity_ownership),
+    # а не всем, у кого просто включена схема 'legal_entity'.
+    if user_id is not None and PUBLIC_URL:
+        owned_entity = get_legal_entity_owned_by(user_id)
+        if owned_entity:
+            cabinet_url = f"{PUBLIC_URL}{LEGAL_CABINET_WEBAPP_PATH}"
+            rows.append([InlineKeyboardButton(text="🏛 ЛИЧНЫЙ КАБИНЕТ ЮРЛИЦА", web_app=WebAppInfo(url=cabinet_url))])
+    rows += [
         [InlineKeyboardButton(text="🔗 МОЯ ССЫЛКА", callback_data="referral_link_show")],
         # "📱 QR-КОД ССЫЛКИ" - по прямой просьбе пользователя (22.09.2026,
         # после подготовки презентации бота - "добавить возможность каждому
@@ -21423,7 +22516,8 @@ def referral_menu_keyboard(referral_link, current_type=REFERRAL_DEFAULT_TYPE):
         # совпадения показывает админ-панель - отдельной кнопки, которая
         # выдавала бы саму возможность существования админки, больше нет.
         [InlineKeyboardButton(text="👻 ФАНТОМ", callback_data="phantom_start")],
-    ])
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def get_referral_link(bot_username, user_id):
@@ -21481,7 +22575,7 @@ async def show_referral_program(message: types.Message):
         f"Вывод - только на карту, комиссия сервиса {REFERRAL_WITHDRAWAL_FEE_PERCENT}%, "
         f"минимум {REFERRAL_MIN_WITHDRAWAL_RUB}₽."
     )
-    await message.answer(text, reply_markup=referral_menu_keyboard(link, get_referrer_type(user_id)), parse_mode='Markdown')
+    await message.answer(text, reply_markup=referral_menu_keyboard(link, get_referrer_type(user_id), user_id), parse_mode='Markdown')
 
 
 async def _refresh_referral_menu_message(message, user_id):
@@ -21513,7 +22607,7 @@ async def _refresh_referral_menu_message(message, user_id):
         f"Вывод - только на карту, комиссия сервиса {REFERRAL_WITHDRAWAL_FEE_PERCENT}%, "
         f"минимум {REFERRAL_MIN_WITHDRAWAL_RUB}₽."
     )
-    markup = referral_menu_keyboard(link, get_referrer_type(user_id))
+    markup = referral_menu_keyboard(link, get_referrer_type(user_id), user_id)
     try:
         await message.edit_text(text, reply_markup=markup, parse_mode='Markdown')
     except Exception:
@@ -21573,11 +22667,29 @@ async def referral_legal_password_flow(message: types.Message):
         await message.answer("Отменено.", reply_markup=services_keyboard(category, city, user_id))
         return
 
-    if text == REFERRAL_LEGAL_ENTITY_PASSWORD:
+    # ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя - "будет вводиться
+    # разный пароль... название компании как к этим паролем будут
+    # относиться") - раньше был один пароль на всех (REFERRAL_LEGAL_ENTITY_PASSWORD),
+    # теперь ищем по таблице legal_entities (см. add_legal_entity/
+    # admin_add_legal_entity), СТАРЫЙ пароль оставлен рабочим для обратной
+    # совместимости (тем, кто уже им пользовался). Первый, кто успешно
+    # ввёл пароль КОНКРЕТНОГО юр.лица, становится его владельцем и
+    # получает доступ к "🏛 ЛИЧНЫЙ КАБИНЕТ ЮРЛИЦА" (см. referral_menu_keyboard).
+    legal_entity = find_legal_entity_by_password(text)
+    is_legacy_password = text == REFERRAL_LEGAL_ENTITY_PASSWORD
+    if legal_entity or is_legacy_password:
         state.pop('awaiting_referral_legal_password', None)
         set_referrer_type(user_id, 'legal_entity')
+        if legal_entity:
+            claim_legal_entity_ownership(legal_entity['id'], user_id)
+            owner_note = " Ты первый ввёл пароль этой компании - тебе открыт «🏛 Личный кабинет юрлица»." \
+                if get_legal_entity_owned_by(user_id) and get_legal_entity_owned_by(user_id)['id'] == legal_entity['id'] \
+                else ""
+            confirm_text = f"✅ Схема переключена на «Юр.лицо» ({legal_entity['name']})." + owner_note
+        else:
+            confirm_text = "✅ Схема переключена на «Юр.лицо»."
         await message.answer(
-            "✅ Схема переключена на «Юр.лицо».",
+            confirm_text,
             reply_markup=services_keyboard(category, city, user_id)
         )
         me = await bot.get_me()
@@ -21603,7 +22715,7 @@ async def referral_legal_password_flow(message: types.Message):
             f"Вывод - только на карту, комиссия сервиса {REFERRAL_WITHDRAWAL_FEE_PERCENT}%, "
             f"минимум {REFERRAL_MIN_WITHDRAWAL_RUB}₽."
         )
-        await message.answer(text_out, reply_markup=referral_menu_keyboard(link, 'legal_entity'), parse_mode='Markdown')
+        await message.answer(text_out, reply_markup=referral_menu_keyboard(link, 'legal_entity', user_id), parse_mode='Markdown')
         return
 
     await message.answer("❌ Неверный пароль. Попробуй ещё раз или нажми «❌ ОТМЕНА»:")
@@ -22158,6 +23270,49 @@ async def admin_set_individual_referrer(message: types.Message):
     target_id = int(parts[1])
     set_referrer_type(target_id, 'individual')
     await message.answer(f"✅ user_id={target_id} переключён на обычную схему (30%/15%/5%).")
+
+# ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "я тебе эти пароли
+# чуть позже скажу и буду скажу название компании") - позволяет добавлять
+# новые юр.лица (название + пароль) прямо из чата, без редеплоя кода.
+# Название может содержать пробелы - пароль ВСЕГДА последнее слово команды.
+@router.message(Command("add_legal_entity"))
+async def admin_add_legal_entity(message: types.Message):
+    if not ADMIN_TELEGRAM_ID or str(message.from_user.id) != str(ADMIN_TELEGRAM_ID):
+        return
+    raw = (message.text or '').split(maxsplit=1)
+    if len(raw) != 2 or ' ' not in raw[1].strip():
+        await message.answer("Использование: /add_legal_entity <Название компании> <пароль>\nПример: /add_legal_entity Олимп такси2026")
+        return
+    body = raw[1].strip()
+    name, _, password = body.rpartition(' ')
+    name = name.strip()
+    password = password.strip()
+    if not name or not password:
+        await message.answer("Использование: /add_legal_entity <Название компании> <пароль>")
+        return
+    new_id = add_legal_entity(name, password)
+    if new_id is None:
+        await message.answer(f"❌ Пароль «{password}» уже занят другим юр.лицом.")
+        return
+    await message.answer(f"✅ Юр.лицо «{name}» добавлено (id={new_id}), пароль: {password}")
+
+@router.message(Command("list_legal_entities"))
+async def admin_list_legal_entities(message: types.Message):
+    if not ADMIN_TELEGRAM_ID or str(message.from_user.id) != str(ADMIN_TELEGRAM_ID):
+        return
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT id, name, password, owner_user_id FROM legal_entities ORDER BY id DESC')
+    rows = cursor.fetchall()
+    conn.close()
+    if not rows:
+        await message.answer("Юр.лиц пока нет. Добавь через /add_legal_entity.")
+        return
+    lines = ["🏢 *Юр.лица:*"]
+    for r in rows:
+        owner = f"владелец: {r[3]}" if r[3] else "владелец: — (никто ещё не вошёл)"
+        lines.append(f"#{r[0]} «{r[1]}» / пароль: `{r[2]}` / {owner}")
+    await message.answer("\n".join(lines), parse_mode='Markdown')
 
 # ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - см. compute_campaign_profit
 # выше): команда по запросу + см. также campaign_profit_monthly_report ниже
@@ -23116,6 +24271,7 @@ async def main():
     asyncio.create_task(check_long_shifts())
     asyncio.create_task(nearby_drivers_checker())
     asyncio.create_task(fuel_reminder_checker())
+    asyncio.create_task(legal_entity_rent_reminder_checker())
     asyncio.create_task(morning_greeting_checker())
     asyncio.create_task(user_state_flusher())  # write-behind для user_state - см. комментарий у PersistentUserDict
     # Прогрев кэша telegram-web-app.js (21.09.2026, см. "ЛОКАЛЬНАЯ РАЗДАЧА
