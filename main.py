@@ -15329,6 +15329,26 @@ async def handle_legal_cabinet_data_api(request):
     conn.close()
     notifications_payload = [{'text': r[0], 'recipients_count': r[1], 'sent_at': r[2]} for r in notif_rows]
 
+    # ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "выведи вкладку
+    # карта водителей чтобы не переходить через кнопку прям оттуда можно
+    # было в карту водителя попасть") - готовая ссылка на карту сразу с
+    # ?mine=1 (см. handle_map_positions_api/get_referrer_type), чтобы
+    # владелец сразу видел СВОИХ водителей, а не всю карту города. Город/
+    # категория берём из его собственного user_state (тот же паттерн, что и
+    # у обычной кнопки "🗺 КАРТА ВОДИТЕЛЕЙ" в services_keyboard) - если он
+    # ещё ни разу не выбирал город в боте, ссылку не отдаём вовсе (клиент
+    # тогда просто не показывает кнопку - см. legal_cabinet_webapp_html).
+    map_url = None
+    if PUBLIC_URL:
+        owner_state = user_state.get(user_id) or {}
+        owner_city = owner_state.get('city')
+        owner_category = owner_state.get('category')
+        if owner_city and owner_category:
+            map_url = (
+                f"{PUBLIC_URL}{MAP_WEBAPP_PATH}?city={urllib.parse.quote(owner_city)}"
+                f"&category={urllib.parse.quote(owner_category)}&mine=1"
+            )
+
     return web.json_response({
         'entity_name': entity['name'],
         'summary': get_legal_entity_summary(entity_id),
@@ -15336,6 +15356,7 @@ async def handle_legal_cabinet_data_api(request):
         'drivers': drivers_payload,
         'rent_payments': rent_payments,
         'notifications': notifications_payload,
+        'map_url': map_url,
     })
 
 
@@ -15438,6 +15459,12 @@ def legal_cabinet_webapp_html():
       <div class="hero-tile"><div class="label">Машин</div><div class="value" id="tCars">0</div></div>
       <div class="hero-tile"><div class="label">Пробег, км</div><div class="value" id="tKm">0</div></div>
     </div>
+    <!-- ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "выведи вкладку
+         карта водителей чтобы не переходить через кнопку прям оттуда можно
+         было в карту водителя попасть") - прямой переход на карту (сразу с
+         фильтром "свои водители"), без выхода из кабинета в чат бота. Скрыта,
+         пока не пришёл map_url (см. loadCabinet/renderAll ниже). -->
+    <button class="btn" id="openMapBtn" style="display:none;margin-top:12px">🗺 Карта водителей</button>
   </div>
 
   <div class="cabinet-nav">
@@ -15526,6 +15553,14 @@ function renderAll() {
   document.getElementById('tOff').textContent = s.drivers_off_line;
   document.getElementById('tCars').textContent = s.cars_count;
   document.getElementById('tKm').textContent = Math.round(s.total_mileage_km).toLocaleString('ru-RU');
+
+  const openMapBtn = document.getElementById('openMapBtn');
+  if (STATE.map_url) {
+    openMapBtn.style.display = '';
+    openMapBtn.onclick = () => { window.location.href = STATE.map_url; };
+  } else {
+    openMapBtn.style.display = 'none';
+  }
 
   const carsList = document.getElementById('carsList');
   const rentCarSel = document.getElementById('rentCar');
@@ -21829,7 +21864,7 @@ REFERRAL_PROGRAM_LIVE = True
 # категории (см. referral_category_legal_entity_callback/AwaitingReferralLegalPassword
 # ниже), чтобы обычные пользователи не переключили себе более выгодную
 # схему без ведома админа.
-REFERRAL_LEGAL_ENTITY_PASSWORD = "261194"
+REFERRAL_LEGAL_ENTITY_PASSWORD = "11223344556677889900"  # ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя - смена пароля юр.лица)
 # ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя): теперь ДВЕ схемы
 # начислений на выбор, по 3 уровня в каждой (было 2 уровня, единая схема
 # 40%/50%-от-1-уровня). Какую схему применять к КОНКРЕТНОМУ человеку -
