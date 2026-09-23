@@ -3009,6 +3009,25 @@ def init_db():
         # устройство водителя его не передаёт (не все телефоны/версии
         # клиента это умеют). См. update_map_position/get_map_positions.
         cursor.execute("ALTER TABLE map_positions ADD COLUMN heading INTEGER")
+    if 'shift_active' not in existing_columns:
+        # ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - переработка
+        # видимости геопозиции на карте): "пока у тебя просто включена живая
+        # трансляция, но смена не начата - твою позицию видишь только ты сам,
+        # как только нажал НАЧАТЬ СМЕНУ - видят все (по своим фильтрам); а
+        # для юрлиц позиция своих водителей должна быть видна владельцу
+        # ПОСТОЯННО, независимо от смены, для отслеживания". Раньше
+        # (maybe_update_map_position) позиция вообще не писалась в БД, пока
+        # нет активной смены - значит, у владельца юрлица тоже не было
+        # никаких данных о водителе не на смене. Теперь пишем ВСЕГДА, пока
+        # идёт живая трансляция геопозиции (независимо от смены), а этим
+        # флагом отмечаем, шла ли в момент записи смена: обычная карта
+        # (get_map_positions) по умолчанию показывает только shift_active=1
+        # (как и раньше - "не на смене не видно"), а фильтр "свои водители"
+        # владельца юрлица (require_shift_active=False, см.
+        # handle_map_positions_api) игнорирует этот флаг и видит фактическую
+        # последнюю позицию водителя всегда, пока она не устарела (см.
+        # MAP_VISIBILITY_STALE_MINUTES).
+        cursor.execute("ALTER TABLE map_positions ADD COLUMN shift_active INTEGER NOT NULL DEFAULT 0")
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_map_positions_city ON map_positions (city, updated_at)')
     # ДОБАВЛЕНО 22.09.2026 (см. блок "ЗАПРАВКИ + ЭЛЕКТРОЗАРЯДКИ НА КАРТЕ" выше
     # по файлу) - крауд-отметки "что есть на заправке/свободна ли зарядка".
@@ -3079,6 +3098,22 @@ def init_db():
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    # ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "где ввод
+    # автомобиля указывать марку модель госномер пробег фактический цвет
+    # комментарии об автомобиле") - make/color/comment новые колонки поверх
+    # уже существующих plate/model/mileage_km. Таблица могла уже быть
+    # создана в проде (CREATE TABLE IF NOT EXISTS выше её не трогает) -
+    # добавляем через ALTER TABLE, как и везде в файле для уже
+    # задеплоенных таблиц.
+    for _migration_sql in (
+        'ALTER TABLE legal_entity_cars ADD COLUMN make TEXT',
+        'ALTER TABLE legal_entity_cars ADD COLUMN color TEXT',
+        'ALTER TABLE legal_entity_cars ADD COLUMN comment TEXT',
+    ):
+        try:
+            cursor.execute(_migration_sql)
+        except Exception:
+            pass  # колонка уже существует
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_legal_entity_cars_entity ON legal_entity_cars (entity_id)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_legal_entity_cars_driver ON legal_entity_cars (driver_user_id)')
     # Аренда по машине за период - is_paid отмечает ТОЛЬКО владелец кабинета
@@ -3108,6 +3143,20 @@ def init_db():
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    # ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "установить
+    # периодичность платежа каждый день раз в неделю раз две недели раз в
+    # месяц и также установить цена аренды в день") - frequency: одно из
+    # daily/weekly/biweekly/monthly; daily_rate_kopecks - справочная ставка
+    # в день (не пересчитывает amount_kopecks автоматически, просто
+    # хранится рядом для наглядности в кабинете).
+    for _migration_sql in (
+        'ALTER TABLE legal_entity_car_rent_payments ADD COLUMN frequency TEXT',
+        'ALTER TABLE legal_entity_car_rent_payments ADD COLUMN daily_rate_kopecks INTEGER',
+    ):
+        try:
+            cursor.execute(_migration_sql)
+        except Exception:
+            pass
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_le_rent_car ON legal_entity_car_rent_payments (car_id)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_le_rent_driver ON legal_entity_car_rent_payments (driver_user_id)')
     # Лог push-уведомлений от владельца кабинета своим водителям (см.
@@ -3138,6 +3187,34 @@ def init_db():
             last_sent_at DATETIME,
             reminder_date DATE,
             PRIMARY KEY (rent_payment_id)
+        )
+    ''')
+    # ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - анкета водителя во
+    # вкладке "Водители" кабинета юрлица: ФИО, дата рождения, пол, два
+    # номера телефона, паспортные данные, прописка, статус занятости
+    # (ИП/самозанятый/без трудоустройства), комментарий) - анкету заполняет
+    # ТОЛЬКО владелец кабинета (см. handle_legal_cabinet_data_api,
+    # action=save_driver_profile), сам водитель её не видит и не
+    # редактирует. Ключ (entity_id, driver_user_id) - у одного человека
+    # может быть отдельная анкета в разных компаниях, если он числится в
+    # нескольких реферальных ветках юрлиц.
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS legal_entity_driver_profiles (
+            entity_id INTEGER NOT NULL,
+            driver_user_id INTEGER NOT NULL,
+            last_name TEXT,
+            first_name TEXT,
+            patronymic TEXT,
+            birth_date DATE,
+            gender TEXT,
+            phone1 TEXT,
+            phone2 TEXT,
+            passport_data TEXT,
+            registration_address TEXT,
+            employment_type TEXT,
+            comment TEXT,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (entity_id, driver_user_id)
         )
     ''')
     conn.commit()
@@ -8396,10 +8473,17 @@ def finish_shift(user_id):
             pass
     save_shift_record(user_id, started_at, duration_minutes, total_km, airport_wait_minutes)
     # По прямой просьбе пользователя (21.09.2026): "когда завершает смену на
-    # карте его не видно" - убираем сразу, не дожидаясь устаревания точки
-    # (см. MAP_VISIBILITY_STALE_MINUTES).
+    # карте его не видно" - убираем с ОБЩЕЙ карты сразу, не дожидаясь
+    # устаревания точки (см. MAP_VISIBILITY_STALE_MINUTES).
+    # ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя - "для юрлиц
+    # отображение должно быть постоянно на карте, неважно нажата смена или
+    # нет") - раньше здесь была delete_map_position (строка целиком
+    # стиралась), из-за чего владелец юрлица тоже сразу терял водителя из
+    # виду. Теперь deactivate_map_position - только снимает shift_active,
+    # строка остаётся: обычная карта водителя больше не покажет, а
+    # владелец юрлица по-прежнему видит последнюю известную позицию.
     try:
-        delete_map_position(user_id)
+        deactivate_map_position(user_id)
     except Exception:
         logger.exception(f"❌ Не удалось убрать с карты водителей user_id={user_id} при завершении смены")
     return duration_minutes, total_km, airport_wait_minutes
@@ -9581,42 +9665,73 @@ def set_gas_queue_status(station_id, status, user_id):
 # для них очередь не считаем.
 MAP_AIRPORT_QUEUE_CATEGORIES = ['taxi', 'ultima']
 
-def update_map_position(user_id, city, category, lat, lon, tariffs=None, heading=None):
+def update_map_position(user_id, city, category, lat, lon, tariffs=None, heading=None, shift_active=True):
     """Записывает/обновляет последнюю позицию водителя для общей карты.
-    Вызывается только пока у водителя активна смена (см.
-    maybe_update_map_position/start_shift_and_notify) - сюда напрямую лучше
-    не звать. tariffs - список тарифов, выбранных при старте смены (см.
-    shift_tariffs_keyboard), для подписи маркера. heading - направление
-    движения в градусах (0-360, по часовой от севера) из Telegram Location,
-    может быть None (не все устройства его отдают) - см. комментарий у
-    миграции heading выше."""
+    Вызывается из maybe_update_map_position (хук живой геопозиции) - сюда
+    напрямую лучше не звать. tariffs - список тарифов, выбранных при старте
+    смены (см. shift_tariffs_keyboard), для подписи маркера. heading -
+    направление движения в градусах (0-360, по часовой от севера) из
+    Telegram Location, может быть None (не все устройства его отдают) - см.
+    комментарий у миграции heading выше.
+
+    ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя - переработка видимости
+    геопозиции, см. комментарий у миграции shift_active в init_db) - раньше
+    эта функция вызывалась ТОЛЬКО пока идёт смена. Теперь пишет позицию
+    всегда, пока у водителя просто включена живая трансляция геопозиции
+    (даже не на смене) - shift_active передаёт, была ли в этот момент
+    активна смена, чтобы обычная карта могла по-прежнему показывать только
+    тех, кто "на линии", а владелец юрлица - видеть свой парк всегда (см.
+    get_map_positions/handle_map_positions_api)."""
     conn = get_db_connection()
     cursor = conn.cursor()
     tariffs_json = json.dumps(list(tariffs or []), ensure_ascii=False)
     cursor.execute('''
-        INSERT INTO map_positions (user_id, city, category, lat, lon, tariffs, heading, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        INSERT INTO map_positions (user_id, city, category, lat, lon, tariffs, heading, shift_active, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
         ON CONFLICT(user_id) DO UPDATE SET
             city = excluded.city, category = excluded.category,
             lat = excluded.lat, lon = excluded.lon, tariffs = excluded.tariffs,
-            heading = excluded.heading,
+            heading = excluded.heading, shift_active = excluded.shift_active,
             updated_at = CURRENT_TIMESTAMP
-    ''', (user_id, city, category, lat, lon, tariffs_json, heading))
+    ''', (user_id, city, category, lat, lon, tariffs_json, heading, 1 if shift_active else 0))
     conn.commit()
     conn.close()
 
 def delete_map_position(user_id):
-    """Убирает водителя с карты - при завершении смены (см. finish_shift) или
-    если пропала живая геопозиция дольше MAP_VISIBILITY_STALE_MINUTES (тогда
-    точка и так больше не отдаётся get_map_positions, это просто явная
-    уборка, чтобы не копить старые строки)."""
+    """Убирает водителя с карты насовсем - при полном сбросе user_state
+    (см. send_start_screen/continue_to_bot/go_back: город/категория
+    стираются, старая точка теряет смысл), или если пропала живая
+    геопозиция дольше MAP_VISIBILITY_STALE_MINUTES (тогда точка и так
+    больше не отдаётся get_map_positions, это просто явная уборка, чтобы не
+    копить старые строки). НЕ используется при обычном завершении смены -
+    там теперь deactivate_map_position (см. ниже), чтобы у владельца
+    юрлица не пропадала последняя известная позиция водителя."""
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute('DELETE FROM map_positions WHERE user_id = ?', (user_id,))
     conn.commit()
     conn.close()
 
-def get_map_positions(city, category=None, exclude_user_id=None, only_user_ids=None):
+def deactivate_map_position(user_id):
+    """ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "для юрлиц
+    отображение должно быть постоянно на карте, неважно нажата смена или
+    нет, это важно для отслеживания"): вызывается при завершении смены
+    (см. finish_shift) ВМЕСТО delete_map_position - просто снимает флаг
+    shift_active, не трогая саму строку/координаты. Благодаря этому
+    обычная карта (get_map_positions с require_shift_active=True, по
+    умолчанию) сразу перестаёт показывать водителя всем остальным, а
+    владелец юрлица (фильтр "свои водители", require_shift_active=False)
+    по-прежнему видит его последнюю известную позицию, пока она не
+    устареет (MAP_VISIBILITY_STALE_MINUTES) или пока не придёт новая живая
+    геопозиция. Если строки ещё не было (водитель ни разу не транслировал
+    геопозицию) - просто ничего не делает."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('UPDATE map_positions SET shift_active = 0 WHERE user_id = ?', (user_id,))
+    conn.commit()
+    conn.close()
+
+def get_map_positions(city, category=None, exclude_user_id=None, only_user_ids=None, include_user_id=False, require_shift_active=True):
     """Отдаёт список позиций для карты конкретного города - только
     категория/тарифы/координаты, БЕЗ user_id и имени (приватность, по
     просьбе пользователя - подпись маркера только "какой тариф").
@@ -9644,6 +9759,17 @@ def get_map_positions(city, category=None, exclude_user_id=None, only_user_ids=N
     if exclude_user_id is not None:
         where += ' AND user_id != ?'
         params.append(exclude_user_id)
+    # ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - переработка
+    # видимости геопозиции, см. комментарий у миграции shift_active в
+    # init_db): по умолчанию обычная карта видит только тех, кто СЕЙЧАС на
+    # смене (require_shift_active=True - тот же эффект, что раньше давало
+    # полное отсутствие строки в таблице для водителя не на смене). Для
+    # владельца юрлица (фильтр "свои водители", см.
+    # handle_map_positions_api) require_shift_active=False - он видит
+    # фактическую последнюю позицию своего водителя ВСЕГДА, смена у него
+    # активна или нет, пока точка не устарела.
+    if require_shift_active:
+        where += ' AND shift_active = 1'
     # ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - фильтр карты "свои
     # водители/все" для владельца кабинета юрлица, см.
     # get_referral_downline_user_ids/handle_map_positions_api ?mine=1) -
@@ -9656,7 +9782,16 @@ def get_map_positions(city, category=None, exclude_user_id=None, only_user_ids=N
         placeholders = ','.join('?' for _ in only_user_ids)
         where += f' AND user_id IN ({placeholders})'
         params.extend(only_user_ids)
-    cursor.execute(f'SELECT category, lat, lon, tariffs, heading FROM map_positions WHERE {where}', params)
+    # ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "на карте для
+    # юрлиц... над каждым водителем обязательно подписывается номер
+    # автомобиля ФИО водителя модель и марка и цвет") - include_user_id
+    # используется ТОЛЬКО во владельческом режиме ?mine=1 (см.
+    # handle_map_positions_api/_enrich_positions_with_fleet_info), чтобы
+    # сервер мог сопоставить позицию с карточкой машины/анкетой водителя
+    # ПЕРЕД тем, как убрать сырой user_id из ответа - обычная (не mine=1)
+    # карта по-прежнему НИКОГДА не получает user_id, приватность не нарушена.
+    select_cols = 'category, lat, lon, tariffs, heading' + (', user_id' if include_user_id else '')
+    cursor.execute(f'SELECT {select_cols} FROM map_positions WHERE {where}', params)
     rows = cursor.fetchall()
     conn.close()
     result = []
@@ -9665,7 +9800,10 @@ def get_map_positions(city, category=None, exclude_user_id=None, only_user_ids=N
             tariffs = json.loads(r[3]) if r[3] else []
         except Exception:
             tariffs = []
-        result.append({'category': r[0], 'lat': r[1], 'lon': r[2], 'tariffs': tariffs, 'heading': r[4]})
+        item = {'category': r[0], 'lat': r[1], 'lon': r[2], 'tariffs': tariffs, 'heading': r[4]}
+        if include_user_id:
+            item['user_id'] = r[5]
+        result.append(item)
     return result
 
 # ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "при тапе на парковку
@@ -9695,12 +9833,19 @@ def get_all_map_positions_with_user_id():
     """Как get_map_positions, но ВКЛЮЧАЕТ user_id и без фильтра по городу -
     только для служебного использования внутри бота (см.
     check_nearby_drivers ниже), НИКОГДА не отдаётся во внешний JSON API
-    (там всегда get_map_positions без user_id, ради приватности)."""
+    (там всегда get_map_positions без user_id, ради приватности).
+
+    ИЗМЕНЕНО 23.09.2026 (см. миграцию shift_active в init_db) - теперь
+    map_positions хранит и позиции НЕ на смене (для владельцев юрлиц),
+    поэтому здесь явно фильтруем shift_active = 1: пуш "рядом есть
+    водитель" по-прежнему должен срабатывать только между водителями,
+    которые ФАКТИЧЕСКИ работают на смене сейчас, а не просто везут телефон
+    с включённой геолокацией дома."""
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute('''
         SELECT user_id, city, category, lat, lon, tariffs FROM map_positions
-        WHERE updated_at >= datetime('now', ?)
+        WHERE updated_at >= datetime('now', ?) AND shift_active = 1
     ''', (f'-{MAP_VISIBILITY_STALE_MINUTES} minutes',))
     rows = cursor.fetchall()
     conn.close()
@@ -9999,16 +10144,27 @@ async def fuel_reminder_checker():
 
 async def maybe_update_map_position(user_id, lat, lon, heading=None):
     """Хук из обработчиков живой геопозиции (см. вызовы ниже) - пишет позицию
-    в map_positions, ТОЛЬКО пока у водителя идёт смена (см.
-    is_shift_active/start_shift_and_notify) - по прямому уточнению
-    пользователя (21.09.2026): "когда он нажимает начать смену он
-    автоматически появляется на карте когда завершает смену на карте его не
-    видно". Отдельной настройки-тумблера для показа на карте больше нет.
-    Если категория не входит в MAP_CATEGORY_STYLE (на всякий случай) -
-    ничего не пишет. heading - направление движения (0-360°), если Telegram
-    его прислал (см. комментарий у миграции heading в map_positions) - по
-    просьбе пользователя (22.09.2026), чтобы иконка машинки на карте могла
-    показывать, в какую сторону едет водитель.
+    в map_positions. Если категория не входит в MAP_CATEGORY_STYLE (на
+    всякий случай) - ничего не пишет. heading - направление движения
+    (0-360°), если Telegram его прислал (см. комментарий у миграции heading
+    в map_positions) - по просьбе пользователя (22.09.2026), чтобы иконка
+    машинки на карте могла показывать, в какую сторону едет водитель.
+
+    ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя - переработка видимости
+    геопозиции, см. подробный комментарий у миграции shift_active в
+    init_db): раньше эта функция была НО-ОП, пока не активна смена (см.
+    комментарий "когда завершает смену на карте его не видно" в старой
+    версии) - для ОБЫЧНОГО водителя внешне ничего не поменялось (см.
+    require_shift_active=True по умолчанию в get_map_positions/
+    handle_map_positions_api - без смены его по-прежнему никто не видит на
+    общей карте), НО теперь позиция физически пишется в БД всегда, пока
+    просто идёт живая трансляция геопозиции (даже не на смене), с флагом
+    shift_active = "идёт ли смена сейчас". Это нужно, чтобы у владельца
+    юрлица (фильтр "свои водители", require_shift_active=False) была видна
+    ФАКТИЧЕСКАЯ последняя позиция каждого своего водителя ПОСТОЯННО, для
+    отслеживания, независимо от того, начал ли конкретный водитель смену -
+    иначе (как было раньше) при отсутствии смены строки в БД просто не было
+    бы вообще ни для кого, включая владельца.
 
     ИЗМЕНЕНО 23.09.2026 (подготовка к росту числа пользователей до 5000 -
     прямая просьба пользователя "прогони все системы что может сломаться,
@@ -10023,14 +10179,15 @@ async def maybe_update_map_position(user_id, lat, lon, heading=None):
     loop продолжает обслуживать остальных, пока идёт запись в SQLite."""
     state = user_state.get(user_id) or {}
     shift = state.get('shift')
-    if not shift:
-        return
     category = state.get('category')
     city = state.get('city')
     if not category or not city or category not in MAP_CATEGORY_STYLE:
         return
     try:
-        await asyncio.to_thread(update_map_position, user_id, city, category, lat, lon, shift.get('tariffs'), heading)
+        await asyncio.to_thread(
+            update_map_position, user_id, city, category, lat, lon,
+            (shift or {}).get('tariffs'), heading, bool(shift)
+        )
     except Exception:
         logger.exception(f"❌ Не удалось обновить позицию на карте для user_id={user_id}")
 
@@ -10627,16 +10784,20 @@ def map_webapp_html():
   // кабинете ничего не заполнено, попап не привязываем вовсе (по нажатию
   // ничего не откроется, как и раньше).
   let myProfilePopupHtml = '';
-  // ДОБАВЛЕНО 23.09.2026 (жалоба пользователя со скриншотом - "я не на
-  // линии, моя метка висит на карте, так быть не должно") - своя стрелка
-  // раньше рисовалась просто по факту наличия GPS у браузера, вообще не
-  // спрашивая, активна ли смена. У ДРУГИХ водителей это уже давно работает
-  // правильно (см. maybe_update_map_position - без смены позиция вообще не
-  // пишется на сервер), а вот у себя самого клиент такую проверку не делал.
-  // myShiftActive - тот же признак с сервера (см. handle_map_my_profile_api),
-  // по умолчанию false (пока ответ ещё не пришёл, стрелку не показываем -
-  // лучше на секунду позже появится, чем ошибочно покажется тому, кто не на
-  // линии).
+  // ИЗМЕНЕНО 23.09.2026 (прямое уточнение пользователя, повторно и явно -
+  // "твоя позиция всегда будет показана вот такой стрелкой... а других
+  // пользователь себя будет видеть также стрелкой, других видит смайликами
+  // и цветами"): раньше (жалоба со скриншотом "я не на линии, моя метка
+  // висит на карте, так быть не должно") своя стрелка пряталась, пока не
+  // активна смена - пользователь явно пересмотрел это решение: свою
+  // собственную позицию водитель должен видеть на карте ВСЕГДА, пока просто
+  // включена живая геолокация (независимо от смены) - шторка "не на
+  // смене - никто не видит" касается только того, ВИДЯТ ЛИ ТЕБЯ ДРУГИЕ (это
+  // уже реализовано на сервере, см. maybe_update_map_position/
+  // get_map_positions/shift_active), а не того, видишь ли ты сам себя.
+  // myShiftActive по-прежнему приходит с сервера (см.
+  // handle_map_my_profile_api) и хранится про запас, но больше НЕ управляет
+  // видимостью своей стрелки.
   let myShiftActive = false;
   async function loadMyProfile() {{
     try {{
@@ -10652,12 +10813,6 @@ def map_webapp_html():
       // handle_map_my_profile_api), остальным она вообще не видна.
       if (data.is_legal_entity_referrer && mineToggleBtn) {{
         mineToggleBtn.style.display = '';
-      }}
-      if (!myShiftActive && selfMarker) {{
-        // Ответ пришёл ПОСЛЕ того, как watchPosition уже успел нарисовать
-        // стрелку (пока проверка смены ещё не разрешилась) - убираем её.
-        map.removeLayer(selfMarker);
-        selfMarker = null;
       }}
       const p = data.profile;
       if (!p) return;
@@ -10677,17 +10832,10 @@ def map_webapp_html():
   function updateSelfMarker(lat, lon, heading) {{
     selfLat = lat;
     selfLon = lon;
-    // Не на смене - своя стрелка на карте не рисуется вовсе (см. комментарий
-    // у myShiftActive выше). Если она уже была нарисована ДО того, как это
-    // выяснилось (watchPosition сработал раньше ответа /map/my_profile) -
-    // убираем.
-    if (!myShiftActive) {{
-      if (selfMarker) {{
-        map.removeLayer(selfMarker);
-        selfMarker = null;
-      }}
-      return;
-    }}
+    // ИЗМЕНЕНО 23.09.2026 (прямое уточнение пользователя - см. комментарий
+    // у myShiftActive выше) - своя стрелка рисуется всегда, пока браузер
+    // отдаёт геопозицию, независимо от смены. Видимость для ДРУГИХ
+    // по-прежнему зависит от смены - это уже гарантируется на сервере.
     const h = (heading === null || heading === undefined || isNaN(heading)) ? selfHeading : heading;
     selfHeading = h;
     const icon = L.divIcon({{ className: 'self-icon', html: selfIconHtml(h), iconSize: [42, 42], iconAnchor: [21, 21] }});
@@ -12976,6 +13124,14 @@ async def handle_map_positions_api(request):
     # его собственная реферальная ветка (get_referral_downline_user_ids),
     # для остальных запрос просто игнорирует параметр.
     only_user_ids = None
+    # ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "на карте для
+    # юрлиц... над каждым водителем обязательно подписывается номер
+    # автомобиля ФИО водителя модель и марка и цвет") - entity_id владельца,
+    # если есть, используется ТОЛЬКО чтобы обогатить позиции карточкой
+    # машины/анкетой (см. _enrich_positions_with_fleet_info); сам фильтр
+    # "свои" (only_user_ids) по-прежнему работает по референс-ветке, даже
+    # без владения кабинетом (см. комментарий выше).
+    enrich_entity_id = None
     if request.query.get('mine') == '1' and requester_user_id:
         try:
             is_legal_entity_referrer = await asyncio.to_thread(get_referrer_type, requester_user_id) == 'legal_entity'
@@ -12986,6 +13142,12 @@ async def handle_map_positions_api(request):
                 only_user_ids = await asyncio.to_thread(get_referral_downline_user_ids, requester_user_id)
             except Exception:
                 only_user_ids = []
+            try:
+                owned_entity = await asyncio.to_thread(get_legal_entity_owned_by, requester_user_id)
+            except Exception:
+                owned_entity = None
+            if owned_entity:
+                enrich_entity_id = owned_entity['id']
     try:
         # ИЗМЕНЕНО 23.09.2026 (подготовка к росту до 5000 пользователей) -
         # каждый открытый WebApp карты опрашивает этот эндпоинт периодически
@@ -12993,7 +13155,21 @@ async def handle_map_positions_api(request):
         # async-хендлере блокировал бы event loop на время запроса при
         # каждом таком опросе от КАЖДОГО открытого окна карты одновременно.
         # asyncio.to_thread переносит сам SQL-запрос в отдельный поток.
-        positions = await asyncio.to_thread(get_map_positions, city, category, exclude_user_id, only_user_ids) if city else []
+        # ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя - "для юрлиц
+        # отображение должно быть постоянно на карте, неважно нажата смена
+        # или нет, это важно для отслеживания") - require_shift_active=False
+        # ТОЛЬКО в владельческом режиме "свои водители" (only_user_ids
+        # задан, т.е. запрос уже прошёл проверку is_legal_entity_referrer
+        # выше) - там владелец видит фактическую последнюю позицию своего
+        # водителя всегда. Обычная карта (только_user_ids=None) по-прежнему
+        # видит только тех, кто СЕЙЧАС на смене (require_shift_active=True,
+        # значение по умолчанию).
+        positions = await asyncio.to_thread(
+            get_map_positions, city, category, exclude_user_id, only_user_ids, bool(enrich_entity_id),
+            only_user_ids is None
+        ) if city else []
+        if enrich_entity_id and positions:
+            positions = await asyncio.to_thread(_enrich_positions_with_fleet_info, positions, enrich_entity_id)
         # Тарифы уже человекочитаемые строки (см. CATEGORIES[cat]['tariffs'] /
         # shift_tariff_options) - WebApp просто склеивает их через запятую в
         # подписи маркера (см. map_webapp_html), переводить не нужно.
@@ -15186,10 +15362,22 @@ async def handle_legal_cabinet_webapp(request):
     )
 
 
-def _legal_cabinet_driver_label(uid):
-    """Короткая подпись водителя для списков в кабинете юрлица - пробуем
-    взять имя из анкеты личного кабинета (driver_profiles), иначе просто
-    показываем id."""
+def _legal_cabinet_driver_label(uid, entity_id=None):
+    """Короткая подпись водителя для списков в кабинете юрлица. ИЗМЕНЕНО
+    23.09.2026 (прямая просьба пользователя - анкета водителя с ФИО в
+    кабинете юрлица) - если для entity_id заполнена анкета
+    (legal_entity_driver_profiles), берём ФИО оттуда (это то, что владелец
+    сам вписал про своего водителя); иначе fallback на имя из ЕГО
+    личного кабинета (driver_profiles), иначе просто id."""
+    if entity_id is not None:
+        try:
+            le_profile = get_legal_entity_driver_profile(entity_id, uid)
+        except Exception:
+            le_profile = None
+        if le_profile:
+            fio = ' '.join(p for p in (le_profile.get('last_name'), le_profile.get('first_name'), le_profile.get('patronymic')) if p)
+            if fio:
+                return f"{fio} (id{uid})"
     try:
         profile = get_driver_profile(uid)
     except Exception:
@@ -15219,11 +15407,48 @@ async def handle_legal_cabinet_data_api(request):
             return web.json_response({'error': 'invalid_body'}, status=400)
 
         if action == 'add_car':
+            # ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя - "где ввод
+            # автомобиля указывать марку модель госномер пробег фактический
+            # цвет комментарии об автомобиле") - добавлены make/color/
+            # comment/mileage_km к уже существующим plate/model.
             plate = str(body.get('plate') or '').strip()[:20]
             model = str(body.get('model') or '').strip()[:60]
-            if not plate and not model:
+            make = str(body.get('make') or '').strip()[:40] or None
+            color = str(body.get('color') or '').strip()[:30] or None
+            comment = str(body.get('comment') or '').strip()[:500] or None
+            try:
+                mileage_km = float(body.get('mileage_km')) if body.get('mileage_km') not in (None, '') else 0
+            except (TypeError, ValueError):
+                mileage_km = 0
+            if not plate and not model and not make:
                 return web.json_response({'error': 'empty_car'}, status=400)
-            add_legal_entity_car(entity_id, plate, model)
+            add_legal_entity_car(entity_id, plate, model, make=make, color=color, comment=comment, mileage_km=mileage_km)
+        elif action == 'update_car_details':
+            # ДОБАВЛЕНО 23.09.2026 (та же просьба, что у add_car выше) -
+            # редактирование уже добавленной машины (марка/модель/госномер/
+            # пробег/цвет/комментарий), без потери привязки к водителю.
+            try:
+                car_id = int(body.get('car_id'))
+            except (TypeError, ValueError):
+                return web.json_response({'error': 'invalid_car_id'}, status=400)
+            cars = {c['id']: c for c in get_legal_entity_cars(entity_id)}
+            if car_id not in cars:
+                return web.json_response({'error': 'car_not_found'}, status=404)
+            mileage_km = None
+            if body.get('mileage_km') not in (None, ''):
+                try:
+                    mileage_km = float(body.get('mileage_km'))
+                except (TypeError, ValueError):
+                    mileage_km = None
+            update_legal_entity_car_details(
+                car_id,
+                plate=str(body.get('plate') or '').strip()[:20] or None,
+                model=str(body.get('model') or '').strip()[:60] or None,
+                make=str(body.get('make') or '').strip()[:40] or None,
+                color=str(body.get('color') or '').strip()[:30] or None,
+                comment=str(body.get('comment') or '').strip()[:500] or None,
+                mileage_km=mileage_km,
+            )
         elif action == 'set_car_driver':
             try:
                 car_id = int(body.get('car_id'))
@@ -15271,7 +15496,21 @@ async def handle_legal_cabinet_data_api(request):
                 driver_id = car.get('driver_user_id')
             period = str(body.get('period') or '').strip()[:32] or datetime.now(timezone.utc).strftime('%Y-%m')
             due_date = str(body.get('due_date') or '').strip()[:10] or datetime.now(timezone.utc).date().isoformat()
-            add_legal_entity_rent_payment(car_id, driver_id, period, round(amount_rub * 100), due_date)
+            # ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя -
+            # "установить периодичность платежа каждый день раз в неделю
+            # раз две недели раз в месяц и также установить цена аренды в
+            # день") - frequency и цена/день хранятся рядом со всей
+            # остальной записью аренды, см. LEGAL_ENTITY_RENT_FREQUENCY_LABELS.
+            frequency = body.get('frequency') or None
+            daily_rate_rub = body.get('daily_rate_rub')
+            try:
+                daily_rate_kopecks = round(float(daily_rate_rub) * 100) if daily_rate_rub not in (None, '') else None
+            except (TypeError, ValueError):
+                daily_rate_kopecks = None
+            add_legal_entity_rent_payment(
+                car_id, driver_id, period, round(amount_rub * 100), due_date,
+                frequency=frequency, daily_rate_kopecks=daily_rate_kopecks,
+            )
         elif action == 'set_rent_paid':
             try:
                 payment_id = int(body.get('payment_id'))
@@ -15283,6 +15522,22 @@ async def handle_legal_cabinet_data_api(request):
             if payment_id not in payments:
                 return web.json_response({'error': 'payment_not_found'}, status=404)
             set_legal_entity_rent_paid(payment_id, is_paid, user_id)
+        elif action == 'save_driver_profile':
+            # ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - анкета
+            # водителя во вкладке "Водители": ФИО/дата рождения/пол/два
+            # телефона/паспорт/прописка/занятость/комментарий) - заполняет
+            # ТОЛЬКО владелец кабинета, сам водитель анкету не видит.
+            try:
+                driver_user_id = int(body.get('driver_user_id'))
+            except (TypeError, ValueError):
+                return web.json_response({'error': 'invalid_driver_id'}, status=400)
+            # Разрешаем заполнять анкету только тем, кто реально в ветке
+            # владельца - иначе можно было бы угадать чужой id.
+            if driver_user_id not in set(get_referral_downline_user_ids(user_id)):
+                return web.json_response({'error': 'driver_not_found'}, status=404)
+            save_legal_entity_driver_profile(entity_id, driver_user_id, {
+                k: body.get(k) for k in LEGAL_ENTITY_DRIVER_PROFILE_FIELDS
+            })
         elif action == 'send_notification':
             text = str(body.get('text') or '').strip()[:2000]
             if not text:
@@ -15309,16 +15564,20 @@ async def handle_legal_cabinet_data_api(request):
     cars = get_legal_entity_cars(entity_id)
     driver_ids = sorted(set(get_referral_downline_user_ids(user_id)))
     drivers_payload = [
-        {'user_id': uid, 'label': _legal_cabinet_driver_label(uid), 'on_shift': bool((user_state.get(uid) or {}).get('shift'))}
+        {
+            'user_id': uid, 'label': _legal_cabinet_driver_label(uid, entity_id),
+            'on_shift': bool((user_state.get(uid) or {}).get('shift')),
+            'profile': get_legal_entity_driver_profile(entity_id, uid),
+        }
         for uid in driver_ids
     ]
     cars_payload = [
-        {**c, 'driver_label': _legal_cabinet_driver_label(c['driver_user_id']) if c['driver_user_id'] else None}
+        {**c, 'driver_label': _legal_cabinet_driver_label(c['driver_user_id'], entity_id) if c['driver_user_id'] else None}
         for c in cars
     ]
     rent_payments = get_legal_entity_rent_payments(entity_id)
     for p in rent_payments:
-        p['driver_label'] = _legal_cabinet_driver_label(p['driver_user_id']) if p['driver_user_id'] else None
+        p['driver_label'] = _legal_cabinet_driver_label(p['driver_user_id'], entity_id) if p['driver_user_id'] else None
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute(
@@ -15376,7 +15635,21 @@ def legal_cabinet_webapp_html():
     """HTML-страница кабинета юр.лица - тот же визуальный язык (карточки/
     пилюли-табы/жёлтый акцент), что и обычный cabinet_webapp_html, но
     отдельная страница со своими вкладками (см. комментарий у
-    LEGAL_CABINET_WEBAPP_PATH выше)."""
+    LEGAL_CABINET_WEBAPP_PATH выше).
+
+    ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя - "давай подумаем над
+    стилистикой... чтобы было супер красиво, современно"): та же чёрно-
+    жёлто-серо-белая палитра, что и раньше, но с более выразительным
+    hero-градиентом (движущийся жёлтый блик - см. .hero::before/@keyframes
+    heroSheen), плавным fade+slide переходом между вкладками (см.
+    .tab-pane/@keyframes tabIn), тактильной отдачей на кнопках/карточках
+    (:active transform) и лёгкой fade-in анимацией списков при перерисовке.
+    Функционально: полная анкета машины (марка/модель/госномер/пробег/
+    цвет/комментарий, с возможностью редактировать уже добавленную),
+    анкета водителя (ФИО/дата рождения/пол/два телефона с кнопкой
+    "📞 Позвонить"/паспорт/прописка/занятость/комментарий - см.
+    LEGAL_ENTITY_DRIVER_PROFILE_FIELDS), периодичность и цена/день у
+    аренды, плитки "должны оплатить сегодня"/"не оплатили" на Сводке."""
     return """<!doctype html>
 <html lang="ru">
 <head>
@@ -15392,16 +15665,38 @@ def legal_cabinet_webapp_html():
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     background: var(--tg-theme-bg-color, #f2f2f7); color: var(--tg-theme-text-color, #000);
   }
-  h2.section-title { font-size: 14px; font-weight: 600; opacity: .8; margin: 20px 0 8px; }
+  h2.section-title { font-size: 14px; font-weight: 700; opacity: .8; margin: 20px 0 8px; letter-spacing: .2px; }
+
+  /* ДОБАВЛЕНО 23.09.2026 - более "живой" hero: диагональный градиент +
+     мягкий движущийся жёлтый блик (heroSheen), уважает prefers-reduced-motion. */
   .hero {
-    border-radius: 18px; padding: 18px; background: linear-gradient(135deg, #1c1c1c, #000);
-    color: #fff; margin-bottom: 16px; box-shadow: 0 4px 14px rgba(0,0,0,.4); border: 1px solid rgba(255,196,0,.35);
+    position: relative; overflow: hidden; border-radius: 20px; padding: 20px;
+    background: linear-gradient(135deg, #232323 0%, #101010 55%, #000 100%);
+    color: #fff; margin-bottom: 16px; box-shadow: 0 8px 24px rgba(0,0,0,.35);
+    border: 1px solid rgba(255,196,0,.3);
   }
-  .hero .entity-name { font-size: 20px; font-weight: 800; margin-bottom: 10px; }
-  .hero .hero-tiles { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
-  .hero .hero-tile { background: rgba(255,255,255,.12); border-radius: 12px; padding: 10px 11px; }
+  .hero::before {
+    content: ''; position: absolute; inset: -40% -20%; pointer-events: none;
+    background: radial-gradient(circle at 30% 30%, rgba(255,196,0,.22), transparent 55%);
+    animation: heroSheen 9s ease-in-out infinite;
+  }
+  @keyframes heroSheen {
+    0%, 100% { transform: translate(-6%, -4%) scale(1); opacity: .8; }
+    50% { transform: translate(6%, 4%) scale(1.15); opacity: 1; }
+  }
+  .hero .entity-name {
+    position: relative; font-size: 21px; font-weight: 800; margin-bottom: 12px; letter-spacing: .1px;
+  }
+  .hero .hero-tiles { position: relative; display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
+  .hero .hero-tile {
+    background: rgba(255,255,255,.08); border: 1px solid rgba(255,255,255,.08);
+    border-radius: 13px; padding: 10px 11px; transition: background .2s, transform .2s;
+  }
+  .hero .hero-tile.warn { background: rgba(255,59,48,.16); border-color: rgba(255,59,48,.3); }
   .hero .hero-tile .label { font-size: 11px; opacity: .75; }
   .hero .hero-tile .value { font-size: 20px; font-weight: 800; font-variant-numeric: tabular-nums; color: #FFC400; }
+  .hero .hero-tile.warn .value { color: #FF6B5E; }
+
   .cabinet-nav {
     display: flex; gap: 6px; overflow-x: auto; padding-bottom: 4px; margin-bottom: 14px;
     -webkit-overflow-scrolling: touch;
@@ -15411,33 +15706,55 @@ def legal_cabinet_webapp_html():
     flex-shrink: 0; border: none; border-radius: 999px; padding: 8px 13px; font-size: 12.5px;
     font-weight: 600; background: var(--tg-theme-secondary-bg-color, #fff);
     color: var(--tg-theme-text-color, #000); opacity: .65; white-space: nowrap; text-transform: uppercase;
+    transition: background .15s, color .15s, opacity .15s, transform .1s;
   }
   .nav-pill.active { background: #FFC400; color: #000; opacity: 1; }
+  .nav-pill:active { transform: scale(.95); }
+
+  /* ДОБАВЛЕНО 23.09.2026 - плавный переход между вкладками вместо
+     мгновенного display:none/block. */
   .tab-pane { display: none; }
-  .tab-pane.active { display: block; }
+  .tab-pane.active { display: block; animation: tabIn .22s ease both; }
+  @keyframes tabIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+
   .card {
-    background: var(--tg-theme-secondary-bg-color, #fff); border-radius: 14px; padding: 14px; margin-bottom: 12px;
+    background: var(--tg-theme-secondary-bg-color, #fff); border-radius: 16px; padding: 14px; margin-bottom: 12px;
+    border: 1px solid rgba(127,127,127,.08); transition: transform .15s, box-shadow .15s;
   }
   .field-row { margin-bottom: 10px; }
   .field-row label { display: block; font-size: 12px; opacity: .6; margin-bottom: 4px; }
   .field-row input, .field-row select, .field-row textarea {
     width: 100%; padding: 10px 11px; border-radius: 10px; border: 1px solid rgba(127,127,127,.3);
     background: var(--tg-theme-bg-color, #f2f2f7); color: var(--tg-theme-text-color, #000); font-size: 14.5px;
-    font-family: inherit;
+    font-family: inherit; transition: border-color .15s, box-shadow .15s;
   }
+  .field-row input:focus, .field-row select:focus, .field-row textarea:focus {
+    outline: none; border-color: #FFC400; box-shadow: 0 0 0 3px rgba(255,196,0,.15);
+  }
+  .field-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
   .btn {
-    width: 100%; padding: 11px; border: none; border-radius: 10px; background: #FFC400;
+    width: 100%; padding: 11px; border: none; border-radius: 12px; background: #FFC400;
     color: #000; font-size: 14.5px; font-weight: 700; margin-top: 4px; text-transform: uppercase;
+    transition: transform .1s, filter .15s; cursor: pointer;
   }
+  .btn:active { transform: scale(.98); filter: brightness(.95); }
   .btn.secondary { background: rgba(127,127,127,.18); color: var(--tg-theme-text-color, #000); }
+  .btn.small { width: auto; padding: 8px 12px; font-size: 12.5px; margin-top: 0; }
+  .btn.call { background: #34C759; color: #fff; text-decoration: none; display: inline-block; text-align: center; }
+
   .list-item {
-    display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 0;
-    border-bottom: 1px solid rgba(127,127,127,.15);
+    display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 11px 0;
+    border-bottom: 1px solid rgba(127,127,127,.13); animation: rowIn .25s ease both;
   }
+  @keyframes rowIn { from { opacity: 0; transform: translateX(-4px); } to { opacity: 1; transform: translateX(0); } }
   .list-item:last-child { border-bottom: none; }
   .li-title { font-size: 14px; font-weight: 700; }
   .li-sub { font-size: 12px; opacity: .6; margin-top: 2px; }
-  .badge { border-radius: 999px; padding: 4px 10px; font-size: 11.5px; font-weight: 700; text-transform: uppercase; flex-shrink: 0; }
+  .badge {
+    border-radius: 999px; padding: 4px 10px; font-size: 11.5px; font-weight: 700; text-transform: uppercase;
+    flex-shrink: 0; transition: transform .1s;
+  }
+  .badge:active { transform: scale(.93); }
   .badge.on { background: rgba(76,217,100,.18); color: #34C759; }
   .badge.off { background: rgba(127,127,127,.18); color: var(--tg-theme-text-color, #000); opacity: .6; }
   .badge.paid { background: rgba(76,217,100,.18); color: #34C759; }
@@ -15445,6 +15762,29 @@ def legal_cabinet_webapp_html():
   select.driver-select { max-width: 140px; }
   .muted { opacity: .6; font-size: 13px; }
   #state { text-align: center; padding: 60px 16px; opacity: .6; font-size: 14px; }
+  .car-item, .driver-item {
+    padding: 12px; border-radius: 13px; background: var(--tg-theme-bg-color, #f2f2f7); margin-bottom: 8px;
+    animation: rowIn .25s ease both;
+  }
+  .car-item:last-child, .driver-item:last-child { margin-bottom: 0; }
+  .car-item-head, .driver-item-head {
+    display: flex; align-items: center; justify-content: space-between; gap: 8px; cursor: pointer;
+  }
+  .chevron { transition: transform .2s; opacity: .5; font-size: 12px; }
+  .chevron.open { transform: rotate(90deg); }
+  .expand-body { display: none; margin-top: 10px; padding-top: 10px; border-top: 1px dashed rgba(127,127,127,.25); }
+  .expand-body.open { display: block; animation: tabIn .18s ease both; }
+  .employment-row { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
+  .employment-pill {
+    border: 1px solid rgba(127,127,127,.3); border-radius: 999px; padding: 7px 11px; font-size: 12px;
+    background: var(--tg-theme-bg-color, #f2f2f7); color: var(--tg-theme-text-color, #000); cursor: pointer;
+    transition: background .15s, border-color .15s;
+  }
+  .employment-pill.active { background: #FFC400; border-color: #FFC400; color: #000; font-weight: 700; }
+  @media (prefers-reduced-motion: reduce) {
+    .hero::before { animation: none; }
+    .tab-pane.active, .list-item, .car-item, .driver-item, .expand-body.open { animation: none; }
+  }
 </style>
 </head>
 <body>
@@ -15458,12 +15798,12 @@ def legal_cabinet_webapp_html():
       <div class="hero-tile"><div class="label">Не на линии</div><div class="value" id="tOff">0</div></div>
       <div class="hero-tile"><div class="label">Машин</div><div class="value" id="tCars">0</div></div>
       <div class="hero-tile"><div class="label">Пробег, км</div><div class="value" id="tKm">0</div></div>
+      <!-- ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "сегодня
+           должны оплатить аренду это выведи на главный экран" + "количество
+           аренды водителей ещё не оплатили") -->
+      <div class="hero-tile warn"><div class="label">Аренда сегодня</div><div class="value" id="tRentToday">0</div></div>
+      <div class="hero-tile warn"><div class="label">Всего не оплатили</div><div class="value" id="tRentUnpaid">0</div></div>
     </div>
-    <!-- ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "выведи вкладку
-         карта водителей чтобы не переходить через кнопку прям оттуда можно
-         было в карту водителя попасть") - прямой переход на карту (сразу с
-         фильтром "свои водители"), без выхода из кабинета в чат бота. Скрыта,
-         пока не пришёл map_url (см. loadCabinet/renderAll ниже). -->
     <button class="btn" id="openMapBtn" style="display:none;margin-top:12px">🗺 Карта водителей</button>
   </div>
 
@@ -15478,26 +15818,46 @@ def legal_cabinet_webapp_html():
   <div class="tab-pane active" id="tab-cars">
     <div class="card">
       <h2 class="section-title" style="margin-top:0">Добавить машину</h2>
-      <div class="field-row"><label>Гос. номер</label><input type="text" id="carPlate" placeholder="А123БВ777"></div>
-      <div class="field-row"><label>Марка/модель</label><input type="text" id="carModel" placeholder="Kia Rio"></div>
-      <button class="btn" id="addCarBtn">Добавить</button>
+      <div class="field-grid">
+        <div class="field-row"><label>Марка</label><input type="text" id="carMake" placeholder="Kia"></div>
+        <div class="field-row"><label>Модель</label><input type="text" id="carModel" placeholder="Rio"></div>
+      </div>
+      <div class="field-grid">
+        <div class="field-row"><label>Гос. номер</label><input type="text" id="carPlate" placeholder="А123БВ777"></div>
+        <div class="field-row"><label>Цвет</label><input type="text" id="carColor" placeholder="Белый"></div>
+      </div>
+      <div class="field-row"><label>Пробег фактический, км</label><input type="number" id="carMileage" placeholder="0"></div>
+      <div class="field-row"><label>Комментарий об автомобиле</label><textarea id="carComment" rows="2" placeholder="Состояние, особенности и т.д."></textarea></div>
+      <button class="btn" id="addCarBtn">Добавить машину</button>
     </div>
     <h2 class="section-title">Машины</h2>
-    <div class="card" id="carsList"><div class="muted">Пока нет машин</div></div>
+    <div id="carsList"><div class="card"><div class="muted">Пока нет машин</div></div></div>
   </div>
 
   <div class="tab-pane" id="tab-drivers">
     <h2 class="section-title" style="margin-top:0">Водители (твоя реферальная ветка)</h2>
-    <div class="card" id="driversList"><div class="muted">Пока нет привязанных водителей</div></div>
+    <div id="driversList"><div class="card"><div class="muted">Пока нет привязанных водителей</div></div></div>
   </div>
 
   <div class="tab-pane" id="tab-finance">
     <div class="card">
       <h2 class="section-title" style="margin-top:0">Добавить аренду</h2>
+      <div class="field-row"><label>Водитель (ФИО из списка)</label><select id="rentDriver"></select></div>
       <div class="field-row"><label>Машина</label><select id="rentCar"></select></div>
-      <div class="field-row"><label>Водитель (кто платит)</label><select id="rentDriver"></select></div>
-      <div class="field-row"><label>Сумма, ₽</label><input type="number" id="rentAmount" placeholder="5000"></div>
-      <div class="field-row"><label>Период</label><input type="text" id="rentPeriod" placeholder="Например, 23-30 сентября"></div>
+      <div class="field-grid">
+        <div class="field-row"><label>Сумма, ₽</label><input type="number" id="rentAmount" placeholder="5000"></div>
+        <div class="field-row"><label>Цена аренды в день, ₽</label><input type="number" id="rentDailyRate" placeholder="1500"></div>
+      </div>
+      <div class="field-row">
+        <label>Периодичность платежа</label>
+        <select id="rentFrequency">
+          <option value="daily">Каждый день</option>
+          <option value="weekly">Раз в неделю</option>
+          <option value="biweekly">Раз в две недели</option>
+          <option value="monthly" selected>Раз в месяц</option>
+        </select>
+      </div>
+      <div class="field-row"><label>Период (текстом, необязательно)</label><input type="text" id="rentPeriod" placeholder="Например, 23-30 сентября"></div>
       <div class="field-row"><label>Срок оплаты</label><input type="date" id="rentDue"></div>
       <button class="btn" id="addRentBtn">Добавить</button>
     </div>
@@ -15528,8 +15888,12 @@ def legal_cabinet_webapp_html():
 const tg = window.Telegram && window.Telegram.WebApp;
 if (tg) { tg.ready(); tg.expand(); }
 const API = '""" + LEGAL_CABINET_DATA_API_PATH + """';
+const EMPLOYMENT_TYPES = [['ip', 'ИП'], ['self_employed', 'Самозанятый'], ['none', 'Без трудоустройства']];
 let STATE = null;
+const expandedCars = new Set();
+const expandedDrivers = new Set();
 
+function esc(s) { return (s == null ? '' : String(s)).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function fmtMoney(kop) { return Math.round((kop||0)/100).toLocaleString('ru-RU') + '₽'; }
 
 async function apiCall(body) {
@@ -15553,6 +15917,8 @@ function renderAll() {
   document.getElementById('tOff').textContent = s.drivers_off_line;
   document.getElementById('tCars').textContent = s.cars_count;
   document.getElementById('tKm').textContent = Math.round(s.total_mileage_km).toLocaleString('ru-RU');
+  document.getElementById('tRentToday').textContent = s.rent_due_today_count || 0;
+  document.getElementById('tRentUnpaid').textContent = s.rent_unpaid_total_count || 0;
 
   const openMapBtn = document.getElementById('openMapBtn');
   if (STATE.map_url) {
@@ -15566,40 +15932,108 @@ function renderAll() {
   const rentCarSel = document.getElementById('rentCar');
   rentCarSel.innerHTML = '';
   if (!STATE.cars.length) {
-    carsList.innerHTML = '<div class="muted">Пока нет машин</div>';
+    carsList.innerHTML = '<div class="card"><div class="muted">Пока нет машин</div></div>';
   } else {
     carsList.innerHTML = STATE.cars.map(c => {
       const driverOptions = ['<option value="">— без водителя —</option>'].concat(
-        STATE.drivers.map(d => `<option value="${d.user_id}" ${d.user_id === c.driver_user_id ? 'selected' : ''}>${d.label}</option>`)
+        STATE.drivers.map(d => `<option value="${d.user_id}" ${d.user_id === c.driver_user_id ? 'selected' : ''}>${esc(d.label)}</option>`)
       ).join('');
-      return `<div class="list-item">
-        <div>
-          <div class="li-title">${c.plate || '(без номера)'} ${c.model ? '· ' + c.model : ''}</div>
-          <div class="li-sub">Пробег: ${Math.round(c.mileage_km || 0).toLocaleString('ru-RU')} км ${c.driver_label ? '· Водитель: ' + c.driver_label : ''}</div>
+      const open = expandedCars.has(c.id);
+      const title = [c.make, c.model].filter(Boolean).join(' ') || '(без марки/модели)';
+      return `<div class="card car-item">
+        <div class="car-item-head" onclick="toggleCar(${c.id})">
+          <div>
+            <div class="li-title">${esc(title)} ${c.plate ? '· ' + esc(c.plate) : ''}</div>
+            <div class="li-sub">${c.color ? esc(c.color) + ' · ' : ''}Пробег: ${Math.round(c.mileage_km || 0).toLocaleString('ru-RU')} км ${c.driver_label ? '· ' + esc(c.driver_label) : ''}</div>
+          </div>
+          <span class="chevron ${open ? 'open' : ''}">▶</span>
         </div>
-        <select class="driver-select" onchange="setCarDriver(${c.id}, this.value)">${driverOptions}</select>
+        <div class="expand-body ${open ? 'open' : ''}">
+          <div class="field-row"><label>Водитель</label><select class="driver-select" style="max-width:100%" onchange="setCarDriver(${c.id}, this.value)">${driverOptions}</select></div>
+          <div class="field-grid">
+            <div class="field-row"><label>Марка</label><input type="text" id="carMake_${c.id}" value="${esc(c.make || '')}"></div>
+            <div class="field-row"><label>Модель</label><input type="text" id="carModel_${c.id}" value="${esc(c.model || '')}"></div>
+          </div>
+          <div class="field-grid">
+            <div class="field-row"><label>Гос. номер</label><input type="text" id="carPlate_${c.id}" value="${esc(c.plate || '')}"></div>
+            <div class="field-row"><label>Цвет</label><input type="text" id="carColor_${c.id}" value="${esc(c.color || '')}"></div>
+          </div>
+          <div class="field-row"><label>Пробег фактический, км</label><input type="number" id="carMileage_${c.id}" value="${Math.round(c.mileage_km || 0)}"></div>
+          <div class="field-row"><label>Комментарий</label><textarea id="carComment_${c.id}" rows="2">${esc(c.comment || '')}</textarea></div>
+          <button class="btn secondary" onclick="saveCarDetails(${c.id})">Сохранить изменения</button>
+        </div>
       </div>`;
     }).join('');
     STATE.cars.forEach(c => {
       const opt = document.createElement('option');
-      opt.value = c.id; opt.textContent = (c.plate || '') + ' ' + (c.model || '');
+      opt.value = c.id; opt.textContent = [c.make, c.model, c.plate].filter(Boolean).join(' ');
       rentCarSel.appendChild(opt);
     });
   }
 
   const driversList = document.getElementById('driversList');
   const rentDriverSel = document.getElementById('rentDriver');
-  rentDriverSel.innerHTML = '<option value="">— по машине —</option>';
+  rentDriverSel.innerHTML = '<option value="">— выбери водителя —</option>';
   if (!STATE.drivers.length) {
-    driversList.innerHTML = '<div class="muted">Пока нет привязанных водителей (появятся здесь, как только кто-то зарегистрируется по твоей реферальной ссылке)</div>';
+    driversList.innerHTML = '<div class="card"><div class="muted">Пока нет привязанных водителей (появятся здесь, как только кто-то зарегистрируется по твоей реферальной ссылке)</div></div>';
   } else {
-    driversList.innerHTML = STATE.drivers.map(d => `<div class="list-item">
-      <div class="li-title">${d.label}</div>
-      <span class="badge ${d.on_shift ? 'on' : 'off'}">${d.on_shift ? 'На линии' : 'Не на линии'}</span>
-    </div>`).join('');
+    driversList.innerHTML = STATE.drivers.map(d => {
+      const p = d.profile || {};
+      const open = expandedDrivers.has(d.user_id);
+      const fio = [p.last_name, p.first_name, p.patronymic].filter(Boolean).join(' ') || d.label;
+      const empRow = EMPLOYMENT_TYPES.map(([key, label]) =>
+        `<div class="employment-pill ${p.employment_type === key ? 'active' : ''}" data-emp="${key}" onclick="pickEmployment(this, '${key}')">${label}</div>`
+      ).join('');
+      const callBtn = p.phone1 ? `<a class="btn call small" href="tel:${esc(p.phone1)}" onclick="event.stopPropagation()">📞 Позвонить</a>` : '';
+      return `<div class="card driver-item">
+        <div class="driver-item-head" onclick="toggleDriver(${d.user_id})">
+          <div>
+            <div class="li-title">${esc(fio)}</div>
+            <div class="li-sub">${p.phone1 ? esc(p.phone1) + ' · ' : ''}${d.label}</div>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px">
+            ${callBtn}
+            <span class="badge ${d.on_shift ? 'on' : 'off'}">${d.on_shift ? 'На линии' : 'Не на линии'}</span>
+            <span class="chevron ${open ? 'open' : ''}">▶</span>
+          </div>
+        </div>
+        <div class="expand-body ${open ? 'open' : ''}" id="driverForm_${d.user_id}">
+          <div class="field-grid">
+            <div class="field-row"><label>Фамилия</label><input type="text" id="dLastName_${d.user_id}" value="${esc(p.last_name || '')}"></div>
+            <div class="field-row"><label>Имя</label><input type="text" id="dFirstName_${d.user_id}" value="${esc(p.first_name || '')}"></div>
+          </div>
+          <div class="field-grid">
+            <div class="field-row"><label>Отчество</label><input type="text" id="dPatronymic_${d.user_id}" value="${esc(p.patronymic || '')}"></div>
+            <div class="field-row"><label>Дата рождения</label><input type="date" id="dBirthDate_${d.user_id}" value="${esc(p.birth_date || '')}"></div>
+          </div>
+          <div class="field-row">
+            <label>Пол</label>
+            <select id="dGender_${d.user_id}">
+              <option value="">—</option>
+              <option value="male" ${p.gender === 'male' ? 'selected' : ''}>Мужской</option>
+              <option value="female" ${p.gender === 'female' ? 'selected' : ''}>Женский</option>
+            </select>
+          </div>
+          <div class="field-grid">
+            <div class="field-row"><label>Телефон 1</label><input type="tel" id="dPhone1_${d.user_id}" value="${esc(p.phone1 || '')}" placeholder="+7..."></div>
+            <div class="field-row"><label>Телефон 2</label><input type="tel" id="dPhone2_${d.user_id}" value="${esc(p.phone2 || '')}" placeholder="+7..."></div>
+          </div>
+          <div class="field-row"><label>Паспортные данные</label><input type="text" id="dPassport_${d.user_id}" value="${esc(p.passport_data || '')}"></div>
+          <div class="field-row"><label>Прописка</label><input type="text" id="dRegAddr_${d.user_id}" value="${esc(p.registration_address || '')}"></div>
+          <div class="field-row">
+            <label>Статус занятости</label>
+            <div class="employment-row" id="dEmployment_${d.user_id}">${empRow}</div>
+          </div>
+          <div class="field-row"><label>Комментарий</label><textarea id="dComment_${d.user_id}" rows="2">${esc(p.comment || '')}</textarea></div>
+          <button class="btn secondary" onclick="saveDriverProfile(${d.user_id})">Сохранить анкету</button>
+        </div>
+      </div>`;
+    }).join('');
     STATE.drivers.forEach(d => {
       const opt = document.createElement('option');
-      opt.value = d.user_id; opt.textContent = d.label;
+      const p = d.profile || {};
+      const fio = [p.last_name, p.first_name, p.patronymic].filter(Boolean).join(' ');
+      opt.value = d.user_id; opt.textContent = fio || d.label;
       rentDriverSel.appendChild(opt);
     });
   }
@@ -15608,10 +16042,11 @@ function renderAll() {
   if (!STATE.rent_payments.length) {
     rentList.innerHTML = '<div class="muted">Пока нет записей аренды</div>';
   } else {
+    const freqLabels = { daily: 'каждый день', weekly: 'раз в неделю', biweekly: 'раз в две недели', monthly: 'раз в месяц' };
     rentList.innerHTML = STATE.rent_payments.map(p => `<div class="list-item">
       <div>
-        <div class="li-title">${p.plate || ''} ${p.model || ''} ${p.driver_label ? '· ' + p.driver_label : ''}</div>
-        <div class="li-sub">${p.period} · ${fmtMoney(p.amount_kopecks)} · до ${p.due_date || '—'}</div>
+        <div class="li-title">${esc(p.driver_label || '')}</div>
+        <div class="li-sub">${esc(p.plate || '')} ${esc(p.model || '')} · ${esc(p.period)} · ${fmtMoney(p.amount_kopecks)}${p.daily_rate_kopecks ? ' (' + fmtMoney(p.daily_rate_kopecks) + '/день)' : ''} · до ${p.due_date || '—'}${p.frequency ? ' · ' + freqLabels[p.frequency] : ''}</div>
       </div>
       <span class="badge ${p.is_paid ? 'paid' : 'unpaid'}" style="cursor:pointer" onclick="toggleRentPaid(${p.id}, ${p.is_paid ? 'false' : 'true'})">${p.is_paid ? 'Оплачено' : 'Не оплачено'}</span>
     </div>`).join('');
@@ -15623,7 +16058,7 @@ function renderAll() {
   } else {
     notifyHistory.innerHTML = STATE.notifications.map(n => `<div class="list-item">
       <div>
-        <div class="li-title">${(n.text || '').slice(0, 80)}</div>
+        <div class="li-title">${esc((n.text || '').slice(0, 80))}</div>
         <div class="li-sub">Доставлено: ${n.recipients_count} · ${n.sent_at || ''}</div>
       </div>
     </div>`).join('');
@@ -15635,8 +16070,45 @@ async function refresh() {
   renderAll();
 }
 
+function toggleCar(carId) {
+  if (expandedCars.has(carId)) expandedCars.delete(carId); else expandedCars.add(carId);
+  renderAll();
+}
+function toggleDriver(uid) {
+  if (expandedDrivers.has(uid)) expandedDrivers.delete(uid); else expandedDrivers.add(uid);
+  renderAll();
+}
+function pickEmployment(el, key) {
+  const row = el.parentElement;
+  row.querySelectorAll('.employment-pill').forEach(p => p.classList.toggle('active', p === el));
+  row.dataset.selected = key;
+}
+
 async function setCarDriver(carId, driverId) {
   await apiCall({ action: 'set_car_driver', car_id: carId, driver_user_id: driverId || null });
+  await refresh();
+}
+
+async function saveCarDetails(carId) {
+  const g = id => (document.getElementById(id + '_' + carId) || {}).value;
+  await apiCall({
+    action: 'update_car_details', car_id: carId,
+    make: g('carMake'), model: g('carModel'), plate: g('carPlate'), color: g('carColor'),
+    mileage_km: g('carMileage'), comment: g('carComment'),
+  });
+  await refresh();
+}
+
+async function saveDriverProfile(uid) {
+  const g = id => (document.getElementById(id + '_' + uid) || {}).value;
+  const empRow = document.getElementById('dEmployment_' + uid);
+  await apiCall({
+    action: 'save_driver_profile', driver_user_id: uid,
+    last_name: g('dLastName'), first_name: g('dFirstName'), patronymic: g('dPatronymic'),
+    birth_date: g('dBirthDate'), gender: g('dGender'), phone1: g('dPhone1'), phone2: g('dPhone2'),
+    passport_data: g('dPassport'), registration_address: g('dRegAddr'),
+    employment_type: empRow ? empRow.dataset.selected || '' : '', comment: g('dComment'),
+  });
   await refresh();
 }
 
@@ -15648,10 +16120,13 @@ async function toggleRentPaid(paymentId, isPaid) {
 document.getElementById('addCarBtn').addEventListener('click', async () => {
   const plate = document.getElementById('carPlate').value.trim();
   const model = document.getElementById('carModel').value.trim();
-  if (!plate && !model) return;
-  await apiCall({ action: 'add_car', plate, model });
-  document.getElementById('carPlate').value = '';
-  document.getElementById('carModel').value = '';
+  const make = document.getElementById('carMake').value.trim();
+  const color = document.getElementById('carColor').value.trim();
+  const comment = document.getElementById('carComment').value.trim();
+  const mileage_km = document.getElementById('carMileage').value;
+  if (!plate && !model && !make) return;
+  await apiCall({ action: 'add_car', plate, model, make, color, comment, mileage_km });
+  ['carPlate', 'carModel', 'carMake', 'carColor', 'carComment', 'carMileage'].forEach(id => { document.getElementById(id).value = ''; });
   await refresh();
 });
 
@@ -15659,11 +16134,14 @@ document.getElementById('addRentBtn').addEventListener('click', async () => {
   const car_id = document.getElementById('rentCar').value;
   const driver_user_id = document.getElementById('rentDriver').value;
   const amount_rub = document.getElementById('rentAmount').value;
+  const daily_rate_rub = document.getElementById('rentDailyRate').value;
+  const frequency = document.getElementById('rentFrequency').value;
   const period = document.getElementById('rentPeriod').value.trim();
   const due_date = document.getElementById('rentDue').value;
   if (!car_id || !amount_rub) return;
-  await apiCall({ action: 'add_rent', car_id, driver_user_id: driver_user_id || null, amount_rub, period, due_date });
+  await apiCall({ action: 'add_rent', car_id, driver_user_id: driver_user_id || null, amount_rub, daily_rate_rub, frequency, period, due_date });
   document.getElementById('rentAmount').value = '';
+  document.getElementById('rentDailyRate').value = '';
   document.getElementById('rentPeriod').value = '';
   await refresh();
 });
@@ -15689,6 +16167,7 @@ document.querySelectorAll('.nav-pill').forEach(btn => {
     document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
     btn.classList.add('active');
     document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
+    if (tg && tg.HapticFeedback) tg.HapticFeedback.selectionChanged();
   });
 });
 
@@ -22165,7 +22644,7 @@ def get_legal_entity_cars(entity_id):
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute(
-        'SELECT id, plate, model, driver_user_id, mileage_km, last_trip_at, created_at '
+        'SELECT id, plate, model, driver_user_id, mileage_km, last_trip_at, created_at, make, color, comment '
         'FROM legal_entity_cars WHERE entity_id = ? ORDER BY id DESC',
         (entity_id,)
     )
@@ -22173,18 +22652,20 @@ def get_legal_entity_cars(entity_id):
     conn.close()
     return [
         {'id': r[0], 'plate': r[1], 'model': r[2], 'driver_user_id': r[3],
-         'mileage_km': r[4] or 0, 'last_trip_at': r[5], 'created_at': r[6]}
+         'mileage_km': r[4] or 0, 'last_trip_at': r[5], 'created_at': r[6],
+         'make': r[7], 'color': r[8], 'comment': r[9]}
         for r in rows
     ]
 
 
-def add_legal_entity_car(entity_id, plate, model, driver_user_id=None):
+def add_legal_entity_car(entity_id, plate, model, driver_user_id=None, make=None, color=None, comment=None, mileage_km=None):
     init_db()
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute(
-        'INSERT INTO legal_entity_cars (entity_id, plate, model, driver_user_id) VALUES (?, ?, ?, ?)',
-        (entity_id, plate, model, driver_user_id)
+        'INSERT INTO legal_entity_cars (entity_id, plate, model, driver_user_id, make, color, comment, mileage_km) '
+        'VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+        (entity_id, plate, model, driver_user_id, make, color, comment, mileage_km or 0)
     )
     conn.commit()
     new_id = cursor.lastrowid
@@ -22209,6 +22690,34 @@ def update_legal_entity_car_mileage(car_id, mileage_km):
     conn.close()
 
 
+# ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "где ввод автомобиля
+# указывать марку модель госномер пробег фактический цвет комментарии об
+# автомобиле") - редактирование карточки машины целиком (в отличие от
+# update_legal_entity_car_mileage выше, которая только пробег и таймстамп
+# последней поездки). Не трогает last_trip_at/driver_user_id.
+def update_legal_entity_car_details(car_id, plate=None, model=None, make=None, color=None, comment=None, mileage_km=None):
+    fields = {}
+    if plate is not None:
+        fields['plate'] = plate
+    if model is not None:
+        fields['model'] = model
+    if make is not None:
+        fields['make'] = make
+    if color is not None:
+        fields['color'] = color
+    if comment is not None:
+        fields['comment'] = comment
+    if mileage_km is not None:
+        fields['mileage_km'] = mileage_km
+    if not fields:
+        return
+    set_clause = ', '.join(f'{k} = ?' for k in fields)
+    conn = get_db_connection()
+    conn.execute(f'UPDATE legal_entity_cars SET {set_clause} WHERE id = ?', list(fields.values()) + [car_id])
+    conn.commit()
+    conn.close()
+
+
 def get_legal_entity_rent_payments(entity_id):
     """Все записи аренды по всем машинам юр.лица - джойним car для
     plate/model, нужно для вкладки "Финансы"/"Автомобили" кабинета."""
@@ -22216,7 +22725,7 @@ def get_legal_entity_rent_payments(entity_id):
     cursor = conn.cursor()
     cursor.execute(
         'SELECT p.id, p.car_id, p.driver_user_id, p.period, p.amount_kopecks, p.due_date, '
-        'p.is_paid, p.paid_at, c.plate, c.model '
+        'p.is_paid, p.paid_at, c.plate, c.model, p.frequency, p.daily_rate_kopecks '
         'FROM legal_entity_car_rent_payments p '
         'JOIN legal_entity_cars c ON c.id = p.car_id '
         'WHERE c.entity_id = ? ORDER BY p.due_date DESC, p.id DESC',
@@ -22227,7 +22736,8 @@ def get_legal_entity_rent_payments(entity_id):
     return [
         {'id': r[0], 'car_id': r[1], 'driver_user_id': r[2], 'period': r[3],
          'amount_kopecks': r[4] or 0, 'due_date': r[5], 'is_paid': bool(r[6]),
-         'paid_at': r[7], 'plate': r[8], 'model': r[9]}
+         'paid_at': r[7], 'plate': r[8], 'model': r[9], 'frequency': r[10],
+         'daily_rate_kopecks': r[11] or 0}
         for r in rows
     ]
 
@@ -22240,7 +22750,7 @@ def get_rent_payments_for_driver(driver_user_id):
     cursor = conn.cursor()
     cursor.execute(
         'SELECT p.id, p.period, p.amount_kopecks, p.due_date, p.is_paid, p.paid_at, '
-        'c.plate, c.model, e.name '
+        'c.plate, c.model, e.name, p.frequency, p.daily_rate_kopecks '
         'FROM legal_entity_car_rent_payments p '
         'JOIN legal_entity_cars c ON c.id = p.car_id '
         'JOIN legal_entities e ON e.id = c.entity_id '
@@ -22251,19 +22761,30 @@ def get_rent_payments_for_driver(driver_user_id):
     conn.close()
     return [
         {'id': r[0], 'period': r[1], 'amount_kopecks': r[2] or 0, 'due_date': r[3],
-         'is_paid': bool(r[4]), 'paid_at': r[5], 'plate': r[6], 'model': r[7], 'entity_name': r[8]}
+         'is_paid': bool(r[4]), 'paid_at': r[5], 'plate': r[6], 'model': r[7], 'entity_name': r[8],
+         'frequency': r[9], 'daily_rate_kopecks': r[10] or 0}
         for r in rows
     ]
 
 
-def add_legal_entity_rent_payment(car_id, driver_user_id, period, amount_kopecks, due_date):
+LEGAL_ENTITY_RENT_FREQUENCY_LABELS = {
+    'daily': 'Каждый день',
+    'weekly': 'Раз в неделю',
+    'biweekly': 'Раз в две недели',
+    'monthly': 'Раз в месяц',
+}
+
+
+def add_legal_entity_rent_payment(car_id, driver_user_id, period, amount_kopecks, due_date, frequency=None, daily_rate_kopecks=None):
     init_db()
+    if frequency not in LEGAL_ENTITY_RENT_FREQUENCY_LABELS:
+        frequency = None
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute(
-        'INSERT INTO legal_entity_car_rent_payments (car_id, driver_user_id, period, amount_kopecks, due_date) '
-        'VALUES (?, ?, ?, ?, ?)',
-        (car_id, driver_user_id, period, amount_kopecks, due_date)
+        'INSERT INTO legal_entity_car_rent_payments (car_id, driver_user_id, period, amount_kopecks, due_date, frequency, daily_rate_kopecks) '
+        'VALUES (?, ?, ?, ?, ?, ?, ?)',
+        (car_id, driver_user_id, period, amount_kopecks, due_date, frequency, daily_rate_kopecks)
     )
     conn.commit()
     new_id = cursor.lastrowid
@@ -22287,7 +22808,10 @@ def set_legal_entity_rent_paid(payment_id, is_paid, marked_by):
 def get_legal_entity_summary(entity_id):
     """Сводка для главного экрана кабинета - число машин, водителей на
     линии/не на линии (по shift в user_state, как и метка на карте), общий
-    пробег (сумма mileage_km по всем машинам)."""
+    пробег (сумма mileage_km по всем машинам), сколько водителей должны
+    сегодня оплатить аренду (ДОБАВЛЕНО 23.09.2026, прямая просьба
+    пользователя - "сегодня должны оплатить аренду это выведи на главный
+    экран такой-то количество водителей")."""
     cars = get_legal_entity_cars(entity_id)
     driver_ids = {c['driver_user_id'] for c in cars if c['driver_user_id']}
     on_line = 0
@@ -22299,12 +22823,153 @@ def get_legal_entity_summary(entity_id):
         else:
             off_line += 1
     total_mileage = sum(c['mileage_km'] or 0 for c in cars)
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        'SELECT COUNT(DISTINCT p.driver_user_id) FROM legal_entity_car_rent_payments p '
+        'JOIN legal_entity_cars c ON c.id = p.car_id '
+        'WHERE c.entity_id = ? AND p.is_paid = 0 AND p.due_date = ? AND p.driver_user_id IS NOT NULL',
+        (entity_id, datetime.now(timezone.utc).date().isoformat())
+    )
+    rent_due_today_count = cursor.fetchone()[0] or 0
+    # ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "такой-то
+    # количество аренды водителей ещё не оплатили") - ВСЕГО водителей с
+    # хотя бы одной неоплаченной записью аренды (независимо от due_date, в
+    # отличие от rent_due_today_count выше - тот только про "сегодня").
+    cursor.execute(
+        'SELECT COUNT(DISTINCT p.driver_user_id) FROM legal_entity_car_rent_payments p '
+        'JOIN legal_entity_cars c ON c.id = p.car_id '
+        'WHERE c.entity_id = ? AND p.is_paid = 0 AND p.driver_user_id IS NOT NULL',
+        (entity_id,)
+    )
+    rent_unpaid_total_count = cursor.fetchone()[0] or 0
+    conn.close()
     return {
         'cars_count': len(cars),
         'drivers_on_line': on_line,
         'drivers_off_line': off_line,
         'total_mileage_km': round(total_mileage, 1),
+        'rent_due_today_count': rent_due_today_count,
+        'rent_unpaid_total_count': rent_unpaid_total_count,
     }
+
+
+LEGAL_ENTITY_EMPLOYMENT_TYPES = {
+    'ip': 'Работает как ИП',
+    'self_employed': 'Самозанятый',
+    'none': 'Без трудоустройства',
+}
+
+
+def get_legal_entity_driver_profile(entity_id, driver_user_id):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        'SELECT last_name, first_name, patronymic, birth_date, gender, phone1, phone2, '
+        'passport_data, registration_address, employment_type, comment '
+        'FROM legal_entity_driver_profiles WHERE entity_id = ? AND driver_user_id = ?',
+        (entity_id, driver_user_id)
+    )
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        return None
+    keys = ['last_name', 'first_name', 'patronymic', 'birth_date', 'gender', 'phone1', 'phone2',
+            'passport_data', 'registration_address', 'employment_type', 'comment']
+    return dict(zip(keys, row))
+
+
+def get_legal_entity_driver_profiles_map(entity_id):
+    """Все анкеты водителей юр.лица сразу, {driver_user_id: {last_name,
+    first_name, patronymic}} - используется для подписи ФИО на карте (см.
+    _enrich_positions_with_fleet_info) - только ФИО, остальные поля анкеты
+    (паспорт/прописка и т.д.) на карту не нужны."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        'SELECT driver_user_id, last_name, first_name, patronymic FROM legal_entity_driver_profiles WHERE entity_id = ?',
+        (entity_id,)
+    )
+    rows = cursor.fetchall()
+    conn.close()
+    return {r[0]: {'last_name': r[1], 'first_name': r[2], 'patronymic': r[3]} for r in rows}
+
+
+def _enrich_positions_with_fleet_info(positions, entity_id):
+    """Добавляет к позициям водителей (см. get_map_positions(include_user_id=True))
+    данные из карточки машины (госномер/марка/модель/цвет) и ФИО из анкеты
+    водителя (см. LEGAL_ENTITY_DRIVER_PROFILE_FIELDS) - прямая просьба
+    пользователя (23.09.2026): "над каждым водителем обязательно
+    подписывается номер автомобиля ФИО водителя модель и марка и цвет".
+    user_id убирается из каждой позиции ПОСЛЕ обогащения - наружу он не
+    уходит, только человекочитаемые поля."""
+    cars = get_legal_entity_cars(entity_id)
+    car_by_driver = {c['driver_user_id']: c for c in cars if c['driver_user_id']}
+    profiles = get_legal_entity_driver_profiles_map(entity_id)
+    result = []
+    for p in positions:
+        uid = p.pop('user_id', None)
+        car = car_by_driver.get(uid)
+        profile = profiles.get(uid)
+        fio_parts = [profile.get(k) for k in ('last_name', 'first_name', 'patronymic')] if profile else []
+        fio = ' '.join(part for part in fio_parts if part) or None
+        p['fleet_plate'] = car['plate'] if car else None
+        p['fleet_make'] = car['make'] if car else None
+        p['fleet_model'] = car['model'] if car else None
+        p['fleet_color'] = car['color'] if car else None
+        p['fleet_driver_name'] = fio
+        result.append(p)
+    return result
+
+
+LEGAL_ENTITY_DRIVER_PROFILE_FIELDS = [
+    'last_name', 'first_name', 'patronymic', 'birth_date', 'gender', 'phone1', 'phone2',
+    'passport_data', 'registration_address', 'employment_type', 'comment',
+]
+LEGAL_ENTITY_DRIVER_PROFILE_MAX_LEN = {
+    'last_name': 60, 'first_name': 60, 'patronymic': 60, 'birth_date': 10, 'gender': 10,
+    'phone1': 30, 'phone2': 30, 'passport_data': 60, 'registration_address': 200,
+    'employment_type': 20, 'comment': 1000,
+}
+
+
+def save_legal_entity_driver_profile(entity_id, driver_user_id, fields):
+    """Апсёрт анкеты водителя (см. таблицу legal_entity_driver_profiles в
+    init_db) - fields - словарь с любым подмножеством
+    LEGAL_ENTITY_DRIVER_PROFILE_FIELDS, отсутствующие поля не трогаем
+    (COALESCE от старого значения)."""
+    init_db()
+    clean = {}
+    for key in LEGAL_ENTITY_DRIVER_PROFILE_FIELDS:
+        if key in fields:
+            val = fields.get(key)
+            val = str(val).strip()[:LEGAL_ENTITY_DRIVER_PROFILE_MAX_LEN[key]] if val not in (None, '') else None
+            clean[key] = val
+    if clean.get('employment_type') is not None and clean['employment_type'] not in LEGAL_ENTITY_EMPLOYMENT_TYPES:
+        clean.pop('employment_type', None)
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        'SELECT 1 FROM legal_entity_driver_profiles WHERE entity_id = ? AND driver_user_id = ?',
+        (entity_id, driver_user_id)
+    )
+    exists = cursor.fetchone() is not None
+    if exists:
+        set_clause = ', '.join(f'{k} = ?' for k in clean) + ', updated_at = CURRENT_TIMESTAMP'
+        cursor.execute(
+            f'UPDATE legal_entity_driver_profiles SET {set_clause} WHERE entity_id = ? AND driver_user_id = ?',
+            list(clean.values()) + [entity_id, driver_user_id]
+        )
+    else:
+        cols = ['entity_id', 'driver_user_id'] + list(clean.keys())
+        placeholders = ', '.join('?' for _ in cols)
+        cursor.execute(
+            f'INSERT INTO legal_entity_driver_profiles ({", ".join(cols)}) VALUES ({placeholders})',
+            [entity_id, driver_user_id] + list(clean.values())
+        )
+    conn.commit()
+    conn.close()
+    return True
 
 
 # ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "если аренда будет не
@@ -22431,6 +23096,106 @@ async def legal_entity_rent_reminder_checker():
         except Exception:
             logger.exception("❌ Ошибка фоновой проверки напоминаний об аренде юрлица")
         await asyncio.sleep(LEGAL_ENTITY_RENT_REMINDER_CHECK_INTERVAL_MINUTES * 60)
+
+
+# ==================== РЕЗЕРВНОЕ КОПИРОВАНИЕ БАЗЫ ====================
+# ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "насколько вот эти
+# базы устойчивые... можно ли как-то делать бэкап этих баз... дублировать
+# их... давай подумаем сразу резервирование и безопасности этих баз").
+#
+# КАК СЕЙЧАС УСТРОЕНО ХРАНЕНИЕ (см. _resolve_db_file выше): если у сервиса
+# в Railway подключён Persistent Volume, смонтированный в /data, основная
+# БД (taxi_queue.db - в НЕЙ же теперь и вся новая юрлицо-логика:
+# legal_entities/legal_entity_cars/legal_entity_car_rent_payments/
+# legal_entity_driver_profiles) переживает редеплой. Но это ОДИН файл на
+# ОДНОМ диске - он не защищён от порчи самого диска Railway, случайного
+# удаления volume, обрыва записи при крэше процесса посреди транзакции и
+# т.п. Это и есть риск, о котором пишет пользователь - "резко могут
+# рухнуть, пропасть".
+#
+# РЕШЕНИЕ (без дополнительной инфраструктуры вроде S3, которой сейчас нет
+# в проекте): автоматический снэпшот базы через SQLite Backup API (даёт
+# консистентную копию, даже если в это время идёт запись - в отличие от
+# простого копирования файла) отправляется ДОКУМЕНТОМ в Telegram
+# ADMIN_TELEGRAM_ID раз в DB_BACKUP_INTERVAL_HOURS часов. Telegram - это
+# физически ДРУГОЕ хранилище (серверы Telegram), не связанное с Railway,
+# так что при потере volume целиком копия всё равно остаётся - именно то
+# "дублирование", о котором просит пользователь. Плюс команда /backup_now
+# для бэкапа по требованию в любой момент.
+DB_BACKUP_INTERVAL_HOURS = 6  # 4 копии в сутки
+
+
+async def backup_database_now(reason="плановый"):
+    """Снимает консистентный снэпшот DB_FILE (sqlite3 Backup API - безопасно
+    даже при параллельной записи, в отличие от обычного copy файла) и
+    отправляет его ADMIN_TELEGRAM_ID документом. Синхронная часть (сам backup
+    в SQLite - блокирующая операция) уходит в отдельный поток, чтобы не
+    вешать event loop бота на время копирования."""
+    if not bot or not ADMIN_TELEGRAM_ID:
+        return False
+    ts = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
+    backup_path = f"{DB_FILE}.backup_{ts}.db"
+
+    def _do_backup():
+        src = sqlite3.connect(DB_FILE)
+        dst = sqlite3.connect(backup_path)
+        try:
+            src.backup(dst)
+        finally:
+            dst.close()
+            src.close()
+        return os.path.getsize(backup_path)
+
+    try:
+        size_bytes = await asyncio.to_thread(_do_backup)
+    except Exception:
+        logger.exception("❌ Не удалось сделать резервную копию базы")
+        try:
+            await bot.send_message(ADMIN_TELEGRAM_ID, "⚠️ Резервное копирование базы не удалось - смотри логи Railway.")
+        except Exception:
+            pass
+        return False
+
+    try:
+        await bot.send_document(
+            ADMIN_TELEGRAM_ID,
+            FSInputFile(backup_path, filename=f"taxi_queue_backup_{ts}.db"),
+            caption=f"💾 Резервная копия базы ({reason}), {round(size_bytes / 1024 / 1024, 1)} МБ, {ts} UTC",
+        )
+        ok = True
+    except Exception:
+        logger.exception("❌ Не удалось отправить резервную копию базы в Telegram")
+        ok = False
+    finally:
+        try:
+            os.remove(backup_path)
+        except Exception:
+            pass
+    return ok
+
+
+async def db_backup_checker():
+    """Фоновая задача (см. asyncio.create_task в main()) - раз в
+    DB_BACKUP_INTERVAL_HOURS часов отправляет свежий бэкап базы админу (см.
+    backup_database_now)."""
+    while True:
+        await asyncio.sleep(DB_BACKUP_INTERVAL_HOURS * 3600)
+        try:
+            await backup_database_now(reason="плановый")
+        except Exception:
+            logger.exception("❌ Ошибка фоновой задачи резервного копирования базы")
+
+
+@router.message(Command("backup_now"))
+async def admin_backup_now(message: types.Message):
+    """Бэкап базы по требованию (см. backup_database_now) - только
+    ADMIN_TELEGRAM_ID, тот же паттерн проверки, что у /referral_paid."""
+    if not ADMIN_TELEGRAM_ID or str(message.from_user.id) != str(ADMIN_TELEGRAM_ID):
+        return
+    await message.answer("⏳ Делаю резервную копию базы...")
+    ok = await backup_database_now(reason="по команде /backup_now")
+    if not ok:
+        await message.answer("❌ Не получилось - смотри логи Railway.")
 
 
 def distribute_referral_earnings(payer_user_id, amount_kopecks, order_id):
@@ -24336,6 +25101,7 @@ async def main():
     asyncio.create_task(nearby_drivers_checker())
     asyncio.create_task(fuel_reminder_checker())
     asyncio.create_task(legal_entity_rent_reminder_checker())
+    asyncio.create_task(db_backup_checker())
     asyncio.create_task(morning_greeting_checker())
     asyncio.create_task(user_state_flusher())  # write-behind для user_state - см. комментарий у PersistentUserDict
     # Прогрев кэша telegram-web-app.js (21.09.2026, см. "ЛОКАЛЬНАЯ РАЗДАЧА
