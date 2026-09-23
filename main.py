@@ -22039,6 +22039,30 @@ async def subscription_email_flow(message: types.Message):
     state = user_state[user_id]
     text = (message.text or '').strip()
 
+    # ДОБАВЛЕНО 23.09.2026 (баг с Android, скриншоты пользователя: любое
+    # нажатие кнопки меню, пока бот ждёт email, "проглатывалось" этим
+    # хендлером и превращалось в "Не похоже на email" - пользователь
+    # застревал без возможности выбраться, кнопки "Реферальная программа"/
+    # "Оплатить подписку" и т.п. переставали работать вообще). Подписи ВСЕХ
+    # кнопок бота - ЗАГЛАВНЫМИ БУКВАМИ (см. services_keyboard, комментарий
+    # 21.09.2026), настоящий email так не выглядит - если текст целиком в
+    # верхнем регистре (без учёта эмодзи/цифр/пунктуации) и не содержит "@",
+    # считаем это нажатием кнопки, а не попыткой ввести email: отменяем
+    # ожидание и возвращаем на экран статуса/оплаты, откуда начали, чтобы
+    # повторное нажатие уже отработало как обычно.
+    letters = [c for c in text if c.isalpha()]
+    if letters and all(c.isupper() for c in letters) and '@' not in text:
+        context = state.pop('awaiting_subscription_email', None)
+        await message.answer("Ввод email отменён - нажми на нужную кнопку ещё раз:")
+        if context == 'paywall' or not is_subscription_active(user_id):
+            await send_subscription_paywall(message)
+        else:
+            await message.answer(
+                "🚕 Меню TAXI HELPER",
+                reply_markup=services_keyboard(state.get('category'), state.get('city'), user_id)
+            )
+        return
+
     if not SUBSCRIPTION_EMAIL_REGEX.match(text):
         await message.answer("Не похоже на email - введи в формате name@example.com:")
         return
