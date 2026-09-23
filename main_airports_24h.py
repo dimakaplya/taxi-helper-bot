@@ -7934,10 +7934,14 @@ async def score_district_candidates(city, category, user_lat=None, user_lon=None
         # означает "до полуночи" - показываем как 00:00, а не "24:00".
         # Дождевой "пол" демонстрации (district_raining выше) НЕ влияет на
         # это окно - оно всегда про матрицу, дождь может закончиться раньше.
+        # ИЗМЕНЕНО 24.09.2026 (прямая просьба пользователя - "не надо писать
+        # по таблице а на основе анализа") - формулировка не должна выдавать
+        # водителю, что это просто строка из таблицы, а звучать как вывод
+        # анализа данных (сама логика/источник данных не изменились).
         if d.get('slot_start_h') is not None and d.get('slot_end_h') is not None:
             start_label = f"{d['slot_start_h']:02d}:00"
             end_label = f"{d['slot_end_h'] % 24:02d}:00"
-            reasons.append(f"⏰ спрос по таблице держится с {start_label} до {end_label}")
+            reasons.append(f"⏰ по анализу спрос держится с {start_label} до {end_label}")
         if d['raining']:
             reasons.append("🌧 осадки сейчас в этом районе - спрос выше обычного")
         if d['holiday']:
