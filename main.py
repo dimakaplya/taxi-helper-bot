@@ -10954,12 +10954,66 @@ def map_webapp_html():
       map.setView([lat, lon], 13);
     }}
   }}
-  if (navigator.geolocation) {{
+  // ИЗМЕНЕНО 23.09.2026 (жалоба пользователя со скриншотом - "на андроиде
+  // каждый раз заново спрашивает разрешение на геопозицию, при открытии
+  // карты") - обычный browser navigator.geolocation внутри Telegram-
+  // WebView на Android не запоминает разрешение между открытиями
+  // мини-приложения (на iOS/десктопе запоминает) - это ограничение самого
+  // Android-клиента Telegram, а не что-то, что можно починить в JS. Вместо
+  // этого пробуем нативный Telegram.WebApp.LocationManager (Bot API 8.0+,
+  // https://core.telegram.org/bots/webapps#locationmanager) - разрешение
+  // там выдаётся ЧЕРЕЗ САМ Telegram (как у "поделиться геопозицией" в
+  // чате), а не через системный диалог WebView, и может вести себя
+  // стабильнее между запусками. Гарантии, что это уберёт повторный запрос
+  // ПОЛНОСТЬЮ, нет (зависит от версии Android/Telegram у конкретного
+  // пользователя) - но хуже не будет: если LocationManager недоступен
+  // (старый клиент Telegram, либо карта открыта не в Telegram, а в обычном
+  // браузере) - используем прежний navigator.geolocation.watchPosition как
+  // и раньше, без изменений в поведении.
+  const hasLocationManager = !!(tg && tg.LocationManager && typeof tg.LocationManager.init === 'function');
+  let usingLocationManager = false;
+  function startBrowserGeolocationFallback() {{
+    if (!navigator.geolocation) return;
     navigator.geolocation.watchPosition(
       (pos) => {{ updateSelfMarker(pos.coords.latitude, pos.coords.longitude, pos.coords.heading); }},
       (err) => {{ /* тихо - геолокация запрещена/недоступна, просто не показываем свой треугольник */ }},
       {{ enableHighAccuracy: true, maximumAge: 5000, timeout: 15000 }}
     );
+  }}
+  if (hasLocationManager) {{
+    try {{
+      tg.LocationManager.init(() => {{
+        try {{
+          if (!tg.LocationManager.isLocationAvailable) {{
+            // Геолокация недоступна через Telegram (например, у пользователя
+            // выключена совсем на устройстве) - пробуем обычный браузерный
+            // способ, вдруг он всё-таки сработает.
+            startBrowserGeolocationFallback();
+            return;
+          }}
+          usingLocationManager = true;
+          // getLocation() у LocationManager - разовый запрос (не watch, как
+          // у navigator.geolocation), поэтому опрашиваем сами каждые 5
+          // секунд, тем же интервалом, что раньше был maximumAge у
+          // watchPosition - чтобы стрелка обновлялась так же плавно.
+          const pollLocation = () => {{
+            tg.LocationManager.getLocation((data) => {{
+              if (data && typeof data.latitude === 'number' && typeof data.longitude === 'number') {{
+                updateSelfMarker(data.latitude, data.longitude, (typeof data.course === 'number') ? data.course : null);
+              }}
+            }});
+          }};
+          pollLocation();
+          setInterval(pollLocation, 5000);
+        }} catch (e) {{
+          startBrowserGeolocationFallback();
+        }}
+      }});
+    }} catch (e) {{
+      startBrowserGeolocationFallback();
+    }}
+  }} else {{
+    startBrowserGeolocationFallback();
   }}
   // ДОБАВЛЕНО 23.09.2026 (см. selectedTariffs выше) - водитель показывается
   // на карте, если хотя бы один из ЕГО тарифов отмечен в панели "Тарифы";
