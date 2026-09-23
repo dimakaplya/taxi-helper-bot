@@ -9969,9 +9969,18 @@ MAP_CHROME_CSS = """
      обратно карту которая была стандартная по обработке"): фильтр
      инверсии убран целиком - подложка карты снова обычные "дневные" цвета
      OpenStreetMap, без чёрно-инверсной темы. */
-  .legend { position: absolute; top: 10px; right: 10px; z-index: 1000; background: #1c1c1c; color: #fff; border: 1px solid rgba(255,196,0,.4); border-radius: 8px; padding: 8px 10px; font-family: -apple-system, sans-serif; font-size: 12px; box-shadow: 0 1px 4px rgba(0,0,0,.35); }
-  .legend div { display: flex; align-items: center; gap: 6px; margin: 3px 0; }
-  .legend .dot { width: 11px; height: 11px; border-radius: 50%; border: 1px solid rgba(255,255,255,.5); display: inline-block; }
+  /* УБРАНО 23.09.2026 (жалоба пользователя со скриншотом - "друг на друга
+     наехало... в Ultima убрать"): плашка .legend (top:10px, right:10px,
+     кружок с текущей выбранной категорией - "○ Ultima" на скриншоте)
+     оставалась ФИКСИРОВАННО в правом верхнем углу, а ряд кнопок
+     .map-toggles-row слева вырос (добавились "Пробки"/"Север"/"Следить") и
+     на узких экранах стал заезжать своим правым краем прямо под неё - два
+     независимых блока накладывались друг на друга. Плашка дублировала то,
+     что уже видно в панели "Тарифы" (выбранная категория/тарифы), так что
+     решили просто убрать её целиком, а не пытаться развести два отдельных
+     плавающих блока по разным углам узкого экрана. CSS-правила
+     .legend/.legend div/.legend .dot и сам div#legend/renderLegend() ниже
+     удалены вместе с этим. */
   /* ИСПРАВЛЕНО 22.09.2026 (жалоба пользователя со скриншотом - "надпись
      наехала на плюс/минус"): у Leaflet зум-контрол (+/-) тоже стоит в
      левом верхнем углу (.leaflet-top.leaflet-left), left: 10px совпадал
@@ -10031,7 +10040,14 @@ MAP_CHROME_CSS = """
      карты; каждая раскрывающаяся панель по-прежнему выпадает вниз ПОД
      своей кнопкой (margin-top на .tariff-toggle/.layer-toggle, обычный
      document flow внутри своего wrap - здесь не менялось). */
-  .map-toggles-row { position: absolute; top: 10px; left: 56px; z-index: 1000; display: flex; flex-direction: row; align-items: flex-start; gap: 8px; }
+  /* ИЗМЕНЕНО 23.09.2026 (жалоба пользователя со скриншотом - "друг на
+     друга наехало все... надо все скомпоновать сверху в одну строчку") -
+     кнопок в ряду стало 5 (Тарифы/Слои/Пробки/Север/Следить), на узких
+     экранах они больше не помещались в одну строку и вылезали за правый
+     край карты. flex-wrap: wrap - если места не хватает, лишние кнопки
+     сами переносятся на вторую строку (right: 10px ограничивает ряд
+     правым краем карты), а не обрезаются/наезжают на другие элементы. */
+  .map-toggles-row { position: absolute; top: 10px; left: 56px; right: 10px; z-index: 1000; display: flex; flex-direction: row; flex-wrap: wrap; align-items: flex-start; gap: 8px; }
   .layer-toggle-btn { display: inline-block; background: #1c1c1c; color: #fff; border: 1px solid rgba(255,196,0,.4); border-radius: 8px; padding: 6px 10px; font-family: -apple-system, sans-serif; font-size: 12px; font-weight: 600; box-shadow: 0 1px 4px rgba(0,0,0,.35); cursor: pointer; user-select: none; white-space: nowrap; }
   /* ДОБАВЛЕНО 23.09.2026 (уточнение пользователя - "включи тумблер пробки") -
      подсветка кнопки "🚦 Пробки", когда слой пробок включён. */
@@ -10229,7 +10245,6 @@ def map_webapp_html():
   <div class="layer-toggle-btn" id="navModeToggleBtn">🧭 Север</div>
   <div class="layer-toggle-btn" id="followModeToggleBtn">🎯 Следить</div>
 </div>
-<div class="legend" id="legend"></div>
 <script>
   const CATEGORY_STYLE = {style_json};
   const TARIFF_OPTIONS = {tariff_options_json};
@@ -10243,7 +10258,6 @@ def map_webapp_html():
   const params = new URLSearchParams(window.location.search);
   const city = params.get('city') || '';
   const myCategory = params.get('category') || '';
-  const legend = document.getElementById('legend');
   // ДОБАВЛЕНО 23.09.2026 (см. TARIFF_OPTIONS/tariff-toggle-wrap выше) -
   // замена сломанного бинарного тумблера "Показать все категории" на
   // мультивыбор конкретных тарифов. selectedTariffs - Set строк вида
@@ -10309,16 +10323,7 @@ def map_webapp_html():
     const layerToggleRowEl = document.getElementById('layerToggle');
     if (!tariffPanel.classList.contains('collapsed')) layerToggleRowEl.classList.add('collapsed');
   }});
-  function renderLegend() {{
-    legend.innerHTML = '';
-    Object.keys(CATEGORY_STYLE).forEach(key => {{
-      if (!categoryFullySelected(key) && !(TARIFF_OPTIONS[key].tariffs || []).some(t => selectedTariffs.has(tariffKey(key, t)))) return;
-      const s = CATEGORY_STYLE[key];
-      legend.innerHTML += `<div><span class="dot" style="background:${{s.color}}"></span>${{s.label}}</div>`;
-    }});
-  }}
   renderTariffPanel();
-  renderLegend();
   // ИСПРАВЛЕНО 23.09.2026 (прямая просьба пользователя - "чтобы быстрее
   // карта подложка загружалась"): раньше карта ВСЕГДА открывалась
   // центрированной на Москве, независимо от реального города водителя, и
