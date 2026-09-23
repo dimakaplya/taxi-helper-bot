@@ -7938,10 +7938,13 @@ async def score_district_candidates(city, category, user_lat=None, user_lon=None
         # по таблице а на основе анализа") - формулировка не должна выдавать
         # водителю, что это просто строка из таблицы, а звучать как вывод
         # анализа данных (сама логика/источник данных не изменились).
+        # ЕЩЁ РАЗ ИЗМЕНЕНО 24.09.2026 (прямая просьба пользователя - "на
+        # основе данных AI ассистента") - конкретная формулировка "на
+        # основе данных AI ассистента" вместо "по анализу".
         if d.get('slot_start_h') is not None and d.get('slot_end_h') is not None:
             start_label = f"{d['slot_start_h']:02d}:00"
             end_label = f"{d['slot_end_h'] % 24:02d}:00"
-            reasons.append(f"⏰ по анализу спрос держится с {start_label} до {end_label}")
+            reasons.append(f"⏰ на основе данных AI ассистента спрос держится с {start_label} до {end_label}")
         if d['raining']:
             reasons.append("🌧 осадки сейчас в этом районе - спрос выше обычного")
         if d['holiday']:
