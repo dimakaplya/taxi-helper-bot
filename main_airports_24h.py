@@ -10517,6 +10517,17 @@ def map_webapp_html():
   // кабинете ничего не заполнено, попап не привязываем вовсе (по нажатию
   // ничего не откроется, как и раньше).
   let myProfilePopupHtml = '';
+  // ДОБАВЛЕНО 23.09.2026 (жалоба пользователя со скриншотом - "я не на
+  // линии, моя метка висит на карте, так быть не должно") - своя стрелка
+  // раньше рисовалась просто по факту наличия GPS у браузера, вообще не
+  // спрашивая, активна ли смена. У ДРУГИХ водителей это уже давно работает
+  // правильно (см. maybe_update_map_position - без смены позиция вообще не
+  // пишется на сервер), а вот у себя самого клиент такую проверку не делал.
+  // myShiftActive - тот же признак с сервера (см. handle_map_my_profile_api),
+  // по умолчанию false (пока ответ ещё не пришёл, стрелку не показываем -
+  // лучше на секунду позже появится, чем ошибочно покажется тому, кто не на
+  // линии).
+  let myShiftActive = false;
   async function loadMyProfile() {{
     try {{
       const initData = tg ? tg.initData : '';
@@ -10524,6 +10535,13 @@ def map_webapp_html():
       const resp = await fetch('/map/my_profile', {{ headers: {{ 'X-Telegram-Init-Data': initData }} }});
       if (!resp.ok) return;
       const data = await resp.json();
+      myShiftActive = !!data.shift_active;
+      if (!myShiftActive && selfMarker) {{
+        // Ответ пришёл ПОСЛЕ того, как watchPosition уже успел нарисовать
+        // стрелку (пока проверка смены ещё не разрешилась) - убираем её.
+        map.removeLayer(selfMarker);
+        selfMarker = null;
+      }}
       const p = data.profile;
       if (!p) return;
       const rows = [];
@@ -10540,11 +10558,22 @@ def map_webapp_html():
   }}
   loadMyProfile();
   function updateSelfMarker(lat, lon, heading) {{
+    selfLat = lat;
+    selfLon = lon;
+    // Не на смене - своя стрелка на карте не рисуется вовсе (см. комментарий
+    // у myShiftActive выше). Если она уже была нарисована ДО того, как это
+    // выяснилось (watchPosition сработал раньше ответа /map/my_profile) -
+    // убираем.
+    if (!myShiftActive) {{
+      if (selfMarker) {{
+        map.removeLayer(selfMarker);
+        selfMarker = null;
+      }}
+      return;
+    }}
     const h = (heading === null || heading === undefined || isNaN(heading)) ? selfHeading : heading;
     selfHeading = h;
     const icon = L.divIcon({{ className: 'self-icon', html: selfIconHtml(h), iconSize: [42, 42], iconAnchor: [21, 21] }});
-    selfLat = lat;
-    selfLon = lon;
     if (selfMarker) {{
       selfMarker.setLatLng([lat, lon]);
       selfMarker.setIcon(icon);
@@ -12820,27 +12849,40 @@ async def handle_map_my_profile_api(request):
     отдаёт тариф/марку машины/госномер из кабинета водителя (get_driver_profile),
     чтобы показать их в попапе своего маркера-стрелки по нажатию. В отличие от
     /map/positions это личные данные, поэтому initData ОБЯЗАТЕЛЕН и должен
-    пройти проверку подписи - без неё или без BOT_TOKEN отдаём пустой profile."""
+    пройти проверку подписи - без неё или без BOT_TOKEN отдаём пустой profile.
+
+    ДОБАВЛЕНО 23.09.2026 (жалоба пользователя со скриншотом - "я не на линии,
+    моя метка висит на карте, так быть не должно"): своя стрелка на карте
+    строится ЧИСТО на клиенте (browser navigator.geolocation), совершенно
+    независимо от смены - в отличие от того, как его видят ДРУГИЕ водители
+    (там уже действует правило "не на смене - не видно", см.
+    maybe_update_map_position/is_shift_active). Отдаём shift_active тем же
+    запросом, чтобы клиент мог применить то же самое правило и к себе
+    самому - см. myShiftActive/updateSelfMarker в JS ниже."""
     init_data = request.headers.get('X-Telegram-Init-Data', '')
     if not BOT_TOKEN or not init_data:
-        return web.json_response({'profile': None})
+        return web.json_response({'profile': None, 'shift_active': False})
     parsed = validate_telegram_webapp_init_data(init_data, BOT_TOKEN)
     if parsed is None:
         logger.warning("⚠️ /map/my_profile: не прошла проверка initData")
-        return web.json_response({'profile': None})
+        return web.json_response({'profile': None, 'shift_active': False})
     try:
         user_json = json.loads(parsed.get('user', '{}'))
         user_id = user_json.get('id')
     except Exception:
         user_id = None
     if not user_id:
-        return web.json_response({'profile': None})
+        return web.json_response({'profile': None, 'shift_active': False})
     try:
         profile = get_driver_profile(user_id)
     except Exception:
         logger.exception("❌ Ошибка при получении профиля для карты (my_profile)")
         profile = None
-    return web.json_response({'profile': profile})
+    try:
+        shift_active = is_shift_active(user_state.get(user_id) or {})
+    except Exception:
+        shift_active = False
+    return web.json_response({'profile': profile, 'shift_active': shift_active})
 
 async def handle_map_airports_api(request):
     """JSON API для меток аэропортов на карте (по просьбе пользователя,
