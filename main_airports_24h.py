@@ -22636,9 +22636,20 @@ async def referral_category_legal_start(callback_query: types.CallbackQuery):
     """Схема "юр.лицо" защищена паролем (по прямой просьбе пользователя,
     23.09.2026 - "запароль юрлиц введи пароль 261194") - не переключаем
     сразу, а просим ввести пароль текстом (см. referral_legal_password_flow
-    ниже, тот же паттерн ожидания текста, что и у referral_withdraw_flow)."""
+    ниже, тот же паттерн ожидания текста, что и у referral_withdraw_flow).
+
+    ИСПРАВЛЕНО 23.09.2026 (жалоба пользователя со скриншотом - "нажимаю
+    юрлицо, не могу попасть в личный кабинет"): раньше при уже включённой
+    схеме 'legal_entity' кнопка просто отвечала "Уже выбрана схема" и
+    ДАЛЬШЕ НИЧЕГО НЕ ПРОИСХОДИЛО - человек, который переключился на схему
+    юр.лица ДО того, как для него завели компанию в legal_entities (см.
+    add_legal_entity/find_legal_entity_by_password), навсегда терял
+    возможность ввести пароль компании и получить доступ к кабинету
+    (get_legal_entity_owned_by оставался пустым). Теперь "уже выбрана"
+    показываем ТОЛЬКО тем, кто уже владеет каким-то кабинетом - остальным,
+    даже если схема уже 'legal_entity', снова предлагаем ввести пароль."""
     user_id = callback_query.from_user.id
-    if get_referrer_type(user_id) == 'legal_entity':
+    if get_referrer_type(user_id) == 'legal_entity' and get_legal_entity_owned_by(user_id):
         try:
             await callback_query.answer("Уже выбрана схема юр.лица")
         except Exception:
@@ -22651,7 +22662,7 @@ async def referral_category_legal_start(callback_query: types.CallbackQuery):
     state = user_state.setdefault(user_id, {})
     state['awaiting_referral_legal_password'] = True
     await callback_query.message.answer(
-        "🔒 Схема «Юр.лицо» доступна по паролю. Введи пароль:",
+        "🔒 Введи пароль компании (юр.лица) - он же откроет «Личный кабинет юрлица»:",
         reply_markup=referral_withdraw_cancel_keyboard()
     )
 
@@ -22682,6 +22693,19 @@ async def referral_legal_password_flow(message: types.Message):
     # получает доступ к "🏛 ЛИЧНЫЙ КАБИНЕТ ЮРЛИЦА" (см. referral_menu_keyboard).
     legal_entity = find_legal_entity_by_password(text)
     is_legacy_password = text == REFERRAL_LEGAL_ENTITY_PASSWORD
+    # ИСПРАВЛЕНО 23.09.2026 (жалоба пользователя - "нажимаю юрлицо, не могу
+    # попасть в личный кабинет"): старый пароль REFERRAL_LEGAL_ENTITY_PASSWORD
+    # раньше давал только переключение схемы начислений (referrer_type),
+    # но НЕ создавал строку в legal_entities - значит, get_legal_entity_owned_by
+    # никогда не находил владельца, и кнопка "🏛 ЛИЧНЫЙ КАБИНЕТ ЮРЛИЦА" не
+    # появлялась НИКОГДА, сколько бы раз человек ни вводил этот пароль. Теперь
+    # при первом успешном вводе старого пароля для него автоматически
+    # заводится запись в legal_entities (название по умолчанию, можно потом
+    # переименовать через админку/базу) - дальше работает та же логика
+    # владения (claim_legal_entity_ownership), что и у паролей из /add_legal_entity.
+    if not legal_entity and is_legacy_password:
+        add_legal_entity("Юр.лицо (старый пароль)", REFERRAL_LEGAL_ENTITY_PASSWORD)
+        legal_entity = find_legal_entity_by_password(text)
     if legal_entity or is_legacy_password:
         state.pop('awaiting_referral_legal_password', None)
         set_referrer_type(user_id, 'legal_entity')
