@@ -23846,8 +23846,16 @@ def referral_menu_keyboard(referral_link, current_type=REFERRAL_DEFAULT_TYPE, us
     # web_app, если подписка вдруг ещё не оплачена (иначе платный кабинет
     # открывался бы в обход paywall) - проверка обязательна ДО переключения
     # в web_app-режим.
+    # ИСПРАВЛЕНО 23.09.2026 (найдено при проверке логики оплат рефералов):
+    # схема 'admin' (см. admin_referral_password_flow) владеет кабинетом
+    # (owned_entity), но НИКОГДА не платит SUBSCRIPTION_GROUP_LEGAL_ENTITY_
+    # REFERRAL (её кабинет бесплатный, "админский бэкдор") - без этого
+    # условия is_legal_entity_referral_subscription_active была бы False
+    # для админа, кнопка падала бы в callback-ветку и просила бы пароль/
+    # оплату заново вместо прямой ссылки на уже свой бесплатный кабинет.
     owned_entity = get_legal_entity_owned_by(user_id) if user_id is not None else None
-    if owned_entity and PUBLIC_URL and is_legal_entity_referral_subscription_active(user_id):
+    cabinet_unlocked = current_type == 'admin' or is_legal_entity_referral_subscription_active(user_id)
+    if owned_entity and PUBLIC_URL and cabinet_unlocked:
         cabinet_url = f"{PUBLIC_URL}{LEGAL_CABINET_WEBAPP_PATH}"
         legal_button = InlineKeyboardButton(text=legal_label, web_app=WebAppInfo(url=cabinet_url))
     else:
@@ -24039,9 +24047,17 @@ async def referral_category_legal_start(callback_query: types.CallbackQuery):
     вместо пароля/кабинета показывается экран оплаты
     (send_legal_entity_referral_paywall). Схема 'admin' (Фантом) эту
     подписку не проверяет - у нее свой отдельный вход, см.
-    admin_referral_password_flow."""
+    admin_referral_password_flow.
+
+    ИСПРАВЛЕНО 23.09.2026 (найдено при проверке логики оплат рефералов):
+    выше написано, что схема 'admin' не проверяет эту подписку, но код
+    проверял её БЕЗ УСЛОВИЯ для всех - администратор, зашедший через
+    Фантом (admin_referral_password_flow даёт кабинет бесплатно), при
+    повторном нажатии "🏢 ЮРЛИЦО" тоже попадал на платный paywall на
+    1890₽, хотя у него схема 'admin', а не 'legal_entity'. Теперь
+    пропускаем проверку подписки для 'admin'."""
     user_id = callback_query.from_user.id
-    if not is_legal_entity_referral_subscription_active(user_id):
+    if get_referrer_type(user_id) != 'admin' and not is_legal_entity_referral_subscription_active(user_id):
         try:
             await callback_query.answer()
         except Exception:
@@ -24598,7 +24614,24 @@ def compute_referral_reserve_by_scheme():
     }
 
 
-REFERRAL_SCHEME_LABELS = {'individual': 'Обычная (30/15/5%)', 'legal_entity': 'Юр.лица (40/30/20%)'}
+# ИСПРАВЛЕНО 23.09.2026 (найдено при проверке логики оплат рефералов по
+# просьбе пользователя): раньше это был статический словарь ТОЛЬКО с двумя
+# схемами и вручную вписанными процентами - после появления схемы 'admin'
+# (40/20/10%) её резерв (балансы + заявки на вывод по ней) молча пропадал
+# из отчёта format_campaign_profit_text (цикл шёл по REFERRAL_SCHEME_LABELS,
+# а не по REFERRAL_RATES_PERCENT) - "Итого резерв" был ЗАНИЖЕН на всю сумму
+# схемы 'admin'. Плюс проценты юр.лица в подписи давно устарели (было
+# 40/30/20%, стало 35/20/10%). Теперь подписи собираются ДИНАМИЧЕСКИ из
+# самого REFERRAL_RATES_PERCENT - схему/проценты больше невозможно забыть
+# поменять в двух местах.
+REFERRAL_SCHEME_TITLES = {'individual': 'Обычная', 'legal_entity': 'Юр.лица', 'admin': 'Админ'}
+
+
+def _referral_scheme_labels():
+    return {
+        scheme: f"{REFERRAL_SCHEME_TITLES.get(scheme, scheme)} ({'/'.join(str(p) for p in rates)}%)"
+        for scheme, rates in REFERRAL_RATES_PERCENT.items()
+    }
 
 
 def format_campaign_profit_text():
@@ -24620,7 +24653,7 @@ def format_campaign_profit_text():
 
     reserve_lines = []
     total_reserve = 0
-    for scheme, label in REFERRAL_SCHEME_LABELS.items():
+    for scheme, label in _referral_scheme_labels().items():
         s = reserve[scheme]
         total_reserve += s['total_reserve_kopecks']
         reserve_lines.append(
@@ -24685,7 +24718,12 @@ async def admin_set_legal_referrer(message: types.Message):
         return
     target_id = int(parts[1])
     set_referrer_type(target_id, 'legal_entity')
-    await message.answer(f"✅ user_id={target_id} переключён на схему юр.лица (40%/30%/20%).")
+    # ИСПРАВЛЕНО 23.09.2026 (найдено при проверке логики оплат рефералов) -
+    # проценты в сообщении были захардкожены и устарели (было 40/30/20%,
+    # реальная ставка давно 35/20/10% - см. REFERRAL_RATES_PERCENT); теперь
+    # подставляются из самой таблицы, чтобы не расходиться снова.
+    rates = REFERRAL_RATES_PERCENT['legal_entity']
+    await message.answer(f"✅ user_id={target_id} переключён на схему юр.лица ({rates[0]}%/{rates[1]}%/{rates[2]}%).")
 
 @router.message(Command("set_individual_referrer"))
 async def admin_set_individual_referrer(message: types.Message):
