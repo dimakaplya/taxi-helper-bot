@@ -279,14 +279,18 @@ WEATHERAPI_KEY = os.getenv('WEATHERAPI_KEY')
 # нужно пересчитывать почаще, чтобы пуш ушёл вовремя (в нужное окно
 # RAIN_LEAD_MINUTES), а не только раз в час.
 RAIN_CHECK_INTERVAL_MINUTES = 20
-# Как часто ЖИВЬЁМ опрашивать Open-Meteo по всем 12 городам и обновлять
+# Как часто ЖИВЬЁМ опрашивать погодный API по всем 12 городам и обновлять
 # weather_data.json. Было раз в час (по прямой просьбе пользователя,
-# 21.09.2026 - "чтобы не нагружать лимиты", после инцидента с 429).
-# ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя - хотел каждые 10
-# минут, сошлись на компромиссе 20 минут, чтобы не упереться в лимит
-# Open-Meteo повторно) - см. retry на 429 в weather_data_updater ниже,
-# он остаётся дополнительной подстраховкой.
-WEATHER_UPDATE_INTERVAL_MINUTES = 20
+# 21.09.2026 - "чтобы не нагружать лимиты", после инцидента с 429 от
+# Open-Meteo), затем 22.09.2026 - компромисс на 20 минут (хотел 10, но
+# лимиты Open-Meteo не позволяли рисковать). ИЗМЕНЕНО 23.09.2026 (прямая
+# просьба пользователя - "с погодой обновления каждые 10 минут") - после
+# перехода на WeatherAPI.com (бесплатный тариф 100K запросов/месяц, сейчас
+# ещё и триал на 10 млн/месяц) 12 городов раз в 10 минут - это всего ~52K
+# запросов/месяц, с большим запасом даже на бесплатном тарифе. Retry на
+# 429/любые ошибки в fetch_rain_forecast остаётся дополнительной
+# подстраховкой в любом случае.
+WEATHER_UPDATE_INTERVAL_MINUTES = 10
 # За сколько минут до начала (или усиления) осадков слать пуш - по просьбе
 # пользователя: не "уже идёт", а заблаговременное предупреждение.
 RAIN_LEAD_MINUTES = 30
@@ -18482,7 +18486,7 @@ async def weather_data_updater():
     старте бота, НО ТОЛЬКО если снепшот реально устарел - тот же принцип
     защиты от лишних запросов при частых редеплоях, что у airports_data_updater/
     trains_data_updater (см. их комментарии, инцидент 19.09.2026)."""
-    MIN_FRESH_AGE_MINUTES = 30  # меньше половины WEATHER_UPDATE_INTERVAL_HOURS (60мин)
+    MIN_FRESH_AGE_MINUTES = 5  # меньше половины WEATHER_UPDATE_INTERVAL_MINUTES (10мин) - см. её комментарий
     while True:
         age_min = _data_file_age_minutes(WEATHER_DATA_FILE)
         if age_min is not None and age_min < MIN_FRESH_AGE_MINUTES:
@@ -18494,7 +18498,7 @@ async def weather_data_updater():
             await asyncio.sleep(remaining_min * 60 + 30)
             continue
         try:
-            logger.info("🔄 Обновляю weather_data.json из Open-Meteo (все города)...")
+            logger.info("🔄 Обновляю weather_data.json из WeatherAPI (все города)...")
             await update_weather_data()
         except Exception as e:
             logger.error(f"❌ Ошибка фонового обновления weather_data.json: {e}")
