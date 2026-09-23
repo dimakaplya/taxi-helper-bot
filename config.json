@@ -1,12 +1,13 @@
 {
   "_comment": "Единый справочник аэропортов и вокзалов для Taxi Helper бота. Раньше этот список дублировался в main.py (AIRPORTS_INFO/STATION_CITY/STATION_CAPACITY/AIRPORT_CAPACITY/AIRPORT_TIMEZONE/AIRPORT_COORDS), fetch_yandex_data.py (AIRPORTS) и fetch_trains_data.py (STATIONS) - три места, которые нужно было держать синхронными вручную. Именно рассинхрон между такими списками уже приводил к реальному багу (Шереметьево показывал 'все нули'). Теперь это единственный источник правды: main.py/fetch_yandex_data.py/fetch_trains_data.py читают его через config_loader.py при старте. Логика терминальных зон Шереметьево (AIRPORT_TERMINAL_ZONES/TERMINAL_LETTER_TO_ZONE) сюда намеренно НЕ вынесена - она слишком тесно связана с кодом (flight_terminal_zone/compute_zone_capacity_shares), остаётся в main.py.",
+  "_comment_capacity_dme_vko": "ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя - нашёл и перепроверил по нескольким независимым источникам годовой пассажиропоток за 2025г.: Домодедово 13.86 млн, Внуково 16.4 млн). 'capacity' у DME/VKO пересчитан той же методикой, что и у терминалов Шереметьево (см. AIRPORT_TERMINAL_ZONES в main.py) - 'busy hour rate' 0.035% от годового потока (ICAO Doc 9184), затем занижен на 15% по прямой просьбе пользователя: DME 13 860 000 x 0.00035 = 4851 -> x0.85 = 4123; VKO 16 400 000 x 0.00035 = 5740 -> x0.85 = 4879.",
   "cities": {
     "moscow": {
       "airports": [
         {"iata": "SVO", "icao": "UUEE", "name": "SVO (Шереметьево B/C)", "emoji": "✈️", "yandex_code": "s9600213", "zone_key": "bc", "capacity": 4966, "timezone": "Europe/Moscow", "coords": [55.971953, 37.410020]},
         {"iata": "SVO", "icao": "UUEE", "name": "SVO (Шереметьево Терминал D)", "emoji": "✈️", "yandex_code": "s9600213", "zone_key": "d", "capacity": 4966, "timezone": "Europe/Moscow", "coords": [55.971953, 37.410020]},
-        {"iata": "DME", "icao": "UUDD", "name": "DME (Домодедово)", "emoji": "✈️", "yandex_code": "s9600216", "capacity": 1586, "timezone": "Europe/Moscow", "coords": [55.415277, 37.901480]},
-        {"iata": "VKO", "icao": "UUWW", "name": "VKO (Внуково)", "emoji": "✈️", "yandex_code": "s9600215", "capacity": 1838, "timezone": "Europe/Moscow", "coords": [55.605219, 37.286370]}
+        {"iata": "DME", "icao": "UUDD", "name": "DME (Домодедово)", "emoji": "✈️", "yandex_code": "s9600216", "capacity": 4123, "timezone": "Europe/Moscow", "coords": [55.415277, 37.901480]},
+        {"iata": "VKO", "icao": "UUWW", "name": "VKO (Внуково)", "emoji": "✈️", "yandex_code": "s9600215", "capacity": 4879, "timezone": "Europe/Moscow", "coords": [55.605219, 37.286370]}
       ],
       "stations": [
         {"name": "Казанский вокзал", "code": "s2000003", "capacity": 2100, "coords": [55.7730, 37.6556]},
