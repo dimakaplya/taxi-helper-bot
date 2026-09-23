@@ -15,7 +15,7 @@ import ssl
 import urllib.parse
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
-from math import radians, sin, cos, asin, sqrt
+from math import radians, sin, cos, asin, sqrt, atan2, degrees
 from aiogram import Bot, Dispatcher, Router, types, BaseMiddleware
 from aiogram.filters import Command
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo, FSInputFile, BufferedInputFile, MenuButtonWebApp, MenuButtonDefault
@@ -4246,13 +4246,26 @@ MAIN_MENU_INLINE_BUTTON_CALLBACK = "open_services_menu"
 # кнопкой]") - у Telegram Bot API нет способа спросить "жива ли ещё нижняя
 # ReplyKeyboardMarkup у пользователя" (её можно потерять, если пользователь
 # сам очистил историю чата/удалил сообщение с меню - бот об этом никак не
-# узнаёт). Подстраховка: считаем нижнее меню "точно ещё на месте" только
-# REPLY_KEYBOARD_STALE_HOURS часов после последней отправки - после этого
-# инлайн-кнопка "МЕНЮ TAXI HELPER" на обычных сообщениях включается снова
-# (см. reply_keyboard_already_open ниже), даже если меню технически всё ещё
-# никуда не делось - лишняя кнопка раз в сутки не мешает, а вот полное
-# отсутствие способа вернуться в меню - серьёзный тупик для пользователя.
-REPLY_KEYBOARD_STALE_HOURS = 12
+# узнаёт).
+#
+# ЕЩЁ РАЗ ИЗМЕНЕНО 23.09.2026 (жалоба пользователя - "на андроиде бывает
+# пропадает кнопка меню, чтобы открыть снизу это меню"): раньше здесь была
+# страховка по времени (REPLY_KEYBOARD_STALE_HOURS = 12 часов) - инлайн-
+# кнопка "МЕНЮ TAXI HELPER" включалась обратно, только если с последней
+# отправки нижнего меню прошло 12+ часов. Проблема - у нижнего меню этого
+# бота ЕСТЬ свои кнопки с web_app= прямо ВНУТРИ него (🌤 ПОГОДА/🗺 КАРТА
+# ВОДИТЕЛЕЙ/💰 КУДА ЕХАТЬ/события, см. services_keyboard) - на Android
+# известная особенность Telegram-клиента: открытие WebApp через кнопку
+# ВНУТРИ ReplyKeyboardMarkup может само по себе скрыть эту клавиатуру
+# насовсем, без единого сообщения от пользователя боту - т.е. бот вообще
+# не видит момент, когда это произошло, и 12-часовое окно оставляло
+# водителя без доступа к меню на весь этот срок. Раз узнать РЕАЛЬНЫЙ
+# момент пропажи невозможно, а на Android она может случиться в любую
+# секунду - инлайн-кнопка "МЕНЮ TAXI HELPER" теперь добавляется ВСЕГДА на
+# любое сообщение без своей ReplyKeyboardMarkup, без окна "меню и так
+# недавно открыто" - лишняя кнопка на сообщении не мешает, а гарантия, что
+# путь назад в меню есть всегда, важнее.
+REPLY_KEYBOARD_STALE_HOURS = 12  # оставлено только для истории/совместимости с save_last_reply_keyboard_message - в гейтинг ниже больше не участвует
 _last_reply_keyboard_sent_at = {}  # chat_id -> datetime последней отправки сообщения с ReplyKeyboardMarkup
 
 def _with_main_menu_button(reply_markup):
@@ -4274,27 +4287,19 @@ class SingleMessageMiddleware(BaseRequestMiddleware):
         if isinstance(method, SendMessage):
             chat_id = method.chat_id
             has_reply_keyboard = isinstance(method.reply_markup, ReplyKeyboardMarkup)
-            # УТОЧНЕНО 23.09.2026 (прямая просьба пользователя - "кнопка
-            # появляется, если меню кнопок снизу не открыто") - нижняя
-            # reply-клавиатура в Telegram, once отправлена, остаётся у
-            # пользователя пристыкованной постоянно (не привязана к
-            # конкретному сообщению) - то есть уже даёт доступ к меню.
-            # Поэтому инлайн-кнопку "МЕНЮ TAXI HELPER" добавляем ТОЛЬКО пока
-            # у этого чата ещё ни разу не было отправлено такое меню
-            # (_last_reply_keyboard_msg_id ещё пусто для chat_id) - как
-            # только оно появилось, дублировать доступ к меню инлайн-кнопкой
-            # на каждом сообщении больше не нужно.
-            # См. REPLY_KEYBOARD_STALE_HOURS выше - "открыто" не навсегда, а
-            # только пока последняя отправка не устарела (подстраховка на
-            # случай, если меню у пользователя реально пропало, а бот об
-            # этом узнать не может).
-            last_sent_at = _last_reply_keyboard_sent_at.get(chat_id)
-            reply_keyboard_already_open = (
-                chat_id in _last_reply_keyboard_msg_id
-                and last_sent_at is not None
-                and (datetime.utcnow() - last_sent_at) < timedelta(hours=REPLY_KEYBOARD_STALE_HOURS)
-            )
-            if not has_reply_keyboard and not reply_keyboard_already_open:
+            # ИЗМЕНЕНО 23.09.2026 (жалоба пользователя - "на андроиде бывает
+            # пропадает кнопка меню" - см. подробный комментарий у
+            # REPLY_KEYBOARD_STALE_HOURS выше) - раньше тут была проверка
+            # "меню и так недавно отправлено, повторную инлайн-кнопку не
+            # добавляем" (reply_keyboard_already_open). Её убрали: у меню
+            # этого бота есть свои web_app-кнопки ПРЯМО ВНУТРИ
+            # ReplyKeyboardMarkup, и на Android именно тап по ним может
+            # молча скрыть нижнюю клавиатуру без единого сигнала боту - то
+            # есть момент "меню пропало" бот в принципе не видит и не может
+            # его отследить по времени. Теперь инлайн-кнопка "МЕНЮ TAXI
+            # HELPER" добавляется на ЛЮБОЕ сообщение без собственной
+            # ReplyKeyboardMarkup - без исключений и без окна ожидания.
+            if not has_reply_keyboard:
                 method.reply_markup = _with_main_menu_button(method.reply_markup)
             skip_trim = _skip_message_trim.get()
             result = await make_request(bot_instance, method)
@@ -5375,6 +5380,27 @@ def haversine_km(lat1, lon1, lat2, lon2):
     dlambda = radians(lon2 - lon1)
     a = sin(dphi / 2) ** 2 + cos(phi1) * cos(phi2) * sin(dlambda / 2) ** 2
     return 2 * r * asin(sqrt(a))
+
+# ДОБАВЛЕНО 23.09.2026 (жалоба пользователя - "на андройде стрелка не
+# показывает направление, не крутится"): Telegram отдаёт Location.heading
+# ТОЛЬКО если устройство само его посчитало - на заметной части Android-
+# телефонов (особенно в Telegram-WebView) это поле почти всегда пустое,
+# даже когда водитель реально едет, в отличие от iOS. См. тот же приём на
+# клиенте (bearingDeg/SELF_HEADING_FALLBACK_MIN_METERS в map_webapp_html,
+# для своей стрелки) - здесь то же самое, но на сервере, для стрелки-
+# индикатора у ОСТАЛЬНЫХ водителей на общей карте (см. update_map_position
+# ниже): если Telegram heading не прислал, считаем направление сами по
+# смещению между предыдущей и новой точкой этого же водителя.
+MAP_HEADING_FALLBACK_MIN_METERS = 6
+
+def compute_bearing_deg(lat1, lon1, lat2, lon2):
+    """Азимут (0-360°, по часовой от севера) из точки 1 в точку 2 - обычная
+    формула bearing по большому кругу."""
+    phi1, phi2 = radians(lat1), radians(lat2)
+    dlambda = radians(lon2 - lon1)
+    y = sin(dlambda) * cos(phi2)
+    x = cos(phi1) * sin(phi2) - sin(phi1) * cos(phi2) * cos(dlambda)
+    return (degrees(atan2(y, x)) + 360) % 360
 
 def nearest_airport(lat, lon):
     """Ближайший аэропорт (из AIRPORT_COORDS) к точке (lat, lon) - основа
@@ -9689,9 +9715,30 @@ def update_map_position(user_id, city, category, lat, lon, tariffs=None, heading
     (даже не на смене) - shift_active передаёт, была ли в этот момент
     активна смена, чтобы обычная карта могла по-прежнему показывать только
     тех, кто "на линии", а владелец юрлица - видеть свой парк всегда (см.
-    get_map_positions/handle_map_positions_api)."""
+    get_map_positions/handle_map_positions_api).
+
+    ИЗМЕНЕНО 23.09.2026 (жалоба пользователя - "на андройде стрелка не
+    показывает направление, не крутится", см. MAP_HEADING_FALLBACK_MIN_METERS/
+    compute_bearing_deg выше) - если Telegram heading не прислал (частый
+    случай на Android), считаем направление сами по смещению от предыдущей
+    сохранённой точки ЭТОГО ЖЕ водителя, если он реально сдвинулся хотя бы
+    на несколько метров (иначе, стоя на месте, оставляем прежнее значение -
+    не дёргаем стрелку на шуме GPS)."""
     conn = get_db_connection()
     cursor = conn.cursor()
+    if heading is None:
+        cursor.execute('SELECT lat, lon, heading FROM map_positions WHERE user_id = ?', (user_id,))
+        prev_row = cursor.fetchone()
+        if prev_row:
+            prev_lat, prev_lon, prev_heading = prev_row
+            try:
+                moved_m = haversine_km(prev_lat, prev_lon, lat, lon) * 1000
+            except Exception:
+                moved_m = 0
+            if moved_m >= MAP_HEADING_FALLBACK_MIN_METERS:
+                heading = round(compute_bearing_deg(prev_lat, prev_lon, lat, lon))
+            elif prev_heading is not None:
+                heading = prev_heading
     tariffs_json = json.dumps(list(tariffs or []), ensure_ascii=False)
     cursor.execute('''
         INSERT INTO map_positions (user_id, city, category, lat, lon, tariffs, heading, shift_active, updated_at)
@@ -10719,6 +10766,31 @@ def map_webapp_html():
       Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
     return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   }}
+  // ДОБАВЛЕНО 23.09.2026 (жалоба пользователя - "на андройде стрелка не
+  // показывает направление, не крутится"): navigator.geolocation отдаёт
+  // course/heading (pos.coords.heading) ТОЛЬКО когда его вычислил сам GPS-
+  // чип устройства - на многих Android-телефонах (особенно внутри
+  // Telegram-WebView) это поле почти всегда приходит null, даже когда
+  // водитель реально едет, в отличие от iOS, где браузер обычно heading
+  // отдаёт. Раньше при null стрелка просто не поворачивалась (оставалась
+  // на последнем значении, по умолчанию 0 - "смотрит вверх" и не крутится).
+  // Теперь, если браузер heading не дал - считаем направление движения
+  // САМИ, по разнице между двумя последними GPS-точками (обычная формула
+  // азимута/bearing) - работает на любой платформе, не зависит от того,
+  // умеет ли конкретный телефон/браузер отдавать курс. Порог в 6 метров -
+  // чтобы на месте (стоя в пробке/на светофоре) стрелка не дёргалась туда-
+  // сюда от шума GPS.
+  const SELF_HEADING_FALLBACK_MIN_METERS = 6;
+  let selfHeadingFromLat = null;
+  let selfHeadingFromLon = null;
+  function bearingDeg(lat1, lon1, lat2, lon2) {{
+    const toRad = (d) => d * Math.PI / 180;
+    const toDeg = (r) => r * 180 / Math.PI;
+    const y = Math.sin(toRad(lon2 - lon1)) * Math.cos(toRad(lat2));
+    const x = Math.cos(toRad(lat1)) * Math.sin(toRad(lat2)) -
+      Math.sin(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.cos(toRad(lon2 - lon1));
+    return (toDeg(Math.atan2(y, x)) + 360) % 360;
+  }}
   function clamp255(v) {{ return Math.max(0, Math.min(255, v)); }}
   function hexToRgb(hex) {{
     let h = hex.replace('#', '');
@@ -10851,7 +10923,26 @@ def map_webapp_html():
     // у myShiftActive выше) - своя стрелка рисуется всегда, пока браузер
     // отдаёт геопозицию, независимо от смены. Видимость для ДРУГИХ
     // по-прежнему зависит от смены - это уже гарантируется на сервере.
-    const h = (heading === null || heading === undefined || isNaN(heading)) ? selfHeading : heading;
+    let h = heading;
+    if (h === null || h === undefined || isNaN(h)) {{
+      // ДОБАВЛЕНО 23.09.2026 (жалоба - "на андройде стрелка не показывает
+      // направление, не крутится") - см. bearingDeg/
+      // SELF_HEADING_FALLBACK_MIN_METERS выше: браузер не дал курс - считаем
+      // сами по сдвигу координат, если он достаточно заметный (иначе просто
+      // оставляем стрелку как была, а не дёргаем её на шуме GPS).
+      if (selfHeadingFromLat !== null && selfHeadingFromLon !== null) {{
+        const moved = distanceMetersLatLon(selfHeadingFromLat, selfHeadingFromLon, lat, lon);
+        if (moved >= SELF_HEADING_FALLBACK_MIN_METERS) {{
+          h = bearingDeg(selfHeadingFromLat, selfHeadingFromLon, lat, lon);
+        }} else {{
+          h = selfHeading;
+        }}
+      }} else {{
+        h = selfHeading;
+      }}
+    }}
+    selfHeadingFromLat = lat;
+    selfHeadingFromLon = lon;
     selfHeading = h;
     const icon = L.divIcon({{ className: 'self-icon', html: selfIconHtml(h), iconSize: [42, 42], iconAnchor: [21, 21] }});
     if (selfMarker) {{
@@ -11621,22 +11712,42 @@ def map_webapp_html():
   // в Python) и своим цветом, чтобы слои были визуально различимы -
   // читается прямо из ответа /map/district_demand (свои поля demand_*
   // на каждый слой, см. handle_map_district_demand_api).
+  // ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя - "пороги спроса
+  // облаков опусти для ultima... эконом 60-70-80-90-100, комфорт
+  // 70-80-90-100, комфорт плюс 80-90-100... бизнес 60-70-80-90-100,
+  // премьер 70-80-90-100, элит 85-90-95-100", уточнено - только Москва,
+  // элит ориентируется на цифры премьера, т.к. отдельных данных под элит
+  // нет, см. handle_map_district_demand_api/demand_elite в Python) - у
+  // taxi Комфорт и Комфорт+ разошлись на два отдельных слоя вместо одного
+  // общего; у ultima добавлен отдельный слой "Элит" (та же цифра demand_
+  // elite, что и у "Премьер", просто более высокий порог загорания).
   const DISTRICT_CLOUD_LAYERS = {{
     taxi: [
-      {{ field: 'demand_econom', thresholds: [60, 80, 100], color: '#9b30ff', label: 'Эконом' }},
-      {{ field: 'demand_comfort', thresholds: [70, 90, 100], color: '#00b8a9', label: 'Комфорт/Комфорт+' }},
+      {{ field: 'demand_econom', thresholds: [60, 70, 80, 90, 100], color: '#9b30ff', label: 'Эконом' }},
+      {{ field: 'demand_comfort', thresholds: [70, 80, 90, 100], color: '#00b8a9', label: 'Комфорт' }},
+      {{ field: 'demand_comfort_plus', thresholds: [80, 90, 100], color: '#2ec4b6', label: 'Комфорт+' }},
     ],
     ultima: [
-      {{ field: 'demand_business', thresholds: [80, 90, 100], color: '#9b30ff', label: 'Бизнес' }},
-      {{ field: 'demand_premium', thresholds: [90, 95, 100], color: '#ff9f1c', label: 'Премьер/Элит' }},
+      {{ field: 'demand_business', thresholds: [60, 70, 80, 90, 100], color: '#9b30ff', label: 'Бизнес' }},
+      {{ field: 'demand_premier', thresholds: [70, 80, 90, 100], color: '#ff9f1c', label: 'Премьер' }},
+      {{ field: 'demand_elite', thresholds: [85, 90, 95, 100], color: '#ff3b3b', label: 'Элит' }},
     ],
   }};
+  // ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя - "оттенки цвета
+  // облака спроса становится ярче") - раньше было ровно 3 фиксированных
+  // порога/ступени прозрачности; теперь порогов у слоя может быть 3, 4 или
+  // 5 (см. DISTRICT_CLOUD_LAYERS выше) - функция сама считает, сколько
+  // порогов пройдено (level, от 0 до длины массива), и растягивает
+  // прозрачность по ним равномерно от OPACITY_MIN до OPACITY_MAX - чем
+  // больше порогов пройдено, тем ярче/плотнее облако, независимо от того,
+  // 3 у слоя ступени или 5.
   function districtLayerOpacity(demand, thresholds) {{
-    const [t1, t2, t3] = thresholds;
-    if (demand >= t3) return 0.28;
-    if (demand >= t2) return 0.20;
-    if (demand >= t1) return 0.12;
-    return 0;
+    const n = thresholds.length;
+    let level = 0;
+    for (let i = 0; i < n; i++) {{ if (demand >= thresholds[i]) level = i + 1; }}
+    if (level === 0) return 0;
+    const OPACITY_MIN = 0.14, OPACITY_MAX = 0.34;
+    return OPACITY_MIN + (OPACITY_MAX - OPACITY_MIN) * (level / n);
   }}
   async function loadDistrictDemandClouds() {{
     try {{
@@ -13568,21 +13679,26 @@ def get_moscow_district_demand():
 # ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя - "два независимых слоя
 # облаков одновременно - эконом отдельно, комфорт+комфорт+ отдельно, у них
 # разные пороги показа") - категория 'taxi' больше не сводится к ОДНОМУ
-# максимуму по всем трём тарифам: эконом (индекс 0) и комфорт+комфорт+
-# (индексы 1,2 - максимум между ними) считаются и отдаются ОТДЕЛЬНО, чтобы
-# на карте могли одновременно рисоваться два независимых слоя облаков с
-# разными порогами/прозрачностью (см. MOSCOW_DISTRICT_CLOUD_THRESHOLDS
-# ниже и loadDistrictDemandClouds в map_webapp_html). ЕЩЁ РАЗ ИЗМЕНЕНО
-# 22.09.2026 (прямая просьба пользователя - "в категории Ultima тоже
-# разделим ... на бизнес у нас будет порог 80 90 100, на премьер и элит
-# будет у нас 90 95 100") - Ultima теперь ТОЖЕ два независимых слоя, как
-# и 'taxi': бизнес (индекс 3) отдельно, премиум/элит (индекс 4) отдельно
-# (в данных только один "премиум"-тариф - под него и заведён "премьер и
-# элит" пользователя).
+# максимуму по всем трём тарифам.
+# ЕЩЁ РАЗ ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя - "пороги спроса
+# облаков опусти для ultima... эконом 60-70-80-90-100, комфорт 70-80-90-100,
+# комфорт плюс 80-90-100... бизнес 60-70-80-90-100, премьер 70-80-90-100,
+# элит 85-90-95-100", уточнено через вопрос - только для Москвы, Элит
+# считать по тем же цифрам, что и Премьер, т.к. в данных нет отдельной
+# колонки под Элит):
+# - taxi теперь ТРИ независимых слоя (эконом/комфорт/комфорт+ отдельно, а не
+#   комфорт+комфорт+ вместе одним максимумом, как было раньше) - реальные
+#   раздельные цифры по Комфорт (индекс 1) и Комфорт+ (индекс 2) в данных
+#   УЖЕ есть, их просто перестали сводить в один максимум.
+# - ultima теперь ТРИ слоя: бизнес (индекс 3) отдельно, премьер и элит - оба
+#   берутся из ОДНОЙ и той же колонки "премиум" (индекс 4, единственная,
+#   что есть в данных), но с РАЗНЫМИ порогами каждый - у элит выше, т.к.
+#   тариф реже/дороже.
 MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_ECONOM = (0,)
-MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_COMFORT = (1, 2)
+MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_COMFORT = (1,)
+MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_COMFORT_PLUS = (2,)
 MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_BUSINESS = (3,)
-MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_PREMIUM = (4,)
+MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_PREMIUM = (4,)  # источник и для "премьер", и для "элит" слоя
 
 # Комбинированные индексы (максимум по всем тарифам категории) - используются
 # ТОЛЬКО для общего ранжирования районов в "Куда ехать" (score_district_candidates),
@@ -13592,17 +13708,18 @@ MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES = {
     'ultima': (3, 4),
 }
 
-# Пороги показа облака (первое значение) и "ступени" непрозрачности (все три
-# значения) для КАЖДОГО слоя районных облаков - ДОБАВЛЕНО/ИЗМЕНЕНО
-# 22.09.2026 по прямой просьбе пользователя: "для эконом 60, 80, 100", "для
-# комфорт/комфорт+ 70, 90, 100", "для бизнес 80, 90, 100", "для премьер и
-# элит 90, 95, 100". Раньше был всего один порог на всю категорию 'taxi'
-# (60%) и другой на всю 'ultima' (85%, шаг 5% до 100) - теперь у каждого
-# тарифного слоя СВОИ 3 порога.
-MOSCOW_DISTRICT_CLOUD_THRESHOLDS_ECONOM = (60, 80, 100)
-MOSCOW_DISTRICT_CLOUD_THRESHOLDS_COMFORT = (70, 90, 100)
-MOSCOW_DISTRICT_CLOUD_THRESHOLDS_BUSINESS = (80, 90, 100)
-MOSCOW_DISTRICT_CLOUD_THRESHOLDS_PREMIUM = (90, 95, 100)
+# Пороги показа облака (первое значение) и "ступени" непрозрачности (все
+# значения по возрастанию, чем больше порогов пройдено - тем ярче облако,
+# см. districtLayerOpacity в JS) для КАЖДОГО слоя районных облаков.
+# ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя, см. комментарий у
+# MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_* выше) - пороги опущены и стали
+# более "ступенчатыми" (5 порогов у эконом/бизнес вместо 3).
+MOSCOW_DISTRICT_CLOUD_THRESHOLDS_ECONOM = (60, 70, 80, 90, 100)
+MOSCOW_DISTRICT_CLOUD_THRESHOLDS_COMFORT = (70, 80, 90, 100)
+MOSCOW_DISTRICT_CLOUD_THRESHOLDS_COMFORT_PLUS = (80, 90, 100)
+MOSCOW_DISTRICT_CLOUD_THRESHOLDS_BUSINESS = (60, 70, 80, 90, 100)
+MOSCOW_DISTRICT_CLOUD_THRESHOLDS_PREMIER = (70, 80, 90, 100)
+MOSCOW_DISTRICT_CLOUD_THRESHOLDS_ELITE = (85, 90, 95, 100)
 
 MAP_DISTRICT_DEMAND_API_PATH = '/map/district_demand'
 
@@ -13650,18 +13767,34 @@ async def handle_map_district_demand_api(request):
             slots = entry.get('weekday', {}).get(weekday, [])
             item = {'name': name, 'lat': entry['lat'], 'lon': entry['lon']}
             if category == 'taxi':
+                # ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя - "эконом
+                # 60-70-80-90-100, комфорт 70-80-90-100, комфорт плюс
+                # 80-90-100") - Комфорт и Комфорт+ раньше сводились в ОДИН
+                # максимум (demand_comfort), теперь два раздельных слоя -
+                # реальные отдельные цифры по обоим в данных уже были.
                 econom = _district_slot_value(slots, now.hour, MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_ECONOM)
                 comfort = _district_slot_value(slots, now.hour, MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_COMFORT)
-                if econom is None and comfort is None:
+                comfort_plus = _district_slot_value(slots, now.hour, MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_COMFORT_PLUS)
+                if econom is None and comfort is None and comfort_plus is None:
                     continue
                 if rain_now:
                     if econom is not None:
                         econom = max(econom, MAP_DEMAND_RAIN_FLOOR_PERCENT)
                     if comfort is not None:
                         comfort = max(comfort, MAP_DEMAND_RAIN_FLOOR_PERCENT)
+                    if comfort_plus is not None:
+                        comfort_plus = max(comfort_plus, MAP_DEMAND_RAIN_FLOOR_PERCENT)
                 item['demand_econom'] = econom
                 item['demand_comfort'] = comfort
+                item['demand_comfort_plus'] = comfort_plus
             else:
+                # ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя - "бизнес
+                # 60-70-80-90-100, премьер 70-80-90-100, элит 85-90-95-100",
+                # уточнено - элит считать по тем же цифрам, что премьер, т.к.
+                # отдельной колонки под элит в данных нет) - demand_premium
+                # разошёлся на demand_premier/demand_elite, ОБА читают одно и
+                # то же значение "премиум" из данных - различаются только
+                # пороги показа/яркости на стороне JS (DISTRICT_CLOUD_LAYERS).
                 business = _district_slot_value(slots, now.hour, MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_BUSINESS)
                 premium = _district_slot_value(slots, now.hour, MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_PREMIUM)
                 if business is None and premium is None:
@@ -13672,7 +13805,8 @@ async def handle_map_district_demand_api(request):
                     if premium is not None:
                         premium = max(premium, MAP_DEMAND_RAIN_FLOOR_PERCENT)
                 item['demand_business'] = business
-                item['demand_premium'] = premium
+                item['demand_premier'] = premium
+                item['demand_elite'] = premium
             result['districts'].append(item)
     except Exception:
         logger.exception("❌ Ошибка при получении районного спроса для карты водителей (Москва)")
