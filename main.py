@@ -8091,6 +8091,13 @@ async def check_long_shifts():
                         )
                     except Exception as e:
                         logger.error(f"❌ Не удалось автозавершить смену пользователю {user_id}: {e}")
+                    # ДОБАВЛЕНО 23.09.2026 (подготовка к росту до 5000
+                    # пользователей) - пауза между отправками, как и в
+                    # остальных похожих фоновых рассылках файла (см.
+                    # check_nearby_drivers) - если много водителей одновременно
+                    # достигнут лимита часов, шлём не залпом (риск 429 от
+                    # Telegram), а с той же паузой ~20 сообщений/сек.
+                    await asyncio.sleep(0.05)
                     continue
 
                 if elapsed_hours >= SHIFT_AUTO_FINISH_HOURS - SHIFT_AUTO_FINISH_WARN_MINUTES / 60 and not shift.get('warned_auto_finish'):
@@ -8105,6 +8112,7 @@ async def check_long_shifts():
                         )
                     except Exception as e:
                         logger.error(f"❌ Не удалось отправить пуш о скором автозавершении смены пользователю {user_id}: {e}")
+                    await asyncio.sleep(0.05)
                     shift = dict(state.get('shift') or {})
                     if shift:
                         shift['warned_auto_finish'] = True
@@ -8123,6 +8131,7 @@ async def check_long_shifts():
                     )
                 except Exception as e:
                     logger.error(f"❌ Не удалось отправить пуш о долгой смене пользователю {user_id}: {e}")
+                await asyncio.sleep(0.05)
                 # Ставим флаг независимо от успеха отправки - иначе при
                 # временной ошибке Telegram будем долбить пуш каждую
                 # проверку до конца смены.
@@ -9750,7 +9759,7 @@ async def fuel_reminder_checker():
             logger.exception("❌ Ошибка фоновой проверки напоминаний о заправках")
         await asyncio.sleep(FUEL_REMINDER_CHECK_INTERVAL_MINUTES * 60)
 
-def maybe_update_map_position(user_id, lat, lon, heading=None):
+async def maybe_update_map_position(user_id, lat, lon, heading=None):
     """Хук из обработчиков живой геопозиции (см. вызовы ниже) - пишет позицию
     в map_positions, ТОЛЬКО пока у водителя идёт смена (см.
     is_shift_active/start_shift_and_notify) - по прямому уточнению
@@ -9761,7 +9770,19 @@ def maybe_update_map_position(user_id, lat, lon, heading=None):
     ничего не пишет. heading - направление движения (0-360°), если Telegram
     его прислал (см. комментарий у миграции heading в map_positions) - по
     просьбе пользователя (22.09.2026), чтобы иконка машинки на карте могла
-    показывать, в какую сторону едет водитель."""
+    показывать, в какую сторону едет водитель.
+
+    ИЗМЕНЕНО 23.09.2026 (подготовка к росту числа пользователей до 5000 -
+    прямая просьба пользователя "прогони все системы что может сломаться,
+    важно подготовиться к наплыву юзеров") - раньше update_map_position
+    (синхронный sqlite3.connect+INSERT+commit+close) вызывался НАПРЯМУЮ
+    внутри async-хендлера живой геопозиции - при частоте живых пинг-обновлений
+    Telegram (~раз в 5-20 сек НА КАЖДОГО едущего водителя) это блокировало
+    ВЕСЬ event loop (то есть вообще всех пользователей бота, не только
+    текущего) на время самой SQL-записи. При 5000 водителей на смене
+    одновременно это стало бы главным узким местом отзывчивости бота.
+    Теперь сама запись уходит в отдельный поток (asyncio.to_thread) - event
+    loop продолжает обслуживать остальных, пока идёт запись в SQLite."""
     state = user_state.get(user_id) or {}
     shift = state.get('shift')
     if not shift:
@@ -9771,7 +9792,7 @@ def maybe_update_map_position(user_id, lat, lon, heading=None):
     if not category or not city or category not in MAP_CATEGORY_STYLE:
         return
     try:
-        update_map_position(user_id, city, category, lat, lon, tariffs=shift.get('tariffs'), heading=heading)
+        await asyncio.to_thread(update_map_position, user_id, city, category, lat, lon, shift.get('tariffs'), heading)
     except Exception:
         logger.exception(f"❌ Не удалось обновить позицию на карте для user_id={user_id}")
 
@@ -12486,7 +12507,13 @@ async def handle_map_positions_api(request):
             except Exception:
                 exclude_user_id = None
     try:
-        positions = get_map_positions(city, category, exclude_user_id) if city else []
+        # ИЗМЕНЕНО 23.09.2026 (подготовка к росту до 5000 пользователей) -
+        # каждый открытый WebApp карты опрашивает этот эндпоинт периодически
+        # (автообновление позиций) - синхронный sqlite-запрос напрямую в
+        # async-хендлере блокировал бы event loop на время запроса при
+        # каждом таком опросе от КАЖДОГО открытого окна карты одновременно.
+        # asyncio.to_thread переносит сам SQL-запрос в отдельный поток.
+        positions = await asyncio.to_thread(get_map_positions, city, category, exclude_user_id) if city else []
         # Тарифы уже человекочитаемые строки (см. CATEGORIES[cat]['tariffs'] /
         # shift_tariff_options) - WebApp просто склеивает их через запятую в
         # подписи маркера (см. map_webapp_html), переводить не нужно.
@@ -15636,7 +15663,7 @@ async def handle_airport_queue_location(message: types.Message):
     await process_parking_ping(user_id, lat, lon)
     await km_counter_ping(user_id, lat, lon)
     remember_live_location(user_id, lat, lon)
-    maybe_update_map_position(user_id, lat, lon, heading=heading)
+    await maybe_update_map_position(user_id, lat, lon, heading=heading)
     await maybe_start_pending_shift(message, user_id)
     state = user_state.get(user_id) or {}
     if state.get('airport_queue_active') and is_shift_active(state):
@@ -15661,7 +15688,7 @@ async def handle_airport_queue_location_update(message: types.Message):
     await process_parking_ping(user_id, lat, lon)
     await km_counter_ping(user_id, lat, lon)
     remember_live_location(user_id, lat, lon)
-    maybe_update_map_position(user_id, lat, lon, heading=heading)
+    await maybe_update_map_position(user_id, lat, lon, heading=heading)
     await maybe_start_pending_shift(message, user_id)
 
 @router.message(lambda message: message.text in NEARBY_BUTTON_TO_KIND and user_state.get(message.from_user.id, {}).get('in_courier_module'))
@@ -18239,24 +18266,42 @@ async def fetch_rain_forecast(city):
         'timezone': 'auto',
     }
     RETRY_ATTEMPTS = 3
+    # ИСПРАВЛЕНО 23.09.2026 (жалоба пользователя - реальная погода в
+    # Краснодаре была "дождь", а бот показывал "пасмурно, осадков нет" -
+    # т.е. явно устаревшие данные хотя бы для одного города): раньше
+    # retry-логика реально повторяла запрос ТОЛЬКО при HTTP 429 - любая
+    # другая ошибка (таймаут, обрыв соединения, 500/502/503 от Open-Meteo)
+    # сразу делала `return None` НЕСМОТРЯ на то, что сам цикл `for attempt
+    # in range(1, RETRY_ATTEMPTS+1)` выглядел так, будто повторяет попытки
+    # при любой ошибке. На практике это значило: один случайный сетевой сбой
+    # для конкретного города (например Краснодар, 11-й из 12 в очереди,
+    # см. RAIN_CITY_COORDS) - и update_weather_data() молча откатывался на
+    # ПРОШЛЫЙ снепшот для него (см. её комментарий ниже "оставляю прошлый
+    # снепшот"), без единой повторной попытки внутри самого цикла retry.
+    # Теперь любая ошибка (кроме успешных 200) реально уходит на следующую
+    # попытку с тем же backoff, что был у 429, и лишь после ВСЕХ
+    # RETRY_ATTEMPTS попыток возвращает None.
     for attempt in range(1, RETRY_ATTEMPTS + 1):
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(OPEN_METEO_URL, params=params, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                    if resp.status == 429:
-                        if attempt < RETRY_ATTEMPTS:
-                            wait_s = 2.0 * attempt
-                            logger.warning(f"⏳ Open-Meteo 429 для {city}, попытка {attempt}/{RETRY_ATTEMPTS} - жду {wait_s}с...")
-                            await asyncio.sleep(wait_s)
-                            continue
-                        logger.warning(f"⚠️ Open-Meteo вернул 429 для города {city} - исчерпаны все {RETRY_ATTEMPTS} попыток")
-                        return None
-                    if resp.status != 200:
-                        logger.warning(f"⚠️ Open-Meteo вернул {resp.status} для города {city}")
-                        return None
-                    return await resp.json()
+                    if resp.status == 200:
+                        return await resp.json()
+                    label = "429" if resp.status == 429 else str(resp.status)
+                    if attempt < RETRY_ATTEMPTS:
+                        wait_s = 2.0 * attempt
+                        logger.warning(f"⏳ Open-Meteo вернул {label} для {city}, попытка {attempt}/{RETRY_ATTEMPTS} - жду {wait_s}с...")
+                        await asyncio.sleep(wait_s)
+                        continue
+                    logger.warning(f"⚠️ Open-Meteo вернул {label} для города {city} - исчерпаны все {RETRY_ATTEMPTS} попыток")
+                    return None
         except Exception as e:
-            logger.warning(f"⚠️ Не удалось получить прогноз Open-Meteo для {city}: {e}")
+            if attempt < RETRY_ATTEMPTS:
+                wait_s = 2.0 * attempt
+                logger.warning(f"⏳ Ошибка запроса к Open-Meteo для {city} ({e}), попытка {attempt}/{RETRY_ATTEMPTS} - жду {wait_s}с...")
+                await asyncio.sleep(wait_s)
+                continue
+            logger.warning(f"⚠️ Не удалось получить прогноз Open-Meteo для {city} - исчерпаны все {RETRY_ATTEMPTS} попыток ({e})")
             return None
     return None
 
