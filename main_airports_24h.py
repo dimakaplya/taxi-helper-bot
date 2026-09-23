@@ -7878,10 +7878,12 @@ async def score_district_candidates(city, category, user_lat=None, user_lon=None
     for name, entry in table.get('districts', {}).items():
         slots = entry.get('weekday', {}).get(weekday, [])
         demand = None
+        slot_start_h = slot_end_h = None
         for slot in slots:
             start_h, end_h = slot[0], slot[1]
             if start_h <= now.hour < end_h:
                 demand = max(slot[2 + i] for i in indices)
+                slot_start_h, slot_end_h = start_h, end_h
                 break
         if demand is None:
             continue
@@ -7913,6 +7915,7 @@ async def score_district_candidates(city, category, user_lat=None, user_lon=None
             'name': name, 'demand': demand, 'lat': entry['lat'], 'lon': entry['lon'],
             'adjusted': adjusted, 'raining': district_raining,
             'holiday': holiday_mult != 1.0, 'temp_extreme': temp_mult != 1.0, 'event_nearby': event_mult != 1.0,
+            'slot_start_h': slot_start_h, 'slot_end_h': slot_end_h,
         })
 
     if not scored:
@@ -7922,6 +7925,19 @@ async def score_district_candidates(city, category, user_lat=None, user_lon=None
     result = []
     for d in scored[:limit]:
         reasons = [f"{d['demand']}% спроса в районе"]
+        # ДОБАВЛЕНО 24.09.2026 (прямая просьба пользователя, скриншот
+        # "Район Арбат" - "ожидаемый спрос с 21:00 до 23:00... давай это
+        # тоже реализуем на основе наших данных") - окно из ТОЙ ЖЕ строки
+        # матрицы (slot_start_h/slot_end_h), по которой посчитан сам %
+        # спроса (см. цикл выше) - т.е. РЕАЛЬНАЯ граница текущего часового
+        # блока таблицы, а не выдуманная оценка. 24 в конце блока в файле
+        # означает "до полуночи" - показываем как 00:00, а не "24:00".
+        # Дождевой "пол" демонстрации (district_raining выше) НЕ влияет на
+        # это окно - оно всегда про матрицу, дождь может закончиться раньше.
+        if d.get('slot_start_h') is not None and d.get('slot_end_h') is not None:
+            start_label = f"{d['slot_start_h']:02d}:00"
+            end_label = f"{d['slot_end_h'] % 24:02d}:00"
+            reasons.append(f"⏰ спрос по таблице держится с {start_label} до {end_label}")
         if d['raining']:
             reasons.append("🌧 осадки сейчас в этом районе - спрос выше обычного")
         if d['holiday']:
