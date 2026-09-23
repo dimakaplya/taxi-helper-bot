@@ -7676,6 +7676,16 @@ def get_city_advice(city, level, category=None):
 # за расстояние, используется и для других целей) - это именно место, куда
 # кандидат "Центр" ведёт кнопкой "Поехали".
 MOSCOW_CENTER_COORDS = (55.7539, 37.6208)
+# ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "на оба города",
+# генерализация score_moscow_center_candidate -> score_city_center_candidate
+# ниже) - Дворцовая площадь, тот же смысл для Питера, что Красная площадь
+# для Москвы: центральная точка вне списка спальных районов из матрицы
+# спроса, отдельный кандидат "Центр города".
+SPB_CENTER_COORDS = (59.9398, 30.3146)
+CITY_CENTER_COORDS = {
+    'moscow': MOSCOW_CENTER_COORDS,
+    'spb': SPB_CENTER_COORDS,
+}
 
 def _is_weekend_night_window(weekday, hour):
     """Пятница/суббота ночь (21:00-06:00, через полночь на следующий день -
@@ -7757,8 +7767,12 @@ async def score_district_candidates(city, category, user_lat=None, user_lon=None
     более высоким % спроса. Если данных нет (файл не загрузился) или
     подходящего района на текущий час/день не нашлось - откатываемся на
     старый список из одного score_city_candidate, чтобы "Куда ехать" не
-    осталась совсем без кандидата "Город/центр"."""
-    table = get_moscow_district_demand()
+    осталась совсем без кандидата "Город/центр".
+
+    ОБОБЩЕНО 23.09.2026 (прямая просьба пользователя - "на оба города") -
+    таблица теперь берётся ПО ГОРОДУ (get_district_demand(city)), не только
+    для Москвы - см. DISTRICT_DEMAND_FILES."""
+    table = get_district_demand(city)
     indices = MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES.get(category) if table else None
     if not table or not indices:
         return [await score_city_candidate(city, category=category)]
@@ -7807,7 +7821,11 @@ async def score_district_candidates(city, category, user_lat=None, user_lon=None
         # проверяется по СВОЕМУ снепшоту (district_rain_now, см. блок
         # "ПОГОДА ПО РАЙОНАМ МОСКВЫ" выше) - fallback на общегородской
         # rain_now, пока для района ещё не накопился собственный снепшот.
-        district_raining = district_rain_now(name, fallback_rain_now=rain_now)
+        # ОБОБЩЕНО 23.09.2026 ("на оба города") - district_rain_now остаётся
+        # Москва-only подсистемой (коллизии имён районов между городами,
+        # см. get_district_demand выше), для Питера используем только
+        # общегородской rain_now.
+        district_raining = district_rain_now(name, fallback_rain_now=rain_now) if city == 'moscow' else rain_now
         if district_raining:
             demand = max(demand, MAP_DEMAND_RAIN_FLOOR_PERCENT)
         dist_km = None
@@ -7916,20 +7934,28 @@ async def score_city_candidate(city, category=None):
         'kind': 'center',
     }
 
-async def score_moscow_center_candidate(city, category):
-    """Кандидат "Центр" для Москвы такси/Ultima - ДОБАВЛЕНО 22.09.2026
-    (прямая просьба пользователя): раньше "Город/центр" был ПОЛНОСТЬЮ
-    заменён на районы (score_district_candidates), но пользователь
-    уточнил, что реальный центр (Красная площадь/Охотный ряд - вне списка
-    30 спальных районов из его файла, см. MOSCOW_CENTER_COORDS) должен
-    остаться отдельным кандидатом наравне с районами, с явным приоритетом
-    для Ultima в определённые часы/дни (см. ultima_time_bias). Использует
-    ту же базовую логику (час пик + погода), что и score_city_candidate,
-    только переопределяет метку/координаты на реальный центр и, для
-    Ultima, домножает score по временной логике."""
+async def score_city_center_candidate(city, category):
+    """Кандидат "Центр" для такси/Ultima - ДОБАВЛЕНО 22.09.2026 (прямая
+    просьба пользователя): раньше "Город/центр" был ПОЛНОСТЬЮ заменён на
+    районы (score_district_candidates), но пользователь уточнил, что
+    реальный центр (Красная площадь/Охотный ряд у Москвы - вне списка
+    спальных районов из его файла, см. CITY_CENTER_COORDS) должен остаться
+    отдельным кандидатом наравне с районами, с явным приоритетом для
+    Ultima в определённые часы/дни (см. ultima_time_bias). Использует ту же
+    базовую логику (час пик + погода), что и score_city_candidate, только
+    переопределяет метку/координаты на реальный центр и, для Ultima в
+    Москве, домножает score по временной логике.
+
+    ПЕРЕИМЕНОВАНО 23.09.2026 из score_moscow_center_candidate (прямая
+    просьба пользователя - "на оба города") - раньше координаты и
+    departure_wave_info были захардкожены на 'moscow' буквально внутри
+    функции ДАЖЕ ПРИ ТОМ что она уже получала city аргументом (безобидно,
+    т.к. вызывалась только при city=='moscow', но теперь, когда её зовут и
+    для Питера, это было бы реальным багом) - оба места теперь используют
+    настоящий city."""
     base = await score_city_candidate(city, category=category)
     base['label'] = 'Центр города'
-    base['lat'], base['lon'] = MOSCOW_CENTER_COORDS
+    base['lat'], base['lon'] = CITY_CENTER_COORDS.get(city, RAIN_CITY_COORDS.get(city, (None, None)))
     center_mult, _airport_mult = ultima_time_bias(city, category)
     if center_mult != 1.0:
         base['score'] *= center_mult
@@ -7946,10 +7972,10 @@ async def score_moscow_center_candidate(city, category):
     # DEPARTURE_WAVE_THRESHOLD+ рейсов, поднимаем "Центр города" - там
     # предполётные пассажиры (гостиницы/бизнес-центры/жильё), которым
     # понадобится заказ В аэропорт. Применяется и к такси, и к Ultima -
-    # источник данных общий (только 3 аэропорта Москвы, см. DEPARTURE_ICAO
-    # в fetch_yandex_data.py).
+    # источник данных - DEPARTURE_WAVE_AIRPORTS_BY_CITY (Москва: 3
+    # аэропорта, Питер: Пулково), см. DEPARTURE_ICAO в fetch_yandex_data.py.
     try:
-        wave = departure_wave_info('moscow')
+        wave = departure_wave_info(city)
     except Exception:
         wave = None
     if wave and wave['is_wave']:
@@ -8084,14 +8110,18 @@ async def compute_where_to_go(city, category, user_lat=None, user_lon=None):
         # ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя, уточнение
         # голосовым) - для Москвы такси/Ultima ТОП-3 реальных района (см.
         # score_district_candidates) дополняются ОТДЕЛЬНЫМ кандидатом
-        # "Центр" (Красная площадь/Охотный ряд - вне списка 30 спальных
-        # районов из файла пользователя, см. score_moscow_center_candidate),
-        # а не заменяются им полностью, как было в первой версии этой фичи
-        # в тот же день. Для остальных городов/категорий - прежняя
-        # эвристика по часу пика (score_city_candidate).
-        if city == 'moscow' and category in ('taxi', 'ultima'):
+        # "Центр" (Красная площадь/Охотный ряд - вне списка спальных районов
+        # из файла пользователя, см. score_city_center_candidate), а не
+        # заменяются им полностью, как было в первой версии этой фичи в тот
+        # же день. Для остальных городов/категорий - прежняя эвристика по
+        # часу пика (score_city_candidate).
+        # ОБОБЩЕНО 23.09.2026 (прямая просьба пользователя - "на оба
+        # города") - тот же путь теперь и для Питера (была своя матрица
+        # спроса загружена пользователем), не только для Москвы -
+        # см. DISTRICT_DEMAND_FILES/CITY_CENTER_COORDS.
+        if city in DISTRICT_DEMAND_FILES and category in ('taxi', 'ultima'):
             candidates.extend(await score_district_candidates(city, category, user_lat=user_lat, user_lon=user_lon, limit=3))
-            candidates.append(await score_moscow_center_candidate(city, category))
+            candidates.append(await score_city_center_candidate(city, category))
         else:
             candidates.append(await score_city_candidate(city, category=category))
     except Exception:
@@ -12004,13 +12034,21 @@ def map_webapp_html():
     }} catch (e) {{ /* тихо */ }}
   }}
 
+  // ОБОБЩЕНО 23.09.2026 (прямая просьба пользователя - "на оба города") -
+  // города, для которых сервер отдаёт реальные районные облака (см.
+  // DISTRICT_DEMAND_FILES в Python) - должно быть синхронизировано вручную,
+  // отдельного API чтобы спросить сервер "для каких городов есть районные
+  // данные" нет, но список короткий и меняется редко.
+  const DISTRICT_DEMAND_CITIES = ['moscow', 'spb'];
+
   async function loadDemandCloud() {{
     try {{
-      // Москва + такси/Ultima -> реальные районные облака (см. выше), а не
+      // Города с реальными районными облаками (DISTRICT_DEMAND_CITIES) +
+      // такси/Ultima -> реальные районные облака (см. выше), а не
       // процедурная схема ниже. Старые demandCloudMarker/demandSatelliteMarkers
       // на всякий случай тоже очищаются, чтобы не оставалось "хвостов" при
       // переключении категории/города внутри одной сессии карты.
-      if (city === 'moscow' && (myCategory === 'taxi' || myCategory === 'ultima')) {{
+      if (DISTRICT_DEMAND_CITIES.includes(city) && (myCategory === 'taxi' || myCategory === 'ultima')) {{
         if (demandCloudMarker) {{ map.removeLayer(demandCloudMarker); demandCloudMarker = null; }}
         demandSatelliteMarkers.forEach(m => map.removeLayer(m));
         demandSatelliteMarkers = [];
@@ -13977,34 +14015,59 @@ async def handle_map_demand_api(request):
 # районам") - раньше облако спроса для Москвы (см. handle_map_demand_api
 # выше) было ОДНО на весь город плюс процедурные случайные спутники, без
 # привязки к реальной географии. Пользователь прислал модельную, но куда
-# более детальную матрицу спроса: 30 крупных жилых районов внутри МКАД x
-# 7 дней недели x 8 получасовых интервалов x 5 тарифов (Эконом/Комфорт/
-# Комфорт+/Бизнес/Премиум), 0-100. Файл лежит рядом с main.py
-# (moscow_district_demand.json), тот же принцип, что config_loader.py у
-# аэропортов/вокзалов - грузим и кэшируем один раз при старте процесса.
-_MOSCOW_DISTRICT_DEMAND_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'moscow_district_demand.json')
-_moscow_district_demand_cache = None
+# более детальную матрицу спроса: районы города x 7 дней недели x 8
+# получасовых интервалов x 6 тарифов (Эконом/Комфорт/Комфорт+/Бизнес/
+# Премьер/Элит), 0-100. Файлы лежат рядом с main.py, тот же принцип, что
+# config_loader.py у аэропортов/вокзалов - грузим и кэшируем один раз на
+# город при первом обращении.
+# ОБОБЩЕНО 23.09.2026 (прямая просьба пользователя - "на оба города", после
+# загрузки такой же матрицы по Питеру) - было ЖЁСТКО Москва-only
+# (_MOSCOW_DISTRICT_DEMAND_PATH/get_moscow_district_demand), теперь словарь
+# файл-на-город плюс кэш-словарь по городу (get_district_demand(city)).
+# ВАЖНО: районная ПОГОДА (find_nearest_moscow_district/district_rain_now/
+# update_district_weather_data/check_district_rain_transitions ниже) НЕ
+# обобщена вместе с этим - осталась строго Москва-only, т.к. это отдельная
+# фоновая подсистема (свой файл-кэш снепшотов погоды по районам, ключ -
+# голое имя района) и у Москвы с Питером ЕСТЬ реальные коллизии имён района
+# (например "Красносельский" и "Московский" существуют в обоих городах,
+# разные координаты) - смешивать без композитного ключа (city, name)
+# небезопасно, это отдельная задача на будущее, если понадобится.
+DISTRICT_DEMAND_FILES = {
+    'moscow': 'moscow_district_demand.json',
+    'spb': 'spb_district_demand.json',
+}
+_district_demand_cache = {}  # city -> data (или False, если загрузка не удалась)
 
-def get_moscow_district_demand():
-    """Возвращает {'tariff_order': [...], 'districts': {name: {'lat','lon','weekday': {0..6: [[start,end,v0..v5],...]}}}}.
-    Если файла нет/битый - логируем и возвращаем None (см. handle_map_district_
-    demand_api) - фича просто не покажет районные облака, а не роняет карту
+def get_district_demand(city):
+    """Возвращает {'tariff_order': [...], 'districts': {name: {'lat','lon','weekday': {0..6: [[start,end,v0..v5],...]}}}}
+    для города из DISTRICT_DEMAND_FILES. Для остальных городов (нет файла) -
+    None сразу, без попытки чтения. Если файл есть, но не загрузился/битый -
+    логируем и возвращаем None (см. handle_map_district_demand_api) - фича
+    просто не покажет районные облака для этого города, а не роняет карту
     целиком, в отличие от config.json у аэропортов (тот - критичен для
     старта бота, этот - нет).
 
-    ОБНОВЛЕНО 23.09.2026: новая 129-районная матрица (было 30 районов),
-    6 реальных тарифных колонок (было 5, Элит раньше дублировал Премьер) -
-    см. MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_* ниже."""
-    global _moscow_district_demand_cache
-    if _moscow_district_demand_cache is not None:
-        return _moscow_district_demand_cache
+    ОБНОВЛЕНО 23.09.2026 (Москва): новая 129-районная матрица (было 30
+    районов), 6 реальных тарифных колонок (было 5, Элит раньше дублировал
+    Премьер) - см. MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_* ниже (несмотря на
+    имя с "MOSCOW", индексы колонок общие для всех городов - у Питера тот
+    же порядок 6 тарифов в файле)."""
+    filename = DISTRICT_DEMAND_FILES.get(city)
+    if not filename:
+        return None
+    cached = _district_demand_cache.get(city)
+    if cached is not None:
+        return cached or None
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)
     try:
-        with open(_MOSCOW_DISTRICT_DEMAND_PATH, 'r', encoding='utf-8') as f:
-            _moscow_district_demand_cache = json.load(f)
+        with open(path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        _district_demand_cache[city] = data
+        return data
     except Exception:
-        logger.exception(f"❌ Не удалось загрузить {_MOSCOW_DISTRICT_DEMAND_PATH} - районные облака спроса для Москвы недоступны")
-        _moscow_district_demand_cache = False  # False, не None - чтобы не пытаться перечитать на каждый запрос
-    return _moscow_district_demand_cache or None
+        logger.exception(f"❌ Не удалось загрузить {path} - районные облака спроса для {city} недоступны")
+        _district_demand_cache[city] = False  # False, не None - чтобы не пытаться перечитать на каждый запрос
+        return None
 
 # Индексы колонок tariff_order (['Эконом','Комфорт','Комфорт+','Бизнес','Премьер','Элит']).
 # ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя - "два независимых слоя
@@ -14072,11 +14135,12 @@ def _district_slot_value(slots, hour, indices):
     return None
 
 async def handle_map_district_demand_api(request):
-    """JSON API для районных облаков спроса Москвы (см. loadDistrictDemandClouds
-    в map_webapp_html) - только city=moscow и category in (taxi, ultima), для
-    остальных город/категорий отдаёт пустой список (карта в этом случае
-    использует прежнюю единую схему, см. handle_map_demand_api). Публичные
-    агрегированные данные, initData не проверяется (как и у /map/demand).
+    """JSON API для районных облаков спроса (см. loadDistrictDemandClouds
+    в map_webapp_html) - только city из DISTRICT_DEMAND_FILES и
+    category in (taxi, ultima), для остальных город/категорий отдаёт пустой
+    список (карта в этом случае использует прежнюю единую схему, см.
+    handle_map_demand_api). Публичные агрегированные данные, initData не
+    проверяется (как и у /map/demand).
 
     ИЗМЕНЕНО 22.09.2026 (см. MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_ECONOM/
     _COMFORT/_BUSINESS/_PREMIUM выше) - и для category='taxi', и для
@@ -14085,13 +14149,22 @@ async def handle_map_district_demand_api(request):
     'demand_business'/'demand_premier'/'demand_elite' для ultima), а не один
     максимум по всем тарифам категории - JS рисует их как независимые слои
     облаков каждый. ИЗМЕНЕНО 23.09.2026 - demand_elite теперь реальная
-    колонка новой 129-районной матрицы, не дубль demand_premier."""
+    колонка новой 129-районной матрицы, не дубль demand_premier.
+
+    ОБОБЩЕНО 23.09.2026 (прямая просьба пользователя - "на оба города") -
+    было city != 'moscow', теперь любой город из DISTRICT_DEMAND_FILES
+    (сейчас Москва и Питер). ВАЖНО: district_rain_now ниже по-прежнему
+    вызывается ТОЛЬКО для city=='moscow' - районная погода осталась
+    Москва-only подсистемой (см. комментарий у get_district_demand выше),
+    и у некоторых имён районов есть реальные коллизии между городами
+    (например "Красносельский" существует и в Москве, и в Питере) - для
+    Питера используем только общегородской rain_now, без районного уточнения."""
     city = request.query.get('city', '')
     category = request.query.get('category', '') or None
     result = {'districts': []}
-    if city != 'moscow' or category not in ('taxi', 'ultima'):
+    if city not in DISTRICT_DEMAND_FILES or category not in ('taxi', 'ultima'):
         return web.json_response(result)
-    table = get_moscow_district_demand()
+    table = get_district_demand(city)
     if not table:
         return web.json_response(result)
     try:
@@ -14120,7 +14193,10 @@ async def handle_map_district_demand_api(request):
             # ПРЯМО СЕЙЧАС, но базового значения на этот слот нет - облако
             # всё равно показываем на уровне MAP_DEMAND_RAIN_FLOOR_PERCENT,
             # а не пропускаем район вовсе.
-            district_raining = district_rain_now(name, fallback_rain_now=rain_now)
+            # city=='moscow' guard - см. докстринг выше (коллизии имён
+            # районов между городами делают district_rain_now небезопасным
+            # для не-Москвы, пока у него нет композитного ключа (city, name)).
+            district_raining = district_rain_now(name, fallback_rain_now=rain_now) if city == 'moscow' else rain_now
             if category == 'taxi':
                 # ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя - "эконом
                 # 60-70-80-90-100, комфорт 70-80-90-100, комфорт плюс
@@ -14161,7 +14237,7 @@ async def handle_map_district_demand_api(request):
                 item['demand_elite'] = elite
             result['districts'].append(item)
     except Exception:
-        logger.exception("❌ Ошибка при получении районного спроса для карты водителей (Москва)")
+        logger.exception(f"❌ Ошибка при получении районного спроса для карты водителей ({city})")
         result = {'districts': []}
     return web.json_response(result)
 
@@ -20653,7 +20729,7 @@ async def update_district_weather_data():
     получит районные облака, тут аналогично - районная погода не обновится,
     а get_cached_district_weather_forecast продолжит отдавать старый снепшот
     или None, ничего не падает)."""
-    table = get_moscow_district_demand()
+    table = get_district_demand('moscow')
     if not table:
         return
     districts = table.get('districts') or {}
@@ -20697,7 +20773,7 @@ def find_nearest_moscow_district(lat, lon):
     handle_weather_data_api ниже) и для district_rain_now (см. ниже).
     Возвращает (name, dist_km, district_lat, district_lon) или None, если
     таблица районов не загрузилась."""
-    table = get_moscow_district_demand()
+    table = get_district_demand('moscow')
     if not table:
         return None
     districts = table.get('districts') or {}
@@ -21214,7 +21290,7 @@ async def check_district_rain_transitions():
     (save_rain_state/load_all_rain_states принимают произвольную строку как
     "city" - используем синтетический ключ f"moscow::{район}", отдельная
     миграция БД не нужна)."""
-    table = get_moscow_district_demand()
+    table = get_district_demand('moscow')
     if not table or not table.get('districts'):
         return
     positions = get_all_map_positions_with_user_id()
