@@ -21287,6 +21287,15 @@ SUBSCRIPTION_PRICE_KOPECKS = SUBSCRIPTION_PRICE_RUB * 100
 # чека один на пользователя, не зависит от группы).
 SUBSCRIPTION_GROUP_TAXI_ULTIMA = 'taxi_ultima'
 SUBSCRIPTION_GROUP_COURIER_CARGO = 'courier_cargo'
+# ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя) - отдельная группа
+# подписки для доступа к "🏛 Личный кабинет юрлица" реферальной системы (см.
+# REFERRAL_LEGAL_ENTITY_SUBSCRIPTION_PRICE_RUB/referral_category_legal_start
+# ниже). В отличие от taxi_ultima/courier_cargo эта группа НЕ привязана к
+# категории водителя (get_subscription_group) - её sub_group передаётся
+# явно везде, где используется (см. is_legal_entity_referral_subscription_
+# active/send_legal_entity_referral_paywall), обычный get_user_subscription_
+# group её никогда не возвращает.
+SUBSCRIPTION_GROUP_LEGAL_ENTITY_REFERRAL = 'legal_entity_referral'
 
 def get_subscription_group(category):
     if category in ('courier', 'cargo'):
@@ -21297,9 +21306,17 @@ def get_user_subscription_group(user_id):
     state = user_state.get(user_id) or {}
     return get_subscription_group(state.get('category'))
 
+# ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "подписка для
+# реферальной системы юрлиц 1890 руб. в месяц"): та же механика оплаты
+# (Tinkoff), что и у обычной подписки, но отдельная цена/группа - см.
+# SUBSCRIPTION_GROUP_LEGAL_ENTITY_REFERRAL.
+REFERRAL_LEGAL_ENTITY_SUBSCRIPTION_PRICE_RUB = 1890
+
 def get_subscription_group_price_rub(sub_group):
     if sub_group == SUBSCRIPTION_GROUP_COURIER_CARGO:
         return SUBSCRIPTION_PRICE_RUB_COURIER_CARGO
+    if sub_group == SUBSCRIPTION_GROUP_LEGAL_ENTITY_REFERRAL:
+        return REFERRAL_LEGAL_ENTITY_SUBSCRIPTION_PRICE_RUB
     return SUBSCRIPTION_PRICE_RUB
 
 def get_subscription_price_rub(user_id):
@@ -21313,11 +21330,13 @@ SUBSCRIPTION_PERIOD_DAYS = 30
 SUBSCRIPTION_CHECK_INTERVAL_MINUTES = 60
 # ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "сделай кнопку Фантом
 # и за пароль... означает что подписка действует бесплатно на месяц"):
-# скрытая кнопка "👻 ФАНТОМ" на экранах подписки (см.
-# subscription_paywall_keyboard) - по правильному паролю выдаёт
-# SUBSCRIPTION_PERIOD_DAYS дней подписки бесплатно, без оплаты (см.
-# grant_free_month/phantom_password_flow ниже).
-PHANTOM_SUBSCRIPTION_PASSWORD = "210795"
+# скрытая кнопка "👻 ФАНТОМ" в меню реферальной программы (см.
+# referral_menu_keyboard) - по правильному паролю открывает меню с двумя
+# пунктами, "Админ реферальная система" и "Админ панель" (см.
+# phantom_password_flow ниже; бесплатные SUBSCRIPTION_PERIOD_DAYS дней
+# подписки теперь выдаются в admin_referral_password_flow, а не тут).
+# ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя - смена пароля Фантома).
+PHANTOM_SUBSCRIPTION_PASSWORD = "1234567890"
 # ДОБАВЛЕНО 23.09.2026 (по факту - Tinkoff Init отказывал: обязателен
 # фискальный чек по 54-ФЗ для этого терминала) - система налогообложения
 # для чека, уточнено с пользователем через AskUserQuestion ("УСН доходы").
@@ -21893,7 +21912,7 @@ def save_subscription_order(user_id, sub_group, order_id, amount_kopecks):
     conn.close()
 
 
-async def create_tinkoff_payment(user_id: int):
+async def create_tinkoff_payment(user_id: int, sub_group=None):
     """Создаёт заказ в Tinkoff Kassa (Init) и возвращает ссылку на оплату,
     либо None при ошибке (нет ключей, сеть недоступна, провайдер отказал,
     email для чека ещё не собран - см. ниже).
@@ -21909,8 +21928,15 @@ async def create_tinkoff_payment(user_id: int):
     ИЗМЕНЕНО 22.09.2026 (см. get_subscription_group выше) - платёж теперь
     ВСЕГДА за ТЕКУЩУЮ группу пользователя (sub_group), сумма и заказ
     привязаны именно к ней - оплата такси/Ultima не продлевает курьерскую
-    подписку и наоборот."""
-    sub_group = get_user_subscription_group(user_id)
+    подписку и наоборот.
+
+    ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя - подписка на
+    реферальную систему юрлиц): необязательный параметр sub_group -
+    если передан явно (SUBSCRIPTION_GROUP_LEGAL_ENTITY_REFERRAL и т.п.),
+    используется ОН вместо автоопределения по категории пользователя (эта
+    группа вообще не привязана к категории)."""
+    if sub_group is None:
+        sub_group = get_user_subscription_group(user_id)
     if not TINKOFF_TERMINAL_KEY or not TINKOFF_PASSWORD:
         logger.warning(f"⚠️ TINKOFF_TERMINAL_KEY/TINKOFF_PASSWORD не заданы - не могу создать ссылку на оплату для user_id={user_id}")
         return None
@@ -21920,11 +21946,16 @@ async def create_tinkoff_payment(user_id: int):
         return None
     order_id = f"sub_{user_id}_{int(time.time())}"
     price_kopecks = get_subscription_group_price_rub(sub_group) * 100
+    description = (
+        'Подписка на реферальную систему юрлиц Taxi Helper на 1 месяц'
+        if sub_group == SUBSCRIPTION_GROUP_LEGAL_ENTITY_REFERRAL
+        else 'Подписка Taxi Helper на 1 месяц'
+    )
     params = {
         'TerminalKey': TINKOFF_TERMINAL_KEY,
         'Amount': price_kopecks,
         'OrderId': order_id,
-        'Description': 'Подписка Taxi Helper на 1 месяц',
+        'Description': description,
         # Обязательный блок чека (54-ФЗ) - Tax='none' соответствует УСН
         # доходы (TINKOFF_RECEIPT_TAXATION), НДС не выделяется. Это
         # ВЛОЖЕННЫЙ объект - в подпись (tinkoff_generate_token) НЕ входит,
@@ -21934,7 +21965,7 @@ async def create_tinkoff_payment(user_id: int):
             'Taxation': TINKOFF_RECEIPT_TAXATION,
             'Items': [
                 {
-                    'Name': 'Подписка Taxi Helper на 1 месяц',
+                    'Name': description,
                     'Price': price_kopecks,
                     'Quantity': 1,
                     'Amount': price_kopecks,
@@ -22054,7 +22085,12 @@ async def subscription_email_flow(message: types.Message):
     if letters and all(c.isupper() for c in letters) and '@' not in text:
         context = state.pop('awaiting_subscription_email', None)
         await message.answer("Ввод email отменён - нажми на нужную кнопку ещё раз:")
-        if context == 'paywall' or not is_subscription_active(user_id):
+        # ДОБАВЛЕНО 23.09.2026 (подписка на реферальную систему юрлиц, см.
+        # send_legal_entity_referral_paywall) - у этого context свой экран
+        # возврата, отдельный от обычной подписки.
+        if context == 'legal_entity_paywall':
+            await send_legal_entity_referral_paywall(message)
+        elif context == 'paywall' or not is_subscription_active(user_id):
             await send_subscription_paywall(message)
         else:
             await message.answer(
@@ -22069,7 +22105,9 @@ async def subscription_email_flow(message: types.Message):
 
     context = state.pop('awaiting_subscription_email')
     set_receipt_email(user_id, text)
-    if context == 'paywall':
+    if context == 'legal_entity_paywall':
+        await send_legal_entity_referral_paywall(message)
+    elif context == 'paywall':
         await send_subscription_paywall(message)
     else:
         await show_subscription_status(message)
@@ -22131,12 +22169,111 @@ async def show_subscription_status(message: types.Message):
     await message.answer(text, reply_markup=subscription_paywall_keyboard(pay_url, user_id), parse_mode='Markdown')
 
 
+# ==================== ПОДПИСКА НА РЕФЕРАЛЬНУЮ СИСТЕМУ ЮРЛИЦ ====================
+# ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "для того чтобы
+# попасть в юрлицо нужно оплатить подписку... 1890 руб. в месяц"). В отличие
+# от обычной подписки (taxi_ultima/courier_cargo) у этой группы НЕТ
+# пробного периода - доступ есть, только пока paid_until в будущем (см.
+# is_legal_entity_referral_subscription_active ниже), поэтому НЕ используем
+# subscription_active_until/is_subscription_active (те трактуют "записи ещё
+# нет" как "доступ есть" - для триала это ок, для чистой платной подписки
+# без триала - нет).
+def is_legal_entity_referral_subscription_active(user_id):
+    sub = get_subscription(user_id, SUBSCRIPTION_GROUP_LEGAL_ENTITY_REFERRAL)
+    if not sub or not sub['paid_until']:
+        return False
+    return _sub_now() < _sub_parse(sub['paid_until'])
+
+
+def legal_entity_referral_paywall_text(active_until=None):
+    price_rub = REFERRAL_LEGAL_ENTITY_SUBSCRIPTION_PRICE_RUB
+    if active_until:
+        status_line = f"✅ Подписка оплачена до *{active_until.strftime('%d.%m.%Y')}*."
+    else:
+        status_line = "🔒 Подписка не оформлена."
+    return (
+        "🏢 *Юрлицо - подписка на реферальную систему*\n"
+        f"{WHERE_TO_GO_DIVIDER}\n\n"
+        f"{status_line}\n\n"
+        f"Доступ к «🏛 Личный кабинет юрлица» и схеме начислений «Юрлицо» (35/20/10%) - "
+        f"*{price_rub}₽/мес*.\n\n"
+        "После оплаты доступ откроется в течение пары минут - или сразу нажми «Я оплатил(а), проверить»."
+    )
+
+
+async def send_legal_entity_referral_paywall(event):
+    """event - types.Message или types.CallbackQuery. Аналог
+    send_subscription_paywall, но для отдельной группы подписки
+    SUBSCRIPTION_GROUP_LEGAL_ENTITY_REFERRAL (см. выше) - показывается по
+    кнопке "🏢 ЮРЛИЦО" в реферальном меню, пока эта подписка не оплачена
+    (см. referral_category_legal_start)."""
+    user_id = event.from_user.id
+    if not get_receipt_email(user_id):
+        await request_subscription_email(event, 'legal_entity_paywall')
+        return
+    ensure_subscription(user_id, SUBSCRIPTION_GROUP_LEGAL_ENTITY_REFERRAL)
+    pay_url = await create_tinkoff_payment(user_id, sub_group=SUBSCRIPTION_GROUP_LEGAL_ENTITY_REFERRAL)
+    sub = get_subscription(user_id, SUBSCRIPTION_GROUP_LEGAL_ENTITY_REFERRAL)
+    active_until = _sub_parse(sub['paid_until']) if sub and sub['paid_until'] else None
+    text = legal_entity_referral_paywall_text(active_until if active_until and _sub_now() < active_until else None)
+    if not pay_url:
+        text += "\n\n⚠️ Не получилось создать ссылку на оплату, попробуй ещё раз чуть позже."
+    # ВАЖНО: своя клавиатура (не subscription_paywall_keyboard) - у той
+    # кнопка "Проверить" всегда ведёт на callback_data="sub_pay_check"
+    # (обычная driver-подписка), здесь нужен отдельный
+    # "legal_entity_sub_pay_check" (см. legal_entity_sub_pay_check выше).
+    buttons = []
+    if pay_url:
+        buttons.append([InlineKeyboardButton(text=f"💳 ОПЛАТИТЬ {REFERRAL_LEGAL_ENTITY_SUBSCRIPTION_PRICE_RUB}₽", url=pay_url)])
+    buttons.append([InlineKeyboardButton(text="🔄 Я ОПЛАТИЛ(А), ПРОВЕРИТЬ", callback_data="legal_entity_sub_pay_check")])
+    markup = InlineKeyboardMarkup(inline_keyboard=buttons)
+    if isinstance(event, types.CallbackQuery):
+        try:
+            await event.answer()
+        except Exception:
+            pass
+        await event.message.answer(text, reply_markup=markup, parse_mode='Markdown')
+    else:
+        await event.answer(text, reply_markup=markup, parse_mode='Markdown')
+
+
+@router.callback_query(lambda c: c.data == "legal_entity_sub_pay_check")
+async def legal_entity_sub_pay_check(callback_query: types.CallbackQuery):
+    """Кнопка "Я оплатил(а), проверить" на экране оплаты юрлица-подписки
+    (см. send_legal_entity_referral_paywall выше) - тот же принцип, что и
+    subscription_check_payment, но для отдельной группы."""
+    user_id = callback_query.from_user.id
+    if is_legal_entity_referral_subscription_active(user_id):
+        try:
+            await callback_query.answer("Оплата подтверждена ✅", show_alert=True)
+        except Exception:
+            pass
+        await referral_category_legal_start(callback_query)
+    else:
+        try:
+            await callback_query.answer("Пока не вижу оплату. Если только что оплатил(а) - подожди минуту и попробуй снова.", show_alert=True)
+        except Exception:
+            pass
+
+
+@router.callback_query(lambda c: c.data == "legal_entity_sub_status")
+async def legal_entity_sub_status(callback_query: types.CallbackQuery):
+    """Кнопка "💳 ПОДПИСКА ЮРЛИЦА" в реферальном меню (см.
+    referral_menu_keyboard) - показывает статус/продление той же подписки,
+    что и паывол при входе (send_legal_entity_referral_paywall)."""
+    await send_legal_entity_referral_paywall(callback_query)
+
+
 @router.callback_query(lambda c: c.data == "phantom_start")
 async def phantom_start(callback_query: types.CallbackQuery):
-    """См. PHANTOM_SUBSCRIPTION_PASSWORD/grant_free_month выше - просит
-    пароль текстом (тот же паттерн ожидания текста, что и у
-    referral_category_legal_start/referral_legal_password_flow). Работает
-    даже на экране-блокировке - см. исключение в SubscriptionMiddleware."""
+    """См. PHANTOM_SUBSCRIPTION_PASSWORD выше - просит пароль текстом (тот
+    же паттерн ожидания текста, что и у referral_category_legal_start/
+    referral_legal_password_flow). Работает даже на экране-блокировке - см.
+    исключение в SubscriptionMiddleware.
+
+    ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя - переработка "Фантома"):
+    правильный пароль Фантома больше НЕ выдаёт подписку напрямую - открывает
+    меню с двумя пунктами (см. phantom_password_flow ниже)."""
     user_id = callback_query.from_user.id
     try:
         await callback_query.answer()
@@ -22151,45 +22288,134 @@ async def phantom_start(callback_query: types.CallbackQuery):
 async def phantom_password_flow(message: types.Message):
     """Ловит ЛЮБОЙ текст, пока ждём пароль "Фантома" - должен стоять РАНЬШЕ
     остальных текстовых хендлеров (тот же приём, что и
-    referral_legal_password_flow/referral_withdraw_flow)."""
+    referral_legal_password_flow/referral_withdraw_flow).
+
+    ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя): по верному паролю
+    Фантома теперь открывается МЕНЮ с двумя пунктами - "Админ реферальная
+    система" (свой пароль REFERRAL_ADMIN_PASSWORD, см.
+    admin_referral_password_flow - именно ТАМ теперь выдаётся бесплатный
+    месяц подписки, а не сразу тут) и "Админ панель" (свой пароль
+    ADMIN_PANEL_PASSWORD, см. admin_panel_password_confirm_flow). Прежняя
+    "двойная верификация" админ-панели (ввод пароля дважды) больше не
+    нужна - кнопка сама по себе уже отдельный шаг."""
     user_id = message.from_user.id
     state = user_state[user_id]
     text = (message.text or '').strip()
-
-    if text == PHANTOM_SUBSCRIPTION_PASSWORD:
-        state.pop('awaiting_phantom_password', None)
-        new_paid_until = grant_free_month(user_id)
-        await message.answer(
-            f"✅ Подписка активирована бесплатно на {SUBSCRIPTION_PERIOD_DAYS} дней, "
-            f"до *{new_paid_until.strftime('%d.%m.%Y')}*.",
-            parse_mode='Markdown',
-            reply_markup=services_keyboard(state.get('category'), state.get('city'), user_id)
-        )
-        return
-
-    # ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "занеси кнопку
-    # админ в фантом будет с двойной верефикацией") - доступ в админ-панель
-    # спрятан внутри той же кнопки "👻 ФАНТОМ", отдельной кнопки для него
-    # больше нет (см. referral_menu_keyboard). Если введённый "пароль
-    # Фантома" на самом деле ADMIN_PANEL_PASSWORD - НЕ показываем админку
-    # сразу, а просим ввести его ЕЩЁ РАЗ (двойная верификация, см.
-    # admin_panel_password_confirm_flow ниже) - случайно подсмотренный или
-    # угаданный пароль с первого раза панель не откроет.
-    if text == ADMIN_PANEL_PASSWORD:
-        state.pop('awaiting_phantom_password', None)
-        state['awaiting_admin_panel_password_confirm'] = True
-        await message.answer("🔐 Подтверди пароль ещё раз:")
-        return
-
     state.pop('awaiting_phantom_password', None)
-    await message.answer("❌ Неверный пароль.")
+
+    if text != PHANTOM_SUBSCRIPTION_PASSWORD:
+        await message.answer("❌ Неверный пароль.")
+        return
+
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🤝 АДМИН РЕФЕРАЛЬНАЯ СИСТЕМА", callback_data="admin_referral_start")],
+        [InlineKeyboardButton(text="🔐 АДМИН ПАНЕЛЬ", callback_data="admin_panel_start")],
+    ])
+    await message.answer("👻 Фантом:", reply_markup=markup)
+
+
+@router.callback_query(lambda c: c.data == "admin_panel_start")
+async def admin_panel_start(callback_query: types.CallbackQuery):
+    """Кнопка "🔐 АДМИН ПАНЕЛЬ" в меню Фантома (см. phantom_password_flow
+    выше) - просит пароль ADMIN_PANEL_PASSWORD (см.
+    admin_panel_password_confirm_flow ниже, хендлер переиспользован как
+    есть, только теперь это единственный шаг, а не второй из двух)."""
+    user_id = callback_query.from_user.id
+    try:
+        await callback_query.answer()
+    except Exception:
+        pass
+    state = user_state.setdefault(user_id, {})
+    state['awaiting_admin_panel_password_confirm'] = True
+    await callback_query.message.answer("🔐 Введи пароль:")
+
+
+@router.callback_query(lambda c: c.data == "admin_referral_start")
+async def admin_referral_start(callback_query: types.CallbackQuery):
+    """Кнопка "🤝 АДМИН РЕФЕРАЛЬНАЯ СИСТЕМА" в меню Фантома (см.
+    phantom_password_flow выше) - просит пароль REFERRAL_ADMIN_PASSWORD (см.
+    admin_referral_password_flow ниже)."""
+    user_id = callback_query.from_user.id
+    try:
+        await callback_query.answer()
+    except Exception:
+        pass
+    state = user_state.setdefault(user_id, {})
+    state['awaiting_admin_referral_password'] = True
+    await callback_query.message.answer("🔑 Введи пароль:")
+
+
+@router.message(lambda message: user_state.get(message.from_user.id, {}).get('awaiting_admin_referral_password'))
+async def admin_referral_password_flow(message: types.Message):
+    """Пароль "Админ реферальной системы" (см. admin_referral_start выше) -
+    ловит ЛЮБОЙ текст, должен стоять РАНЬШЕ остальных текстовых хендлеров
+    (тот же приём, что и у phantom_password_flow). ДОБАВЛЕНО 23.09.2026
+    (прямая просьба пользователя). При верном пароле: (1) выдаёт бесплатный
+    месяц подписки (перенесено сюда с обычного пароля Фантома), (2)
+    переключает схему начислений на 'admin' (40/20/10%, см.
+    REFERRAL_RATES_PERCENT), (3) заводит/находит "компанию"-кабинет с этим
+    же паролем в legal_entities и закрепляет владельцем - тот же механизм,
+    что и у обычных юр.лиц (см. find_legal_entity_by_password/
+    claim_legal_entity_ownership), поэтому "🏛 Личный кабинет юрлица" в
+    referral_menu_keyboard появляется автоматически и БЕЗ платной подписки
+    на юрлица (see REFERRAL_LEGAL_ENTITY_SUBSCRIPTION_PRICE_RUB) - это
+    админский бэкдор."""
+    user_id = message.from_user.id
+    state = user_state[user_id]
+    text = (message.text or '').strip()
+    state.pop('awaiting_admin_referral_password', None)
+
+    if text != REFERRAL_ADMIN_PASSWORD:
+        await message.answer("❌ Неверный пароль.")
+        return
+
+    new_paid_until = grant_free_month(user_id)
+    set_referrer_type(user_id, 'admin')
+    entity = find_legal_entity_by_password(REFERRAL_ADMIN_PASSWORD)
+    if not entity:
+        add_legal_entity("Админ реферальная система", REFERRAL_ADMIN_PASSWORD)
+        entity = find_legal_entity_by_password(REFERRAL_ADMIN_PASSWORD)
+    if entity:
+        claim_legal_entity_ownership(entity['id'], user_id)
+
+    await message.answer(
+        f"✅ Схема начислений: «Админ» (40/20/10%). Подписка активирована бесплатно на "
+        f"{SUBSCRIPTION_PERIOD_DAYS} дней, до *{new_paid_until.strftime('%d.%m.%Y')}*.",
+        parse_mode='Markdown',
+        reply_markup=services_keyboard(state.get('category'), state.get('city'), user_id)
+    )
+    me = await bot.get_me()
+    link = get_referral_link(me.username, user_id)
+    stats = get_referral_stats(user_id)
+    my_rates = REFERRAL_RATES_PERCENT['admin']
+    admin_text = (
+        "🤝 *Реферальная программа - Админ*\n"
+        f"{WHERE_TO_GO_DIVIDER}\n\n"
+        f"🔗 Твоя ссылка:\n`{link}`\n\n"
+        f"👥 Рефералов 1-го уровня: {stats['level1_count']}\n"
+        f"👥 Рефералов 2-го уровня: {stats['level2_count']}\n"
+        f"👥 Рефералов 3-го уровня: {stats['level3_count']}\n"
+        f"{WHERE_TO_GO_DIVIDER}\n\n"
+        f"💰 Баланс: {stats['balance'] / 100:.0f}₽\n"
+        f"📈 Всего заработано: {stats['total_earned'] / 100:.0f}₽\n"
+        f"{WHERE_TO_GO_DIVIDER}\n\n"
+        f"_Ставка:_ {my_rates[0]}% / {my_rates[1]}% / {my_rates[2]}% по трём уровням."
+    )
+    await message.answer(
+        admin_text,
+        reply_markup=referral_menu_keyboard(link, get_referrer_type(user_id), user_id),
+        parse_mode='Markdown'
+    )
 
 
 @router.message(lambda message: user_state.get(message.from_user.id, {}).get('awaiting_admin_panel_password_confirm'))
 async def admin_panel_password_confirm_flow(message: types.Message):
-    """Второй шаг двойной верификации админ-панели (см. phantom_password_flow
-    выше) - должен стоять РАНЬШЕ остальных текстовых хендлеров, тем же
-    приёмом. Ловит ЛЮБОЙ текст, пока ждём подтверждение пароля."""
+    """Пароль "🔐 АДМИН ПАНЕЛЬ" в меню Фантома (см. admin_panel_start выше) -
+    должен стоять РАНЬШЕ остальных текстовых хендлеров, тем же приёмом.
+    Ловит ЛЮБОЙ текст, пока ждём пароль. ИЗМЕНЕНО 23.09.2026 - раньше это
+    был второй шаг "двойной верификации" (пароль вводился дважды), теперь
+    единственный шаг: отдельная кнопка в меню Фантома сама по себе служит
+    первым фактором."""
     user_id = message.from_user.id
     state = user_state[user_id]
     text = (message.text or '').strip()
@@ -22227,6 +22453,19 @@ class SubscriptionMiddleware(BaseMiddleware):
         if isinstance(event, types.CallbackQuery) and event.data == 'phantom_start':
             return await handler(event, data)
         if isinstance(event, types.Message) and user_state.get(user_id, {}).get('awaiting_phantom_password'):
+            return await handler(event, data)
+        # ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - переработка
+        # "Фантома" в меню с двумя пунктами) - те же исключения нужны и для
+        # ДАЛЬНЕЙШИХ шагов внутри Фантома (кнопки "Админ реферальная
+        # система"/"Админ панель" и ввод их паролей), иначе после верного
+        # пароля Фантома (excepted выше) следующий тап уже попадал бы под
+        # блокировку - Фантом переставал бы работать как обход блокировки
+        # ровно в том сценарии, для которого он и сделан.
+        if isinstance(event, types.CallbackQuery) and event.data in ('admin_referral_start', 'admin_panel_start'):
+            return await handler(event, data)
+        if isinstance(event, types.Message) and user_state.get(user_id, {}).get('awaiting_admin_referral_password'):
+            return await handler(event, data)
+        if isinstance(event, types.Message) and user_state.get(user_id, {}).get('awaiting_admin_panel_password_confirm'):
             return await handler(event, data)
         # Ввод email для чека (см. request_subscription_email/
         # subscription_email_flow выше) тоже должен проходить даже на
@@ -22660,24 +22899,33 @@ REFERRAL_PROGRAM_LIVE = True
 # ниже), чтобы обычные пользователи не переключили себе более выгодную
 # схему без ведома админа.
 REFERRAL_LEGAL_ENTITY_PASSWORD = "11223344556677889900"  # ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя - смена пароля юр.лица)
-# ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя): теперь ДВЕ схемы
-# начислений на выбор, по 3 уровня в каждой (было 2 уровня, единая схема
-# 40%/50%-от-1-уровня). Какую схему применять к КОНКРЕТНОМУ человеку -
-# решает его собственный referrer_type в таблице referrals (по умолчанию
-# 'individual', на 'legal_entity' переключает админ - см.
-# admin_set_referrer_type/команду /set_legal_referrer):
-#   'legal_entity' - юр.лицо приглашает водителей/курьеров напрямую и
-#   через них дальше по цепочке: 40% с платежа 1-го уровня, 30% со 2-го,
-#   20% с 3-го (ИЗМЕНЕНО 22.09.2026, прямая просьба пользователя - было
-#   40%/20%/10%).
-#   'individual' (обычные пользователи, дефолт) - 30%/15%/5% по тем же
-#   трём уровням - без изменений.
-# В обоих случаях это ПРЯМОЙ процент от суммы платежа плательщика на каждом
+# ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя) - пароль для схемы
+# 'admin' (см. REFERRAL_RATES_PERCENT ниже), вводится в меню "Фантома" (см.
+# admin_referral_start/admin_referral_password_flow).
+REFERRAL_ADMIN_PASSWORD = "1122334455667788"
+# ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя): теперь ТРИ схемы
+# начислений, по 3 уровня в каждой. Какую схему применять к КОНКРЕТНОМУ
+# человеку - решает его собственный referrer_type в таблице referrals (по
+# умолчанию 'individual'):
+#   'individual' (обычные пользователи, дефолт) - 30%/15%/5% по трём
+#   уровням - без изменений.
+#   'legal_entity' - юр.лицо, переключается паролем компании (см.
+#   REFERRAL_LEGAL_ENTITY_PASSWORD/referral_legal_password_flow), теперь
+#   доступ к "🏛 Личный кабинет юрлица" дополнительно требует платной
+#   подписки (см. REFERRAL_LEGAL_ENTITY_SUBSCRIPTION_PRICE_RUB) - 35% с
+#   платежа 1-го уровня, 20% со 2-го, 10% с 3-го (ИЗМЕНЕНО 23.09.2026,
+#   прямая просьба пользователя - было 40%/30%/20%).
+#   'admin' (ДОБАВЛЕНО 23.09.2026) - доступна только через меню "Фантома"
+#   (см. REFERRAL_ADMIN_PASSWORD/admin_referral_password_flow), даёт
+#   бесплатный месяц подписки и "Личный кабинет" без оплаты (админский
+#   бэкдор) - 40% с платежа 1-го уровня, 20% со 2-го, 10% с 3-го.
+# Во всех случаях это ПРЯМОЙ процент от суммы платежа плательщика на каждом
 # уровне (не "доля от начисления уровня выше", как было раньше) - см.
 # distribute_referral_earnings ниже.
 REFERRAL_RATES_PERCENT = {
     'individual': [30, 15, 5],
-    'legal_entity': [40, 30, 20],
+    'legal_entity': [35, 20, 10],
+    'admin': [40, 20, 10],
 }
 REFERRAL_DEFAULT_TYPE = 'individual'
 REFERRAL_WITHDRAWAL_FEE_PERCENT = 3
@@ -23600,6 +23848,14 @@ def referral_menu_keyboard(referral_link, current_type=REFERRAL_DEFAULT_TYPE, us
         if owned_entity:
             cabinet_url = f"{PUBLIC_URL}{LEGAL_CABINET_WEBAPP_PATH}"
             rows.append([InlineKeyboardButton(text="🏛 ЛИЧНЫЙ КАБИНЕТ ЮРЛИЦА", web_app=WebAppInfo(url=cabinet_url))])
+            # ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "там
+            # появляется кнопка внутри личный кабинет и подписка") - кнопка
+            # статуса/продления платной подписки юрлица (см.
+            # send_legal_entity_referral_paywall). У схемы 'admin' (Фантом)
+            # своя бесплатная подписка (SUBSCRIPTION_GROUP_TAXI_ULTIMA/
+            # COURIER_CARGO через grant_free_month) - эта кнопка ей не нужна.
+            if current_type == 'legal_entity':
+                rows.append([InlineKeyboardButton(text="💳 ПОДПИСКА ЮРЛИЦА", callback_data="legal_entity_sub_status")])
     rows += [
         [InlineKeyboardButton(text="🔗 МОЯ ССЫЛКА", callback_data="referral_link_show")],
         # "📱 QR-КОД ССЫЛКИ" - по прямой просьбе пользователя (22.09.2026,
@@ -23763,8 +24019,27 @@ async def referral_category_legal_start(callback_query: types.CallbackQuery):
     возможность ввести пароль компании и получить доступ к кабинету
     (get_legal_entity_owned_by оставался пустым). Теперь "уже выбрана"
     показываем ТОЛЬКО тем, кто уже владеет каким-то кабинетом - остальным,
-    даже если схема уже 'legal_entity', снова предлагаем ввести пароль."""
+    даже если схема уже 'legal_entity', снова предлагаем ввести пароль.
+
+    ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "для того чтобы
+    попасть в юрлицо нужно оплатить подписку... только после того когда
+    подписка будет оплачено он проваливается в этой юрлицо"): вход в
+    "🏢 ЮРЛИЦО" (и ввод пароля компании, и повторный вход уже владеющего
+    кабинетом) теперь ВСЕГДА сначала проверяет отдельную платную подписку
+    SUBSCRIPTION_GROUP_LEGAL_ENTITY_REFERRAL (1890₽/мес, БЕЗ триала - см.
+    is_legal_entity_referral_subscription_active) - если она не активна,
+    вместо пароля/кабинета показывается экран оплаты
+    (send_legal_entity_referral_paywall). Схема 'admin' (Фантом) эту
+    подписку не проверяет - у нее свой отдельный вход, см.
+    admin_referral_password_flow."""
     user_id = callback_query.from_user.id
+    if not is_legal_entity_referral_subscription_active(user_id):
+        try:
+            await callback_query.answer()
+        except Exception:
+            pass
+        await send_legal_entity_referral_paywall(callback_query)
+        return
     if get_referrer_type(user_id) == 'legal_entity' and get_legal_entity_owned_by(user_id):
         try:
             await callback_query.answer("Уже выбрана схема юр.лица")
