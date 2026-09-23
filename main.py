@@ -10342,16 +10342,33 @@ def map_webapp_html():
   // вынести хотя бы на нашу карту?"), ИЗМЕНЕНО 23.09.2026 (уточнение
   // пользователя - "включи тумблер пробки" - изначально пробки включались
   // всегда сразу при открытии карты, теперь это отдельная кнопка-тумблер
-  // "🚦 Пробки" в общем ряду .map-toggles-row, по умолчанию выключена)
-  // - слой пробок Яндекс.Карт (тот же API-ключ, что уже используется для
-  // подложки, отдельного ключа не нужно). yandexLayer сохраняем в
-  // переменную, чтобы дёргать её trafficControl.showTraffic()/hideTraffic()
-  // (штатный метод ymaps.control.TrafficControl) из обработчика клика на
-  // кнопке ниже. У OSM-фолбэка живых пробок нет (нужен был бы отдельный
-  // платный провайдер) - кнопку в этом случае прячем.
+  // "🚦 Пробки" в общем ряду .map-toggles-row, по умолчанию выключена).
+  // ИСПРАВЛЕНО 23.09.2026 (жалоба пользователя - "нажимаю пробки ничего не
+  // происходит"): конструкторская опция trafficControl у L.Yandex рисует
+  // СВОЙ штатный виджет-переключатель пробок от Яндекса, но не даёт
+  // предсказуемого способа дёргать его программно нашей собственной
+  // кнопкой (yandexLayer.trafficControl как публичное свойство слоя не
+  // существует - отсюда клик ничего не делал). Правильный по документации
+  // leaflet-plugins способ - дождаться события 'load' на самом слое (оно
+  // стреляет, когда Yandex JS API реально готов), достать из
+  // yandexLayer._yandex "сырой" нативный объект карты ymaps и включать/
+  // выключать пробки через официальный ymaps.traffic.provider.Actual
+  // (.setMap(nativeMap) показывает, .setMap(null) убирает) - тот же
+  // паттерн, что в официальном примере deferred.html этого плагина.
+  // У OSM-фолбэка живых пробок нет (нужен был бы отдельный платный
+  // провайдер) - кнопку в этом случае прячем.
   let yandexLayer = null;
+  let yandexTrafficProvider = null;
   if (YANDEX_MAPS_API_KEY_SET && typeof L.Yandex === 'function') {{
-    yandexLayer = new L.Yandex('map', {{ trafficControl: {{ state: {{ trafficShown: false }} }} }}).addTo(map);
+    yandexLayer = new L.Yandex('map');
+    yandexLayer.on('load', function() {{
+      try {{
+        if (window.ymaps && ymaps.traffic && ymaps.traffic.provider && yandexLayer._yandex) {{
+          yandexTrafficProvider = new ymaps.traffic.provider.Actual({{}}, {{ infoLayerShown: false }});
+        }}
+      }} catch (e) {{ /* тихо */ }}
+    }});
+    yandexLayer.addTo(map);
   }} else {{
     L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
       attribution: '© OpenStreetMap',
@@ -11737,21 +11754,26 @@ def map_webapp_html():
     if (!layerToggleRow.classList.contains('collapsed')) tariffPanel.classList.add('collapsed');
   }});
   // ДОБАВЛЕНО 23.09.2026 (уточнение пользователя - "включи тумблер пробки
-  // не пробки [всегда]") - кнопка "🚦 Пробки" в общем ряду переключает
-  // живой слой пробок Яндекс.Карт через штатные методы ymaps
-  // trafficControl.showTraffic()/hideTraffic() (см. инициализацию
-  // yandexLayer выше). Выключено по умолчанию при открытии карты.
+  // не пробки [всегда]"), ИСПРАВЛЕНО 23.09.2026 (жалоба пользователя -
+  // "нажимаю пробки ничего не происходит" - см. подробный комментарий у
+  // инициализации yandexLayer/yandexTrafficProvider выше про причину) -
+  // кнопка "🚦 Пробки" переключает живой слой пробок через
+  // yandexTrafficProvider.setMap(nativeMap)/.setMap(null). Если провайдер
+  // ещё не создан (страница ещё не успела получить событие 'load' от
+  // Yandex JS API - обычно доли секунды после загрузки подложки), клик
+  // просто игнорируется вместо ошибки. Выключено по умолчанию при
+  // открытии карты.
   const trafficToggleBtn = document.getElementById('trafficToggleBtn');
   let trafficShownState = false;
   if (trafficToggleBtn) {{
     trafficToggleBtn.addEventListener('click', () => {{
-      if (!yandexLayer || !yandexLayer.trafficControl) return;
+      if (!yandexTrafficProvider || !yandexLayer || !yandexLayer._yandex) return;
       trafficShownState = !trafficShownState;
       try {{
         if (trafficShownState) {{
-          yandexLayer.trafficControl.showTraffic();
+          yandexTrafficProvider.setMap(yandexLayer._yandex);
         }} else {{
-          yandexLayer.trafficControl.hideTraffic();
+          yandexTrafficProvider.setMap(null);
         }}
       }} catch (e) {{ /* тихо */ }}
       trafficToggleBtn.classList.toggle('active', trafficShownState);
