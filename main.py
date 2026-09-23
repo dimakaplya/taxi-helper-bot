@@ -10033,6 +10033,9 @@ MAP_CHROME_CSS = """
      document flow внутри своего wrap - здесь не менялось). */
   .map-toggles-row { position: absolute; top: 10px; left: 56px; z-index: 1000; display: flex; flex-direction: row; align-items: flex-start; gap: 8px; }
   .layer-toggle-btn { display: inline-block; background: #1c1c1c; color: #fff; border: 1px solid rgba(255,196,0,.4); border-radius: 8px; padding: 6px 10px; font-family: -apple-system, sans-serif; font-size: 12px; font-weight: 600; box-shadow: 0 1px 4px rgba(0,0,0,.35); cursor: pointer; user-select: none; white-space: nowrap; }
+  /* ДОБАВЛЕНО 23.09.2026 (уточнение пользователя - "включи тумблер пробки") -
+     подсветка кнопки "🚦 Пробки", когда слой пробок включён. */
+  .layer-toggle-btn.active { background: #ffc400; color: #1c1c1c; border-color: #ffc400; }
   .layer-toggle { display: flex; flex-direction: row; flex-wrap: wrap; gap: 4px 10px; margin-top: 6px; background: #1c1c1c; color: #fff; border: 1px solid rgba(255,196,0,.4); border-radius: 8px; padding: 6px 10px; font-family: -apple-system, sans-serif; font-size: 12px; box-shadow: 0 1px 4px rgba(0,0,0,.35); }
   .layer-toggle.collapsed { display: none; }
   .layer-toggle label { display: flex; align-items: center; gap: 5px; cursor: pointer; user-select: none; white-space: nowrap; }
@@ -10210,6 +10213,7 @@ def map_webapp_html():
       <label><input type="checkbox" id="parkingLayerCheckbox"> 🅿️ Бесплатные парковки</label>
     </div>
   </div>
+  <div class="layer-toggle-btn" id="trafficToggleBtn">🚦 Пробки</div>
 </div>
 <div class="legend" id="legend"></div>
 <script>
@@ -10334,13 +10338,27 @@ def map_webapp_html():
   // yandex_maps_scripts в handle_map_webapp) - если ключа нет, тихо
   // остаёмся на OpenStreetMap (tile.openstreetmap.org), как раньше.
   const YANDEX_MAPS_API_KEY_SET = {('true' if YANDEX_MAPS_API_KEY else 'false')};
+  // ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "пробки можешь
+  // вынести хотя бы на нашу карту?"), ИЗМЕНЕНО 23.09.2026 (уточнение
+  // пользователя - "включи тумблер пробки" - изначально пробки включались
+  // всегда сразу при открытии карты, теперь это отдельная кнопка-тумблер
+  // "🚦 Пробки" в общем ряду .map-toggles-row, по умолчанию выключена)
+  // - слой пробок Яндекс.Карт (тот же API-ключ, что уже используется для
+  // подложки, отдельного ключа не нужно). yandexLayer сохраняем в
+  // переменную, чтобы дёргать её trafficControl.showTraffic()/hideTraffic()
+  // (штатный метод ymaps.control.TrafficControl) из обработчика клика на
+  // кнопке ниже. У OSM-фолбэка живых пробок нет (нужен был бы отдельный
+  // платный провайдер) - кнопку в этом случае прячем.
+  let yandexLayer = null;
   if (YANDEX_MAPS_API_KEY_SET && typeof L.Yandex === 'function') {{
-    new L.Yandex().addTo(map);
+    yandexLayer = new L.Yandex('map', {{ trafficControl: {{ state: {{ trafficShown: false }} }} }}).addTo(map);
   }} else {{
     L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
       attribution: '© OpenStreetMap',
       maxZoom: 19,
     }}).addTo(map);
+    const trafficBtnHide = document.getElementById('trafficToggleBtn');
+    if (trafficBtnHide) trafficBtnHide.style.display = 'none';
   }}
   let markers = [];
   let airportMarkers = [];
@@ -11401,10 +11419,13 @@ def map_webapp_html():
     }} catch (e) {{ /* тихо */ }}
   }}
   // ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "вокруг такого
-  // события рисуй красную квадратную зону радиусом 500 м") - только вокруг
-  // ПЕРЕКРЫТИЙ (is_closure), не обычных аварий - квадрат 500х500м в каждую
-  // сторону от точки (L.rectangle по расчитанным из метров градусам).
-  const ROAD_CLOSURE_ZONE_RADIUS_METERS = 500;
+  // события рисуй красную квадратную зону радиусом 500 м"), УМЕНЬШЕНО
+  // 23.09.2026 (прямая просьба пользователя - "уменьши зону до 50 метров",
+  // судя по скриншоту зона в 500м выглядела слишком большой относительно
+  // квартала) - только вокруг ПЕРЕКРЫТИЙ (is_closure), не обычных аварий -
+  // квадрат 50х50м в каждую сторону от точки (L.rectangle по расчитанным
+  // из метров градусам).
+  const ROAD_CLOSURE_ZONE_RADIUS_METERS = 50;
   function closureZoneBounds(lat, lon) {{
     const metersPerDegLat = 111320;
     const dLat = ROAD_CLOSURE_ZONE_RADIUS_METERS / metersPerDegLat;
@@ -11696,6 +11717,27 @@ def map_webapp_html():
     // взаимоисключающе.
     if (!layerToggleRow.classList.contains('collapsed')) tariffPanel.classList.add('collapsed');
   }});
+  // ДОБАВЛЕНО 23.09.2026 (уточнение пользователя - "включи тумблер пробки
+  // не пробки [всегда]") - кнопка "🚦 Пробки" в общем ряду переключает
+  // живой слой пробок Яндекс.Карт через штатные методы ymaps
+  // trafficControl.showTraffic()/hideTraffic() (см. инициализацию
+  // yandexLayer выше). Выключено по умолчанию при открытии карты.
+  const trafficToggleBtn = document.getElementById('trafficToggleBtn');
+  let trafficShownState = false;
+  if (trafficToggleBtn) {{
+    trafficToggleBtn.addEventListener('click', () => {{
+      if (!yandexLayer || !yandexLayer.trafficControl) return;
+      trafficShownState = !trafficShownState;
+      try {{
+        if (trafficShownState) {{
+          yandexLayer.trafficControl.showTraffic();
+        }} else {{
+          yandexLayer.trafficControl.hideTraffic();
+        }}
+      }} catch (e) {{ /* тихо */ }}
+      trafficToggleBtn.classList.toggle('active', trafficShownState);
+    }});
+  }}
   const fuelCheckbox = document.getElementById('fuelLayerCheckbox');
   const chargingCheckbox = document.getElementById('chargingLayerCheckbox');
   const parkingCheckbox = document.getElementById('parkingLayerCheckbox');
