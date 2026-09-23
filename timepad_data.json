@@ -1,0 +1,666 @@
+{
+  "generated_at": "2026-09-23 21:13:58",
+  "cities": {
+    "moscow": [
+      {
+        "title": "РИСКИ И ВОЗМОЖНОСТИ ВЭД-2026: налоги, расчеты, логистика, таможня, валютный и налоговый контроль",
+        "start": 1790230500,
+        "end": 1790247600,
+        "place_title": "",
+        "place_address": "г. Москва, ул. Ильинка, д.6/1, стр.1",
+        "place_lat": null,
+        "place_lon": null,
+        "tickets_total": 202,
+        "categories": [
+          "Бизнес"
+        ],
+        "url": "https://pravovest-au-org.timepad.ru/event/4147206/",
+        "source": "timepad"
+      },
+      {
+        "title": "&quot;КВН.Дети&quot; Съемка",
+        "start": 1790258400,
+        "end": 1790266500,
+        "place_title": "",
+        "place_address": "Планета КВН, Шереметьевская улица, д2",
+        "place_lat": null,
+        "place_lon": null,
+        "tickets_total": 545,
+        "categories": [
+          "Концерты"
+        ],
+        "url": "https://detskiy-kvn.timepad.ru/event/4198786/",
+        "source": "timepad"
+      },
+      {
+        "title": "НАШИ ГОДЫ, КАК ПТИЦЫ… Концерт к 70-летию заслуженного артиста России Николая Васильева",
+        "start": 1790265600,
+        "end": 1790276400,
+        "place_title": "",
+        "place_address": "ул. Профсоюзная, д. 61",
+        "place_lat": 55.6654194,
+        "place_lon": 37.549641,
+        "tickets_total": 1243,
+        "categories": [
+          "Концерты"
+        ],
+        "url": "https://tski-meridian.timepad.ru/event/4134675/",
+        "source": "timepad"
+      },
+      {
+        "title": "Паблик-ток «Амазонки русского авангарда»",
+        "start": 1790267400,
+        "end": 1790272800,
+        "place_title": "",
+        "place_address": "4-й Сыромятнический переулок, 1/8, подъезд Е6 - Винтажный зал",
+        "place_lat": null,
+        "place_lon": null,
+        "tickets_total": 349,
+        "categories": [
+          "Искусство и культура"
+        ],
+        "url": "https://winzavodcca.timepad.ru/event/4189906/",
+        "source": "timepad"
+      },
+      {
+        "title": "ЗОЖ-Экспо Осень&#039;26. Третья международная выставка товаров и услуг для здорового образа жизни. Для бизнеса",
+        "start": 1790323200,
+        "end": 1790438400,
+        "place_title": "",
+        "place_address": "Тишинская площадь, дом 1",
+        "place_lat": 55.7703408,
+        "place_lon": 37.5829069,
+        "tickets_total": 267,
+        "categories": [
+          "Выставки"
+        ],
+        "url": "https://zozh-expo.timepad.ru/event/4083209/",
+        "source": "timepad"
+      },
+      {
+        "title": "ЗОЖ-Экспо Осень&#039;26. Третья международная выставка товаров и услуг для здорового образа жизни",
+        "start": 1790323200,
+        "end": 1790438400,
+        "place_title": "",
+        "place_address": "Тишинская площадь, дом 1.",
+        "place_lat": 55.7703408,
+        "place_lon": 37.5829069,
+        "tickets_total": 1674,
+        "categories": [
+          "Выставки"
+        ],
+        "url": "https://zozh-expo.timepad.ru/event/4083147/",
+        "source": "timepad"
+      },
+      {
+        "title": "Большая музыка для маленьких. 6+",
+        "start": 1790341200,
+        "end": 1790344800,
+        "place_title": "",
+        "place_address": "Большая Никитская, д. 11",
+        "place_lat": 55.7563193,
+        "place_lon": 37.6066321,
+        "tickets_total": 300,
+        "categories": [
+          "Концерты"
+        ],
+        "url": "https://artcom-mgk.timepad.ru/event/4206130/",
+        "source": "timepad"
+      },
+      {
+        "title": "Закрытие кинофестиваля &quot;Антарес&quot;",
+        "start": 1790348400,
+        "end": 1790359200,
+        "place_title": "",
+        "place_address": "Кинотеатр &quot;Октябрь&quot;, ул. Новый Арбат, 24",
+        "place_lat": null,
+        "place_lon": null,
+        "tickets_total": 233,
+        "categories": [
+          "Концерты"
+        ],
+        "url": "https://antares-hall.timepad.ru/event/4212778/",
+        "source": "timepad"
+      },
+      {
+        "title": "Культурно-просветительский проект «Открытая сцена»: концерт «Сезоны и юбилеи!»",
+        "start": 1790348400,
+        "end": 1790355600,
+        "place_title": "",
+        "place_address": "ул. Воздвиженка, 3/5, подъезд 3, конференц-зал РГБ",
+        "place_lat": null,
+        "place_lon": null,
+        "tickets_total": 391,
+        "categories": [
+          "Концерты"
+        ],
+        "url": "https://leninka.timepad.ru/event/4205994/",
+        "source": "timepad"
+      },
+      {
+        "title": "DVIZH.ТУСА | МОСКВА | 25 СЕНТЯБРЯ",
+        "start": 1790368200,
+        "end": 1790388000,
+        "place_title": "",
+        "place_address": "Большая Новодмитровская ул., 36 ст 24, Москва, клуб «УРБАН»",
+        "place_lat": null,
+        "place_lon": null,
+        "tickets_total": 511,
+        "categories": [
+          "Вечеринки"
+        ],
+        "url": "https://dvizh-culture.timepad.ru/event/4181119/",
+        "source": "timepad"
+      },
+      {
+        "title": "Colisium Moscow 2026",
+        "start": 1790406000,
+        "end": 1790528400,
+        "place_title": "",
+        "place_address": "отель Сафмар Лесная, ул. Лесная, д.15",
+        "place_lat": null,
+        "place_lon": null,
+        "tickets_total": 247,
+        "categories": [
+          "Искусство и культура"
+        ],
+        "url": "https://colisium.timepad.ru/event/4041527/",
+        "source": "timepad"
+      },
+      {
+        "title": "Спектакль «Тайны Зазеркалья. Королевство кривых зеркал 20 лет спустя»",
+        "start": 1790427600,
+        "end": 1790431200,
+        "place_title": "",
+        "place_address": "ул. Профсоюзная, д. 61",
+        "place_lat": 55.6654194,
+        "place_lon": 37.549641,
+        "tickets_total": 285,
+        "categories": [
+          "Театры"
+        ],
+        "url": "https://tski-meridian.timepad.ru/event/4161180/",
+        "source": "timepad"
+      }
+    ],
+    "spb": [
+      {
+        "title": "Фортепианный вечер",
+        "start": 1790254800,
+        "end": 1790258400,
+        "place_title": "",
+        "place_address": "набережная реки Мойки д.20 \r\nКонцертный зал",
+        "place_lat": null,
+        "place_lon": null,
+        "tickets_total": 436,
+        "categories": [
+          "Концерты"
+        ],
+        "url": "https://kinovcapelle.timepad.ru/event/4176735/",
+        "source": "timepad"
+      },
+      {
+        "title": "24-25 СЕНТЯБРЯ. ПОЛУФИНАЛЫ ЦЕНТРАЛЬНОЙ ЛИГИ КВН «НЕВА»",
+        "start": 1790263800,
+        "end": 1790272800,
+        "place_title": "",
+        "place_address": "Санкт-Петербург, Новоизмайловский пр., 48,",
+        "place_lat": null,
+        "place_lon": null,
+        "tickets_total": 693,
+        "categories": [
+          "Концерты"
+        ],
+        "url": "https://kvn-neva.timepad.ru/event/4130763/",
+        "source": "timepad"
+      },
+      {
+        "title": "XII Форум объединенных культур: четыре тематических круглых стола «Креативный спецпроект»",
+        "start": 1790319600,
+        "end": 1790345700,
+        "place_title": "",
+        "place_address": "Исаакиевская площадь, 1, МВК «Манеж»",
+        "place_lat": null,
+        "place_lon": null,
+        "tickets_total": 519,
+        "categories": [
+          "Искусство и культура"
+        ],
+        "url": "https://manegespb.timepad.ru/event/4205671/",
+        "source": "timepad"
+      },
+      {
+        "title": "Выставка Яхт и Катеров в Санкт-Петербурге",
+        "start": 1790326800,
+        "end": 1790517600,
+        "place_title": "",
+        "place_address": "Санкт-Петербург, Петровский пр. 2 ЖК Royal Park, Яхт-клуб &quot;Светлана&quot;",
+        "place_lat": null,
+        "place_lon": null,
+        "tickets_total": 2743,
+        "categories": [
+          "Выставки"
+        ],
+        "url": "https://spibs.timepad.ru/event/3859461/",
+        "source": "timepad"
+      },
+      {
+        "title": "24-25 СЕНТЯБРЯ. ПОЛУФИНАЛЫ ЦЕНТРАЛЬНОЙ ЛИГИ КВН «НЕВА»",
+        "start": 1790350200,
+        "end": 1790359200,
+        "place_title": "",
+        "place_address": "Санкт-Петербург, Новоизмайловский пр., 48,",
+        "place_lat": null,
+        "place_lon": null,
+        "tickets_total": 668,
+        "categories": [
+          "Концерты"
+        ],
+        "url": "https://kvn-neva.timepad.ru/event/4153575/",
+        "source": "timepad"
+      },
+      {
+        "title": "Апрельский Романс",
+        "start": 1790352000,
+        "end": 1790357400,
+        "place_title": "",
+        "place_address": "Ул. Итальянская, д. 21",
+        "place_lat": 59.9353569,
+        "place_lon": 30.342448,
+        "tickets_total": 297,
+        "categories": [
+          "Театры"
+        ],
+        "url": "https://kosmos-limited-org.timepad.ru/event/4200713/",
+        "source": "timepad"
+      },
+      {
+        "title": "Европейский день языков в Санкт-Петербурге",
+        "start": 1790409600,
+        "end": 1790427600,
+        "place_title": "",
+        "place_address": "",
+        "place_lat": null,
+        "place_lon": null,
+        "tickets_total": 750,
+        "categories": [
+          "Искусство и культура"
+        ],
+        "url": "https://evropeyskiy-den-yaz-event.timepad.ru/event/4188179/",
+        "source": "timepad"
+      },
+      {
+        "title": "Фестиваль Digital Rain: форум мультимедиаиндустрии. День первый",
+        "start": 1790415000,
+        "end": 1790440200,
+        "place_title": "",
+        "place_address": "наб. реки Фонтанки, 49А",
+        "place_lat": 59.9303181,
+        "place_lon": 30.3375624,
+        "tickets_total": 531,
+        "categories": [
+          "Искусство и культура"
+        ],
+        "url": "https://newstage.timepad.ru/event/4205232/",
+        "source": "timepad"
+      },
+      {
+        "title": "VAST Nord Perfume Salon 2026 – Fall Edition",
+        "start": 1790416800,
+        "end": 1790438400,
+        "place_title": "",
+        "place_address": "Суворовский пр-т,  д. 18",
+        "place_lat": null,
+        "place_lon": null,
+        "tickets_total": 354,
+        "categories": [
+          "Искусство и культура"
+        ],
+        "url": "https://perfumeryclub.timepad.ru/event/4167717/",
+        "source": "timepad"
+      },
+      {
+        "title": "STUDEMIA",
+        "start": 1790456100,
+        "end": 1790476200,
+        "place_title": "",
+        "place_address": "Пироговская наб., 5/2",
+        "place_lat": 59.9569446,
+        "place_lon": 30.3413796,
+        "tickets_total": 943,
+        "categories": [
+          "Вечеринки"
+        ],
+        "url": "https://2kg.timepad.ru/event/4126266/",
+        "source": "timepad"
+      },
+      {
+        "title": "Фестиваль Digital Rain: форум мультимедиаиндустрии. День второй",
+        "start": 1790501400,
+        "end": 1790526600,
+        "place_title": "",
+        "place_address": "наб. реки Фонтанки, 49А",
+        "place_lat": 59.9303181,
+        "place_lon": 30.3375624,
+        "tickets_total": 317,
+        "categories": [
+          "Искусство и культура"
+        ],
+        "url": "https://newstage.timepad.ru/event/4205249/",
+        "source": "timepad"
+      },
+      {
+        "title": "VI КОНГРЕСС &quot;НОВЫЕ ПРАВИЛА РОСТА&quot;",
+        "start": 1790839800,
+        "end": 1790868600,
+        "place_title": "",
+        "place_address": "Невский пр..д.35, вход с Невского пр., с центрального фасада, пройти насквозь  через Универмаг во двор, в Академию музыки им. Е.Образцовой",
+        "place_lat": null,
+        "place_lon": null,
+        "tickets_total": 268,
+        "categories": [
+          "Бизнес"
+        ],
+        "url": "https://mazb.timepad.ru/event/4159772/",
+        "source": "timepad"
+      }
+    ],
+    "novosibirsk": [
+      {
+        "title": "Сибирь покоряет: инвестиции в бизнес региона на рынках капитала",
+        "start": 1790316000,
+        "end": 1790353800,
+        "place_title": "",
+        "place_address": "ул. Орджоникидзе, 31",
+        "place_lat": 55.0316039,
+        "place_lon": 82.923596,
+        "tickets_total": 232,
+        "categories": [
+          "Бизнес"
+        ],
+        "url": "https://siberia-forum.timepad.ru/event/4092699/",
+        "source": "timepad"
+      },
+      {
+        "title": "Фестиваль подростковых социальных театров «Касается»",
+        "start": 1790344800,
+        "end": 1790355600,
+        "place_title": "",
+        "place_address": "г. Новосибирск, Красный проспект, 167, ДК &quot;Прогресс&quot;",
+        "place_lat": null,
+        "place_lon": null,
+        "tickets_total": 200,
+        "categories": [
+          "Искусство и культура"
+        ],
+        "url": "https://sodruzhestvo54.timepad.ru/event/4192907/",
+        "source": "timepad"
+      },
+      {
+        "title": "26.09: Посвят WELCOME TO N.S.U! &quot;На Крыше&quot;",
+        "start": 1790449200,
+        "end": 1790470800,
+        "place_title": "",
+        "place_address": "ул.Кутателадзе, 4/4",
+        "place_lat": 54.8600155,
+        "place_lon": 83.1048335,
+        "tickets_total": 227,
+        "categories": [
+          "Вечеринки"
+        ],
+        "url": "https://kafedratus.timepad.ru/event/4140483/",
+        "source": "timepad"
+      }
+    ],
+    "ekb": [
+      {
+        "title": "Приглашаем присоединиться к мероприятиям осеннего проекта",
+        "start": 1790422200,
+        "end": 1790426700,
+        "place_title": "",
+        "place_address": "ул. Горького 4а, Уральский центр развития дизайна",
+        "place_lat": null,
+        "place_lon": null,
+        "tickets_total": 200,
+        "categories": [
+          "Искусство и культура"
+        ],
+        "url": "https://vk-ekspert.timepad.ru/event/4189718/",
+        "source": "timepad"
+      },
+      {
+        "title": "&quot;МЕТАМОРФОЗЫ&quot;",
+        "start": 1790959500,
+        "end": 1790964000,
+        "place_title": "",
+        "place_address": "г. Екатеринбург \r\nул. площадь Субботников 1\r\nКультурный центр Верх-Исетский  \r\n2 октября 2026 год\r\nСбор зрителей в 19:45",
+        "place_lat": null,
+        "place_lon": null,
+        "tickets_total": 274,
+        "categories": [
+          "Искусство и культура"
+        ],
+        "url": "https://g-project.timepad.ru/event/4142853/",
+        "source": "timepad"
+      }
+    ],
+    "kazan": [
+      {
+        "title": "День поставщика СИБУРа",
+        "start": 1790229600,
+        "end": 1790262000,
+        "place_title": "",
+        "place_address": "ул. Спартаковская, 2 -\r\nИТ парк им. Башира Рамеева",
+        "place_lat": null,
+        "place_lon": null,
+        "tickets_total": 214,
+        "categories": [
+          "Бизнес"
+        ],
+        "url": "https://event-innokam.timepad.ru/event/4147875/",
+        "source": "timepad"
+      },
+      {
+        "title": "Спектакль «Волнения». Виолончель и поэтический перформанс",
+        "start": 1790438400,
+        "end": 1790442000,
+        "place_title": "",
+        "place_address": "Татарский государственный академический театр им. Г. Камала, восточный зал. Ул. Хади Такташа, 74",
+        "place_lat": null,
+        "place_lon": null,
+        "tickets_total": 300,
+        "categories": [
+          "Театры"
+        ],
+        "url": "https://fnrz.timepad.ru/event/4201695/",
+        "source": "timepad"
+      },
+      {
+        "title": "Спектакль «К. Коровин: мой друг Федя»",
+        "start": 1790521200,
+        "end": 1790526600,
+        "place_title": "",
+        "place_address": "Татарский Государственный Академический Театр им. Г. Камала, универсальный зал. Ул. Хади Такташа, 74",
+        "place_lat": null,
+        "place_lon": null,
+        "tickets_total": 305,
+        "categories": [
+          "Театры"
+        ],
+        "url": "https://fnrz.timepad.ru/event/4177906/",
+        "source": "timepad"
+      },
+      {
+        "title": "Открытие фестиваля Synesthesia Lab: Оркестр ЦСМ Губайдулиной, дирижер - Любовь Носова",
+        "start": 1790695800,
+        "end": 1790703000,
+        "place_title": "",
+        "place_address": "Площадь Свободы, 3",
+        "place_lat": 47.2298751,
+        "place_lon": 39.7643641,
+        "tickets_total": 650,
+        "categories": [
+          "Концерты"
+        ],
+        "url": "https://synesthesia-lab.timepad.ru/event/4167913/",
+        "source": "timepad"
+      },
+      {
+        "title": "Synesthesia Lab: ЛУННЫЙ ПЬЕРО В ЛУННОМ СВЕТЕ",
+        "start": 1790958600,
+        "end": 1790965800,
+        "place_title": "",
+        "place_address": "ул. Карла Маркса, 70",
+        "place_lat": 55.1654884,
+        "place_lon": 61.4016876,
+        "tickets_total": 242,
+        "categories": [
+          "Искусство и культура"
+        ],
+        "url": "https://synesthesia-lab.timepad.ru/event/4167948/",
+        "source": "timepad"
+      },
+      {
+        "title": "Закрытие фестиваля Synesthesia Lab: Оркестр ЦСМ Губайдулиной, дирижеры - Роман Пархоменко и Даниель Сатановский",
+        "start": 1791473400,
+        "end": 1791480600,
+        "place_title": "",
+        "place_address": "Карла Маркса, 33",
+        "place_lat": 55.7964187,
+        "place_lon": 49.1262401,
+        "tickets_total": 300,
+        "categories": [
+          "Концерты"
+        ],
+        "url": "https://synesthesia-lab.timepad.ru/event/4167928/",
+        "source": "timepad"
+      }
+    ],
+    "nnovgorod": [
+      {
+        "title": "Концерт корейской традиционной музыки в Нижнем Новгороде",
+        "start": 1790352000,
+        "end": 1790359200,
+        "place_title": "",
+        "place_address": "Большая Покровская ул., 37",
+        "place_lat": 56.3194144,
+        "place_lon": 43.9964538,
+        "tickets_total": 300,
+        "categories": [
+          "Концерты"
+        ],
+        "url": "https://korean-culture-moscow.timepad.ru/event/4200663/",
+        "source": "timepad"
+      },
+      {
+        "title": "Второй Общестроительный Слёт в Нижнем Новгороде",
+        "start": 1790663400,
+        "end": 1790694000,
+        "place_title": "",
+        "place_address": "Совнаркомовская ул., 13, корп. 2, Нижний Новгород",
+        "place_lat": null,
+        "place_lon": null,
+        "tickets_total": 971,
+        "categories": [
+          "Выставки"
+        ],
+        "url": "https://slet-media-event.timepad.ru/event/4104797/",
+        "source": "timepad"
+      },
+      {
+        "title": "Экофестиваль «Любовь и атомы»",
+        "start": 1791014400,
+        "end": 1791046800,
+        "place_title": "",
+        "place_address": "Нижне-Волжская набережная, 11",
+        "place_lat": 56.3303607,
+        "place_lon": 43.9928699,
+        "tickets_total": 484,
+        "categories": [
+          "Искусство и культура"
+        ],
+        "url": "https://ys-9d.timepad.ru/event/4189497/",
+        "source": "timepad"
+      },
+      {
+        "title": "Фестиваль женских увлечений &quot;Нити&quot;",
+        "start": 1791442800,
+        "end": 1791734400,
+        "place_title": "",
+        "place_address": "улица Бетанкура, 1А/1 Nizhniy Novgorod",
+        "place_lat": 56.3361237,
+        "place_lon": 43.9596256,
+        "tickets_total": 233,
+        "categories": [
+          "Выставки"
+        ],
+        "url": "https://uzorochie.timepad.ru/event/4028619/",
+        "source": "timepad"
+      },
+      {
+        "title": "Концерт кафедры композиции и инструментовки Нижегородской консерватории &quot;История и современность&quot;",
+        "start": 1791732600,
+        "end": 1791739800,
+        "place_title": "",
+        "place_address": "ул. Пискунова, д. 40",
+        "place_lat": 56.3241125,
+        "place_lon": 44.0053717,
+        "tickets_total": 274,
+        "categories": [
+          "Концерты"
+        ],
+        "url": "https://nngk.timepad.ru/event/4182674/",
+        "source": "timepad"
+      },
+      {
+        "title": "Концерт хоровой музыки к юбилею Нижегородской государственной консерватории им. М. И. Глинки",
+        "start": 1791905400,
+        "end": 1791912600,
+        "place_title": "",
+        "place_address": "Ул. Пискунова, д. 40",
+        "place_lat": 56.3241125,
+        "place_lon": 44.0053717,
+        "tickets_total": 246,
+        "categories": [
+          "Концерты"
+        ],
+        "url": "https://nngk.timepad.ru/event/4162951/",
+        "source": "timepad"
+      }
+    ],
+    "krasnodar": [
+      {
+        "title": "БК ТЕРРА Краснодар. 21 поток. ЗАПУСК.",
+        "start": 1790694000,
+        "end": 1790704800,
+        "place_title": "",
+        "place_address": "ул. Красная, 109\r\nCrowne Plaza, зал &quot;Орбита&quot;",
+        "place_lat": null,
+        "place_lon": null,
+        "tickets_total": 307,
+        "categories": [
+          "Бизнес"
+        ],
+        "url": "https://terra-krasnodar.timepad.ru/event/4074965/",
+        "source": "timepad"
+      }
+    ],
+    "sochi": [
+      {
+        "title": "Вечер памяти Тиграна Кеосаяна. Кинопоказ №2: «Бессмертные»",
+        "start": 1790524800,
+        "end": 1790532000,
+        "place_title": "",
+        "place_address": "ул. Черноморская, 11/1",
+        "place_lat": 45.2620605,
+        "place_lon": 37.4365024,
+        "tickets_total": 466,
+        "categories": [
+          "Искусство и культура"
+        ],
+        "url": "https://letniy-teatr.timepad.ru/event/4191286/",
+        "source": "timepad"
+      }
+    ]
+  }
+}

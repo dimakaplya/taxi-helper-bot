@@ -36,25 +36,35 @@ relay-прокси (например r.jina.ai) рассматривался и 
 Railway подхватит новый файл через авто-деплой (GitHub webhook), как и с
 flights_data.json/trains_data.json.
 
-=== ПОЧЕМУ ПОКРЫВАЕТ ТОЛЬКО МОСКВУ ===
-Пока подключена только Москва (TIMEPAD_CITY_MAP). У TimePad нет координат
-места (только текстовый адрес) и нет отдельного price-поля в верхнем уровне
-события - цена лежит в registration_data.price_min/price_max. Общий фид
-города огромный (десятки тысяч событий) и в основном состоит из мелких
-самостоятельных квестов-экскурсий без гида и небольших бизнес-встреч
-(20-200 человек) - это НЕ события, вызывающие всплеск спроса на такси.
-Поэтому здесь двойной фильтр:
+=== ПОЧЕМУ ДВОЙНОЙ ФИЛЬТР ===
+У TimePad нет координат места (только текстовый адрес) и нет отдельного
+price-поля в верхнем уровне события - цена лежит в
+registration_data.price_min/price_max. Общий фид города огромный (в Москве -
+десятки тысяч событий) и в основном состоит из мелких самостоятельных
+квестов-экскурсий без гида и небольших бизнес-встреч (20-200 человек) - это
+НЕ события, вызывающие всплеск спроса на такси. Поэтому здесь двойной фильтр:
   1. По категориям - только "Концерты", "Вечеринки", "Бизнес", "Искусство и
      культура", "Театры" (TIMEPAD_CATEGORY_IDS) - без "Экскурсии и
      путешествия", где сидят все мелкие квесты.
   2. По размеру - только события с registration_data.tickets_total >=
      TIMEPAD_MIN_TICKETS (200) - отсекает мелкие бизнес-завтраки/круглые
      столы, оставляет форумы/концерты/фестивали заметного масштаба.
+
+=== ПОЧЕМУ НЕ ВСЕ 12 ГОРОДОВ БОТА ===
+ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя "другие города") - живой
+пробный запрос к /v1/events.json по каждому из 12 городов бота (с тем же
+фильтром категорий/tickets_total) показал, что у Челябинска, Омска, Самары
+и Ростова-на-Дону на TimePad почти нет крупных событий нужных категорий
+(0 штук на первой странице выдачи) - в TIMEPAD_CITY_MAP они пока НЕ
+включены, чтобы не тратить лимит запросов (60/мин с одного IP) на города,
+где физически нечего показывать. Остальные 7 городов (Питер, Новосибирск,
+Екатеринбург, Казань, Нижний Новгород, Краснодар, Сочи) показали реальный
+объём (от 1 до 6+ крупных событий) и подключены вместе с Москвой.
 """
 import os
 import time
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import requests
 
@@ -68,10 +78,18 @@ OUTPUT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'timepad_
 
 TIMEPAD_TOKEN = os.getenv('TIMEPAD_TOKEN', '')
 
-# Бот-город -> название города у TimePad (параметр cities). Пока только
-# Москва - см. пояснение в шапке файла.
+# Бот-город -> название города у TimePad (параметр cities). См. "ПОЧЕМУ НЕ
+# ВСЕ 12 ГОРОДОВ БОТА" в шапке файла - chelyabinsk/omsk/samara/rostov
+# сознательно не подключены (почти нет крупных событий нужных категорий).
 TIMEPAD_CITY_MAP = {
     'moscow': 'Москва',
+    'spb': 'Санкт-Петербург',
+    'novosibirsk': 'Новосибирск',
+    'ekb': 'Екатеринбург',
+    'kazan': 'Казань',
+    'nnovgorod': 'Нижний Новгород',
+    'krasnodar': 'Краснодар',
+    'sochi': 'Сочи',
 }
 
 # Категории TimePad, id получены живым запросом к /v1/events.json и сверены
@@ -90,7 +108,11 @@ TIMEPAD_MIN_TICKETS = 200
 
 EVENTS_LOOKAHEAD_DAYS = 30
 EVENTS_PER_CITY = 40
-REQUEST_TIMEOUT = 20
+# ИЗМЕНЕНО 23.09.2026 (живой запуск на 8 городов - TimePad стабильно отвечает
+# за 15-25с на запрос, судя по всему из-за собственной нагрузки на их
+# стороне, а не сети/проверено с домашнего IP) - было 20с, реальные запросы
+# стабильно попадали в таймаут на границе. Увеличено с запасом.
+REQUEST_TIMEOUT = 45
 
 def fetch_city_events(timepad_city):
     """Тянет ближайшие крупные события города одним проходом с пагинацией
@@ -119,6 +141,15 @@ def fetch_city_events(timepad_city):
 
     now_dt = datetime.now(timezone.utc)
     starts_at_min = now_dt.strftime('%Y-%m-%dT%H:%M:%S')
+    # ИСПРАВЛЕНО 23.09.2026 (прямая просьба пользователя - "на какой период
+    # можешь выкачивать... на месяц можешь?") - EVENTS_LOOKAHEAD_DAYS был
+    # объявлен, но НИГДЕ не применялся к запросу: реальная глубина выборки
+    # зависела только от EVENTS_PER_CITY/max_pages (сколько КРУПНЫХ событий
+    # наберётся вперёд по времени), а не от календарного периода - для
+    # редких городов (Сочи, Екатеринбург) это могло утянуть события far за
+    # горизонт месяца, для частых (Москва, Питер) - наоборот, меньше месяца.
+    # Теперь starts_at_max явно ограничивает окно EVENTS_LOOKAHEAD_DAYS днями.
+    starts_at_max = (now_dt + timedelta(days=EVENTS_LOOKAHEAD_DAYS)).strftime('%Y-%m-%dT%H:%M:%S')
 
     normalized = []
     skip = 0
@@ -137,6 +168,7 @@ def fetch_city_events(timepad_city):
             'cities': timepad_city,
             'category_ids': ','.join(str(c) for c in TIMEPAD_CATEGORY_IDS),
             'starts_at_min': starts_at_min,
+            'starts_at_max': starts_at_max,
             'sort': '+starts_at',
             'limit': limit,
             'skip': skip,
@@ -265,13 +297,36 @@ def geocode_events(events, bot_city, cache):
 
 
 def main():
+    """ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "другие города" +
+    практика: одиночный процесс на все 8 городов не укладывается в лимит
+    времени одного вызова device_bash, каждый город - это ~15-20с запрос к
+    TimePad + геокодирование адресов через Nominatim с лимитом 1 req/sec) -
+    необязательный аргумент --city ДОБАВЛЯЕТ (не переписывает целиком) один
+    город к уже существующему timepad_data.json, так можно гонять города по
+    одному отдельными запусками, не теряя уже собранные данные по другим."""
     import json
-    result = {
-        'generated_at': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'),
-        'cities': {},
-    }
+    import sys
+
+    only_city = None
+    if len(sys.argv) >= 3 and sys.argv[1] == '--city':
+        only_city = sys.argv[2]
+        if only_city not in TIMEPAD_CITY_MAP:
+            logger.error(f"❌ Неизвестный город '{only_city}', ожидается один из: {list(TIMEPAD_CITY_MAP)}")
+            return
+
+    result = {'generated_at': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'), 'cities': {}}
+    if os.path.exists(OUTPUT_FILE):
+        try:
+            with open(OUTPUT_FILE, 'r', encoding='utf-8') as f:
+                existing = json.load(f)
+            result['cities'] = existing.get('cities', {})
+        except Exception as e:
+            logger.warning(f"⚠️ Не удалось прочитать существующий {OUTPUT_FILE}, начинаю с нуля: {e}")
+
+    cities_to_run = {only_city: TIMEPAD_CITY_MAP[only_city]} if only_city else TIMEPAD_CITY_MAP
+
     geocode_cache = geocoding_utils.load_geocode_cache()
-    for bot_city, timepad_city in TIMEPAD_CITY_MAP.items():
+    for bot_city, timepad_city in cities_to_run.items():
         logger.info(f"🔄 Тяну события TimePad для {bot_city} ({timepad_city})...")
         try:
             events = fetch_city_events(timepad_city)
@@ -287,6 +342,7 @@ def main():
         time.sleep(0.3)
     geocoding_utils.save_geocode_cache(geocode_cache)
 
+    result['generated_at'] = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
     with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
     logger.info(f"💾 Сохранено в {OUTPUT_FILE}")

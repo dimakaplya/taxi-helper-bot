@@ -5,4 +5,4 @@ main.py.backup_opensky
 stations_list_raw.json
 stations_cache.json
 .env
-timepad_data.json
+geocode_cache.json
