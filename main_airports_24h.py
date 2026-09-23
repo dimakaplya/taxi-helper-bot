@@ -11719,27 +11719,31 @@ def map_webapp_html():
     return DEMAND_THRESHOLD_BY_CATEGORY[category] !== undefined
       ? DEMAND_THRESHOLD_BY_CATEGORY[category] : DEMAND_THRESHOLD_DEFAULT;
   }}
-  // ИЗМЕНЕНО 22.09.2026 (та же просьба, что у DEMAND_THRESHOLD выше) -
-  // ступени прозрачности теперь СВОИ у такси (шаг 20%: 60/80/100) и у
-  // Ultima (шаг 5%: 85/90/95/100, более плавно и до максимума повыше -
-  // спрос там реже, но заметнее, когда есть). У остальных категорий (без
-  // реальных почасовых % - курьер/грузовое такси) - прежняя шкала от 70%.
-  function demandCloudOpacity(demand, category) {{
-    if (category === 'ultima') {{
-      if (demand >= 100) return 0.30;
-      if (demand >= 95) return 0.24;
-      if (demand >= 90) return 0.18;
-      return 0.12; // 85-89%
-    }}
-    if (category === 'taxi') {{
-      if (demand >= 100) return 0.26;
-      if (demand >= 80) return 0.18;
-      return 0.10; // 60-79%
-    }}
-    if (demand >= 100) return 0.26;
-    if (demand >= 90) return 0.19;
-    if (demand >= 80) return 0.13;
-    return 0.08; // 70-79%
+  // ЗАМЕНЕНО 23.09.2026 (прямая просьба пользователя - единая цветовая схема
+  // по уровню спроса вместо разных порогов/ступеней прозрачности на
+  // категорию и тариф: "Красный: 0-20% / Жёлтый: 20-50% / Зелёный: 50-65%
+  // облака спроса слабо / Фиолетовый: свыше 65% облака спроса сильно").
+  // Красная и жёлтая зона (<50%) - это просто смысловые уровни спроса, на
+  // карте облако при них вообще не рисуется (порог показа -
+  // DEMAND_CLOUD_SHOW_THRESHOLD_PERCENT, тот же для ВСЕХ категорий и слоёв,
+  // включая районные облака Москвы - см. loadDistrictDemandClouds ниже).
+  // От порога и до DEMAND_CLOUD_STRONG_THRESHOLD_PERCENT - зелёное "слабо",
+  // выше - фиолетовое "сильно". Старые demandCloudThreshold/DEMAND_THRESHOLD_
+  // BY_CATEGORY выше оставлены (используются только для курьера/грузового
+  // такси - категорий без реальных почасовых %, чтобы код не трогать лишний
+  // раз), но их значения в Python (MAP_DEMAND_CLOUD_THRESHOLD_BY_CATEGORY/
+  // _DEFAULT) теперь тоже 50, так что на практике порог везде одинаковый.
+  const DEMAND_CLOUD_SHOW_THRESHOLD_PERCENT = 50;
+  const DEMAND_CLOUD_STRONG_THRESHOLD_PERCENT = 65;
+  const DEMAND_CLOUD_COLOR_WEAK = '#4caf50';   // зелёный - облака спроса слабо (50-65%)
+  const DEMAND_CLOUD_COLOR_STRONG = '#9b30ff'; // фиолетовый - облака спроса сильно (>65%)
+  const DEMAND_CLOUD_OPACITY_WEAK = 0.14;
+  const DEMAND_CLOUD_OPACITY_STRONG = 0.30;
+  function demandCloudColorByLevel(demand) {{
+    return demand >= DEMAND_CLOUD_STRONG_THRESHOLD_PERCENT ? DEMAND_CLOUD_COLOR_STRONG : DEMAND_CLOUD_COLOR_WEAK;
+  }}
+  function demandCloudOpacityByLevel(demand) {{
+    return demand >= DEMAND_CLOUD_STRONG_THRESHOLD_PERCENT ? DEMAND_CLOUD_OPACITY_STRONG : DEMAND_CLOUD_OPACITY_WEAK;
   }}
   // ВЫНЕСЕНО 22.09.2026 из тела loadDemandCloud - генерация формы облака по
   // центру/радиусу/seed теперь отдельная функция, чтобы её же переиспользовать
@@ -11811,34 +11815,25 @@ def map_webapp_html():
   // taxi Комфорт и Комфорт+ разошлись на два отдельных слоя вместо одного
   // общего; у ultima добавлен отдельный слой "Элит" (та же цифра demand_
   // elite, что и у "Премьер", просто более высокий порог загорания).
+  // ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя - единая цветовая
+  // схема по уровню спроса, см. DEMAND_CLOUD_SHOW_THRESHOLD_PERCENT выше) -
+  // у слоёв больше нет своих thresholds/color: порог показа и цвет теперь
+  // одинаковые для ВСЕХ слоёв и берутся из demandCloudColorByLevel/
+  // DEMAND_CLOUD_SHOW_THRESHOLD_PERCENT по фактическому demand каждого
+  // конкретного района - осталось только field (какое число из ответа
+  // API читать) и label (подпись в тултипе).
   const DISTRICT_CLOUD_LAYERS = {{
     taxi: [
-      {{ field: 'demand_econom', thresholds: [60, 70, 80, 90, 100], color: '#9b30ff', label: 'Эконом' }},
-      {{ field: 'demand_comfort', thresholds: [70, 80, 90, 100], color: '#00b8a9', label: 'Комфорт' }},
-      {{ field: 'demand_comfort_plus', thresholds: [80, 90, 100], color: '#2ec4b6', label: 'Комфорт+' }},
+      {{ field: 'demand_econom', label: 'Эконом' }},
+      {{ field: 'demand_comfort', label: 'Комфорт' }},
+      {{ field: 'demand_comfort_plus', label: 'Комфорт+' }},
     ],
     ultima: [
-      {{ field: 'demand_business', thresholds: [60, 70, 80, 90, 100], color: '#9b30ff', label: 'Бизнес' }},
-      {{ field: 'demand_premier', thresholds: [70, 80, 90, 100], color: '#ff9f1c', label: 'Премьер' }},
-      {{ field: 'demand_elite', thresholds: [85, 90, 95, 100], color: '#ff3b3b', label: 'Элит' }},
+      {{ field: 'demand_business', label: 'Бизнес' }},
+      {{ field: 'demand_premier', label: 'Премьер' }},
+      {{ field: 'demand_elite', label: 'Элит' }},
     ],
   }};
-  // ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя - "оттенки цвета
-  // облака спроса становится ярче") - раньше было ровно 3 фиксированных
-  // порога/ступени прозрачности; теперь порогов у слоя может быть 3, 4 или
-  // 5 (см. DISTRICT_CLOUD_LAYERS выше) - функция сама считает, сколько
-  // порогов пройдено (level, от 0 до длины массива), и растягивает
-  // прозрачность по ним равномерно от OPACITY_MIN до OPACITY_MAX - чем
-  // больше порогов пройдено, тем ярче/плотнее облако, независимо от того,
-  // 3 у слоя ступени или 5.
-  function districtLayerOpacity(demand, thresholds) {{
-    const n = thresholds.length;
-    let level = 0;
-    for (let i = 0; i < n; i++) {{ if (demand >= thresholds[i]) level = i + 1; }}
-    if (level === 0) return 0;
-    const OPACITY_MIN = 0.14, OPACITY_MAX = 0.34;
-    return OPACITY_MIN + (OPACITY_MAX - OPACITY_MIN) * (level / n);
-  }}
   async function loadDistrictDemandClouds() {{
     try {{
       const resp = await fetch(`/map/district_demand?city=${{encodeURIComponent(city)}}&category=${{encodeURIComponent(myCategory)}}`);
@@ -11851,13 +11846,14 @@ def map_webapp_html():
       (data.districts || []).forEach(d => {{
         layers.forEach(layer => {{
           const demand = d[layer.field];
-          if (demand === null || demand === undefined || demand < layer.thresholds[0]) return;
+          if (demand === null || demand === undefined || demand < DEMAND_CLOUD_SHOW_THRESHOLD_PERCENT) return;
           const seed = demandCloudSeed(d.name + '::' + myCategory + '::' + layer.field + '::' + timeBucket);
+          const color = demandCloudColorByLevel(demand);
           const marker = L.polygon(cityCloudLatLngs(d.lat, d.lon, DISTRICT_CLOUD_RADIUS_METERS, seed), {{
-            color: layer.color,
+            color: color,
             weight: 0,
-            fillColor: cloudFill(layer.color),
-            fillOpacity: districtLayerOpacity(demand, layer.thresholds),
+            fillColor: cloudFill(color),
+            fillOpacity: demandCloudOpacityByLevel(demand),
             smoothFactor: 3,
           }}).addTo(map);
           if (marker._path) {{ marker._path.style.filter = ensureCloudFilter(20); }}
@@ -11889,14 +11885,15 @@ def map_webapp_html():
       if (demandCloudMarker) {{ map.removeLayer(demandCloudMarker); demandCloudMarker = null; }}
       demandSatelliteMarkers.forEach(m => map.removeLayer(m));
       demandSatelliteMarkers = [];
-      if (data.demand === null || data.demand === undefined || data.demand < demandCloudThreshold(myCategory) || data.lat === null || data.lon === null) return;
+      if (data.demand === null || data.demand === undefined || data.demand < DEMAND_CLOUD_SHOW_THRESHOLD_PERCENT || data.lat === null || data.lon === null) return;
       const DEMAND_CLOUD_RADIUS_METERS = 12000;
       const seed = demandCloudSeed(city + '::' + myCategory + '::' + cityDemandCloudTimeBucket());
+      const cloudColor = demandCloudColorByLevel(data.demand);
       demandCloudMarker = L.polygon(cityCloudLatLngs(data.lat, data.lon, DEMAND_CLOUD_RADIUS_METERS, seed), {{
-        color: '#9b30ff',
+        color: cloudColor,
         weight: 0,
-        fillColor: cloudFill('#9b30ff'),
-        fillOpacity: demandCloudOpacity(data.demand, myCategory),
+        fillColor: cloudFill(cloudColor),
+        fillOpacity: demandCloudOpacityByLevel(data.demand),
         smoothFactor: 3,
       }}).addTo(map);
       if (demandCloudMarker._path) {{ demandCloudMarker._path.style.filter = ensureCloudFilter(34); }}
@@ -11965,10 +11962,10 @@ def map_webapp_html():
         }}
         const [satLat, satLon] = offsetLatLon(data.lat, data.lon, distM, angle);
         const satMarker = L.polygon(cityCloudLatLngs(satLat, satLon, DEMAND_CLOUD_RADIUS_METERS / satRadiusDivisor, satSeed), {{
-          color: '#9b30ff',
+          color: cloudColor,
           weight: 0,
-          fillColor: cloudFill('#9b30ff'),
-          fillOpacity: demandCloudOpacity(data.demand, myCategory) * 0.85,
+          fillColor: cloudFill(cloudColor),
+          fillOpacity: demandCloudOpacityByLevel(data.demand) * 0.85,
           smoothFactor: 3,
         }}).addTo(map);
         if (satMarker._path) {{ satMarker._path.style.filter = ensureCloudFilter(28); }}
@@ -13749,8 +13746,22 @@ MAP_DEMAND_API_PATH = '/map/demand'
 # такси/прочие категории без реальных почасовых % - остаются на прежнем
 # общем пороге (MAP_DEMAND_CLOUD_THRESHOLD_DEFAULT). См. demandCloudOpacity в
 # map_webapp_html - ступени прозрачности идут в том же ритме (20%/5%).
-MAP_DEMAND_CLOUD_THRESHOLD_BY_CATEGORY = {'taxi': 60, 'ultima': 85}
-MAP_DEMAND_CLOUD_THRESHOLD_DEFAULT = 70
+# ЕЩЁ РАЗ ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя - единая цветовая
+# схема по уровню спроса вместо разных порогов и цветов на слой/категорию:
+# "Красный: 0-20% / Жёлтый: 20-50% / Зелёный: 50-65% облака спроса слабо /
+# Фиолетовый: свыше 65% облака спроса сильно"): порог показа облака теперь
+# ОДИН и тот же для всех категорий (DEMAND_CLOUD_SHOW_THRESHOLD_PERCENT=50,
+# см. map_webapp_html) - красная/жёлтая зона (<50%) облака вообще не
+# рисует, это просто смысловые уровни "низкий/обычный спрос" без визуала на
+# карте. Прежние разные пороги по категориям (такси 60%/Ultima 85%) и
+# 3-5-ступенчатая растяжка прозрачности по тарифу заменены на плоскую
+# 2-уровневую схему цвет+прозрачность (зелёный слабо 50-65%, фиолетовый
+# сильно >65%) - см. demandCloudColorByLevel/demandCloudOpacityByLevel в
+# map_webapp_html. Эти два константа-словаря оставлены (используются только
+# для фолбэка категорий без реальных почасовых % - курьер/грузовое такси),
+# но их значения тоже приведены к единому порогу 50%.
+MAP_DEMAND_CLOUD_THRESHOLD_BY_CATEGORY = {'taxi': 50, 'ultima': 50}
+MAP_DEMAND_CLOUD_THRESHOLD_DEFAULT = 50
 # ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "в дождь рисовать
 # всегда спрос") - пока в городе идут осадки, % спроса для облака не может
 # быть ниже этого значения, даже если по часовой таблице сейчас "тихий" час -
@@ -13890,12 +13901,22 @@ MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES = {
 # ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя, см. комментарий у
 # MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_* выше) - пороги опущены и стали
 # более "ступенчатыми" (5 порогов у эконом/бизнес вместо 3).
-MOSCOW_DISTRICT_CLOUD_THRESHOLDS_ECONOM = (60, 70, 80, 90, 100)
-MOSCOW_DISTRICT_CLOUD_THRESHOLDS_COMFORT = (70, 80, 90, 100)
-MOSCOW_DISTRICT_CLOUD_THRESHOLDS_COMFORT_PLUS = (80, 90, 100)
-MOSCOW_DISTRICT_CLOUD_THRESHOLDS_BUSINESS = (60, 70, 80, 90, 100)
-MOSCOW_DISTRICT_CLOUD_THRESHOLDS_PREMIER = (70, 80, 90, 100)
-MOSCOW_DISTRICT_CLOUD_THRESHOLDS_ELITE = (85, 90, 95, 100)
+# ЕЩЁ РАЗ ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя - единая цветовая
+# схема по уровню спроса вместо разных порогов на тариф, см. комментарий у
+# MAP_DEMAND_CLOUD_THRESHOLD_BY_CATEGORY выше: "Красный 0-20% / Жёлтый
+# 20-50% / Зелёный 50-65% облака спроса слабо / Фиолетовый свыше 65% облака
+# спроса сильно"). Эти шесть констант с этого момента НЕ читаются кодом
+# (реальные пороги теперь зашиты прямо в JS - DEMAND_CLOUD_SHOW_THRESHOLD_
+# PERCENT/DEMAND_CLOUD_STRONG_THRESHOLD_PERCENT в map_webapp_html, единые
+# для всех тарифов/слоёв) - оставлены только как документация той же формы,
+# что раньше, приведены к новым единым порогам (50/65) вместо разных на
+# каждый тариф.
+MOSCOW_DISTRICT_CLOUD_THRESHOLDS_ECONOM = (50, 65)
+MOSCOW_DISTRICT_CLOUD_THRESHOLDS_COMFORT = (50, 65)
+MOSCOW_DISTRICT_CLOUD_THRESHOLDS_COMFORT_PLUS = (50, 65)
+MOSCOW_DISTRICT_CLOUD_THRESHOLDS_BUSINESS = (50, 65)
+MOSCOW_DISTRICT_CLOUD_THRESHOLDS_PREMIER = (50, 65)
+MOSCOW_DISTRICT_CLOUD_THRESHOLDS_ELITE = (50, 65)
 
 MAP_DISTRICT_DEMAND_API_PATH = '/map/district_demand'
 
