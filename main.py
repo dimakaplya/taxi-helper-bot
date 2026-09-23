@@ -259,6 +259,27 @@ RAIN_CITY_COORDS = {
     'krasnodar': (45.025, 38.975),
     'sochi': (43.540, 39.800),
 }
+# Часовой пояс каждого города - те же значения, что и в config.json у
+# аэропортов соответствующего города (AIRPORT_TIMEZONE), просто на уровне
+# города, а не привязано к конкретному аэропорту. Нужно, чтобы ночное окно
+# сниженной частоты опроса погоды (WEATHER_NIGHT_START_HOUR/END_HOUR, см.
+# _city_is_night ниже) считалось по МЕСТНОМУ времени каждого города, а не
+# по единому московскому - по прямой просьбе пользователя 23.09.2026
+# ("не по Москве, чтобы у каждого города свой часовой пояс").
+RAIN_CITY_TIMEZONE = {
+    'moscow': 'Europe/Moscow',
+    'spb': 'Europe/Moscow',
+    'novosibirsk': 'Asia/Novosibirsk',
+    'ekb': 'Asia/Yekaterinburg',
+    'kazan': 'Europe/Moscow',
+    'chelyabinsk': 'Asia/Yekaterinburg',
+    'omsk': 'Asia/Omsk',
+    'samara': 'Europe/Samara',
+    'rostov': 'Europe/Moscow',
+    'nnovgorod': 'Europe/Moscow',
+    'krasnodar': 'Europe/Moscow',
+    'sochi': 'Europe/Moscow',
+}
 # ЗАМЕНЕНО 23.09.2026 (прямая просьба пользователя - сравнил прогноз бота с
 # другими источниками для нескольких городов, расхождения показались ему
 # слишком большими, попросил попробовать WeatherAPI.com вместо Open-Meteo).
@@ -18451,63 +18472,91 @@ def get_cached_weather_forecast(city):
         return None
     return (data.get('cities') or {}).get(city)
 
+# В 00:00-06:00 ПО МЕСТНОМУ ВРЕМЕНИ КАЖДОГО ГОРОДА (см. RAIN_CITY_TIMEZONE
+# выше) спрос и активность минимальны - по прямой просьбе пользователя
+# (23.09.2026, сначала "чтобы не нагружать", затем уточнение "не по Москве,
+# чтобы у каждого города свой часовой пояс") ночью опрашиваем WeatherAPI
+# реже для ЭТОГО КОНКРЕТНОГО города, раз в
+# WEATHER_UPDATE_INTERVAL_MINUTES_NIGHT минут вместо
+# WEATHER_UPDATE_INTERVAL_MINUTES - то есть Екатеринбург/Челябинск уходят
+# в ночной режим на 2 часа раньше Москвы, а Новосибирск/Омск - ещё раньше
+# (см. часовые пояса в RAIN_CITY_TIMEZONE). weather_data_updater ниже
+# тикает с шагом WEATHER_UPDATE_INTERVAL_MINUTES (самый частый, дневной
+# интервал) - это ГРАНУЛЯРНОСТЬ проверки, а не гарантия живого запроса на
+# каждый тик: update_weather_data решает ПО КАЖДОМУ ГОРОДУ ОТДЕЛЬНО, пора
+# ли его обновлять, по _city_last_fetched_at (когда город реально в
+# последний раз опрашивался живьём).
+WEATHER_UPDATE_INTERVAL_MINUTES_NIGHT = 30
+WEATHER_NIGHT_START_HOUR = 0  # 00:00 по местному времени города
+WEATHER_NIGHT_END_HOUR = 6    # 06:00 по местному времени города (опрос раз в WEATHER_UPDATE_INTERVAL_MINUTES_NIGHT ДО этого часа)
+
+def _city_is_night(city):
+    """Сейчас ли ночное окно (WEATHER_NIGHT_START_HOUR..WEATHER_NIGHT_END_HOUR)
+    по МЕСТНОМУ времени города - см. RAIN_CITY_TIMEZONE и комментарий выше."""
+    tz_name = RAIN_CITY_TIMEZONE.get(city, 'Europe/Moscow')
+    hour_local = datetime.now(ZoneInfo(tz_name)).hour
+    return WEATHER_NIGHT_START_HOUR <= hour_local < WEATHER_NIGHT_END_HOUR
+
+# Когда каждый город live-опрашивался в последний раз (city -> datetime) -
+# только в памяти процесса, сбрасывается при рестарте (тогда первый прогон
+# после старта опросит все города заново, что и так уже делает
+# weather_data_updater при устаревшем снепшоте, см. MIN_FRESH_AGE_MINUTES).
+_city_last_fetched_at = {}
+
 async def update_weather_data():
     """Один прогон по всем RAIN_CITY_COORDS - как и у аэропортов/вокзалов,
     пауза между городами (WEATHER_REQUEST_DELAY_SECONDS), чтобы не залпом
-    бить по Open-Meteo. Город, для которого запрос не удался, просто не
-    попадает в новый снепшот - ЕСЛИ в файле уже была запись для него с
-    прошлого прогона, оставляем ЕЁ вместо того чтобы стереть (тот же принцип
-    "лучше старые данные, чем ничего", что для рейсов/поездов, см.
-    fetch_yandex_data.py 21.09.2026)."""
+    бить по WeatherAPI. Живой запрос делается ТОЛЬКО для городов, которым
+    реально пора обновляться (см. _city_is_night/_city_last_fetched_at выше -
+    ночью по местному времени города интервал больше) - остальные просто
+    переносят предыдущую запись из старого снепшота как есть, без сетевого
+    запроса. Город, для которого запрос не удался (или не был нужен),
+    просто не попадает в новый снепшот с НОВЫМИ данными - ЕСЛИ в файле уже
+    была запись для него с прошлого прогона, оставляем ЕЁ вместо того чтобы
+    стереть (тот же принцип "лучше старые данные, чем ничего", что для
+    рейсов/поездов, см. fetch_yandex_data.py 21.09.2026)."""
     WEATHER_REQUEST_DELAY_SECONDS = 1.0
+    now = datetime.now()
     previous = load_weather_data() or {}
     previous_cities = previous.get('cities') or {}
     cities = {}
+    fetched_count = 0
     for city in RAIN_CITY_COORDS:
+        interval_min = WEATHER_UPDATE_INTERVAL_MINUTES_NIGHT if _city_is_night(city) else WEATHER_UPDATE_INTERVAL_MINUTES
+        last_fetched = _city_last_fetched_at.get(city)
+        due = last_fetched is None or (now - last_fetched).total_seconds() >= interval_min * 60 - 30
+        if not due:
+            if city in previous_cities:
+                cities[city] = previous_cities[city]
+            continue
         forecast = await fetch_rain_forecast(city)
         if forecast:
             cities[city] = forecast
+            _city_last_fetched_at[city] = now
+            fetched_count += 1
         elif city in previous_cities:
             cities[city] = previous_cities[city]
             logger.warning(f"⚠️ {city}: свежий прогноз погоды не получен - оставляю прошлый снепшот")
         await asyncio.sleep(WEATHER_REQUEST_DELAY_SECONDS)
     result = {
-        'generated_at': datetime.now().isoformat(),
+        'generated_at': now.isoformat(),
         'cities': cities,
     }
     with open(WEATHER_DATA_FILE, 'w', encoding='utf-8') as f:
         json.dump(result, f, ensure_ascii=False)
-    logger.info(f"💾 weather_data.json обновлён ({len(cities)}/{len(RAIN_CITY_COORDS)} городов)")
-
-# С 00:00 до 06:00 по Москве спрос и активность минимальны - по прямой
-# просьбе пользователя (23.09.2026, "чтобы не нагружать") ночью опрашиваем
-# WeatherAPI реже, раз в WEATHER_UPDATE_INTERVAL_MINUTES_NIGHT вместо
-# WEATHER_UPDATE_INTERVAL_MINUTES. Ориентируемся на Europe/Moscow, а не на
-# локальное время каждого из 12 городов - тот же ориентир, что уже
-# используется для других ночных окон в боте (см. ZoneInfo('Europe/Moscow')
-# в _minutes_until_next_target/check_long_shifts и т.п.), плюс почти все
-# города бота живут в одном часовом поясе или близко к нему.
-WEATHER_UPDATE_INTERVAL_MINUTES_NIGHT = 30
-WEATHER_NIGHT_START_HOUR = 0  # 00:00 МСК
-WEATHER_NIGHT_END_HOUR = 6    # 06:00 МСК (опрос раз в WEATHER_UPDATE_INTERVAL_MINUTES_NIGHT ДО этого часа)
-
-def _current_weather_update_interval_minutes():
-    """WEATHER_UPDATE_INTERVAL_MINUTES_NIGHT с 00:00 до 06:00 по Москве,
-    иначе обычный WEATHER_UPDATE_INTERVAL_MINUTES - см. комментарий выше."""
-    hour_msk = datetime.now(ZoneInfo('Europe/Moscow')).hour
-    if WEATHER_NIGHT_START_HOUR <= hour_msk < WEATHER_NIGHT_END_HOUR:
-        return WEATHER_UPDATE_INTERVAL_MINUTES_NIGHT
-    return WEATHER_UPDATE_INTERVAL_MINUTES
+    logger.info(f"💾 weather_data.json обновлён (живьём опрошено {fetched_count}/{len(RAIN_CITY_COORDS)} городов, остальные ещё не пришло время или сеть не ответила)")
 
 async def weather_data_updater():
-    """Фоновая задача - собирает погоду по всем городам раз в
-    WEATHER_UPDATE_INTERVAL_MINUTES (по прямой просьбе пользователя,
-    21.09.2026, после инцидента с 429 от Open-Meteo), а с 00:00 до 06:00 по
-    Москве - реже, раз в WEATHER_UPDATE_INTERVAL_MINUTES_NIGHT (см.
-    _current_weather_update_interval_minutes выше). Запускается сразу при
-    старте бота, НО ТОЛЬКО если снепшот реально устарел - тот же принцип
-    защиты от лишних запросов при частых редеплоях, что у airports_data_updater/
-    trains_data_updater (см. их комментарии, инцидент 19.09.2026)."""
+    """Фоновая задача - тикает раз в WEATHER_UPDATE_INTERVAL_MINUTES (по
+    прямой просьбе пользователя, 21.09.2026, после инцидента с 429 от
+    Open-Meteo) и на каждом тике вызывает update_weather_data(), которая уже
+    сама решает по КАЖДОМУ ГОРОДУ ОТДЕЛЬНО, нужен ли ему живой запрос прямо
+    сейчас - см. _city_is_night/WEATHER_UPDATE_INTERVAL_MINUTES_NIGHT выше
+    (ночью по местному времени конкретного города опрашивается реже).
+    Запускается сразу при старте бота, НО ТОЛЬКО если снепшот реально
+    устарел - тот же принцип защиты от лишних запросов при частых
+    редеплоях, что у airports_data_updater/trains_data_updater (см. их
+    комментарии, инцидент 19.09.2026)."""
     MIN_FRESH_AGE_MINUTES = 5  # меньше половины даже дневного WEATHER_UPDATE_INTERVAL_MINUTES (10мин) - см. её комментарий
     while True:
         age_min = _data_file_age_minutes(WEATHER_DATA_FILE)
@@ -18520,13 +18569,11 @@ async def weather_data_updater():
             await asyncio.sleep(remaining_min * 60 + 30)
             continue
         try:
-            logger.info("🔄 Обновляю weather_data.json из WeatherAPI (все города)...")
+            logger.info("🔄 Проверяю погоду по городам (WeatherAPI, у каждого свой интервал день/ночь)...")
             await update_weather_data()
         except Exception as e:
             logger.error(f"❌ Ошибка фонового обновления weather_data.json: {e}")
-        interval_min = _current_weather_update_interval_minutes()
-        logger.info(f"💤 Следующее обновление погоды через {interval_min}мин ({'ночной' if interval_min == WEATHER_UPDATE_INTERVAL_MINUTES_NIGHT else 'дневной'} режим)")
-        await asyncio.sleep(interval_min * 60)
+        await asyncio.sleep(WEATHER_UPDATE_INTERVAL_MINUTES * 60)
 
 def _current_hour_index(forecast, city):
     """ИСПРАВЛЕНО 23.09.2026 (жалоба пользователя - "идёт дождь, а бот
