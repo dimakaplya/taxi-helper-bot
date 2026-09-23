@@ -259,7 +259,17 @@ RAIN_CITY_COORDS = {
     'krasnodar': (45.025, 38.975),
     'sochi': (43.540, 39.800),
 }
-OPEN_METEO_URL = 'https://api.open-meteo.com/v1/forecast'
+# ЗАМЕНЕНО 23.09.2026 (прямая просьба пользователя - сравнил прогноз бота с
+# другими источниками для нескольких городов, расхождения показались ему
+# слишком большими, попросил попробовать WeatherAPI.com вместо Open-Meteo).
+# WeatherAPI.com: бесплатный тариф 100K запросов/месяц, разрешено
+# коммерческое использование (в отличие от Open-Meteo, где бесплатно только
+# некоммерческое), почасовой прогноз на 3 дня вперёд - с запасом хватает на
+# RAIN_FORECAST_HOURS=12. Нужен персональный ключ в переменной окружения
+# WEATHERAPI_KEY (регистрация на https://www.weatherapi.com/ - пользователь
+# получает ключ сам, я не создаю аккаунты).
+WEATHERAPI_URL = 'https://api.weatherapi.com/v1/forecast.json'
+WEATHERAPI_KEY = os.getenv('WEATHERAPI_KEY')
 # Как часто ПЕРЕСЧИТЫВАЕМ решение "нужен ли пуш" по уже загруженному
 # снепшоту (см. rain_checker/check_rain_transitions ниже) - НЕ то же самое,
 # что частота живых запросов к Open-Meteo (та теперь отдельно, раз в
@@ -327,6 +337,104 @@ PRECIP_WEATHERCODES = {code for code, (_, weight, _) in WEATHERCODE_INFO.items()
 
 def describe_weathercode(code):
     return WEATHERCODE_INFO.get(code, ('осадки', 1, '🌧'))
+
+# Коды состояния погоды WeatherAPI.com (condition.code, см. weather_conditions.json
+# в их документации) -> ближайший WMO weathercode (ключи WEATHERCODE_INFO выше).
+# ВЕСЬ остальной код бота (описания, эмодзи, PRECIP_WEATHERCODES, шкала
+# интенсивности WEATHERCODE_TO_INTENSITY, весь JS в WebApp) продолжает
+# работать с кодами WMO - эта таблица нужна ТОЛЬКО в момент конвертации
+# ответа WeatherAPI внутри fetch_rain_forecast, дальше в системе живут
+# только WMO-коды, как и раньше с Open-Meteo.
+WEATHERAPI_CODE_TO_WMO = {
+    1000: 0,   # Sunny/Clear -> ясно
+    1003: 1,   # Partly cloudy -> малооблачно
+    1006: 2,   # Cloudy -> облачно с прояснениями
+    1009: 3,   # Overcast -> пасмурно
+    1012: 45, 1015: 45, 1018: 45, 1021: 45, 1024: 45, 1027: 45,  # дымка/пыль/песчаная буря -> туман
+    1030: 45,  # Mist -> туман
+    1033: 45, 1036: 45, 1039: 45, 1042: 45, 1045: 45, 1048: 45,  # дым/смог/пыль -> туман
+    1063: 51,  # Patchy rain possible -> морось слабая
+    1066: 71,  # Patchy snow possible -> снег слабый
+    1069: 56,  # Patchy sleet possible -> ледяная морось слабая
+    1072: 56,  # Patchy freezing drizzle possible -> ледяная морось слабая
+    1087: 95,  # Thundery outbreaks possible -> гроза
+    1114: 85,  # Blowing snow -> снежный заряд слабый
+    1117: 86,  # Blizzard -> снежный заряд сильный
+    1135: 45,  # Fog -> туман
+    1147: 48,  # Freezing fog -> изморозь
+    1150: 51, 1153: 51,  # Patchy/light drizzle -> морось слабая
+    1168: 56,  # Freezing drizzle -> ледяная морось слабая
+    1171: 57,  # Heavy freezing drizzle -> ледяная морось сильная
+    1180: 61, 1183: 61,  # Patchy/light rain -> дождь слабый
+    1186: 63, 1189: 63,  # Moderate rain -> дождь
+    1192: 65, 1195: 65,  # Heavy rain -> сильный дождь
+    1198: 66,  # Light freezing rain -> ледяной дождь слабый
+    1201: 67,  # Moderate or heavy freezing rain -> ледяной дождь сильный
+    1204: 66,  # Light sleet -> ледяной дождь слабый
+    1207: 67,  # Moderate or heavy sleet -> ледяной дождь сильный
+    1210: 71, 1213: 71,  # Patchy/light snow -> снег слабый
+    1216: 73, 1219: 73,  # Moderate snow -> снег
+    1222: 75, 1225: 75,  # Heavy snow -> сильный снегопад
+    1237: 77,  # Ice pellets -> снежная крупа
+    1240: 80,  # Light rain shower -> ливень слабый
+    1243: 81,  # Moderate or heavy rain shower -> ливень
+    1246: 82,  # Torrential rain shower -> сильный ливень
+    1249: 80,  # Light sleet showers -> ливень слабый
+    1252: 81,  # Moderate or heavy sleet showers -> ливень
+    1255: 85,  # Light snow showers -> снежный заряд слабый
+    1258: 86,  # Moderate or heavy snow showers -> снежный заряд сильный
+    1261: 77, 1264: 77,  # ice pellet showers -> снежная крупа
+    1273: 95, 1279: 95,  # Patchy rain/snow with thunder -> гроза
+    1276: 96, 1282: 96,  # Moderate or heavy rain/snow with thunder -> гроза с градом слабая
+}
+
+def _weatherapi_code_to_wmo(code):
+    """Неизвестный/новый код WeatherAPI -> 3 (пасмурно) как безопасный
+    нейтральный дефолт, а не 0 (ясно) - чтобы не занижать вероятность
+    осадков молча."""
+    return WEATHERAPI_CODE_TO_WMO.get(code, 3)
+
+def _convert_weatherapi_response(raw):
+    """Конвертирует сырой ответ WeatherAPI forecast.json в тот же формат
+    (current/hourly с WMO weathercode), который раньше отдавал Open-Meteo -
+    см. комментарий в fetch_rain_forecast. Благодаря этому весь остальной
+    код (get_cached_weather_forecast и все её читатели: find_upcoming_precip_event,
+    describe_weathercode, весь JS в weather_webapp_html и т.д.) продолжает
+    работать без единого изменения - переехал только сам fetch."""
+    try:
+        cur = raw['current']
+        cur_time = (cur.get('last_updated') or '').replace(' ', 'T', 1) or None
+        current = {
+            'time': cur_time,
+            'weathercode': _weatherapi_code_to_wmo((cur.get('condition') or {}).get('code')),
+            'temperature_2m': cur.get('temp_c'),
+            'windspeed_10m': cur.get('wind_kph'),
+            'winddirection_10m': cur.get('wind_degree'),
+            'surface_pressure': cur.get('pressure_mb'),
+            'precipitation': cur.get('precip_mm'),
+        }
+        all_hours = []
+        for day in (raw.get('forecast') or {}).get('forecastday') or []:
+            all_hours.extend(day.get('hour') or [])
+        now_epoch = cur.get('last_updated_epoch') or 0
+        # WeatherAPI отдаёт ВСЕ 24 часа каждых суток (включая уже прошедшие
+        # сегодня) - берём только часы от текущего момента и дальше, на
+        # RAIN_FORECAST_HOURS вперёд (days=2 в запросе гарантирует, что для
+        # этого хватит часов даже поздним вечером, за счёт завтрашних суток).
+        upcoming = [h for h in all_hours if (h.get('time_epoch') or 0) >= now_epoch][:RAIN_FORECAST_HOURS]
+        hourly = {
+            'time': [(h.get('time') or '').replace(' ', 'T', 1) for h in upcoming],
+            'weathercode': [_weatherapi_code_to_wmo((h.get('condition') or {}).get('code')) for h in upcoming],
+            'temperature_2m': [h.get('temp_c') for h in upcoming],
+            'windspeed_10m': [h.get('wind_kph') for h in upcoming],
+            'winddirection_10m': [h.get('wind_degree') for h in upcoming],
+            'surface_pressure': [h.get('pressure_mb') for h in upcoming],
+            'precipitation': [h.get('precip_mm') for h in upcoming],
+        }
+        return {'current': current, 'hourly': hourly}
+    except Exception as e:
+        logger.warning(f"⚠️ Не удалось разобрать ответ WeatherAPI: {e}")
+        return None
 
 # Влияние осадков на спрос по 10-балльной шкале, присланное пользователем
 # 22.09.2026 - ДВЕ РАЗНЫЕ шкалы: у Ultima (Business/Premier/Élite/Cruise)
@@ -18233,75 +18341,71 @@ def format_queue_breakdown(city, icao, category, zone_key=None):
 
 async def fetch_rain_forecast(city):
     """Почасовой прогноз (weathercode, температура) на RAIN_FORECAST_HOURS
-    часов вперёд по городу через Open-Meteo - СЫРОЙ live-запрос к API.
+    часов вперёд по городу через WeatherAPI.com - СЫРОЙ live-запрос к API.
+
+    ЗАМЕНЕНО 23.09.2026 (прямая просьба пользователя - сравнил прогноз бота
+    с другими источниками, расхождения показались слишком большими, попросил
+    попробовать WeatherAPI вместо Open-Meteo). Возвращаемый формат НАМЕРЕННО
+    оставлен таким же, каким был у Open-Meteo (current/hourly с WMO
+    weathercode) - см. _convert_weatherapi_response выше, конвертирующую
+    ответ WeatherAPI в этот же shape, чтобы весь остальной код (кэш
+    get_cached_weather_forecast и все её читатели) не пришлось трогать.
 
     ИЗМЕНЕНО 21.09.2026 (пользователь - "раз в час собирал инфу... чтобы не
-    нагружать лимиты", после инцидента с "Open-Meteo вернул 429"): раньше эта
-    функция вызывалась НАПРЯМУЮ из каждого места, которому нужна погода
-    (кнопка "🌤 ПОГОДА", "Куда ехать", утреннее приветствие, проверка на
-    дождь) - то есть живой запрос к API на каждое действие пользователя.
-    Теперь единственный вызывающий - weather_data_updater() (фоновая задача
-    ниже), раз в WEATHER_UPDATE_INTERVAL_MINUTES по всем городам разом.
-    Всё остальное читает уже готовый снепшот через get_cached_weather_forecast()
-    ниже, не дёргая API вообще. Retry на 429 оставлен - полезен, даже когда
-    вызовов раз в час, а не при каждом клике."""
+    нагружать лимиты", после инцидента с "Open-Meteo вернул 429"): эта
+    функция вызывается НАПРЯМУЮ только из weather_data_updater() (фоновая
+    задача ниже), раз в WEATHER_UPDATE_INTERVAL_MINUTES по всем городам
+    разом. Всё остальное читает уже готовый снепшот через
+    get_cached_weather_forecast() ниже, не дёргая API вообще. Retry на 429
+    оставлен - полезен, даже когда вызовов раз в 20 минут, а не при каждом
+    клике."""
+    if not WEATHERAPI_KEY:
+        logger.warning("⚠️ WEATHERAPI_KEY не задан в переменных окружения - погода недоступна")
+        return None
     coords = RAIN_CITY_COORDS.get(city)
     if not coords:
         return None
     lat, lon = coords
     params = {
-        'latitude': lat,
-        'longitude': lon,
-        # РАСШИРЕНО 22.09.2026 (прямая просьба пользователя - "не только
-        # температуру и осадки а ещё и силу ветра направления ветра давление") -
-        # добавлены windspeed_10m/winddirection_10m (сила и направление ветра),
-        # surface_pressure (атмосферное давление) и precipitation (осадки в мм,
-        # раньше был только weathercode - тип осадков без количества) и в
-        # current, и в hourly. Дата/время текущего момента в само API не
-        # входят - берутся из forecast['current']['time'] (Open-Meteo отдаёт
-        # его всегда с timezone=auto) на стороне клиента (JS)/format-функции.
-        'current': 'weathercode,temperature_2m,windspeed_10m,winddirection_10m,surface_pressure,precipitation',
-        'hourly': 'weathercode,temperature_2m,windspeed_10m,winddirection_10m,surface_pressure,precipitation',
-        'forecast_hours': RAIN_FORECAST_HOURS,
-        'timezone': 'auto',
+        'key': WEATHERAPI_KEY,
+        'q': f'{lat},{lon}',
+        # days=2 (сегодня+завтра), а не 1 - иначе почасовой прогноз "на
+        # RAIN_FORECAST_HOURS часов вперёд" обрывался бы на границе суток
+        # поздним вечером (WeatherAPI отдаёт часы только В ПРЕДЕЛАХ каждых
+        # суток отдельным массивом на день, см. _convert_weatherapi_response).
+        'days': 2,
+        'aqi': 'no',
+        'alerts': 'no',
     }
     RETRY_ATTEMPTS = 3
     # ИСПРАВЛЕНО 23.09.2026 (жалоба пользователя - реальная погода в
     # Краснодаре была "дождь", а бот показывал "пасмурно, осадков нет" -
-    # т.е. явно устаревшие данные хотя бы для одного города): раньше
-    # retry-логика реально повторяла запрос ТОЛЬКО при HTTP 429 - любая
-    # другая ошибка (таймаут, обрыв соединения, 500/502/503 от Open-Meteo)
-    # сразу делала `return None` НЕСМОТРЯ на то, что сам цикл `for attempt
-    # in range(1, RETRY_ATTEMPTS+1)` выглядел так, будто повторяет попытки
-    # при любой ошибке. На практике это значило: один случайный сетевой сбой
-    # для конкретного города (например Краснодар, 11-й из 12 в очереди,
-    # см. RAIN_CITY_COORDS) - и update_weather_data() молча откатывался на
-    # ПРОШЛЫЙ снепшот для него (см. её комментарий ниже "оставляю прошлый
-    # снепшот"), без единой повторной попытки внутри самого цикла retry.
-    # Теперь любая ошибка (кроме успешных 200) реально уходит на следующую
-    # попытку с тем же backoff, что был у 429, и лишь после ВСЕХ
+    # т.е. явно устаревшие данные хотя бы для одного города): retry-логика
+    # реально повторяет запрос при ЛЮБОЙ ошибке (не только HTTP 429) - тот
+    # же backoff (2.0 * attempt секунд), что был у 429, и лишь после ВСЕХ
     # RETRY_ATTEMPTS попыток возвращает None.
     for attempt in range(1, RETRY_ATTEMPTS + 1):
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.get(OPEN_METEO_URL, params=params, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                async with session.get(WEATHERAPI_URL, params=params, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                     if resp.status == 200:
-                        return await resp.json()
+                        raw = await resp.json()
+                        return _convert_weatherapi_response(raw)
                     label = "429" if resp.status == 429 else str(resp.status)
                     if attempt < RETRY_ATTEMPTS:
                         wait_s = 2.0 * attempt
-                        logger.warning(f"⏳ Open-Meteo вернул {label} для {city}, попытка {attempt}/{RETRY_ATTEMPTS} - жду {wait_s}с...")
+                        logger.warning(f"⏳ WeatherAPI вернул {label} для {city}, попытка {attempt}/{RETRY_ATTEMPTS} - жду {wait_s}с...")
                         await asyncio.sleep(wait_s)
                         continue
-                    logger.warning(f"⚠️ Open-Meteo вернул {label} для города {city} - исчерпаны все {RETRY_ATTEMPTS} попыток")
+                    logger.warning(f"⚠️ WeatherAPI вернул {label} для города {city} - исчерпаны все {RETRY_ATTEMPTS} попыток")
                     return None
         except Exception as e:
             if attempt < RETRY_ATTEMPTS:
                 wait_s = 2.0 * attempt
-                logger.warning(f"⏳ Ошибка запроса к Open-Meteo для {city} ({e}), попытка {attempt}/{RETRY_ATTEMPTS} - жду {wait_s}с...")
+                logger.warning(f"⏳ Ошибка запроса к WeatherAPI для {city} ({e}), попытка {attempt}/{RETRY_ATTEMPTS} - жду {wait_s}с...")
                 await asyncio.sleep(wait_s)
                 continue
-            logger.warning(f"⚠️ Не удалось получить прогноз Open-Meteo для {city} - исчерпаны все {RETRY_ATTEMPTS} попыток ({e})")
+            logger.warning(f"⚠️ Не удалось получить прогноз WeatherAPI для {city} - исчерпаны все {RETRY_ATTEMPTS} попыток ({e})")
             return None
     return None
 
