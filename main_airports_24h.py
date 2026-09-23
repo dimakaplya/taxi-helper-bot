@@ -23834,28 +23834,36 @@ def referral_menu_keyboard(referral_link, current_type=REFERRAL_DEFAULT_TYPE, us
     # ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя - "по кнопке юрлицо
     # его надо с большими буквами сделать ЮРЛИЦО") - заглавные буквы.
     legal_label = ("✅ " if current_type == 'legal_entity' else "") + "🏢 ЮРЛИЦО"
+    # ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя - "убери личный
+    # кабинет в кнопку юрлицо"): раньше "🏛 ЛИЧНЫЙ КАБИНЕТ ЮРЛИЦА" была
+    # ОТДЕЛЬНОЙ строкой под "🏢 ЮРЛИЦО" - теперь это ОДНА кнопка. Если
+    # человек уже владеет кабинетом (get_legal_entity_owned_by) И у него
+    # активна платная подписка юрлица (is_legal_entity_referral_subscription_
+    # active) - сама кнопка "ЮРЛИЦО" становится web_app-ссылкой на кабинет
+    # (открывает сразу, без лишнего тапа). Иначе - как раньше, callback на
+    # referral_category_legal_start (пароль компании/оплата подписки) - у
+    # web_app-кнопки нет серверного колбэка, так что кнопку НЕЛЬЗЯ сделать
+    # web_app, если подписка вдруг ещё не оплачена (иначе платный кабинет
+    # открывался бы в обход paywall) - проверка обязательна ДО переключения
+    # в web_app-режим.
+    owned_entity = get_legal_entity_owned_by(user_id) if user_id is not None else None
+    if owned_entity and PUBLIC_URL and is_legal_entity_referral_subscription_active(user_id):
+        cabinet_url = f"{PUBLIC_URL}{LEGAL_CABINET_WEBAPP_PATH}"
+        legal_button = InlineKeyboardButton(text=legal_label, web_app=WebAppInfo(url=cabinet_url))
+    else:
+        legal_button = InlineKeyboardButton(text=legal_label, callback_data="referral_category_legal_start")
     rows = [
         [InlineKeyboardButton(text=individual_label, callback_data="referral_category_individual")],
-        [InlineKeyboardButton(text=legal_label, callback_data="referral_category_legal_start")],
+        [legal_button],
     ]
-    # ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "там ещё будет
-    # кнопка Личный кабинет заходя в эту кнопку они попадают в Telegram
-    # приложения") - кнопка видна ТОЛЬКО владельцу конкретного юр.лица
-    # (первому, кто ввёл его пароль - см. claim_legal_entity_ownership),
-    # а не всем, у кого просто включена схема 'legal_entity'.
-    if user_id is not None and PUBLIC_URL:
-        owned_entity = get_legal_entity_owned_by(user_id)
-        if owned_entity:
-            cabinet_url = f"{PUBLIC_URL}{LEGAL_CABINET_WEBAPP_PATH}"
-            rows.append([InlineKeyboardButton(text="🏛 ЛИЧНЫЙ КАБИНЕТ ЮРЛИЦА", web_app=WebAppInfo(url=cabinet_url))])
-            # ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "там
-            # появляется кнопка внутри личный кабинет и подписка") - кнопка
-            # статуса/продления платной подписки юрлица (см.
-            # send_legal_entity_referral_paywall). У схемы 'admin' (Фантом)
-            # своя бесплатная подписка (SUBSCRIPTION_GROUP_TAXI_ULTIMA/
-            # COURIER_CARGO через grant_free_month) - эта кнопка ей не нужна.
-            if current_type == 'legal_entity':
-                rows.append([InlineKeyboardButton(text="💳 ПОДПИСКА ЮРЛИЦА", callback_data="legal_entity_sub_status")])
+    # ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "там появляется
+    # кнопка внутри личный кабинет и подписка") - кнопка статуса/продления
+    # платной подписки юрлица (см. send_legal_entity_referral_paywall). У
+    # схемы 'admin' (Фантом) своя бесплатная подписка (SUBSCRIPTION_GROUP_
+    # TAXI_ULTIMA/COURIER_CARGO через grant_free_month) - эта кнопка ей не
+    # нужна.
+    if owned_entity and current_type == 'legal_entity':
+        rows.append([InlineKeyboardButton(text="💳 ПОДПИСКА ЮРЛИЦА", callback_data="legal_entity_sub_status")])
     rows += [
         [InlineKeyboardButton(text="🔗 МОЯ ССЫЛКА", callback_data="referral_link_show")],
         # "📱 QR-КОД ССЫЛКИ" - по прямой просьбе пользователя (22.09.2026,
