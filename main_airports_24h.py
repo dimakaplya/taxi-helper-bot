@@ -10343,10 +10343,10 @@ def map_webapp_html():
     </div>
   </div>
   <div class="layer-toggle-btn" id="trafficToggleBtn">🚦 Пробки</div>
-  <!-- ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - фильтр карты "свои
-       водители/все" для владельца кабинета юрлица) - скрыта по умолчанию,
-       показывается только если /map/my_profile отдал is_legal_entity_owner
-       (см. loadMyProfile ниже). -->
+  <!-- ИЗМЕНЕНО 23.09.2026 (фильтр карты "свои водители/все") - скрыта по
+       умолчанию, показывается любому, у кого get_referrer_type ==
+       'legal_entity' (см. is_legal_entity_referrer/loadMyProfile ниже),
+       не только владельцу кабинета. -->
   <div class="layer-toggle-btn" id="mineToggleBtn" style="display:none">👥 Все</div>
 </div>
 <script>
@@ -10646,11 +10646,11 @@ def map_webapp_html():
       if (!resp.ok) return;
       const data = await resp.json();
       myShiftActive = !!data.shift_active;
-      // ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - фильтр карты
-      // "свои водители/все") - показываем кнопку-переключатель только
-      // владельцу кабинета юрлица (см. is_legal_entity_owner в
+      // ИЗМЕНЕНО 23.09.2026 (прямое уточнение пользователя - кнопка видна
+      // любому с подтверждённой схемой юрлица в реферальной системе, а не
+      // только владельцу кабинета - см. is_legal_entity_referrer в
       // handle_map_my_profile_api), остальным она вообще не видна.
-      if (data.is_legal_entity_owner && mineToggleBtn) {{
+      if (data.is_legal_entity_referrer && mineToggleBtn) {{
         mineToggleBtn.style.display = '';
       }}
       if (!myShiftActive && selfMarker) {{
@@ -12968,18 +12968,20 @@ async def handle_map_positions_api(request):
                 exclude_user_id = requester_user_id
             except Exception:
                 exclude_user_id = None
-    # ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "у юрлиц появляется
-    # возможность на карте поставить фильтр свои водители и отслеживать либо
-    # своих водителей либо всех водителей") - ?mine=1 работает ТОЛЬКО для
-    # владельца юр.лица (проверяем через get_legal_entity_owned_by), для
-    # остальных запрос просто игнорирует параметр и отдаёт карту как обычно.
+    # ИЗМЕНЕНО 23.09.2026 (прямое уточнение пользователя - виден/работает
+    # тумблер "свои/все" у ЛЮБОГО с подтверждённой схемой юрлица в
+    # реферальной системе, get_referrer_type == 'legal_entity', а НЕ только
+    # у владельца конкретного кабинета legal_entities - см. тот же принцип
+    # в handle_map_my_profile_api/is_legal_entity_referrer). "Свои водители" -
+    # его собственная реферальная ветка (get_referral_downline_user_ids),
+    # для остальных запрос просто игнорирует параметр.
     only_user_ids = None
     if request.query.get('mine') == '1' and requester_user_id:
         try:
-            owned_entity = await asyncio.to_thread(get_legal_entity_owned_by, requester_user_id)
+            is_legal_entity_referrer = await asyncio.to_thread(get_referrer_type, requester_user_id) == 'legal_entity'
         except Exception:
-            owned_entity = None
-        if owned_entity:
+            is_legal_entity_referrer = False
+        if is_legal_entity_referrer:
             try:
                 only_user_ids = await asyncio.to_thread(get_referral_downline_user_ids, requester_user_id)
             except Exception:
@@ -13038,15 +13040,18 @@ async def handle_map_my_profile_api(request):
         shift_active = is_shift_active(user_state.get(user_id) or {})
     except Exception:
         shift_active = False
-    # ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - фильтр карты "свои
-    # водители/все" для владельца кабинета юрлица) - отдаём признак владения,
-    # чтобы клиент показал переключатель ТОЛЬКО таким пользователям (см.
-    # только_user_ids в handle_map_positions_api и toggle в map_webapp_html).
+    # ИЗМЕНЕНО 23.09.2026 (прямое уточнение пользователя - "тумблер свои/все
+    # виден только тогда, когда подтверждена схема юрлица в реферальной
+    # системе", а НЕ только у владельца кабинета) - раньше проверялось
+    # владение конкретным legal_entities (get_legal_entity_owned_by), теперь
+    # смотрим на сам переключатель схемы начислений (см. get_referrer_type/
+    # referral_category_legal_start) - виден любому, у кого referrer_type ==
+    # 'legal_entity', даже если он ещё не входил в кабинет ни разу.
     try:
-        is_legal_entity_owner = bool(get_legal_entity_owned_by(user_id))
+        is_legal_entity_referrer = get_referrer_type(user_id) == 'legal_entity'
     except Exception:
-        is_legal_entity_owner = False
-    return web.json_response({'profile': profile, 'shift_active': shift_active, 'is_legal_entity_owner': is_legal_entity_owner})
+        is_legal_entity_referrer = False
+    return web.json_response({'profile': profile, 'shift_active': shift_active, 'is_legal_entity_referrer': is_legal_entity_referrer})
 
 async def handle_map_airports_api(request):
     """JSON API для меток аэропортов на карте (по просьбе пользователя,
