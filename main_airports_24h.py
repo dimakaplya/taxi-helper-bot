@@ -8257,7 +8257,36 @@ def _where_to_go_score_bar(score):
 
 WHERE_TO_GO_DIVIDER = "┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄"
 
-def where_to_go_keyboard(candidates):
+def where_to_go_button_target(city, c):
+    """Куда именно ведёт кнопка "🚗 Поехали" для одного кандидата "Куда
+    ехать" - ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя: "кнопка
+    поехали в куда поехали всегда вела если это аэропорт или жд в точку
+    аэропорта или жд а если это районы то ближайщая бесплатная парковка из
+    нашей базы"). Аэропорт/вокзал/"Центр"/событие афиши - это уже
+    конкретная точка (терминал, вокзал, реальный центр, адрес площадки),
+    кнопка ведёт прямо туда, как и раньше. "Район" (kind == 'district') -
+    это ЦЕЛАЯ территория, а не одна точка, ехать буквально "в район"
+    некуда - поэтому кнопка ведёт на ближайшую к его центру бесплатную
+    парковку из нашей базы (см. NEARBY_SERVICES['parking']/
+    nearest_nearby_points), а не на условный центр района. Если рядом с
+    районом бесплатных парковок в базе нет (город/район ещё не покрыт
+    сбором, см. fetch_parking_data.py) - откатываемся на прежнее поведение
+    (координаты самого района), чтобы кнопка не пропадала вовсе.
+    Возвращает (lat, lon) или (None, None)."""
+    lat, lon = c.get('lat'), c.get('lon')
+    if lat is None or lon is None:
+        return None, None
+    if c.get('kind') == 'district':
+        try:
+            nearest = nearest_nearby_points('parking', city, lat, lon, count=1)
+        except Exception:
+            nearest = None
+        if nearest:
+            _dist_km, point = nearest[0]
+            return point.get('lat', lat), point.get('lon', lon)
+    return lat, lon
+
+def where_to_go_keyboard(city, candidates):
     """Инлайн-кнопки "🚗 ПОЕХАЛИ" под текстовой сводкой "Куда ехать" -
     ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "аэропорты и
     районы помечай кнопкой поехали чтобы переводила на Яндекс.Навигатор").
@@ -8267,7 +8296,11 @@ def where_to_go_keyboard(candidates):
     места + районы из блока "Рекомендуемые районы" (без повтора кнопки,
     если район уже был в топ-3). По одной кнопке на кандидата с известными
     координатами (у части концертных событий координат может не быть,
-    см. fetch_concert_events.py - для них кнопки просто не будет)."""
+    см. fetch_concert_events.py - для них кнопки просто не будет).
+    ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя) - принимает city
+    и определяет реальную точку назначения кнопки через
+    where_to_go_button_target (аэропорт/вокзал - в свою точку, район -
+    в ближайшую бесплатную парковку)."""
     open_candidates = [c for c in candidates if not c['closed']]
     podium = open_candidates[:3]
     district_candidates = [c for c in open_candidates if c.get('kind') == 'district' and c.get('dist_km') is not None]
@@ -8280,8 +8313,8 @@ def where_to_go_keyboard(candidates):
 
     rows = []
     for i, c in enumerate(shown):
-        lat, lon = c.get('lat'), c.get('lon')
-        if lat is None or lon is None:
+        target_lat, target_lon = where_to_go_button_target(city, c)
+        if target_lat is None or target_lon is None:
             continue
         if i == 0:
             rank = '🏆'
@@ -8292,7 +8325,7 @@ def where_to_go_keyboard(candidates):
         label = c['label']
         if len(label) > 26:
             label = label[:25] + "…"
-        rows.append([InlineKeyboardButton(text=f"🚗 {rank} Поехали — {label}", url=yandex_navi_url(lat, lon))])
+        rows.append([InlineKeyboardButton(text=f"🚗 {rank} Поехали — {label}", url=yandex_navi_url(target_lat, target_lon))])
     return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
 
 def format_where_to_go_text(city, category, candidates, extra_header=None):
@@ -8468,7 +8501,7 @@ async def send_where_to_go(message: types.Message, user_id, city, category, extr
         # ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя) - кнопки "🚗
         # ПОЕХАЛИ" на маршрут в Яндекс Навигаторе/Картах под каждым открытым
         # кандидатом с известными координатами (см. where_to_go_keyboard).
-        keyboard = where_to_go_keyboard(candidates)
+        keyboard = where_to_go_keyboard(city, candidates)
         try:
             await status_msg.edit_text(text, parse_mode='Markdown', reply_markup=keyboard)
         except Exception:
@@ -13258,8 +13291,16 @@ def where_to_go_webapp_html():
   // если оно установлено. Без координат (часть концертных событий без
   // геокодированного адреса) кнопки просто не будет.
   function renderGoButton(c) {
-    if (c.lat === null || c.lat === undefined || c.lon === null || c.lon === undefined) return '';
-    const url = 'https://yandex.ru/maps/?rtext=~' + c.lat + ',' + c.lon + '&rtt=auto';
+    // ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя) - ведём по
+    // nav_lat/nav_lon (реальная точка назначения - см. _pack/
+    // where_to_go_button_target в Python: аэропорт/вокзал/центр/событие -
+    // своя точка, район - ближайшая бесплатная парковка), с откатом на
+    // lat/lon для обратной совместимости, если по какой-то причине
+    // nav_lat/nav_lon не пришли.
+    const navLat = (c.nav_lat === null || c.nav_lat === undefined) ? c.lat : c.nav_lat;
+    const navLon = (c.nav_lon === null || c.nav_lon === undefined) ? c.lon : c.nav_lon;
+    if (navLat === null || navLat === undefined || navLon === null || navLon === undefined) return '';
+    const url = 'https://yandex.ru/maps/?rtext=~' + navLat + ',' + navLon + '&rtt=auto';
     return '<a class="go-btn" href="' + url + '" target="_blank" rel="noopener">🚗 ПОЕХАЛИ</a>';
   }
 
@@ -13589,9 +13630,19 @@ async def handle_where_to_go_data_api(request):
     airports_summary = build_airports_status_summary(city, category)
 
     def _pack(c):
+        # ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "кнопка
+        # поехали... если это аэропорт или жд в точку аэропорта или жд а
+        # если это районы то ближайшая бесплатная парковка из нашей базы") -
+        # nav_lat/nav_lon - РЕАЛЬНАЯ точка назначения кнопки "🚗 ПОЕХАЛИ" в
+        # WebApp (см. where_to_go_button_target/renderGoButton ниже),
+        # ОТДЕЛЬНО от lat/lon (которые остаются координатами самого
+        # кандидата - используются для расстояния/ETA и для маркера, если
+        # он когда-нибудь понадобится на карте).
+        nav_lat, nav_lon = where_to_go_button_target(city, c)
         return {
             'label': c['label'], 'score': c['score'], 'reasons': c['reasons'], 'advice': c.get('advice'),
             'lat': c.get('lat'), 'lon': c.get('lon'),
+            'nav_lat': nav_lat, 'nav_lon': nav_lon,
         }
 
     # ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя - "рекомендации на
