@@ -10794,7 +10794,17 @@ def map_webapp_html():
         // highDemandBlobOpacity/seedFromString/demandCloudTimeBucket/
         // CLOUD_SHAPE_PROFILES/blobLatLngs вынесены на уровень скрипта (см.
         // комментарий там же) - теперь общие для аэропортов и вокзалов.
-        if (a.load !== null && a.load !== undefined && a.load > HIGH_DEMAND_LOAD_THRESHOLD) {{
+        // ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя - "облако спроса
+        // от аэропорта оставлять только над ним, а спутников убрать... и
+        // ещё ночью с 12 до 6 утра спроса не показывать"): убраны
+        // облака-спутники (раньше здесь было 2-3 доп. облака поменьше рядом
+        // с основным, см. историю до 23.09.2026) - остаётся только ОДНО
+        // облако прямо над аэропортом. Плюс добавлена проверка
+        // a.demand_cloud_allowed (см. handle_map_airports_api) - облако не
+        // рисуется вообще, если по МЕСТНОМУ времени этого аэропорта сейчас
+        // ночь (00:00-06:00) - сам load (число загрузки на маркере)
+        // при этом продолжает показываться как обычно.
+        if (a.load !== null && a.load !== undefined && a.load > HIGH_DEMAND_LOAD_THRESHOLD && a.demand_cloud_allowed !== false) {{
           const cloudSeed = seedFromString(a.icao + '::' + demandCloudTimeBucket());
           const blob = L.polygon(blobLatLngs(a.lat, a.lon, HIGH_DEMAND_RADIUS_METERS, cloudSeed), {{
             color: '#9b30ff',
@@ -10805,28 +10815,6 @@ def map_webapp_html():
           }}).addTo(map);
           if (blob._path) {{ ensureCloudGrainFilter(); blob._path.style.filter = 'blur(30px)' + CLOUD_FILTER_SUFFIX; }}
           airportMarkers.push(blob);
-          // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - см. общий
-          // комментарий у SATELLITE_DISTANCE_BASE_METERS в loadDemandCloud) -
-          // 2-3 облака-спутника вполовину меньше основного, на расстоянии
-          // ~7 км от аэропорта, каждое своей формы/позиции, меняются вместе
-          // с основным раз в 5 минут (та же demandCloudTimeBucket() сидит
-          // внутри cloudSeed).
-          const satCount = satelliteCount(cloudSeed);
-          for (let s = 0; s < satCount; s++) {{
-            const satSeed = (cloudSeed * 97 + s * 311 + 1) % 100000;
-            const distM = SATELLITE_DISTANCE_BASE_METERS + (satSeed % SATELLITE_DISTANCE_SPREAD_METERS) - SATELLITE_DISTANCE_SPREAD_METERS / 2;
-            const angle = ((satSeed * 17) % 628) / 100;
-            const [satLat, satLon] = offsetLatLon(a.lat, a.lon, distM, angle);
-            const satBlob = L.polygon(blobLatLngs(satLat, satLon, HIGH_DEMAND_RADIUS_METERS / 2, satSeed), {{
-              color: '#9b30ff',
-              weight: 0,
-              fillColor: cloudFill('#9b30ff'),
-              fillOpacity: highDemandBlobOpacity(a.load) * 0.85,
-              smoothFactor: 3,
-            }}).addTo(map);
-            if (satBlob._path) {{ ensureCloudGrainFilter(); satBlob._path.style.filter = 'blur(24px)' + CLOUD_FILTER_SUFFIX; }}
-            airportMarkers.push(satBlob);
-          }}
         }}
         // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "полигон для
         // карты отображения"): контуры конкретных парковок зоны (см.
@@ -12732,6 +12720,20 @@ async def handle_map_airports_api(request):
                     entry['load'] = round(info['load'])
                 except Exception:
                     entry['load'] = None
+            # ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "облако
+            # спроса момент спроса от аэропорта оставлять только над ним, а
+            # спутников убрать... и ещё ночью с 12 до 6 утра спроса не
+            # показывать"): флаг для JS (см. loadAirports) - можно ли рисовать
+            # облако повышенного спроса над этим аэропортом ПРЯМО СЕЙЧАС, по
+            # ЕГО местному времени (AIRPORT_TIMEZONE), а не по времени
+            # сервера/водителя. Сам entry['load'] (число загрузки на маркере)
+            # ночью НЕ скрывается - гасится только рисование облака, это два
+            # независимых поля.
+            try:
+                airport_hour = datetime.now(ZoneInfo(AIRPORT_TIMEZONE.get(icao, 'Europe/Moscow'))).hour
+                entry['demand_cloud_allowed'] = not (0 <= airport_hour < 6)
+            except Exception:
+                entry['demand_cloud_allowed'] = True
             # ИСПРАВЛЕНО 20.09.2026 (жалоба пользователя - "тут надо разбить
             # на тарифы очереди, а не просто Ultima"): раньше очередь на
             # карте показывалась ОДНОЙ общей цифрой на всю категорию
