@@ -7819,13 +7819,14 @@ async def score_district_candidates(city, category, user_lat=None, user_lon=None
         # FLOOR_PERCENT применялся ко ВСЕМ районам одинаково, если дождь шёл
         # хоть где-то в городской точке замера. Теперь каждый район
         # проверяется по СВОЕМУ снепшоту (district_rain_now, см. блок
-        # "ПОГОДА ПО РАЙОНАМ МОСКВЫ" выше) - fallback на общегородской
+        # "ПОГОДА ПО РАЙОНАМ ГОРОДОВ" выше) - fallback на общегородской
         # rain_now, пока для района ещё не накопился собственный снепшот.
-        # ОБОБЩЕНО 23.09.2026 ("на оба города") - district_rain_now остаётся
-        # Москва-only подсистемой (коллизии имён районов между городами,
-        # см. get_district_demand выше), для Питера используем только
-        # общегородской rain_now.
-        district_raining = district_rain_now(name, fallback_rain_now=rain_now) if city == 'moscow' else rain_now
+        # ОБОБЩЕНО 23.09.2026 (прямая просьба пользователя - "погода так же
+        # тяни в Питере как и в Москве") - district_rain_now теперь сам
+        # принимает city composite-ключом, коллизии имён районов между
+        # городами больше не проблема - работает для любого города из
+        # DISTRICT_DEMAND_FILES, не только Москвы.
+        district_raining = district_rain_now(city, name, fallback_rain_now=rain_now)
         if district_raining:
             demand = max(demand, MAP_DEMAND_RAIN_FLOOR_PERCENT)
         dist_km = None
@@ -12925,7 +12926,12 @@ def weather_webapp_html():
     }
     try {
       let url = '""" + WEATHER_DATA_API_PATH + """?city=' + encodeURIComponent(city);
-      if (city === 'moscow') {
+      // ОБОБЩЕНО 23.09.2026 (прямая просьба пользователя - "погода так же
+      // тяни в Питере как и в Москве") - было city === 'moscow' буквально,
+      // теперь любой город с районными данными (см. DISTRICT_DEMAND_FILES
+      // в Python - этот список синхронизирован вручную оттуда).
+      const DISTRICT_WEATHER_CITIES = """ + json.dumps(list(DISTRICT_DEMAND_FILES.keys()), ensure_ascii=False) + """;
+      if (DISTRICT_WEATHER_CITIES.includes(city)) {
         const loc = await getDriverLocationOnce();
         if (loc) url += '&lat=' + loc.lat + '&lon=' + loc.lon;
       }
@@ -12996,31 +13002,36 @@ async def handle_weather_data_api(request):
 
     ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "привязать к текущей
     локации водителя"): необязательные query-параметры lat/lon - если город
-    'moscow' и координаты переданы, ищем ближайший из 30 районов Москвы
-    (find_nearest_moscow_district) и, если для него уже есть свой снепшот
-    погоды (get_cached_district_weather_forecast), отдаём ЕГО вместо
-    погоды по одной точке на весь город - точнее для конкретного места, где
-    сейчас находится водитель. В ответе тогда появляется 'district_name' -
-    клиент показывает его вместо/рядом с названием города (см. JS в
-    weather_webapp_html ниже). Если координат нет, город не Москва, район не
-    нашёлся или для него ещё нет своего снепшота (бот только что стартовал) -
-    молча используем прежнее поведение (погода по городу), без district_name -
-    ЭТО ФОЛБЭК, а не ошибка."""
+    входит в DISTRICT_DEMAND_FILES и координаты переданы, ищем ближайший
+    район города (find_nearest_district) и, если для него уже есть свой
+    снепшот погоды (get_cached_district_weather_forecast), отдаём ЕГО
+    вместо погоды по одной точке на весь город - точнее для конкретного
+    места, где сейчас находится водитель. В ответе тогда появляется
+    'district_name' - клиент показывает его вместо/рядом с названием
+    города (см. JS в weather_webapp_html ниже). Если координат нет, город
+    вне DISTRICT_DEMAND_FILES, район не нашёлся или для него ещё нет
+    своего снепшота (бот только что стартовал) - молча используем прежнее
+    поведение (погода по городу), без district_name - ЭТО ФОЛБЭК, а не
+    ошибка.
+
+    ОБОБЩЕНО 23.09.2026 (прямая просьба пользователя - "погода так же тяни
+    в Питере как и в Москве") - было city == 'moscow' буквально, теперь
+    любой город из DISTRICT_DEMAND_FILES."""
     city = request.query.get('city', '')
     if not city:
         return web.json_response({'error': 'no_city'}, status=400)
     district_name = None
     forecast = None
-    if city == 'moscow':
+    if city in DISTRICT_DEMAND_FILES:
         try:
             lat_raw = request.query.get('lat')
             lon_raw = request.query.get('lon')
             if lat_raw is not None and lon_raw is not None:
                 lat, lon = float(lat_raw), float(lon_raw)
-                nearest = find_nearest_moscow_district(lat, lon)
+                nearest = find_nearest_district(city, lat, lon)
                 if nearest:
                     candidate_name = nearest[0]
-                    district_forecast = get_cached_district_weather_forecast(candidate_name)
+                    district_forecast = get_cached_district_weather_forecast(city, candidate_name)
                     if district_forecast:
                         district_name = candidate_name
                         forecast = district_forecast
@@ -14024,14 +14035,15 @@ async def handle_map_demand_api(request):
 # загрузки такой же матрицы по Питеру) - было ЖЁСТКО Москва-only
 # (_MOSCOW_DISTRICT_DEMAND_PATH/get_moscow_district_demand), теперь словарь
 # файл-на-город плюс кэш-словарь по городу (get_district_demand(city)).
-# ВАЖНО: районная ПОГОДА (find_nearest_moscow_district/district_rain_now/
-# update_district_weather_data/check_district_rain_transitions ниже) НЕ
-# обобщена вместе с этим - осталась строго Москва-only, т.к. это отдельная
-# фоновая подсистема (свой файл-кэш снепшотов погоды по районам, ключ -
-# голое имя района) и у Москвы с Питером ЕСТЬ реальные коллизии имён района
-# (например "Красносельский" и "Московский" существуют в обоих городах,
-# разные координаты) - смешивать без композитного ключа (city, name)
-# небезопасно, это отдельная задача на будущее, если понадобится.
+# ЕЩЁ РАЗ ОБОБЩЕНО 23.09.2026 (прямая просьба пользователя - "погода так же
+# тяни в Питере как и в Москве") - районная ПОГОДА (find_nearest_district/
+# district_rain_now/update_district_weather_data/check_district_rain_
+# transitions ниже) изначально была оставлена строго Москва-only из-за
+# РЕАЛЬНЫХ коллизий имён района между городами (например "Красносельский"
+# и "Московский" существуют и в Москве, и в Питере, разные координаты) -
+# теперь обобщена тоже, но с составным ключом (city, name) везде в этой
+# подсистеме (файл district_weather_data.json, _district_last_fetched_at,
+# rain_state), см. _district_weather_key ниже.
 DISTRICT_DEMAND_FILES = {
     'moscow': 'moscow_district_demand.json',
     'spb': 'spb_district_demand.json',
@@ -14153,12 +14165,11 @@ async def handle_map_district_demand_api(request):
 
     ОБОБЩЕНО 23.09.2026 (прямая просьба пользователя - "на оба города") -
     было city != 'moscow', теперь любой город из DISTRICT_DEMAND_FILES
-    (сейчас Москва и Питер). ВАЖНО: district_rain_now ниже по-прежнему
-    вызывается ТОЛЬКО для city=='moscow' - районная погода осталась
-    Москва-only подсистемой (см. комментарий у get_district_demand выше),
-    и у некоторых имён районов есть реальные коллизии между городами
-    (например "Красносельский" существует и в Москве, и в Питере) - для
-    Питера используем только общегородской rain_now, без районного уточнения."""
+    (сейчас Москва и Питер). ЕЩЁ РАЗ ОБОБЩЕНО 23.09.2026 (прямая просьба
+    пользователя - "погода так же тяни в Питере как и в Москве") -
+    районная погода (district_rain_now) тоже обобщена на оба города, с
+    защитой от коллизий имён района между городами через составной ключ
+    (city, name) - см. _district_weather_key выше."""
     city = request.query.get('city', '')
     category = request.query.get('category', '') or None
     result = {'districts': []}
@@ -14193,10 +14204,10 @@ async def handle_map_district_demand_api(request):
             # ПРЯМО СЕЙЧАС, но базового значения на этот слот нет - облако
             # всё равно показываем на уровне MAP_DEMAND_RAIN_FLOOR_PERCENT,
             # а не пропускаем район вовсе.
-            # city=='moscow' guard - см. докстринг выше (коллизии имён
-            # районов между городами делают district_rain_now небезопасным
-            # для не-Москвы, пока у него нет композитного ключа (city, name)).
-            district_raining = district_rain_now(name, fallback_rain_now=rain_now) if city == 'moscow' else rain_now
+            # ОБОБЩЕНО 23.09.2026 (прямая просьба пользователя - "погода
+            # так же тяни в Питере") - district_rain_now теперь сам
+            # принимает city composite-ключом, работает для любого города.
+            district_raining = district_rain_now(city, name, fallback_rain_now=rain_now)
             if category == 'taxi':
                 # ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя - "эконом
                 # 60-70-80-90-100, комфорт 70-80-90-100, комфорт плюс
@@ -20467,7 +20478,7 @@ def format_queue_breakdown(city, icao, category, zone_key=None):
 
 async def fetch_rain_forecast_at(lat, lon, label):
     """Общая часть fetch_rain_forecast (ниже) и fetch_district_rain_forecast
-    (см. блок "ПОГОДА ПО РАЙОНАМ МОСКВЫ" ниже) - СЫРОЙ live-запрос к
+    (см. блок "ПОГОДА ПО РАЙОНАМ ГОРОДОВ" ниже) - СЫРОЙ live-запрос к
     WeatherAPI.com по произвольным координатам, с retry. label - только для
     логов (название города или "р-н <Название>"), в остальном функция не
     знает, город это или район.
@@ -20666,35 +20677,49 @@ async def update_weather_data():
         json.dump(result, f, ensure_ascii=False)
     logger.info(f"💾 weather_data.json обновлён (живьём опрошено {fetched_count}/{len(RAIN_CITY_COORDS)} городов, остальные ещё не пришло время или сеть не ответила)")
 
-# ==================== ПОГОДА ПО РАЙОНАМ МОСКВЫ ====================
+# ==================== ПОГОДА ПО РАЙОНАМ ГОРОДОВ ====================
 # ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "раздели данные погоды
 # на районы города, чтобы было более точное данные", затем уточнение -
 # "привязать к текущей локации водителя"). Пока ТОЛЬКО Москва (выбор
 # пользователя - "Только Москва (Рекомендую)", у остальных 11 городов нет
 # готовых координат районов). Источник координат - тот же
 # moscow_district_demand.json, что уже используется для облаков спроса на
-# карте (см. get_moscow_district_demand/MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES
-# выше) - у каждого из 30 районов уже есть lat/lon, отдельный список координат
+# карте (см. get_district_demand/MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES
+# выше) - у каждого района уже есть lat/lon, отдельный список координат
 # заводить не нужно. Тот же паттерн опроса/кэша, что у городов
 # (fetch_rain_forecast_at/update_weather_data/get_cached_weather_forecast
 # выше) - отдельный файл (не смешиваем с weather_data.json, чтобы не ломать
-# формат для существующих читателей 'cities'), отдельный троттлинг
-# день/ночь (используем _city_is_night('moscow') - все 30 районов в одном
-# часовом поясе Europe/Moscow, отдельный словарь по районам не нужен).
-MOSCOW_DISTRICT_WEATHER_DATA_FILE = os.path.join(DATA_DIR, 'moscow_district_weather_data.json')
+# формат для существующих читателей 'cities').
+#
+# ОБОБЩЕНО 23.09.2026 (прямая просьба пользователя - "погода так же тяни в
+# Питере как и в Москве") - была ЖЁСТКО Москва-only подсистема (единственный
+# аргумент district_name, ключ в файле/кэше - голое имя района). У Москвы и
+# Питера есть РЕАЛЬНЫЕ коллизии имён района (например "Красносельский" и
+# "Московский" существуют в обоих городах, разные координаты) - поэтому
+# везде ниже ключ теперь СОСТАВНОЙ (city, district_name), а не голое имя:
+# load_district_weather_data хранит их в файле как "city::name" (тот же
+# паттерн, что уже использовался для rain_state, см. check_district_rain_
+# transitions ниже), functions принимают city первым параметром.
+# Троттлинг день/ночь - по СВОЕМУ часовому поясу каждого города
+# (_city_is_night(city)), хотя Москва и Питер сейчас оба Europe/Moscow -
+# на случай, если позже добавится город в другом поясе.
+DISTRICT_WEATHER_DATA_FILE = os.path.join(DATA_DIR, 'district_weather_data.json')
 
 _district_weather_cache = None
 _district_weather_mtime = None
+
+def _district_weather_key(city, district_name):
+    return f"{city}::{district_name}"
 
 def load_district_weather_data():
     """Тот же паттерн, что load_weather_data() выше - кэш в памяти,
     перечитывается только если файл на диске изменился."""
     global _district_weather_cache, _district_weather_mtime
     try:
-        mtime = os.path.getmtime(MOSCOW_DISTRICT_WEATHER_DATA_FILE)
+        mtime = os.path.getmtime(DISTRICT_WEATHER_DATA_FILE)
         if _district_weather_cache is not None and mtime == _district_weather_mtime:
             return _district_weather_cache
-        with open(MOSCOW_DISTRICT_WEATHER_DATA_FILE, 'r', encoding='utf-8') as f:
+        with open(DISTRICT_WEATHER_DATA_FILE, 'r', encoding='utf-8') as f:
             data = json.load(f)
         _district_weather_cache = data
         _district_weather_mtime = mtime
@@ -20702,78 +20727,89 @@ def load_district_weather_data():
     except FileNotFoundError:
         return None
     except Exception as e:
-        logger.warning(f"⚠️ Не удалось прочитать {MOSCOW_DISTRICT_WEATHER_DATA_FILE}: {e}")
+        logger.warning(f"⚠️ Не удалось прочитать {DISTRICT_WEATHER_DATA_FILE}: {e}")
         return None
 
-def get_cached_district_weather_forecast(district_name):
-    """Прогноз ОДНОГО района Москвы из готового снепшота - тот же формат,
-    что и get_cached_weather_forecast(city) выше ('current'/'hourly' с
+def get_cached_district_weather_forecast(city, district_name):
+    """Прогноз ОДНОГО района готового снепшота - тот же формат, что и
+    get_cached_weather_forecast(city) выше ('current'/'hourly' с
     weathercode/temperature_2m и т.п.), поэтому все читатели (describe_
     weathercode, find_upcoming_precip_event) работают с ним без изменений.
     None, если снепшота ещё нет (бот только что стартовал) или для этого
-    района нет записи."""
+    (города, района) нет записи."""
     data = load_district_weather_data()
     if not data:
         return None
-    return (data.get('districts') or {}).get(district_name)
+    return (data.get('districts') or {}).get(_district_weather_key(city, district_name))
 
 _district_last_fetched_at = {}
 
 async def update_district_weather_data():
-    """Один прогон по всем 30 районам Москвы (get_moscow_district_demand) -
-    точная копия логики update_weather_data() выше (пауза между запросами,
-    троттлинг день/ночь, "лучше старые данные, чем ничего"), только источник
-    координат/список точек - районы вместо RAIN_CITY_COORDS. Если файл
-    moscow_district_demand.json не загрузился - тихо выходим (та же
-    защита, что у get_moscow_district_demand - карта в этом случае просто не
-    получит районные облака, тут аналогично - районная погода не обновится,
-    а get_cached_district_weather_forecast продолжит отдавать старый снепшот
+    """Один прогон по всем районам ВСЕХ городов из DISTRICT_DEMAND_FILES
+    (было - только 30 районов Москвы) - точная копия логики
+    update_weather_data() выше (пауза между запросами, троттлинг день/ночь,
+    "лучше старые данные, чем ничего"), только источник координат/список
+    точек - районы вместо RAIN_CITY_COORDS. Если для города файл матрицы не
+    загрузился - тихо пропускаем этот город (та же защита, что у
+    get_district_demand - карта в этом случае просто не получит районные
+    облака, тут аналогично - районная погода не обновится, а
+    get_cached_district_weather_forecast продолжит отдавать старый снепшот
     или None, ничего не падает)."""
-    table = get_district_demand('moscow')
-    if not table:
-        return
-    districts = table.get('districts') or {}
-    if not districts:
-        return
     WEATHER_REQUEST_DELAY_SECONDS = 1.0
     now = datetime.now()
     previous = load_district_weather_data() or {}
     previous_districts = previous.get('districts') or {}
     result_districts = {}
     fetched_count = 0
-    is_night = _city_is_night('moscow')
-    interval_min = WEATHER_UPDATE_INTERVAL_MINUTES_NIGHT if is_night else WEATHER_UPDATE_INTERVAL_MINUTES
-    for name, entry in districts.items():
-        last_fetched = _district_last_fetched_at.get(name)
-        due = last_fetched is None or (now - last_fetched).total_seconds() >= interval_min * 60 - 30
-        if not due:
-            if name in previous_districts:
-                result_districts[name] = previous_districts[name]
+    total_districts = 0
+    for city in DISTRICT_DEMAND_FILES:
+        table = get_district_demand(city)
+        if not table:
             continue
-        forecast = await fetch_rain_forecast_at(entry['lat'], entry['lon'], f"р-н {name}")
-        if forecast:
-            result_districts[name] = forecast
-            _district_last_fetched_at[name] = now
-            fetched_count += 1
-        elif name in previous_districts:
-            result_districts[name] = previous_districts[name]
-            logger.warning(f"⚠️ район {name}: свежий прогноз погоды не получен - оставляю прошлый снепшот")
-        await asyncio.sleep(WEATHER_REQUEST_DELAY_SECONDS)
+        districts = table.get('districts') or {}
+        if not districts:
+            continue
+        total_districts += len(districts)
+        is_night = _city_is_night(city)
+        interval_min = WEATHER_UPDATE_INTERVAL_MINUTES_NIGHT if is_night else WEATHER_UPDATE_INTERVAL_MINUTES
+        for name, entry in districts.items():
+            key = _district_weather_key(city, name)
+            last_fetched = _district_last_fetched_at.get(key)
+            due = last_fetched is None or (now - last_fetched).total_seconds() >= interval_min * 60 - 30
+            if not due:
+                if key in previous_districts:
+                    result_districts[key] = previous_districts[key]
+                continue
+            forecast = await fetch_rain_forecast_at(entry['lat'], entry['lon'], f"{city}/р-н {name}")
+            if forecast:
+                result_districts[key] = forecast
+                _district_last_fetched_at[key] = now
+                fetched_count += 1
+            elif key in previous_districts:
+                result_districts[key] = previous_districts[key]
+                logger.warning(f"⚠️ {city}/район {name}: свежий прогноз погоды не получен - оставляю прошлый снепшот")
+            await asyncio.sleep(WEATHER_REQUEST_DELAY_SECONDS)
     result = {
         'generated_at': now.isoformat(),
         'districts': result_districts,
     }
-    with open(MOSCOW_DISTRICT_WEATHER_DATA_FILE, 'w', encoding='utf-8') as f:
+    with open(DISTRICT_WEATHER_DATA_FILE, 'w', encoding='utf-8') as f:
         json.dump(result, f, ensure_ascii=False)
-    logger.info(f"💾 moscow_district_weather_data.json обновлён (живьём опрошено {fetched_count}/{len(districts)} районов)")
+    logger.info(f"💾 district_weather_data.json обновлён (живьём опрошено {fetched_count}/{total_districts} районов по {len(DISTRICT_DEMAND_FILES)} городам)")
 
-def find_nearest_moscow_district(lat, lon):
-    """Ближайший к точке (lat, lon) район Москвы из moscow_district_demand.json
-    - для привязки погоды к текущей геопозиции водителя (см.
+def find_nearest_district(city, lat, lon):
+    """Ближайший к точке (lat, lon) район ГОРОДА city из get_district_demand -
+    для привязки погоды к текущей геопозиции водителя (см.
     handle_weather_data_api ниже) и для district_rain_now (см. ниже).
     Возвращает (name, dist_km, district_lat, district_lon) или None, если
-    таблица районов не загрузилась."""
-    table = get_district_demand('moscow')
+    таблица районов не загрузилась/для города нет данных.
+
+    ПЕРЕИМЕНОВАНО 23.09.2026 из find_nearest_moscow_district (прямая
+    просьба пользователя - "погода так же тяни в Питере") - добавлен
+    обязательный параметр city, поиск идёт СТРОГО среди районов этого
+    города (get_district_demand(city) уже сам по себе не смешивает города,
+    коллизии имён между городами тут не проблема)."""
+    table = get_district_demand(city)
     if not table:
         return None
     districts = table.get('districts') or {}
@@ -20789,8 +20825,8 @@ def find_nearest_moscow_district(lat, lon):
     entry = districts[best_name]
     return (best_name, best_dist, entry['lat'], entry['lon'])
 
-def district_rain_now(district_name, fallback_rain_now=False):
-    """Идёт ли осадки ПРЯМО СЕЙЧАС именно в этом районе Москвы - по его
+def district_rain_now(city, district_name, fallback_rain_now=False):
+    """Идёт ли осадки ПРЯМО СЕЙЧАС именно в этом районе ГОРОДА city - по его
     собственному снепшоту погоды, а не по общегородскому. ДОБАВЛЕНО
     23.09.2026 (прямая просьба пользователя - "Куда ехать" и облака спроса
     на карте считать по погоде В РАЙОНЕ, а не по одной точке на весь город,
@@ -20799,8 +20835,13 @@ def district_rain_now(district_name, fallback_rain_now=False):
     (бот только что стартовал, район ещё не был живьём опрошен ни разу) -
     вызывающий код передаёт туда уже посчитанный общегородской rain_now,
     чтобы не остаться совсем без сигнала об осадках, пока районные данные
-    только собираются."""
-    forecast = get_cached_district_weather_forecast(district_name)
+    только собираются.
+
+    ОБОБЩЕНО 23.09.2026 (прямая просьба пользователя - "погода так же тяни
+    в Питере") - добавлен обязательный параметр city (composite-ключ, см.
+    _district_weather_key выше - у Москвы и Питера есть реальные коллизии
+    имён района)."""
+    forecast = get_cached_district_weather_forecast(city, district_name)
     if not forecast:
         return fallback_rain_now
     current_code = (forecast.get('current') or {}).get('weathercode')
@@ -20835,15 +20876,15 @@ async def weather_data_updater():
             await update_weather_data()
         except Exception as e:
             logger.error(f"❌ Ошибка фонового обновления weather_data.json: {e}")
-        # ДОБАВЛЕНО 23.09.2026 (см. блок "ПОГОДА ПО РАЙОНАМ МОСКВЫ" выше) -
+        # ДОБАВЛЕНО 23.09.2026 (см. блок "ПОГОДА ПО РАЙОНАМ ГОРОДОВ" выше) -
         # районная погода обновляется в ТОМ ЖЕ тике, тем же интервалом, что и
         # городская - отдельный try/except, чтобы сбой у районов (например,
-        # ещё не загрузился moscow_district_demand.json) не мешал City-
+        # ещё не загрузился один из DISTRICT_DEMAND_FILES) не мешал City-
         # обновлению выше и наоборот.
         try:
             await update_district_weather_data()
         except Exception as e:
-            logger.error(f"❌ Ошибка фонового обновления moscow_district_weather_data.json: {e}")
+            logger.error(f"❌ Ошибка фонового обновления district_weather_data.json: {e}")
         await asyncio.sleep(WEATHER_UPDATE_INTERVAL_MINUTES * 60)
 
 def _current_hour_index(forecast, city):
@@ -21116,7 +21157,7 @@ async def push_rain_alert(city, event):
     # ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "присылать push
     # если человек находится в этом районе идёт дождь либо собирается
     # дождь... если данных нету считает по центральной части Москвы"):
-    # водители Москвы с известной СВЕЖЕЙ геопозицией (см.
+    # водители с известной СВЕЖЕЙ геопозицией (см.
     # get_all_map_positions_with_user_id/MAP_VISIBILITY_STALE_MINUTES)
     # теперь получают ТОЧЕЧНЫЙ районный пуш о своей собственной погоде (см.
     # check_district_rain_transitions/push_district_rain_alert ниже) вместо
@@ -21125,13 +21166,17 @@ async def push_rain_alert(city, event):
     # сразу, либо пуш о дожде в центре, пока в их районе на самом деле сухо.
     # Этот пуш (по погоде в центре) остаётся ТОЛЬКО фолбэком для тех, у
     # кого свежей точки на карте сейчас нет вовсе.
-    located_moscow_user_ids = set()
-    if city == 'moscow':
-        located_moscow_user_ids = {p['user_id'] for p in get_all_map_positions_with_user_id() if p['city'] == 'moscow'}
+    # ОБОБЩЕНО 23.09.2026 (прямая просьба пользователя - "погода так же
+    # тяни в Питере как и в Москве") - было city == 'moscow' буквально,
+    # теперь любой город из DISTRICT_DEMAND_FILES (переименовано
+    # located_moscow_user_ids -> located_district_user_ids).
+    located_district_user_ids = set()
+    if city in DISTRICT_DEMAND_FILES:
+        located_district_user_ids = {p['user_id'] for p in get_all_map_positions_with_user_id() if p['city'] == city}
     recipients = [
         (uid, state) for uid, state in list(user_state.items())
         if isinstance(state, dict) and state.get('city') == city and notifications_enabled(state, 'weather')
-        and uid not in located_moscow_user_ids
+        and uid not in located_district_user_ids
     ]
     if not recipients:
         logger.info(f"{event['emoji']} В городе {city} ожидаются осадки ({event['name']}), но известных пользователей нет (либо все отключили эти пуши, либо все с известной геопозицией - см. районный пуш)")
@@ -21213,16 +21258,21 @@ async def check_rain_transitions():
             save_rain_state(city, event_start, event['weight'])
             await push_rain_alert(city, event)
 
-async def push_district_rain_alert(district_name, event, user_ids):
-    """Точечный пуш о дожде В КОНКРЕТНОМ районе Москвы - ДОБАВЛЕНО
-    23.09.2026 (см. check_district_rain_transitions ниже). Тот же текст и
-    та же клавиатура, что у общегородского push_rain_alert выше, только в
-    шапке название района вместо города, и разослан ТОЛЬКО user_ids
-    (водители, чья последняя СВЕЖАЯ точка на карте сейчас в этом районе) -
-    остальные подписчики Москвы (включая тех, у кого нет свежей геопозиции)
-    его не получают, см. фильтр located_moscow_user_ids в push_rain_alert."""
+async def push_district_rain_alert(city, district_name, event, user_ids):
+    """Точечный пуш о дожде В КОНКРЕТНОМ районе - ДОБАВЛЕНО 23.09.2026 (см.
+    check_district_rain_transitions ниже). Тот же текст и та же клавиатура,
+    что у общегородского push_rain_alert выше, только в шапке название
+    района вместо города, и разослан ТОЛЬКО user_ids (водители, чья
+    последняя СВЕЖАЯ точка на карте сейчас в этом районе) - остальные
+    подписчики города (включая тех, у кого нет свежей геопозиции) его не
+    получают, см. фильтр located_district_user_ids в push_rain_alert.
+
+    ОБОБЩЕНО 23.09.2026 (прямая просьба пользователя - "погода так же тяни
+    в Питере как и в Москве") - добавлен обязательный параметр city, было
+    захардкожено 'moscow' и в тексте, и в кнопках."""
     if not bot:
         return
+    city_display = CITY_DISPLAY_NAMES.get(city, city)
     if event['hour_offset'] == 0:
         when_text = "начался"
         demand_text = "В районе уже подрос спрос - хорошее время быть на линии."
@@ -21235,7 +21285,7 @@ async def push_district_rain_alert(district_name, event, user_ids):
     else:
         duration_text = f"по прогнозу не прекратится в ближайшие {RAIN_FORECAST_HOURS} ч"
     text = (
-        f"{event['emoji']} *Район {district_name} (Москва)*\n\n"
+        f"{event['emoji']} *Район {district_name} ({city_display})*\n\n"
         f"{event['name'].capitalize()} {when_text}, {duration_text}.\n\n"
         f"{demand_text}"
     )
@@ -21243,23 +21293,23 @@ async def push_district_rain_alert(district_name, event, user_ids):
     def _rain_push_keyboard(state):
         rows = []
         if PUBLIC_URL:
-            weather_url = f"{PUBLIC_URL}{WEATHER_WEBAPP_PATH}?city=moscow"
+            weather_url = f"{PUBLIC_URL}{WEATHER_WEBAPP_PATH}?city={urllib.parse.quote(city)}"
             rows.append([InlineKeyboardButton(text="🌤 Посмотреть погоду", web_app=WebAppInfo(url=weather_url))])
             category = state.get('category')
             if category:
-                map_url = f"{PUBLIC_URL}{MAP_WEBAPP_PATH}?city=moscow&category={urllib.parse.quote(category)}"
+                map_url = f"{PUBLIC_URL}{MAP_WEBAPP_PATH}?city={urllib.parse.quote(city)}&category={urllib.parse.quote(category)}"
                 rows.append([InlineKeyboardButton(text="🗺 Карта водителей", web_app=WebAppInfo(url=map_url))])
         return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
 
     recipients = []
     for uid in user_ids:
         state = user_state.get(uid)
-        if isinstance(state, dict) and state.get('city') == 'moscow' and notifications_enabled(state, 'weather'):
+        if isinstance(state, dict) and state.get('city') == city and notifications_enabled(state, 'weather'):
             recipients.append((uid, state))
     if not recipients:
-        logger.info(f"{event['emoji']} Район {district_name} (Москва): осадки, но подписанных водителей с этой точкой сейчас нет (либо отключили пуши)")
+        logger.info(f"{event['emoji']} Район {district_name} ({city_display}): осадки, но подписанных водителей с этой точкой сейчас нет (либо отключили пуши)")
         return
-    logger.info(f"{event['emoji']} Район {district_name} (Москва): осадки ({event['name']}) - точечно рассылаю {len(recipients)} водителям в этом районе")
+    logger.info(f"{event['emoji']} Район {district_name} ({city_display}): осадки ({event['name']}) - точечно рассылаю {len(recipients)} водителям в этом районе")
     sent, failed = 0, 0
     for user_id, state in recipients:
         ok = await send_push_with_retry(user_id, text, state=state, parse_mode='Markdown', reply_markup=_rain_push_keyboard(state))
@@ -21268,38 +21318,47 @@ async def push_district_rain_alert(district_name, event, user_ids):
         else:
             failed += 1
         await asyncio.sleep(0.05)
-    logger.info(f"{event['emoji']} Районный пуш ({district_name}) разослан: {sent} успешно, {failed} ошибок")
+    logger.info(f"{event['emoji']} Районный пуш ({city_display}/{district_name}) разослан: {sent} успешно, {failed} ошибок")
 
 async def check_district_rain_transitions():
-    """Районная версия check_rain_transitions() (см. выше), только для
-    Москвы - ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "присылать
-    push если человек находится в этом районе идёт дождь либо собирается
-    дождь... если данных нету считает по центральной части Москвы").
+    """Районная версия check_rain_transitions() (см. выше) - ДОБАВЛЕНО
+    23.09.2026 (прямая просьба пользователя - "присылать push если человек
+    находится в этом районе идёт дождь либо собирается дождь... если
+    данных нету считает по центральной части Москвы").
 
     check_rain_transitions() выше по-прежнему остаётся источником пуша по
     погоде В ЦЕНТРЕ - но теперь только для водителей БЕЗ известной свежей
-    геопозиции (фолбэк, см. located_moscow_user_ids в push_rain_alert). Эта
-    функция ДОПОЛНИТЕЛЬНО берёт всех водителей Москвы, у кого ЕСТЬ свежая
-    точка на карте (get_all_map_positions_with_user_id), находит ближайший
-    из 30 районов КАЖДОМУ (find_nearest_moscow_district) и проверяет
-    погоду ИМЕННО в этом районе (собственный снепшот района, а не общая
-    точка на весь город) - пушит точечно только тех, кто физически сейчас
-    в районе, где идёт (или вот-вот начнётся) дождь.
+    геопозиции (фолбэк, см. located_district_user_ids в push_rain_alert).
+    Эта функция ДОПОЛНИТЕЛЬНО берёт всех водителей КАЖДОГО города из
+    DISTRICT_DEMAND_FILES, у кого ЕСТЬ свежая точка на карте
+    (get_all_map_positions_with_user_id), находит ближайший район каждому
+    (find_nearest_district) и проверяет погоду ИМЕННО в этом районе
+    (собственный снепшот района, а не общая точка на весь город) - пушит
+    точечно только тех, кто физически сейчас в районе, где идёт (или
+    вот-вот начнётся) дождь.
+
+    ОБОБЩЕНО 23.09.2026 (прямая просьба пользователя - "погода так же тяни
+    в Питере как и в Москве") - было ЖЁСТКО только Москва, теперь цикл по
+    всем городам DISTRICT_DEMAND_FILES.
 
     Дедуп состояния - той же таблицей rain_state, что и у городского пуша
     (save_rain_state/load_all_rain_states принимают произвольную строку как
-    "city" - используем синтетический ключ f"moscow::{район}", отдельная
+    "city" - используем синтетический ключ f"{city}::{район}", отдельная
     миграция БД не нужна)."""
-    table = get_district_demand('moscow')
+    for city in DISTRICT_DEMAND_FILES:
+        await _check_district_rain_transitions_for_city(city)
+
+async def _check_district_rain_transitions_for_city(city):
+    table = get_district_demand(city)
     if not table or not table.get('districts'):
         return
     positions = get_all_map_positions_with_user_id()
-    moscow_positions = [p for p in positions if p['city'] == 'moscow']
-    if not moscow_positions:
-        return  # ни у одного водителя Москвы сейчас нет свежей геопозиции - точечно проверять некого
+    city_positions = [p for p in positions if p['city'] == city]
+    if not city_positions:
+        return  # ни у одного водителя этого города сейчас нет свежей геопозиции - точечно проверять некого
     user_district = {}
-    for p in moscow_positions:
-        nearest = find_nearest_moscow_district(p['lat'], p['lon'])
+    for p in city_positions:
+        nearest = find_nearest_district(city, p['lat'], p['lon'])
         if nearest:
             user_district[p['user_id']] = nearest[0]
     if not user_district:
@@ -21311,11 +21370,11 @@ async def check_district_rain_transitions():
 
     previous = load_all_rain_states()
     for dist_name, user_ids in districts_to_users.items():
-        forecast = get_cached_district_weather_forecast(dist_name)
+        forecast = get_cached_district_weather_forecast(city, dist_name)
         if not forecast:
             continue  # для этого района ещё нет собственного снепшота погоды - подождём следующего прогона weather_data_updater
-        event = find_upcoming_precip_event(forecast, 'moscow')
-        state_key = f"moscow::{dist_name}"
+        event = find_upcoming_precip_event(forecast, city)
+        state_key = f"{city}::{dist_name}"
         prev_start, prev_weight = previous.get(state_key, (None, None))
 
         if event is None:
@@ -21329,11 +21388,11 @@ async def check_district_rain_transitions():
         is_stronger = (prev_weight is not None and event['weight'] > prev_weight)
 
         if is_new_event or is_stronger:
-            if is_rain_push_quiet_hours('moscow'):
-                logger.info(f"{event['emoji']} Район {dist_name} (Москва): осадки ({event['name']}), но сейчас ночная тишина (23:30-6:30) - пуш отложен")
+            if is_rain_push_quiet_hours(city):
+                logger.info(f"{event['emoji']} Район {dist_name} ({CITY_DISPLAY_NAMES.get(city, city)}): осадки ({event['name']}), но сейчас ночная тишина (23:30-6:30) - пуш отложен")
                 continue
             save_rain_state(state_key, event_start, event['weight'])
-            await push_district_rain_alert(dist_name, event, user_ids)
+            await push_district_rain_alert(city, dist_name, event, user_ids)
 
 _WIND_DIRS_RU = ['С', 'СВ', 'В', 'ЮВ', 'Ю', 'ЮЗ', 'З', 'СЗ']
 
