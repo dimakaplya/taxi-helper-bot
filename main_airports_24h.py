@@ -20774,12 +20774,28 @@ async def push_rain_alert(city, event):
                 rows.append([InlineKeyboardButton(text="🗺 Карта водителей", web_app=WebAppInfo(url=map_url))])
         return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
 
+    # ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "присылать push
+    # если человек находится в этом районе идёт дождь либо собирается
+    # дождь... если данных нету считает по центральной части Москвы"):
+    # водители Москвы с известной СВЕЖЕЙ геопозицией (см.
+    # get_all_map_positions_with_user_id/MAP_VISIBILITY_STALE_MINUTES)
+    # теперь получают ТОЧЕЧНЫЙ районный пуш о своей собственной погоде (см.
+    # check_district_rain_transitions/push_district_rain_alert ниже) вместо
+    # этого общегородского пуша по погоде В ЦЕНТРЕ - исключаем их отсюда,
+    # иначе они получили бы два разных (и возможно противоречащих) пуша
+    # сразу, либо пуш о дожде в центре, пока в их районе на самом деле сухо.
+    # Этот пуш (по погоде в центре) остаётся ТОЛЬКО фолбэком для тех, у
+    # кого свежей точки на карте сейчас нет вовсе.
+    located_moscow_user_ids = set()
+    if city == 'moscow':
+        located_moscow_user_ids = {p['user_id'] for p in get_all_map_positions_with_user_id() if p['city'] == 'moscow'}
     recipients = [
         (uid, state) for uid, state in list(user_state.items())
         if isinstance(state, dict) and state.get('city') == city and notifications_enabled(state, 'weather')
+        and uid not in located_moscow_user_ids
     ]
     if not recipients:
-        logger.info(f"{event['emoji']} В городе {city} ожидаются осадки ({event['name']}), но известных пользователей нет (либо все отключили эти пуши)")
+        logger.info(f"{event['emoji']} В городе {city} ожидаются осадки ({event['name']}), но известных пользователей нет (либо все отключили эти пуши, либо все с известной геопозицией - см. районный пуш)")
         return
     logger.info(f"{event['emoji']} В городе {city} ожидаются осадки ({event['name']}) - рассылаю {len(recipients)} пользователям")
     sent, failed = 0, 0
@@ -20856,6 +20872,129 @@ async def check_rain_transitions():
                 continue
             save_rain_state(city, event_start, event['weight'])
             await push_rain_alert(city, event)
+
+async def push_district_rain_alert(district_name, event, user_ids):
+    """Точечный пуш о дожде В КОНКРЕТНОМ районе Москвы - ДОБАВЛЕНО
+    23.09.2026 (см. check_district_rain_transitions ниже). Тот же текст и
+    та же клавиатура, что у общегородского push_rain_alert выше, только в
+    шапке название района вместо города, и разослан ТОЛЬКО user_ids
+    (водители, чья последняя СВЕЖАЯ точка на карте сейчас в этом районе) -
+    остальные подписчики Москвы (включая тех, у кого нет свежей геопозиции)
+    его не получают, см. фильтр located_moscow_user_ids в push_rain_alert."""
+    if not bot:
+        return
+    if event['hour_offset'] == 0:
+        when_text = "начался"
+        demand_text = "В районе уже подрос спрос - хорошее время быть на линии."
+    else:
+        when_text = f"ожидается в ближайшие {RAIN_LEAD_MINUTES} минут"
+        demand_text = f"Через {RAIN_LEAD_MINUTES} минут в районе ожидается больше заказов - хорошее время быть на линии."
+    duration_hours = find_precip_event_end(event['_forecast'], event['_array_index'])
+    if duration_hours:
+        duration_text = f"продлится примерно {duration_hours} ч"
+    else:
+        duration_text = f"по прогнозу не прекратится в ближайшие {RAIN_FORECAST_HOURS} ч"
+    text = (
+        f"{event['emoji']} *Район {district_name} (Москва)*\n\n"
+        f"{event['name'].capitalize()} {when_text}, {duration_text}.\n\n"
+        f"{demand_text}"
+    )
+
+    def _rain_push_keyboard(state):
+        rows = []
+        if PUBLIC_URL:
+            weather_url = f"{PUBLIC_URL}{WEATHER_WEBAPP_PATH}?city=moscow"
+            rows.append([InlineKeyboardButton(text="🌤 Посмотреть погоду", web_app=WebAppInfo(url=weather_url))])
+            category = state.get('category')
+            if category:
+                map_url = f"{PUBLIC_URL}{MAP_WEBAPP_PATH}?city=moscow&category={urllib.parse.quote(category)}"
+                rows.append([InlineKeyboardButton(text="🗺 Карта водителей", web_app=WebAppInfo(url=map_url))])
+        return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
+
+    recipients = []
+    for uid in user_ids:
+        state = user_state.get(uid)
+        if isinstance(state, dict) and state.get('city') == 'moscow' and notifications_enabled(state, 'weather'):
+            recipients.append((uid, state))
+    if not recipients:
+        logger.info(f"{event['emoji']} Район {district_name} (Москва): осадки, но подписанных водителей с этой точкой сейчас нет (либо отключили пуши)")
+        return
+    logger.info(f"{event['emoji']} Район {district_name} (Москва): осадки ({event['name']}) - точечно рассылаю {len(recipients)} водителям в этом районе")
+    sent, failed = 0, 0
+    for user_id, state in recipients:
+        try:
+            await bot.send_message(user_id, text, parse_mode='Markdown', reply_markup=_rain_push_keyboard(state))
+            sent += 1
+        except Exception as e:
+            failed += 1
+            logger.warning(f"⚠️ Не удалось отправить районный пуш о погоде пользователю {user_id}: {e}")
+        await asyncio.sleep(0.05)
+    logger.info(f"{event['emoji']} Районный пуш ({district_name}) разослан: {sent} успешно, {failed} ошибок")
+
+async def check_district_rain_transitions():
+    """Районная версия check_rain_transitions() (см. выше), только для
+    Москвы - ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "присылать
+    push если человек находится в этом районе идёт дождь либо собирается
+    дождь... если данных нету считает по центральной части Москвы").
+
+    check_rain_transitions() выше по-прежнему остаётся источником пуша по
+    погоде В ЦЕНТРЕ - но теперь только для водителей БЕЗ известной свежей
+    геопозиции (фолбэк, см. located_moscow_user_ids в push_rain_alert). Эта
+    функция ДОПОЛНИТЕЛЬНО берёт всех водителей Москвы, у кого ЕСТЬ свежая
+    точка на карте (get_all_map_positions_with_user_id), находит ближайший
+    из 30 районов КАЖДОМУ (find_nearest_moscow_district) и проверяет
+    погоду ИМЕННО в этом районе (собственный снепшот района, а не общая
+    точка на весь город) - пушит точечно только тех, кто физически сейчас
+    в районе, где идёт (или вот-вот начнётся) дождь.
+
+    Дедуп состояния - той же таблицей rain_state, что и у городского пуша
+    (save_rain_state/load_all_rain_states принимают произвольную строку как
+    "city" - используем синтетический ключ f"moscow::{район}", отдельная
+    миграция БД не нужна)."""
+    table = get_moscow_district_demand()
+    if not table or not table.get('districts'):
+        return
+    positions = get_all_map_positions_with_user_id()
+    moscow_positions = [p for p in positions if p['city'] == 'moscow']
+    if not moscow_positions:
+        return  # ни у одного водителя Москвы сейчас нет свежей геопозиции - точечно проверять некого
+    user_district = {}
+    for p in moscow_positions:
+        nearest = find_nearest_moscow_district(p['lat'], p['lon'])
+        if nearest:
+            user_district[p['user_id']] = nearest[0]
+    if not user_district:
+        return
+
+    districts_to_users = {}
+    for uid, dist_name in user_district.items():
+        districts_to_users.setdefault(dist_name, []).append(uid)
+
+    previous = load_all_rain_states()
+    for dist_name, user_ids in districts_to_users.items():
+        forecast = get_cached_district_weather_forecast(dist_name)
+        if not forecast:
+            continue  # для этого района ещё нет собственного снепшота погоды - подождём следующего прогона weather_data_updater
+        event = find_upcoming_precip_event(forecast, 'moscow')
+        state_key = f"moscow::{dist_name}"
+        prev_start, prev_weight = previous.get(state_key, (None, None))
+
+        if event is None:
+            if prev_start is not None:
+                save_rain_state(state_key, None, None)
+            continue
+
+        event['_forecast'] = forecast
+        event_start = event['time']
+        is_new_event = (prev_start != event_start)
+        is_stronger = (prev_weight is not None and event['weight'] > prev_weight)
+
+        if is_new_event or is_stronger:
+            if is_rain_push_quiet_hours('moscow'):
+                logger.info(f"{event['emoji']} Район {dist_name} (Москва): осадки ({event['name']}), но сейчас ночная тишина (23:30-6:30) - пуш отложен")
+                continue
+            save_rain_state(state_key, event_start, event['weight'])
+            await push_district_rain_alert(dist_name, event, user_ids)
 
 _WIND_DIRS_RU = ['С', 'СВ', 'В', 'ЮВ', 'Ю', 'ЮЗ', 'З', 'СЗ']
 
@@ -21070,6 +21209,13 @@ async def rain_checker():
             await check_rain_transitions()
         except Exception as e:
             logger.error(f"❌ Ошибка фоновой проверки погоды: {e}")
+        # ДОБАВЛЕНО 23.09.2026 (см. check_district_rain_transitions выше) -
+        # точечная районная проверка для Москвы в том же тике, отдельным
+        # try/except, чтобы сбой одной не мешал другой.
+        try:
+            await check_district_rain_transitions()
+        except Exception as e:
+            logger.error(f"❌ Ошибка фоновой районной проверки погоды (Москва): {e}")
         await asyncio.sleep(RAIN_CHECK_INTERVAL_MINUTES * 60)
 
 # ==================== ПРАЗДНИКИ (пуши) ====================
