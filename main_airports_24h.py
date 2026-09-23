@@ -538,6 +538,12 @@ NOTIFICATION_TYPES = {
     # "всем в городе, у кого включены пуши"), не привязана к
     # активной смене - см. push_road_incident_alerts ниже.
     'road_events': {'label': 'ПЕРЕКРЫТИЯ И КРУПНЫЕ ДТП', 'emoji': '⛔'},
+    # ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя): пуш, когда водитель
+    # (на активной смене, такси/Ultima) оказывается ближе EVENT_PROXIMITY_
+    # RADIUS_KM к мероприятию из афиши, у которого до конца остаётся меньше
+    # EVENT_PROXIMITY_LEAD_MINUTES минут - см. check_event_proximity_pushes
+    # ниже.
+    'event_ending_nearby': {'label': 'СОБЫТИЯ РЯДОМ ЗАКАНЧИВАЮТСЯ', 'emoji': '🎭'},
 }
 
 def notifications_enabled(state, notif_key):
@@ -1900,16 +1906,16 @@ def get_upcoming_concert_events_for_category(city, category, limit=10):
     пропускается: без даты нельзя понять, актуально ли оно ещё.
 
     По прямому запросу пользователя (19.09.2026, ответы на AskUserQuestion):
-    1) показываем события на СЕГОДНЯ И ЗАВТРА в местном времени города (не
+    1) показываем события СТРОГО НА СЕГОДНЯ в местном времени города (не
        всю афишу на месяцы вперёд) - сравниваем календарную дату start с
-       "сегодня"/"завтра" в часовом поясе города (тот же EVENT_CITY_TIMEZONE,
-       которым размечены сами события в fetch_concert_events.py). Изначально
-       было СТРОГО "только сегодня" (19.09.2026), но выяснилось, что в
-       каналах часто вообще нет ни одного события именно на текущий день
-       (особенно ночью/рано утром, пока новых постов на новый день ещё не
-       было) - афиша получалась почти всегда пустой. Расширено до 2 дней
-       (19.09.2026, повторная жалоба пользователя) - компромисс между "не
-       завалить всей афишей на месяцы" и "не показывать пустой экран";
+       "сегодня" в часовом поясе города (тот же EVENT_CITY_TIMEZONE,
+       которым размечены сами события в fetch_concert_events.py).
+       ИЗМЕНЕНО 23.09.2026 (повторная прямая просьба пользователя -
+       "публикуй события афиши только того дня который они будут
+       проходить" - сужено обратно с "сегодня+завтра" до строго "сегодня",
+       после того как окно "сегодня+завтра" вводили 19.09.2026 против
+       пустого экрана - см. fallback ниже, который остаётся для этого
+       случая);
     2) события БЕЗ явно указанного в посте времени начала
        (start_has_explicit_time=False - у них start это заглушка 20:00 UTC,
        см. parse_event_datetime в fetch_concert_events.py) - НЕ исключаются
@@ -1924,9 +1930,9 @@ def get_upcoming_concert_events_for_category(city, category, limit=10):
     posts = get_concert_events_for_city(city)
     tz = ZoneInfo(EVENT_CITY_TIMEZONE.get(city, 'Europe/Moscow'))
     now_local = datetime.now(tz)
-    allowed_dates = {now_local.date(), (now_local + timedelta(days=1)).date()}
+    allowed_dates = {now_local.date()}
     upcoming = []
-    later = []  # события позже "завтра" - запасной вариант, см. ниже
+    later = []  # события позже сегодня - запасной вариант, см. ниже
     for post in posts:
         if not post.get('start'):
             continue
@@ -1954,10 +1960,10 @@ def get_upcoming_concert_events_for_category(city, category, limit=10):
         return upcoming[:limit]
 
     # По жалобе пользователя (20.09.2026, "события города опять пустые"):
-    # если на сегодня/завтра в канале ничего нет (канал мог просто не
-    # постить несколько дней - это данные, а не баг), не показываем пустой
-    # экран - лучше честно показать ближайшие события ПОЗЖЕ, чем "завтра",
-    # с явной пометкой в тексте (см. build_concert_event_message -
+    # если на сегодня в канале ничего нет (канал мог просто не постить
+    # несколько дней - это данные, а не баг), не показываем пустой экран -
+    # лучше честно показать ближайшие события ПОЗЖЕ, чем сегодня, с явной
+    # пометкой в тексте (см. build_concert_event_message -
     # 'is_fallback_later'), чем оставить раздел без единого события.
     later.sort(key=lambda p: p['start'])
     return [dict(p, is_fallback_later=True) for p in later[:limit]]
@@ -2102,17 +2108,33 @@ def get_events_for_user(city, category, limit=10):
     вместо карт/браузера на части телефонов, и события были не нужны).
     Возвращает (events, city_supported) - city_supported=False значит
     TimePad вообще не покрывает этот город (нужно отдельное сообщение "нет
-    данных", а не пустой список - это разные вещи)."""
+    данных", а не пустой список - это разные вещи).
+
+    ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя - "публикуй события
+    афиши только того дня который они будут проходить"): раньше показывались
+    ВСЕ предстоящие события вперёд на весь собранный горизонт (до
+    EVENTS_LOOKAHEAD_DAYS=30 дней, см. fetch_timepad_data.py) без
+    ограничения по дню - список мог быть забит мероприятиями через 2-3
+    недели. Теперь строго СЕГОДНЯ - по календарной дате в часовом поясе
+    города (EVENT_CITY_TIMEZONE, тот же, что и у Telegram-афиши ниже)."""
     if city not in fetch_timepad_data.TIMEPAD_CITY_MAP:
         return [], False
 
-    now_ts = datetime.now(ZoneInfo('UTC')).timestamp()
+    tz = ZoneInfo(EVENT_CITY_TIMEZONE.get(city, 'Europe/Moscow'))
+    now_local = datetime.now(tz)
+    now_ts = now_local.timestamp()
+    today = now_local.date()
     data = load_timepad_data()
     city_events = (data or {}).get('cities', {}).get(city, [])
     # fetch_timepad_data.py уже отфильтровал по категориям и
     # tickets_total>=200 на стороне сбора данных - здесь только актуальность
-    # по времени (адрес и масштаб уже гарантированы).
-    upcoming = [e for e in city_events if e.get('start', 0) >= now_ts]
+    # по времени (адрес и масштаб уже гарантированы) + строго сегодняшний
+    # календарный день по часовому поясу города.
+    upcoming = [
+        e for e in city_events
+        if e.get('start', 0) >= now_ts
+        and datetime.fromtimestamp(e['start'], tz).date() == today
+    ]
     upcoming.sort(key=lambda e: e['start'])
     return upcoming[:limit], True
 
@@ -10593,6 +10615,7 @@ MAP_CHROME_CSS = """
   .event-popup h4 { margin: 0 0 4px; font-size: 13px; }
   .event-popup .place { color: #555; }
   .event-popup .time { color: #777; font-size: 11px; margin-top: 4px; }
+  .event-popup .info { color: #333; font-size: 11.5px; margin-top: 4px; }
   .event-popup a { color: #b08b00; }
   /* ДОБАВЛЕНО 22.09.2026 - слои "Заправки"/"Электрозарядки" на карте (см.
      блок "ЗАПРАВКИ + ЭЛЕКТРОЗАРЯДКИ НА КАРТЕ" в main.py). Панель с
@@ -12289,14 +12312,25 @@ def map_webapp_html():
       cityEventMarkers.forEach(m => map.removeLayer(m));
       cityEventMarkers = [];
       data.events.forEach(ev => {{
-        const icon = L.divIcon({{ className: 'event-icon', html: '🎭', iconSize: [22, 22] }});
+        // ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "смайлики
+        // разные делай на разные события") - значок теперь приходит с
+        // сервера (см. _timepad_event_emoji/_concert_event_info в
+        // handle_map_city_events_api), разный для концертов/вечеринок/
+        // выставок/театров/бизнес-событий/остального.
+        const icon = L.divIcon({{ className: 'event-icon', html: ev.emoji || '🎭', iconSize: [22, 22] }});
         let popup = `<div class="event-popup">`;
         if (ev.title) popup += `<h4>${{ev.title}}</h4>`;
         if (ev.place) popup += `<div class="place">${{ev.place}}</div>`;
         if (ev.start) popup += `<div class="time">${{formatEventStart(ev)}}</div>`;
-        // УБРАНО 23.09.2026 (та же просьба пользователя, что и у дорожных
-        // событий выше - "убери ссылку на исходный код/пост") - ссылка
-        // "Подробнее" на исходный пост/страницу TimePad убрана.
+        // ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "с доп
+        // информацией о событие без сылок на timepad") - категория/оценка
+        // числа гостей (TimePad) или цена (Telegram-афиша), БЕЗ ссылки на
+        // исходный источник (см. комментарий выше про её удаление).
+        if (ev.info) popup += `<div class="info">${{ev.info}}</div>`;
+        // ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "так же с
+        // кнопкой поехали на карте") - тот же формат кнопки/ссылки, что и
+        // у заправок/зарядок/парковок ниже (см. goButtonHtml/navUrl).
+        popup += goButtonHtml(ev.lat, ev.lon);
         popup += `</div>`;
         const marker = L.marker([ev.lat, ev.lon], {{ icon }}).bindPopup(popup).addTo(map);
         cityEventMarkers.push(marker);
@@ -14607,6 +14641,60 @@ MAP_CITY_EVENTS_API_PATH = '/map/city_events'
 # момент начала, как было раньше, для событий без известной длительности).
 MAP_EVENT_ADVANCE_HOURS = 2
 
+# ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "смайлики разные
+# делай на разные события чтобы на карте было различие"): раньше ВСЕ метки
+# афиши на карте несли один и тот же значок 🎭, независимо от типа
+# мероприятия - концерт/вечеринку/выставку/спектакль было не отличить друг
+# от друга, не открывая попап. TimePad размечает каждое событие списком
+# 'categories' (см. TIMEPAD_CATEGORY_IDS/fetch_timepad_data.py) - берём
+# первую распознанную категорию и сопоставляем со своим значком. У
+# Telegram-афиши (@concerts_moscow/@spb_conc) типа/категории нет - это
+# всегда именно концерты по смыслу канала, поэтому им отдельный,
+# постоянный значок (тот же, что у TimePad-категории "Концерты" - оба по
+# факту одно и то же для водителя).
+TIMEPAD_CATEGORY_EMOJI = {
+    'Концерты': '🎤',
+    'Вечеринки': '🎉',
+    'Выставки': '🖼',
+    'Театры': '🎭',
+    'Бизнес': '💼',
+    'Искусство и культура': '🎨',
+}
+DEFAULT_EVENT_EMOJI = '🎫'
+CONCERT_CHANNEL_EMOJI = '🎤'
+
+def _timepad_event_emoji(categories):
+    for cat in categories or []:
+        emoji = TIMEPAD_CATEGORY_EMOJI.get(cat)
+        if emoji:
+            return emoji
+    return DEFAULT_EVENT_EMOJI
+
+def _timepad_event_info(ev):
+    """Доп. информация в попапе метки - БЕЗ ссылки на TimePad (по прямой
+    просьбе пользователя, "доп информацией о событие без сылок на
+    timepad"): категория(и) + оценка числа гостей (см. estimate_attendance,
+    та же оценка, что и в тексте события внутри бота)."""
+    parts = []
+    categories = ev.get('categories') or []
+    if categories:
+        parts.append(', '.join(categories))
+    lo, hi = estimate_attendance(ev)
+    if hi:
+        parts.append(f"👥 ~{lo}-{hi} чел.")
+    return ' · '.join(parts)
+
+def _concert_event_info(post):
+    """Доп. информация для события из Telegram-афиши - цена/бесплатно
+    (без ссылки на исходный пост, та же логика урезания, что уже
+    применялась к попапу карты 22.09.2026)."""
+    if post.get('is_free'):
+        return '🆓 бесплатно'
+    price_rub = post.get('price_rub')
+    if price_rub:
+        return f"💵 от {price_rub} ₽"
+    return '💵 цена не указана в афише'
+
 async def handle_map_city_events_api(request):
     """JSON API для меток афиши (концерты/мероприятия) на карте - по просьбе
     пользователя (22.09.2026, следом за дорожными событиями): "Афишу тоже
@@ -14635,7 +14723,8 @@ async def handle_map_city_events_api(request):
             result.append({
                 'lat': lat, 'lon': lon, 'title': ev.get('title') or '',
                 'place': ev.get('place_address') or '', 'start': ev.get('start'),
-                'start_is_ts': True, 'link': ev.get('url'),
+                'start_is_ts': True, 'emoji': _timepad_event_emoji(ev.get('categories')),
+                'info': _timepad_event_info(ev),
             })
         for post in get_concert_events_for_city(city):
             lat, lon = post.get('lat'), post.get('lon')
@@ -14654,7 +14743,8 @@ async def handle_map_city_events_api(request):
             result.append({
                 'lat': lat, 'lon': lon, 'title': post.get('title') or '',
                 'place': post.get('place') or '', 'start': start_iso,
-                'start_is_ts': False, 'link': post.get('link'),
+                'start_is_ts': False, 'emoji': CONCERT_CHANNEL_EMOJI,
+                'info': _concert_event_info(post),
             })
     except Exception:
         logger.exception("❌ Ошибка при получении афиши для карты водителей")
@@ -21593,6 +21683,150 @@ RU_MONTHS_GENITIVE = (
     'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря',
 )
 
+# ==================== БЛИЗКИЕ СОБЫТИЯ АФИШИ (пуш) ====================
+# ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя): "пушем помечай если
+# водитель находится в радиусе от события меньше 10 км и до конца
+# мероприятия меньше 30 минут" - момент разъезда с крупного мероприятия
+# даёт всплеск заказов у площадки, водителю полезно узнать об этом заранее,
+# а не только увидеть метку на карте (см. handle_map_city_events_api выше).
+# Источники событий - те же два, что и у карты (TimePad + Telegram-афиша
+# @concerts_moscow/@spb_conc), координаты - те же геокодированные lat/lon.
+# Получатели - ТОЛЬКО такси/Ultima на активной смене (по прямому уточнению
+# пользователя: курьеру/грузовому такси эта афиша вообще не показывается,
+# см. CATEGORIES_WITHOUT_EVENTS, и живая геопозиция есть только у тех, кто
+# на смене - last_lat/last_lon из map_positions, см.
+# get_all_map_positions_with_user_id). Тумблер в настройках уведомлений -
+# 'event_ending_nearby' (см. NOTIFICATION_TYPES выше).
+EVENT_PROXIMITY_RADIUS_KM = 10
+EVENT_PROXIMITY_LEAD_MINUTES = 30
+EVENT_PROXIMITY_CHECK_INTERVAL_MINUTES = 5
+
+# Дедуп: user_id уже запушенных по конкретному событию (ключ события - см.
+# _event_proximity_key) - чтобы не слать один и тот же пуш каждые
+# EVENT_PROXIMITY_CHECK_INTERVAL_MINUTES минут, пока водитель стоит рядом.
+# Простой in-memory словарь (не персистентный) - при рестарте бота дедуп
+# сбрасывается, максимум это лишний повторный пуш раз в очень редких
+# случаях (рестарт + водитель ещё рядом + событие ещё не кончилось) - не
+# критично, тот же компромисс, что и у других in-memory дедупов в боте.
+# Мусор убирается каждый тик - ключи событий, которых больше нет в активном
+# окне (закончились/уехали из выборки), удаляются целиком (см.
+# check_event_proximity_pushes).
+_event_proximity_pushed_users = {}
+
+def _event_proximity_key(ev, source):
+    """Уникальный ключ события для дедупа - TimePad даёt настоящую ссылку
+    (url), у Telegram-афиши - ссылка на пост (link); если по какой-то
+    причине ссылки нет, собираем ключ из названия+времени начала (не
+    идеально при переименовании поста, но такое на практике не случается)."""
+    if source == 'timepad':
+        return ev.get('url') or f"timepad:{ev.get('title')}:{ev.get('start')}"
+    return ev.get('link') or f"concert:{ev.get('title')}:{ev.get('start')}"
+
+async def push_event_proximity_alert(user_id, title, lat, lon, dist_km, remaining_seconds):
+    """Сам пуш - "рядом заканчивается мероприятие" с кнопкой "🚗 Поехали"
+    (тот же yandex_navi_url, что и везде в боте)."""
+    if not bot:
+        return
+    minutes_left = max(1, round(remaining_seconds / 60))
+    text = (
+        f"🎭 *Рядом заканчивается мероприятие*\n\n"
+        f"«{title}» - конец примерно через {minutes_left} мин, ты в "
+        f"~{dist_km:.1f} км: вероятен всплеск заказов от площадки, когда "
+        f"гости начнут расходиться."
+    )
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🚗 Поехали", url=yandex_navi_url(lat, lon))],
+    ])
+    try:
+        await bot.send_message(user_id, text, reply_markup=keyboard, parse_mode='Markdown')
+    except Exception as e:
+        logger.error(f"❌ Не удалось отправить пуш о близком мероприятии пользователю {user_id}: {e}")
+
+async def check_event_proximity_pushes():
+    """Раз в EVENT_PROXIMITY_CHECK_INTERVAL_MINUTES минут: берёт всех
+    водителей такси/Ultima с живой геопозицией на активной смене
+    (get_all_map_positions_with_user_id), группирует по городу, и для
+    каждого города собирает события афиши с известными координатами (тот
+    же набор, что видит карта) - если до конца события осталось меньше
+    EVENT_PROXIMITY_LEAD_MINUTES минут (и оно ещё не закончилось), пушит
+    всех водителей этого города в радиусе EVENT_PROXIMITY_RADIUS_KM от
+    точки события, кто ещё не получал пуш по этому конкретному событию (см.
+    _event_proximity_pushed_users)."""
+    now_ts = datetime.now(ZoneInfo('UTC')).timestamp()
+    positions = get_all_map_positions_with_user_id()
+    by_city = {}
+    for p in positions:
+        if p.get('category') not in ('taxi', 'ultima'):
+            continue
+        by_city.setdefault(p['city'], []).append(p)
+    if not by_city:
+        return
+
+    active_keys = set()
+    timepad_data = load_timepad_data()
+    for city, drivers in by_city.items():
+        events = []
+        for ev in (timepad_data or {}).get('cities', {}).get(city, []):
+            lat, lon = ev.get('place_lat'), ev.get('place_lon')
+            end_ts = ev.get('end') or ev.get('start')
+            if lat is None or lon is None or not end_ts:
+                continue
+            events.append({
+                'key': _event_proximity_key(ev, 'timepad'), 'title': ev.get('title') or 'Мероприятие',
+                'lat': lat, 'lon': lon, 'end': end_ts,
+            })
+        for post in get_concert_events_for_city(city):
+            lat, lon = post.get('lat'), post.get('lon')
+            if lat is None or lon is None:
+                continue
+            end_iso = post.get('end') or post.get('start')
+            if not end_iso:
+                continue
+            try:
+                end_ts = datetime.fromisoformat(end_iso).timestamp()
+            except Exception:
+                continue
+            events.append({
+                'key': _event_proximity_key(post, 'concert'), 'title': post.get('title') or 'Мероприятие',
+                'lat': lat, 'lon': lon, 'end': end_ts,
+            })
+
+        for ev in events:
+            remaining = ev['end'] - now_ts
+            if remaining <= 0 or remaining > EVENT_PROXIMITY_LEAD_MINUTES * 60:
+                continue
+            active_keys.add(ev['key'])
+            pushed = _event_proximity_pushed_users.setdefault(ev['key'], set())
+            for d in drivers:
+                user_id = d['user_id']
+                if user_id in pushed:
+                    continue
+                dist_km = haversine_km(d['lat'], d['lon'], ev['lat'], ev['lon'])
+                if dist_km > EVENT_PROXIMITY_RADIUS_KM:
+                    continue
+                pushed.add(user_id)  # помечаем сразу - и при отправке, и при выключенном тумблере, чтобы не проверять его каждый тик
+                state = user_state.get(user_id, {})
+                if not notifications_enabled(state, 'event_ending_nearby'):
+                    continue
+                await push_event_proximity_alert(user_id, ev['title'], ev['lat'], ev['lon'], dist_km, remaining)
+
+    # Уборка: события, которых в этом тике больше нет в активном окне
+    # (закончились или пропали из выборки) - убираем из дедуп-словаря целиком.
+    for key in list(_event_proximity_pushed_users.keys()):
+        if key not in active_keys:
+            del _event_proximity_pushed_users[key]
+
+async def event_proximity_checker():
+    """Фоновая задача: раз в EVENT_PROXIMITY_CHECK_INTERVAL_MINUTES минут
+    проверяет близкие к завершению события афиши рядом с водителями на
+    смене - см. check_event_proximity_pushes."""
+    while True:
+        try:
+            await check_event_proximity_pushes()
+        except Exception as e:
+            logger.error(f"❌ Ошибка фоновой проверки близких мероприятий: {e}")
+        await asyncio.sleep(EVENT_PROXIMITY_CHECK_INTERVAL_MINUTES * 60)
+
 async def rain_checker():
     """Фоновая задача: раз в RAIN_CHECK_INTERVAL_MINUTES минут опрашивает
     Open-Meteo по каждому из 12 городов и шлёт упреждающий пуш, если в
@@ -26539,6 +26773,7 @@ async def main():
     asyncio.create_task(green_demand_alert_checker())
     asyncio.create_task(weather_data_updater())  # раз в час собирает погоду по всем городам в weather_data.json
     asyncio.create_task(rain_checker())
+    asyncio.create_task(event_proximity_checker())
     asyncio.create_task(holiday_checker())
     asyncio.create_task(airport_queue_checker())
     asyncio.create_task(peak_hour_alert_checker())
