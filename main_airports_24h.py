@@ -11038,7 +11038,9 @@ def map_webapp_html():
           airportMarkers.push(polygon);
         }});
         const icon = L.divIcon({{ className: 'airport-icon', html: a.emoji || '✈️', iconSize: [26, 26] }});
+        const airportEta = etaText(a.lat, a.lon);
         let popup = `<div class="airport-popup"><h4>${{a.emoji || '✈️'}} ${{a.name}}</h4>`;
+        if (airportEta) popup += `<div class="row">${{airportEta}} (~${{AVG_SPEED_KMH}} км/ч)</div>`;
         popup += `<div class="row">${{STATUS_ICON[a.status] || ''}} ${{a.status_text}}</div>`;
         if (a.load !== null && a.load !== undefined) {{
           popup += `<div class="row">📊 Загрузка сейчас: ${{a.load}}%</div>`;
@@ -11069,11 +11071,21 @@ def map_webapp_html():
         }} else {{
           popup += `<div class="row">🚗 Очередь: свежих отметок нет</div>`;
         }}
+        // ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "поехать" от
+        // текущей позиции прямо из попапа аэропорта, тот же паттерн, что уже
+        // есть у заправок/зарядок/парковок) - открывает Яндекс Навигатор/Карты
+        // с готовым маршрутом.
+        popup += goButtonHtml(a.lat, a.lon);
         popup += `</div>`;
         // Постоянная подпись прямо на карте (без клика) - по просьбе
         // пользователя (22.09.2026): "так же отметь на карте", т.е. статус/
         // загрузка/очередь должны быть видны сразу, не только в попапе.
-        let label = `<b>${{a.name}}</b><br>${{STATUS_ICON[a.status] || ''}} ${{a.status_text}}`;
+        // ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "писать на
+        // метках примерное время прибытия... от текущей позиции") - та же
+        // оценка ETA, что и в попапе выше (см. airportEta), сразу в подписи.
+        let label = `<b>${{a.name}}</b>`;
+        if (airportEta) label += ` · ${{airportEta}}`;
+        label += `<br>${{STATUS_ICON[a.status] || ''}} ${{a.status_text}}`;
         if (a.load !== null && a.load !== undefined) {{
           label += ` · 📊 ${{a.load}}%`;
         }}
@@ -11614,6 +11626,37 @@ def map_webapp_html():
   let chargingCluster = L.markerClusterGroup({{ maxClusterRadius: 60, disableClusteringAtZoom: 16, spiderfyOnMaxZoom: false }});
   let chargingLoaded = false;
 
+  // ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "писать на метках
+  // примерное время прибытия... от текущей позиции, средняя скорость 80
+  // км/ч") - примерное время в пути до точки (аэропорты/заправки/зарядки/
+  // парковки) от текущей позиции водителя. Настоящий маршрут с реальным
+  // учётом пробок потребовал бы отдельного запроса к Яндекс.Роутеру НА
+  // КАЖДУЮ точку на карте (сотни заправок/зарядок в одном городе) - это
+  // и медленно, и упёрлось бы в лимиты API. Вместо этого - прямое
+  // расстояние по прямой (формула гаверсинусов) делённое на фиксированную
+  // среднюю скорость 80 км/ч, как и попросил пользователь - грубая, но
+  // мгновенная оценка без сетевых запросов. AVG_SPEED_KMH вынесена
+  // константой, чтобы её было легко поменять одной строкой.
+  const AVG_SPEED_KMH = 80;
+  function haversineKm(lat1, lon1, lat2, lon2) {{
+    const R = 6371;
+    const dLat = (lat2 - lat1) * Math.PI / 180;
+    const dLon = (lon2 - lon1) * Math.PI / 180;
+    const a = Math.sin(dLat / 2) ** 2 +
+      Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
+    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  }}
+  function etaText(lat, lon) {{
+    if (selfLat === null || selfLon === null) return '';
+    const km = haversineKm(selfLat, selfLon, lat, lon);
+    const minutesTotal = Math.round(km / AVG_SPEED_KMH * 60);
+    if (minutesTotal < 1) return '⏱ <1 мин';
+    if (minutesTotal < 60) return `⏱ ~${{minutesTotal}} мин`;
+    const h = Math.floor(minutesTotal / 60);
+    const m = minutesTotal % 60;
+    return `⏱ ~${{h}} ч ${{m}} мин`;
+  }}
+
   // Кнопка "🚕 Поехали" на попапах заправок/зарядок/парковок - по просьбе
   // пользователя, тот же URL-формат, что и везде в боте (yandex_navi_url
   // на сервере/pc-go в кабинете) - обычный https://yandex.ru/maps
@@ -11629,6 +11672,8 @@ def map_webapp_html():
 
   function buildFuelPopup(p) {{
     let html = `<div class="fuel-popup"><h4>⛽ ${{p.name || 'Заправка'}}</h4>`;
+    const eta = etaText(p.lat, p.lon);
+    if (eta) html += `<div class="sub">${{eta}} (~${{AVG_SPEED_KMH}} км/ч)</div>`;
     html += `<div class="sub">Отметь, что есть на заправке:</div><div class="status-btn-row">`;
     ['92', '95', '100', 'diesel'].forEach(ft => {{
       const info = (p.fuel && p.fuel[ft]) || null;
@@ -11719,6 +11764,8 @@ def map_webapp_html():
 
   function buildChargingPopup(p) {{
     let html = `<div class="charging-popup"><h4>🔌 ${{p.name || 'Электрозарядка'}}</h4>`;
+    const eta = etaText(p.lat, p.lon);
+    if (eta) html += `<div class="sub">${{eta}} (~${{AVG_SPEED_KMH}} км/ч)</div>`;
     if (p.operator) html += `<div class="sub">${{p.operator}}</div>`;
     const socketKeys = Object.keys(p.sockets || {{}});
     if (socketKeys.length) {{
@@ -11795,7 +11842,10 @@ def map_webapp_html():
       parkingCluster.clearLayers();
       const icon = L.divIcon({{ className: 'parking-icon', html: '🅿️', iconSize: [20, 20] }});
       (data.stations || []).forEach(p => {{
-        const popup = `<div class="fuel-popup"><h4>🅿️ ${{p.name || 'Бесплатная парковка'}}</h4>${{goButtonHtml(p.lat, p.lon)}}</div>`;
+        const parkEta = etaText(p.lat, p.lon);
+        const popup = `<div class="fuel-popup"><h4>🅿️ ${{p.name || 'Бесплатная парковка'}}</h4>` +
+          (parkEta ? `<div class="sub">${{parkEta}} (~${{AVG_SPEED_KMH}} км/ч)</div>` : '') +
+          `${{goButtonHtml(p.lat, p.lon)}}</div>`;
         const marker = L.marker([p.lat, p.lon], {{ icon }}).bindPopup(popup);
         parkingCluster.addLayer(marker);
       }});
