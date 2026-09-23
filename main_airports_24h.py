@@ -10325,7 +10325,7 @@ def map_webapp_html():
   // лёгкой зернистости, прям лёгкой-лёгкой") - L.svg().addTo(map) заранее
   // создаёт SVG-рендерер Leaflet (иначе он появляется только при первом
   // добавленном полигоне) - нужно, чтобы сразу вставить в него <defs> с
-  // фильтром зернистости (см. ensureCloudGrainFilter ниже), который потом
+  // фильтром зернистости/размытия (см. ensureCloudFilter ниже), который потом
   // переиспользуют ВСЕ "облака" спроса (аэропорты/вокзалы/город/районы).
   L.svg().addTo(map);
   // ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя, прислал API-ключ
@@ -10651,24 +10651,43 @@ def map_webapp_html():
   }}
   // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "добавить какой-то
   // лёгкой зернистости, прям лёгкой-лёгкой, чтобы... более смотрелось
-  // хорошо") - один общий SVG-фильтр (feTurbulence -> едва заметный
-  // чёрный шум с альфой ~0.05 -> накладывается ПОВЕРХ уже размытой заливки
-  // облака, см. CLOUD_FILTER_SUFFIX ниже) - вставляется в DOM один раз
-  // (idempotent, проверка по id), переиспользуется всеми "облаками"
-  // спроса. numOctaves=1 (не 2-3) - дешевле для телефона, заметной разницы
-  // на таком лёгком эффекте всё равно не видно.
-  function ensureCloudGrainFilter() {{
-    if (document.getElementById('cloudGrainFilter')) return;
+  // хорошо"), ПЕРЕДЕЛАНО 23.09.2026 (прямая просьба пользователя со
+  // скриншотами iOS/Android - "по разному отрисовывает облака спроса,
+  // давай как-то едино сделаем") - раньше размытие и зернистость были
+  // ДВУМЯ отдельными CSS filter-функциями, склеенными в одну строку
+  // (`style.filter = 'blur(30px) url(#cloudGrainFilter)'`). Такая связка
+  // "растровый blur() + ссылка на SVG-фильтр" по-разному (и не полностью)
+  // поддерживается в WebView на iOS и Android - отсюда на Android блюр
+  // либо не применялся вовсе, либо применялся иначе, и вместо мягкого
+  // облака была видна резкая/сетчатая текстура шума (feTurbulence без
+  // сглаживания). Теперь ОДИН цельный SVG-фильтр на каждый радиус
+  // размытия (feGaussianBlur + зернистость внутри одного <filter>,
+  // применяется единственной ссылкой `filter: url(#cloudFilter_NN)`) -
+  // это уже чистый SVG-filter-граф без смешивания с CSS-функцией blur(),
+  // одинаково рендерится и в WebKit (iOS), и в Chromium-based WebView
+  // (Android). Кэш по id (idempotent) - один фильтр на каждое уникальное
+  // значение blurPx, переиспользуется всеми облаками с этим радиусом.
+  function ensureCloudFilter(blurPx) {{
+    const fid = 'cloudFilter_' + blurPx;
+    if (document.getElementById(fid)) return 'url(#' + fid + ')';
     const svg = document.querySelector('#map svg');
-    if (!svg) return;
+    if (!svg) return 'url(#' + fid + ')';
     const ns = 'http://www.w3.org/2000/svg';
-    const defs = document.createElementNS(ns, 'defs');
+    let defs = svg.querySelector('defs');
+    if (!defs) {{
+      defs = document.createElementNS(ns, 'defs');
+      svg.insertBefore(defs, svg.firstChild);
+    }}
     const filter = document.createElementNS(ns, 'filter');
-    filter.setAttribute('id', 'cloudGrainFilter');
-    filter.setAttribute('x', '-50%');
-    filter.setAttribute('y', '-50%');
-    filter.setAttribute('width', '200%');
-    filter.setAttribute('height', '200%');
+    filter.setAttribute('id', fid);
+    filter.setAttribute('x', '-60%');
+    filter.setAttribute('y', '-60%');
+    filter.setAttribute('width', '220%');
+    filter.setAttribute('height', '220%');
+    const blur = document.createElementNS(ns, 'feGaussianBlur');
+    blur.setAttribute('in', 'SourceGraphic');
+    blur.setAttribute('stdDeviation', String(blurPx / 2));
+    blur.setAttribute('result', 'blurred');
     const turb = document.createElementNS(ns, 'feTurbulence');
     turb.setAttribute('type', 'fractalNoise');
     turb.setAttribute('baseFrequency', '0.85');
@@ -10682,22 +10701,22 @@ def map_webapp_html():
     cm.setAttribute('result', 'fadedNoise');
     const comp = document.createElementNS(ns, 'feComposite');
     comp.setAttribute('in', 'fadedNoise');
-    comp.setAttribute('in2', 'SourceGraphic');
+    comp.setAttribute('in2', 'blurred');
     comp.setAttribute('operator', 'over');
+    filter.appendChild(blur);
     filter.appendChild(turb);
     filter.appendChild(cm);
     filter.appendChild(comp);
     defs.appendChild(filter);
-    svg.insertBefore(defs, svg.firstChild);
+    return 'url(#' + fid + ')';
   }}
-  const CLOUD_FILTER_SUFFIX = ' url(#cloudGrainFilter)';
   // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "можешь облака
   // сделать объёмными") - радиальный градиент на заливке облака вместо
   // плоского цвета: яркое "ядро" смещено к верхнему левому краю (имитация
   // подсветки), плавно уходит в прозрачность к краям - вместе с уже
   // существующим blur/зернистостью создаёт ощущение объёма вместо плоского
   // цветного пятна. Один градиент на цвет, idempotent по id (переиспользуется
-  // всеми облаками того же цвета, как и ensureCloudGrainFilter выше).
+  // всеми облаками того же цвета, как и ensureCloudFilter выше).
   function ensureCloudGradient(color) {{
     const gid = 'cloudGrad_' + color.replace('#', '');
     if (document.getElementById(gid)) return gid;
@@ -10874,7 +10893,7 @@ def map_webapp_html():
             fillOpacity: highDemandBlobOpacity(a.load),
             smoothFactor: 3,
           }}).addTo(map);
-          if (blob._path) {{ ensureCloudGrainFilter(); blob._path.style.filter = 'blur(30px)' + CLOUD_FILTER_SUFFIX; }}
+          if (blob._path) {{ blob._path.style.filter = ensureCloudFilter(30); }}
           airportMarkers.push(blob);
         }}
         // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "полигон для
@@ -11026,7 +11045,7 @@ def map_webapp_html():
             fillOpacity: 0.18,
             smoothFactor: 3,
           }}).addTo(map);
-          if (blob._path) {{ ensureCloudGrainFilter(); blob._path.style.filter = 'blur(22px)' + CLOUD_FILTER_SUFFIX; }}
+          if (blob._path) {{ blob._path.style.filter = ensureCloudFilter(22); }}
           stationMarkers.push(blob);
         }}
         const icon = L.divIcon({{ className: 'airport-icon', html: '🚆', iconSize: [26, 26] }});
@@ -11114,7 +11133,7 @@ def map_webapp_html():
         fillOpacity: 0.16,
         smoothFactor: 3,
       }}).addTo(map);
-      if (rainCloudMarker._path) {{ ensureCloudGrainFilter(); rainCloudMarker._path.style.filter = 'blur(34px)' + CLOUD_FILTER_SUFFIX; }}
+      if (rainCloudMarker._path) {{ rainCloudMarker._path.style.filter = ensureCloudFilter(34); }}
     }} catch (e) {{ /* тихо */ }}
   }}
   // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "у тебя же есть в
@@ -11302,7 +11321,7 @@ def map_webapp_html():
             fillOpacity: districtLayerOpacity(demand, layer.thresholds),
             smoothFactor: 3,
           }}).addTo(map);
-          if (marker._path) {{ ensureCloudGrainFilter(); marker._path.style.filter = 'blur(20px)' + CLOUD_FILTER_SUFFIX; }}
+          if (marker._path) {{ marker._path.style.filter = ensureCloudFilter(20); }}
           marker.bindTooltip(`${{d.name}} · ${{layer.label}} · ${{demand}}%`, {{ direction: 'top', offset: [0, -6], className: 'airport-label' }});
           districtDemandMarkers.push(marker);
         }});
@@ -11341,7 +11360,7 @@ def map_webapp_html():
         fillOpacity: demandCloudOpacity(data.demand, myCategory),
         smoothFactor: 3,
       }}).addTo(map);
-      if (demandCloudMarker._path) {{ ensureCloudGrainFilter(); demandCloudMarker._path.style.filter = 'blur(34px)' + CLOUD_FILTER_SUFFIX; }}
+      if (demandCloudMarker._path) {{ demandCloudMarker._path.style.filter = ensureCloudFilter(34); }}
       // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя) - 2-3 облака-
       // спутника вполовину меньше основного, на расстоянии ~7 км (с
       // разбросом), каждое своей формы (свой seed -> свой профиль wobble) и
@@ -11413,7 +11432,7 @@ def map_webapp_html():
           fillOpacity: demandCloudOpacity(data.demand, myCategory) * 0.85,
           smoothFactor: 3,
         }}).addTo(map);
-        if (satMarker._path) {{ ensureCloudGrainFilter(); satMarker._path.style.filter = 'blur(28px)' + CLOUD_FILTER_SUFFIX; }}
+        if (satMarker._path) {{ satMarker._path.style.filter = ensureCloudFilter(28); }}
         demandSatelliteMarkers.push(satMarker);
       }}
     }} catch (e) {{ /* тихо */ }}
