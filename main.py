@@ -13986,11 +13986,15 @@ _MOSCOW_DISTRICT_DEMAND_PATH = os.path.join(os.path.dirname(os.path.abspath(__fi
 _moscow_district_demand_cache = None
 
 def get_moscow_district_demand():
-    """Возвращает {'tariff_order': [...], 'districts': {name: {'lat','lon','weekday': {0..6: [[start,end,v0..v4],...]}}}}.
+    """Возвращает {'tariff_order': [...], 'districts': {name: {'lat','lon','weekday': {0..6: [[start,end,v0..v5],...]}}}}.
     Если файла нет/битый - логируем и возвращаем None (см. handle_map_district_
     demand_api) - фича просто не покажет районные облака, а не роняет карту
     целиком, в отличие от config.json у аэропортов (тот - критичен для
-    старта бота, этот - нет)."""
+    старта бота, этот - нет).
+
+    ОБНОВЛЕНО 23.09.2026: новая 129-районная матрица (было 30 районов),
+    6 реальных тарифных колонок (было 5, Элит раньше дублировал Премьер) -
+    см. MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_* ниже."""
     global _moscow_district_demand_cache
     if _moscow_district_demand_cache is not None:
         return _moscow_district_demand_cache
@@ -14002,7 +14006,7 @@ def get_moscow_district_demand():
         _moscow_district_demand_cache = False  # False, не None - чтобы не пытаться перечитать на каждый запрос
     return _moscow_district_demand_cache or None
 
-# Индексы колонок tariff_order (['Эконом','Комфорт','Комфорт+','Бизнес','Премиум']).
+# Индексы колонок tariff_order (['Эконом','Комфорт','Комфорт+','Бизнес','Премьер','Элит']).
 # ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя - "два независимых слоя
 # облаков одновременно - эконом отдельно, комфорт+комфорт+ отдельно, у них
 # разные пороги показа") - категория 'taxi' больше не сводится к ОДНОМУ
@@ -14010,29 +14014,29 @@ def get_moscow_district_demand():
 # ЕЩЁ РАЗ ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя - "пороги спроса
 # облаков опусти для ultima... эконом 60-70-80-90-100, комфорт 70-80-90-100,
 # комфорт плюс 80-90-100... бизнес 60-70-80-90-100, премьер 70-80-90-100,
-# элит 85-90-95-100", уточнено через вопрос - только для Москвы, Элит
-# считать по тем же цифрам, что и Премьер, т.к. в данных нет отдельной
-# колонки под Элит):
-# - taxi теперь ТРИ независимых слоя (эконом/комфорт/комфорт+ отдельно, а не
-#   комфорт+комфорт+ вместе одним максимумом, как было раньше) - реальные
-#   раздельные цифры по Комфорт (индекс 1) и Комфорт+ (индекс 2) в данных
-#   УЖЕ есть, их просто перестали сводить в один максимум.
-# - ultima теперь ТРИ слоя: бизнес (индекс 3) отдельно, премьер и элит - оба
-#   берутся из ОДНОЙ и той же колонки "премиум" (индекс 4, единственная,
-#   что есть в данных), но с РАЗНЫМИ порогами каждый - у элит выше, т.к.
-#   тариф реже/дороже.
+# элит 85-90-95-100"; на тот момент Элит считался по тем же цифрам, что
+# Премьер, т.к. в старой 30-районной таблице не было отдельной колонки).
+# ИЗМЕНЕНО 23.09.2026 (загрузка новой 129-районной матрицы спроса
+# moscow_district_demand.json взамен старой 30-районной, по данным
+# пользователя из moscow_taxi_demand_132_districts.xlsx) - у Элит теперь
+# СВОЯ реальная колонка (индекс 5), больше не дублирует Премьер.
+# - taxi по-прежнему ТРИ независимых слоя (эконом/комфорт/комфорт+) -
+#   реальные раздельные цифры по Комфорт (индекс 1) и Комфорт+ (индекс 2).
+# - ultima теперь ТРИ слоя из ТРЁХ разных колонок: бизнес (индекс 3),
+#   премьер (индекс 4) и элит (индекс 5, реальные данные, не дубль премьера).
 MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_ECONOM = (0,)
 MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_COMFORT = (1,)
 MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_COMFORT_PLUS = (2,)
 MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_BUSINESS = (3,)
-MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_PREMIUM = (4,)  # источник и для "премьер", и для "элит" слоя
+MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_PREMIUM = (4,)
+MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_ELITE = (5,)  # своя реальная колонка (новая 129-районная матрица)
 
 # Комбинированные индексы (максимум по всем тарифам категории) - используются
 # ТОЛЬКО для общего ранжирования районов в "Куда ехать" (score_district_candidates),
 # где нужен один общий балл района на категорию, а не отдельные слои облаков.
 MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES = {
     'taxi': (0, 1, 2),
-    'ultima': (3, 4),
+    'ultima': (3, 4, 5),
 }
 
 # Пороги показа облака (первое значение) и "ступени" непрозрачности (все
@@ -14076,10 +14080,12 @@ async def handle_map_district_demand_api(request):
 
     ИЗМЕНЕНО 22.09.2026 (см. MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_ECONOM/
     _COMFORT/_BUSINESS/_PREMIUM выше) - и для category='taxi', и для
-    'ultima' каждый район теперь отдаёт ДВА отдельных значения
-    ('demand_econom'/'demand_comfort' для taxi, 'demand_business'/
-    'demand_premium' для ultima), а не один максимум по всем тарифам
-    категории - JS рисует их как два независимых слоя облаков каждый."""
+    'ultima' каждый район теперь отдаёт несколько отдельных значений
+    ('demand_econom'/'demand_comfort'/'demand_comfort_plus' для taxi,
+    'demand_business'/'demand_premier'/'demand_elite' для ultima), а не один
+    максимум по всем тарифам категории - JS рисует их как независимые слои
+    облаков каждый. ИЗМЕНЕНО 23.09.2026 - demand_elite теперь реальная
+    колонка новой 129-районной матрицы, не дубль demand_premier."""
     city = request.query.get('city', '')
     category = request.query.get('category', '') or None
     result = {'districts': []}
@@ -14135,22 +14141,24 @@ async def handle_map_district_demand_api(request):
                 item['demand_comfort_plus'] = comfort_plus
             else:
                 # ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя - "бизнес
-                # 60-70-80-90-100, премьер 70-80-90-100, элит 85-90-95-100",
-                # уточнено - элит считать по тем же цифрам, что премьер, т.к.
-                # отдельной колонки под элит в данных нет) - demand_premium
-                # разошёлся на demand_premier/demand_elite, ОБА читают одно и
-                # то же значение "премиум" из данных - различаются только
-                # пороги показа/яркости на стороне JS (DISTRICT_CLOUD_LAYERS).
+                # 60-70-80-90-100, премьер 70-80-90-100, элит 85-90-95-100").
+                # ЕЩЁ РАЗ ИЗМЕНЕНО 23.09.2026 (новая 129-районная матрица
+                # спроса - см. MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_ELITE
+                # выше) - demand_elite теперь читает СВОЮ реальную колонку
+                # "элит", а не дублирует "премьер" как раньше (в старой
+                # 30-районной таблице отдельной колонки под элит не было).
                 business = _district_slot_value(slots, now.hour, MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_BUSINESS)
                 premium = _district_slot_value(slots, now.hour, MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_PREMIUM)
-                if business is None and premium is None and not district_raining:
+                elite = _district_slot_value(slots, now.hour, MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_ELITE)
+                if business is None and premium is None and elite is None and not district_raining:
                     continue
                 if district_raining:
                     business = max(business or 0, MAP_DEMAND_RAIN_FLOOR_PERCENT)
                     premium = max(premium or 0, MAP_DEMAND_RAIN_FLOOR_PERCENT)
+                    elite = max(elite or 0, MAP_DEMAND_RAIN_FLOOR_PERCENT)
                 item['demand_business'] = business
                 item['demand_premier'] = premium
-                item['demand_elite'] = premium
+                item['demand_elite'] = elite
             result['districts'].append(item)
     except Exception:
         logger.exception("❌ Ошибка при получении районного спроса для карты водителей (Москва)")
