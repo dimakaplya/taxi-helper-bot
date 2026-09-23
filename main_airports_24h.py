@@ -7660,13 +7660,25 @@ async def score_district_candidates(city, category, user_lat=None, user_lon=None
                 break
         if demand is None:
             continue
-        if rain_now:
+        # ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя - "Куда ехать"
+        # считать от погоды В ТОМ ИЛИ ИНОМ РАЙОНЕ, а не по одной точке
+        # погоды на весь город) - раньше "дождевой пол" MAP_DEMAND_RAIN_
+        # FLOOR_PERCENT применялся ко ВСЕМ районам одинаково, если дождь шёл
+        # хоть где-то в городской точке замера. Теперь каждый район
+        # проверяется по СВОЕМУ снепшоту (district_rain_now, см. блок
+        # "ПОГОДА ПО РАЙОНАМ МОСКВЫ" выше) - fallback на общегородской
+        # rain_now, пока для района ещё не накопился собственный снепшот.
+        district_raining = district_rain_now(name, fallback_rain_now=rain_now)
+        if district_raining:
             demand = max(demand, MAP_DEMAND_RAIN_FLOOR_PERCENT)
         dist_km = None
         if origin_lat is not None and origin_lon is not None:
             dist_km = haversine_km(origin_lat, origin_lon, entry['lat'], entry['lon'])
         adjusted = demand * district_distance_penalty(dist_km)
-        scored.append({'name': name, 'demand': demand, 'lat': entry['lat'], 'lon': entry['lon'], 'adjusted': adjusted})
+        scored.append({
+            'name': name, 'demand': demand, 'lat': entry['lat'], 'lon': entry['lon'],
+            'adjusted': adjusted, 'raining': district_raining,
+        })
 
     if not scored:
         return [await score_city_candidate(city, category=category)]
@@ -7675,8 +7687,8 @@ async def score_district_candidates(city, category, user_lat=None, user_lon=None
     result = []
     for d in scored[:limit]:
         reasons = [f"{d['demand']}% спроса в районе"]
-        if rain_now:
-            reasons.append("🌧 осадки сейчас - спрос выше обычного")
+        if d['raining']:
+            reasons.append("🌧 осадки сейчас в этом районе - спрос выше обычного")
         level = 'peak' if d['demand'] >= 90 else ('high' if d['demand'] >= 70 else ('mid' if d['demand'] >= 40 else 'low'))
         advice = get_city_advice(city, level, category=category)
         result.append({
@@ -12671,6 +12683,55 @@ def weather_webapp_html():
   }
   requestAnimationFrame(draw);
 
+  // ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "привязать к
+  // текущей локации водителя"): для Москвы один раз (не watch, как на карте
+  // - погоде живое слежение не нужно) спрашиваем геопозицию ТЕМ ЖЕ
+  // способом, что и карта (сначала Telegram.WebApp.LocationManager, при
+  // недоступности - navigator.geolocation, см. map_webapp_html), чтобы
+  // сервер мог отдать погоду ближайшего из 30 районов Москвы вместо одной
+  // точки на весь город (см. handle_weather_data_api). Если геолокация
+  // недоступна/запрещена, город не Москва или водитель не успел ответить за
+  // GEO_TIMEOUT_MS - просто не передаём lat/lon: сервер тогда молча отдаёт
+  // погоду по городу, как и раньше (полностью обратно совместимый фолбэк,
+  // ничего не ломается для остальных 11 городов и для тех, кто не дал
+  // разрешение на геолокацию).
+  const GEO_TIMEOUT_MS = 4000;
+  function getDriverLocationOnce() {
+    return new Promise((resolve) => {
+      let settled = false;
+      const done = (coords) => { if (!settled) { settled = true; resolve(coords); } };
+      const timer = setTimeout(() => done(null), GEO_TIMEOUT_MS);
+      function browserFallback() {
+        if (!navigator.geolocation) { done(null); return; }
+        navigator.geolocation.getCurrentPosition(
+          (pos) => { clearTimeout(timer); done({ lat: pos.coords.latitude, lon: pos.coords.longitude }); },
+          () => { clearTimeout(timer); done(null); },
+          { enableHighAccuracy: false, maximumAge: 300000, timeout: 3500 }
+        );
+      }
+      const hasLocationManager = !!(tg && tg.LocationManager && typeof tg.LocationManager.init === 'function');
+      if (hasLocationManager) {
+        try {
+          tg.LocationManager.init(() => {
+            try {
+              if (!tg.LocationManager.isLocationAvailable) { browserFallback(); return; }
+              tg.LocationManager.getLocation((data) => {
+                if (data && typeof data.latitude === 'number' && typeof data.longitude === 'number') {
+                  clearTimeout(timer);
+                  done({ lat: data.latitude, lon: data.longitude });
+                } else {
+                  browserFallback();
+                }
+              });
+            } catch (e) { browserFallback(); }
+          });
+        } catch (e) { browserFallback(); }
+      } else {
+        browserFallback();
+      }
+    });
+  }
+
   async function load() {
     if (!city) {
       document.getElementById('state').style.display = 'block';
@@ -12678,7 +12739,12 @@ def weather_webapp_html():
       return;
     }
     try {
-      const resp = await fetch('""" + WEATHER_DATA_API_PATH + """?city=' + encodeURIComponent(city));
+      let url = '""" + WEATHER_DATA_API_PATH + """?city=' + encodeURIComponent(city);
+      if (city === 'moscow') {
+        const loc = await getDriverLocationOnce();
+        if (loc) url += '&lat=' + loc.lat + '&lon=' + loc.lon;
+      }
+      const resp = await fetch(url);
       if (!resp.ok) throw new Error('http_' + resp.status);
       const data = await resp.json();
       if (!data.current) {
@@ -12688,7 +12754,7 @@ def weather_webapp_html():
       }
       const group = groupFor(data.current.weathercode);
       initParticles(group);
-      document.getElementById('cityName').textContent = data.city_name || '';
+      document.getElementById('cityName').textContent = data.district_name ? (data.city_name + ' · р-н ' + data.district_name) : (data.city_name || '');
       document.getElementById('nowEmoji').textContent = WEATHERCODE_EMOJI[data.current.weathercode] || '🌤';
       document.getElementById('nowTemp').textContent = (data.current.temperature_2m != null ? Math.round(data.current.temperature_2m) : '—') + '°';
       document.getElementById('nowCond').textContent = WEATHERCODE_NAMES[data.current.weathercode] || '';
@@ -12741,11 +12807,42 @@ async def handle_weather_data_api(request):
     открыт всем). Источник - тот же кэш, что у текстовой версии
     (get_cached_weather_forecast), просто переупакован в формат поудобнее
     для JS (плоский список часов вместо raw Open-Meteo hourly.time[]/
-    hourly.weathercode[]/hourly.temperature_2m[] по индексам)."""
+    hourly.weathercode[]/hourly.temperature_2m[] по индексам).
+
+    ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "привязать к текущей
+    локации водителя"): необязательные query-параметры lat/lon - если город
+    'moscow' и координаты переданы, ищем ближайший из 30 районов Москвы
+    (find_nearest_moscow_district) и, если для него уже есть свой снепшот
+    погоды (get_cached_district_weather_forecast), отдаём ЕГО вместо
+    погоды по одной точке на весь город - точнее для конкретного места, где
+    сейчас находится водитель. В ответе тогда появляется 'district_name' -
+    клиент показывает его вместо/рядом с названием города (см. JS в
+    weather_webapp_html ниже). Если координат нет, город не Москва, район не
+    нашёлся или для него ещё нет своего снепшота (бот только что стартовал) -
+    молча используем прежнее поведение (погода по городу), без district_name -
+    ЭТО ФОЛБЭК, а не ошибка."""
     city = request.query.get('city', '')
     if not city:
         return web.json_response({'error': 'no_city'}, status=400)
-    forecast = get_cached_weather_forecast(city)
+    district_name = None
+    forecast = None
+    if city == 'moscow':
+        try:
+            lat_raw = request.query.get('lat')
+            lon_raw = request.query.get('lon')
+            if lat_raw is not None and lon_raw is not None:
+                lat, lon = float(lat_raw), float(lon_raw)
+                nearest = find_nearest_moscow_district(lat, lon)
+                if nearest:
+                    candidate_name = nearest[0]
+                    district_forecast = get_cached_district_weather_forecast(candidate_name)
+                    if district_forecast:
+                        district_name = candidate_name
+                        forecast = district_forecast
+        except (TypeError, ValueError):
+            pass  # битые/нечисловые lat/lon - просто игнорируем, отдаём погоду по городу
+    if forecast is None:
+        forecast = get_cached_weather_forecast(city)
     if not forecast:
         return web.json_response({'city_name': CITY_DISPLAY_NAMES.get(city, city), 'current': None, 'hourly': []})
     hourly_raw = forecast.get('hourly', {})
@@ -12770,6 +12867,7 @@ async def handle_weather_data_api(request):
     ]
     return web.json_response({
         'city_name': CITY_DISPLAY_NAMES.get(city, city),
+        'district_name': district_name,
         'current': forecast.get('current'),
         'hourly': hourly,
     })
@@ -13822,8 +13920,9 @@ async def handle_map_district_demand_api(request):
     try:
         now = get_city_now(city)
         weekday = str(now.weekday())
-        # Тот же "дождевой пол", что и у общегородского облака - см.
-        # комментарий в handle_map_demand_api выше.
+        # Общегородской rain_now - только как fallback для районов, у
+        # которых ещё нет собственного снепшота погоды (см. district_rain_now
+        # и комментарий в score_district_candidates выше).
         rain_now = False
         try:
             forecast = get_cached_weather_forecast(city)
@@ -13834,6 +13933,17 @@ async def handle_map_district_demand_api(request):
         for name, entry in table.get('districts', {}).items():
             slots = entry.get('weekday', {}).get(weekday, [])
             item = {'name': name, 'lat': entry['lat'], 'lon': entry['lon']}
+            # ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя - "зоны спроса
+            # рисуй облаками где есть осадки") - раньше "дождевой пол"
+            # МОГ поднять уже существующий балл района, но НЕ показывал
+            # облако там, где базового спроса на этот час/день вовсе не было
+            # (район просто пропускался - continue выше). Теперь: 1) дождь
+            # проверяется по СВОЕМУ снепшоту КАЖДОГО района (district_rain_now),
+            # а не по одной городской точке; 2) если в районе идут осадки
+            # ПРЯМО СЕЙЧАС, но базового значения на этот слот нет - облако
+            # всё равно показываем на уровне MAP_DEMAND_RAIN_FLOOR_PERCENT,
+            # а не пропускаем район вовсе.
+            district_raining = district_rain_now(name, fallback_rain_now=rain_now)
             if category == 'taxi':
                 # ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя - "эконом
                 # 60-70-80-90-100, комфорт 70-80-90-100, комфорт плюс
@@ -13843,15 +13953,12 @@ async def handle_map_district_demand_api(request):
                 econom = _district_slot_value(slots, now.hour, MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_ECONOM)
                 comfort = _district_slot_value(slots, now.hour, MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_COMFORT)
                 comfort_plus = _district_slot_value(slots, now.hour, MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_COMFORT_PLUS)
-                if econom is None and comfort is None and comfort_plus is None:
+                if econom is None and comfort is None and comfort_plus is None and not district_raining:
                     continue
-                if rain_now:
-                    if econom is not None:
-                        econom = max(econom, MAP_DEMAND_RAIN_FLOOR_PERCENT)
-                    if comfort is not None:
-                        comfort = max(comfort, MAP_DEMAND_RAIN_FLOOR_PERCENT)
-                    if comfort_plus is not None:
-                        comfort_plus = max(comfort_plus, MAP_DEMAND_RAIN_FLOOR_PERCENT)
+                if district_raining:
+                    econom = max(econom or 0, MAP_DEMAND_RAIN_FLOOR_PERCENT)
+                    comfort = max(comfort or 0, MAP_DEMAND_RAIN_FLOOR_PERCENT)
+                    comfort_plus = max(comfort_plus or 0, MAP_DEMAND_RAIN_FLOOR_PERCENT)
                 item['demand_econom'] = econom
                 item['demand_comfort'] = comfort
                 item['demand_comfort_plus'] = comfort_plus
@@ -13865,13 +13972,11 @@ async def handle_map_district_demand_api(request):
                 # пороги показа/яркости на стороне JS (DISTRICT_CLOUD_LAYERS).
                 business = _district_slot_value(slots, now.hour, MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_BUSINESS)
                 premium = _district_slot_value(slots, now.hour, MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_PREMIUM)
-                if business is None and premium is None:
+                if business is None and premium is None and not district_raining:
                     continue
-                if rain_now:
-                    if business is not None:
-                        business = max(business, MAP_DEMAND_RAIN_FLOOR_PERCENT)
-                    if premium is not None:
-                        premium = max(premium, MAP_DEMAND_RAIN_FLOOR_PERCENT)
+                if district_raining:
+                    business = max(business or 0, MAP_DEMAND_RAIN_FLOOR_PERCENT)
+                    premium = max(premium or 0, MAP_DEMAND_RAIN_FLOOR_PERCENT)
                 item['demand_business'] = business
                 item['demand_premier'] = premium
                 item['demand_elite'] = premium
@@ -15903,7 +16008,7 @@ def legal_cabinet_webapp_html():
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Кабинет юрлица</title>
+<title>Кабинет автопарка</title>
 <script src=\"""" + TG_WEBAPP_JS_PROXY_PATH + """\"></script>
 <style>
   :root { color-scheme: light dark; }
@@ -16126,7 +16231,7 @@ def legal_cabinet_webapp_html():
 
   <div class="tab-pane" id="tab-settings">
     <div class="card">
-      <p class="muted">Кабинет юр.лица «<span id="entityNameSettings">—</span>». Добавление новых машин, водителей и
+      <p class="muted">Кабинет автопарка «<span id="entityNameSettings">—</span>». Добавление новых машин, водителей и
       уведомлений - на соответствующих вкладках выше. По вопросам новых компаний/паролей обращайся к администратору бота.</p>
     </div>
   </div>
@@ -20105,33 +20210,23 @@ def format_queue_breakdown(city, icao, category, zone_key=None):
 #     ручной просмотр почасовой разбивки на RAIN_FORECAST_HOURS часов вперёд:
 #     вид осадков + температура на каждый час (см. show_weather_forecast).
 
-async def fetch_rain_forecast(city):
-    """Почасовой прогноз (weathercode, температура) на RAIN_FORECAST_HOURS
-    часов вперёд по городу через WeatherAPI.com - СЫРОЙ live-запрос к API.
+async def fetch_rain_forecast_at(lat, lon, label):
+    """Общая часть fetch_rain_forecast (ниже) и fetch_district_rain_forecast
+    (см. блок "ПОГОДА ПО РАЙОНАМ МОСКВЫ" ниже) - СЫРОЙ live-запрос к
+    WeatherAPI.com по произвольным координатам, с retry. label - только для
+    логов (название города или "р-н <Название>"), в остальном функция не
+    знает, город это или район.
 
-    ЗАМЕНЕНО 23.09.2026 (прямая просьба пользователя - сравнил прогноз бота
-    с другими источниками, расхождения показались слишком большими, попросил
-    попробовать WeatherAPI вместо Open-Meteo). Возвращаемый формат НАМЕРЕННО
-    оставлен таким же, каким был у Open-Meteo (current/hourly с WMO
-    weathercode) - см. _convert_weatherapi_response выше, конвертирующую
-    ответ WeatherAPI в этот же shape, чтобы весь остальной код (кэш
-    get_cached_weather_forecast и все её читатели) не пришлось трогать.
-
-    ИЗМЕНЕНО 21.09.2026 (пользователь - "раз в час собирал инфу... чтобы не
-    нагружать лимиты", после инцидента с "Open-Meteo вернул 429"): эта
-    функция вызывается НАПРЯМУЮ только из weather_data_updater() (фоновая
-    задача ниже), раз в WEATHER_UPDATE_INTERVAL_MINUTES по всем городам
-    разом. Всё остальное читает уже готовый снепшот через
-    get_cached_weather_forecast() ниже, не дёргая API вообще. Retry на 429
-    оставлен - полезен, даже когда вызовов раз в 20 минут, а не при каждом
-    клике."""
+    ВЫНЕСЕНО 23.09.2026 (прямая просьба пользователя - "раздели данные
+    погоды на районы города... привязать к текущей локации водителя") из
+    прежней fetch_rain_forecast(city), которая содержала весь этот код
+    inline и брала координаты ТОЛЬКО из RAIN_CITY_COORDS. Логика запроса и
+    retry не изменилась ни на символ - просто теперь принимает координаты
+    напрямую, чтобы её могли переиспользовать и городские, и районные
+    сборщики погоды."""
     if not WEATHERAPI_KEY:
         logger.warning("⚠️ WEATHERAPI_KEY не задан в переменных окружения - погода недоступна")
         return None
-    coords = RAIN_CITY_COORDS.get(city)
-    if not coords:
-        return None
-    lat, lon = coords
     params = {
         'key': WEATHERAPI_KEY,
         'q': f'{lat},{lon}',
@@ -20157,23 +20252,52 @@ async def fetch_rain_forecast(city):
                     if resp.status == 200:
                         raw = await resp.json()
                         return _convert_weatherapi_response(raw)
-                    label = "429" if resp.status == 429 else str(resp.status)
+                    label_status = "429" if resp.status == 429 else str(resp.status)
                     if attempt < RETRY_ATTEMPTS:
                         wait_s = 2.0 * attempt
-                        logger.warning(f"⏳ WeatherAPI вернул {label} для {city}, попытка {attempt}/{RETRY_ATTEMPTS} - жду {wait_s}с...")
+                        logger.warning(f"⏳ WeatherAPI вернул {label_status} для {label}, попытка {attempt}/{RETRY_ATTEMPTS} - жду {wait_s}с...")
                         await asyncio.sleep(wait_s)
                         continue
-                    logger.warning(f"⚠️ WeatherAPI вернул {label} для города {city} - исчерпаны все {RETRY_ATTEMPTS} попыток")
+                    logger.warning(f"⚠️ WeatherAPI вернул {label_status} для {label} - исчерпаны все {RETRY_ATTEMPTS} попыток")
                     return None
         except Exception as e:
             if attempt < RETRY_ATTEMPTS:
                 wait_s = 2.0 * attempt
-                logger.warning(f"⏳ Ошибка запроса к WeatherAPI для {city} ({e}), попытка {attempt}/{RETRY_ATTEMPTS} - жду {wait_s}с...")
+                logger.warning(f"⏳ Ошибка запроса к WeatherAPI для {label} ({e}), попытка {attempt}/{RETRY_ATTEMPTS} - жду {wait_s}с...")
                 await asyncio.sleep(wait_s)
                 continue
-            logger.warning(f"⚠️ Не удалось получить прогноз WeatherAPI для {city} - исчерпаны все {RETRY_ATTEMPTS} попыток ({e})")
+            logger.warning(f"⚠️ Не удалось получить прогноз WeatherAPI для {label} - исчерпаны все {RETRY_ATTEMPTS} попыток ({e})")
             return None
     return None
+
+async def fetch_rain_forecast(city):
+    """Почасовой прогноз (weathercode, температура) на RAIN_FORECAST_HOURS
+    часов вперёд по городу через WeatherAPI.com - СЫРОЙ live-запрос к API.
+
+    ЗАМЕНЕНО 23.09.2026 (прямая просьба пользователя - сравнил прогноз бота
+    с другими источниками, расхождения показались слишком большими, попросил
+    попробовать WeatherAPI вместо Open-Meteo). Возвращаемый формат НАМЕРЕННО
+    оставлен таким же, каким был у Open-Meteo (current/hourly с WMO
+    weathercode) - см. _convert_weatherapi_response выше, конвертирующую
+    ответ WeatherAPI в этот же shape, чтобы весь остальной код (кэш
+    get_cached_weather_forecast и все её читатели) не пришлось трогать.
+
+    ИЗМЕНЕНО 21.09.2026 (пользователь - "раз в час собирал инфу... чтобы не
+    нагружать лимиты", после инцидента с "Open-Meteo вернул 429"): эта
+    функция вызывается НАПРЯМУЮ только из weather_data_updater() (фоновая
+    задача ниже), раз в WEATHER_UPDATE_INTERVAL_MINUTES по всем городам
+    разом. Всё остальное читает уже готовый снепшот через
+    get_cached_weather_forecast() ниже, не дёргая API вообще. Retry на 429
+    оставлен - полезен, даже когда вызовов раз в 20 минут, а не при каждом
+    клике.
+
+    ИЗМЕНЕНО 23.09.2026 - теперь тонкая обёртка над fetch_rain_forecast_at
+    (см. выше), которая содержит саму логику запроса/retry."""
+    coords = RAIN_CITY_COORDS.get(city)
+    if not coords:
+        return None
+    lat, lon = coords
+    return await fetch_rain_forecast_at(lat, lon, city)
 
 _weather_data_cache = None
 _weather_data_mtime = None
@@ -20287,6 +20411,148 @@ async def update_weather_data():
         json.dump(result, f, ensure_ascii=False)
     logger.info(f"💾 weather_data.json обновлён (живьём опрошено {fetched_count}/{len(RAIN_CITY_COORDS)} городов, остальные ещё не пришло время или сеть не ответила)")
 
+# ==================== ПОГОДА ПО РАЙОНАМ МОСКВЫ ====================
+# ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "раздели данные погоды
+# на районы города, чтобы было более точное данные", затем уточнение -
+# "привязать к текущей локации водителя"). Пока ТОЛЬКО Москва (выбор
+# пользователя - "Только Москва (Рекомендую)", у остальных 11 городов нет
+# готовых координат районов). Источник координат - тот же
+# moscow_district_demand.json, что уже используется для облаков спроса на
+# карте (см. get_moscow_district_demand/MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES
+# выше) - у каждого из 30 районов уже есть lat/lon, отдельный список координат
+# заводить не нужно. Тот же паттерн опроса/кэша, что у городов
+# (fetch_rain_forecast_at/update_weather_data/get_cached_weather_forecast
+# выше) - отдельный файл (не смешиваем с weather_data.json, чтобы не ломать
+# формат для существующих читателей 'cities'), отдельный троттлинг
+# день/ночь (используем _city_is_night('moscow') - все 30 районов в одном
+# часовом поясе Europe/Moscow, отдельный словарь по районам не нужен).
+MOSCOW_DISTRICT_WEATHER_DATA_FILE = os.path.join(DATA_DIR, 'moscow_district_weather_data.json')
+
+_district_weather_cache = None
+_district_weather_mtime = None
+
+def load_district_weather_data():
+    """Тот же паттерн, что load_weather_data() выше - кэш в памяти,
+    перечитывается только если файл на диске изменился."""
+    global _district_weather_cache, _district_weather_mtime
+    try:
+        mtime = os.path.getmtime(MOSCOW_DISTRICT_WEATHER_DATA_FILE)
+        if _district_weather_cache is not None and mtime == _district_weather_mtime:
+            return _district_weather_cache
+        with open(MOSCOW_DISTRICT_WEATHER_DATA_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        _district_weather_cache = data
+        _district_weather_mtime = mtime
+        return data
+    except FileNotFoundError:
+        return None
+    except Exception as e:
+        logger.warning(f"⚠️ Не удалось прочитать {MOSCOW_DISTRICT_WEATHER_DATA_FILE}: {e}")
+        return None
+
+def get_cached_district_weather_forecast(district_name):
+    """Прогноз ОДНОГО района Москвы из готового снепшота - тот же формат,
+    что и get_cached_weather_forecast(city) выше ('current'/'hourly' с
+    weathercode/temperature_2m и т.п.), поэтому все читатели (describe_
+    weathercode, find_upcoming_precip_event) работают с ним без изменений.
+    None, если снепшота ещё нет (бот только что стартовал) или для этого
+    района нет записи."""
+    data = load_district_weather_data()
+    if not data:
+        return None
+    return (data.get('districts') or {}).get(district_name)
+
+_district_last_fetched_at = {}
+
+async def update_district_weather_data():
+    """Один прогон по всем 30 районам Москвы (get_moscow_district_demand) -
+    точная копия логики update_weather_data() выше (пауза между запросами,
+    троттлинг день/ночь, "лучше старые данные, чем ничего"), только источник
+    координат/список точек - районы вместо RAIN_CITY_COORDS. Если файл
+    moscow_district_demand.json не загрузился - тихо выходим (та же
+    защита, что у get_moscow_district_demand - карта в этом случае просто не
+    получит районные облака, тут аналогично - районная погода не обновится,
+    а get_cached_district_weather_forecast продолжит отдавать старый снепшот
+    или None, ничего не падает)."""
+    table = get_moscow_district_demand()
+    if not table:
+        return
+    districts = table.get('districts') or {}
+    if not districts:
+        return
+    WEATHER_REQUEST_DELAY_SECONDS = 1.0
+    now = datetime.now()
+    previous = load_district_weather_data() or {}
+    previous_districts = previous.get('districts') or {}
+    result_districts = {}
+    fetched_count = 0
+    is_night = _city_is_night('moscow')
+    interval_min = WEATHER_UPDATE_INTERVAL_MINUTES_NIGHT if is_night else WEATHER_UPDATE_INTERVAL_MINUTES
+    for name, entry in districts.items():
+        last_fetched = _district_last_fetched_at.get(name)
+        due = last_fetched is None or (now - last_fetched).total_seconds() >= interval_min * 60 - 30
+        if not due:
+            if name in previous_districts:
+                result_districts[name] = previous_districts[name]
+            continue
+        forecast = await fetch_rain_forecast_at(entry['lat'], entry['lon'], f"р-н {name}")
+        if forecast:
+            result_districts[name] = forecast
+            _district_last_fetched_at[name] = now
+            fetched_count += 1
+        elif name in previous_districts:
+            result_districts[name] = previous_districts[name]
+            logger.warning(f"⚠️ район {name}: свежий прогноз погоды не получен - оставляю прошлый снепшот")
+        await asyncio.sleep(WEATHER_REQUEST_DELAY_SECONDS)
+    result = {
+        'generated_at': now.isoformat(),
+        'districts': result_districts,
+    }
+    with open(MOSCOW_DISTRICT_WEATHER_DATA_FILE, 'w', encoding='utf-8') as f:
+        json.dump(result, f, ensure_ascii=False)
+    logger.info(f"💾 moscow_district_weather_data.json обновлён (живьём опрошено {fetched_count}/{len(districts)} районов)")
+
+def find_nearest_moscow_district(lat, lon):
+    """Ближайший к точке (lat, lon) район Москвы из moscow_district_demand.json
+    - для привязки погоды к текущей геопозиции водителя (см.
+    handle_weather_data_api ниже) и для district_rain_now (см. ниже).
+    Возвращает (name, dist_km, district_lat, district_lon) или None, если
+    таблица районов не загрузилась."""
+    table = get_moscow_district_demand()
+    if not table:
+        return None
+    districts = table.get('districts') or {}
+    if not districts:
+        return None
+    best_name, best_dist = None, None
+    for name, entry in districts.items():
+        dist_km = haversine_km(lat, lon, entry['lat'], entry['lon'])
+        if best_dist is None or dist_km < best_dist:
+            best_name, best_dist = name, dist_km
+    if best_name is None:
+        return None
+    entry = districts[best_name]
+    return (best_name, best_dist, entry['lat'], entry['lon'])
+
+def district_rain_now(district_name, fallback_rain_now=False):
+    """Идёт ли осадки ПРЯМО СЕЙЧАС именно в этом районе Москвы - по его
+    собственному снепшоту погоды, а не по общегородскому. ДОБАВЛЕНО
+    23.09.2026 (прямая просьба пользователя - "Куда ехать" и облака спроса
+    на карте считать по погоде В РАЙОНЕ, а не по одной точке на весь город,
+    см. score_district_candidates/handle_map_district_demand_api).
+    fallback_rain_now - что вернуть, если для района ещё нет своего снепшота
+    (бот только что стартовал, район ещё не был живьём опрошен ни разу) -
+    вызывающий код передаёт туда уже посчитанный общегородской rain_now,
+    чтобы не остаться совсем без сигнала об осадках, пока районные данные
+    только собираются."""
+    forecast = get_cached_district_weather_forecast(district_name)
+    if not forecast:
+        return fallback_rain_now
+    current_code = (forecast.get('current') or {}).get('weathercode')
+    if current_code is None:
+        return fallback_rain_now
+    return current_code in PRECIP_WEATHERCODES
+
 async def weather_data_updater():
     """Фоновая задача - тикает раз в WEATHER_UPDATE_INTERVAL_MINUTES (по
     прямой просьбе пользователя, 21.09.2026, после инцидента с 429 от
@@ -20314,6 +20580,15 @@ async def weather_data_updater():
             await update_weather_data()
         except Exception as e:
             logger.error(f"❌ Ошибка фонового обновления weather_data.json: {e}")
+        # ДОБАВЛЕНО 23.09.2026 (см. блок "ПОГОДА ПО РАЙОНАМ МОСКВЫ" выше) -
+        # районная погода обновляется в ТОМ ЖЕ тике, тем же интервалом, что и
+        # городская - отдельный try/except, чтобы сбой у районов (например,
+        # ещё не загрузился moscow_district_demand.json) не мешал City-
+        # обновлению выше и наоборот.
+        try:
+            await update_district_weather_data()
+        except Exception as e:
+            logger.error(f"❌ Ошибка фонового обновления moscow_district_weather_data.json: {e}")
         await asyncio.sleep(WEATHER_UPDATE_INTERVAL_MINUTES * 60)
 
 def _current_hour_index(forecast, city):
@@ -22195,7 +22470,7 @@ def legal_entity_referral_paywall_text(active_until=None):
         "🏢 *Юрлицо - подписка на реферальную систему*\n"
         f"{WHERE_TO_GO_DIVIDER}\n\n"
         f"{status_line}\n\n"
-        f"Доступ к «🏛 Личный кабинет юрлица» и схеме начислений «Юрлицо» (35/20/10%) - "
+        f"Доступ к «🏛 Кабинет автопарка» и схеме начислений «Юрлицо» (35/20/10%) - "
         f"*{price_rub}₽/мес*.\n\n"
         "После оплаты доступ откроется в течение пары минут - или сразу нажми «Я оплатил(а), проверить»."
     )
@@ -24077,7 +24352,7 @@ async def referral_category_legal_start(callback_query: types.CallbackQuery):
     state = user_state.setdefault(user_id, {})
     state['awaiting_referral_legal_password'] = True
     await callback_query.message.answer(
-        "🔒 Введи пароль компании (юр.лица) - он же откроет «Личный кабинет юрлица»:",
+        "🔒 Введи пароль компании (юр.лица) - он же откроет «Кабинет автопарка»:",
         reply_markup=referral_withdraw_cancel_keyboard()
     )
 
@@ -24126,7 +24401,7 @@ async def referral_legal_password_flow(message: types.Message):
         set_referrer_type(user_id, 'legal_entity')
         if legal_entity:
             claim_legal_entity_ownership(legal_entity['id'], user_id)
-            owner_note = " Ты первый ввёл пароль этой компании - тебе открыт «🏛 Личный кабинет юрлица»." \
+            owner_note = " Ты первый ввёл пароль этой компании - тебе открыт «🏛 Кабинет автопарка»." \
                 if get_legal_entity_owned_by(user_id) and get_legal_entity_owned_by(user_id)['id'] == legal_entity['id'] \
                 else ""
             confirm_text = f"✅ Схема переключена на «Юр.лицо» ({legal_entity['name']})." + owner_note
