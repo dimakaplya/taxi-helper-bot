@@ -1854,13 +1854,37 @@ def get_road_events_for_city(city):
         return []
     return data.get('cities', {}).get(city, [])
 
+def _road_events_chat_window(city):
+    """Сообщения о ДТП/перекрытиях города за то же окно
+    ROAD_EVENTS_CHAT_LOOKBACK_HOURS (6ч), что показывает экран "⛔ Дорожные
+    события"/"События" (см. handle_events_data_api/show_road_events) -
+    ДОБАВЛЕНО 24.09.2026 (реальный баг, найденный пользователем: "Куда
+    ехать" писал "1 активное перекрытие", хотя на экране "События" за
+    последние 6 часов ничего не было). Раньше count_active_road_closures/
+    get_nearby_road_closures читали get_road_events_for_city БЕЗ вообще
+    какого-либо ограничения по времени - т.е. считали даже событие
+    почти суточной давности (данные собираются с окном 24ч, см.
+    fetch_road_events.py/handle_map_road_events_api), которое давно
+    неактуально и уже не попадает в список на самом экране "Дороги".
+    get_road_events_for_city НЕ трогаем (её отдельно использует карта со
+    своим полным 24-часовым окном, см. handle_map_road_events_api) - фильтр
+    по 6ч применяется только здесь, отдельным общим хелпером, чтобы "Куда
+    ехать" и "Дороги"/"События" всегда показывали одну и ту же картину."""
+    events = get_road_events_for_city(city)
+    if not events:
+        return []
+    chat_cutoff = (datetime.now(ZoneInfo('UTC')) - timedelta(hours=ROAD_EVENTS_CHAT_LOOKBACK_HOURS)).isoformat()
+    return [e for e in events if e.get('time', '') >= chat_cutoff]
+
 def count_active_road_closures(city):
     """Число сообщений о перекрытиях (is_closure=True, см. is_road_closure
-    в fetch_road_events.py) в свежей ленте города - используется в сводке
-    "Куда ехать" (по просьбе пользователя, 19.09.2026) как общий сигнал
-    "сейчас в городе есть активные перекрытия", без привязки к конкретному
-    месту (см. format_where_to_go_text)."""
-    return sum(1 for e in get_road_events_for_city(city) if e.get('is_closure'))
+    в fetch_road_events.py) в свежей ленте города за последние
+    ROAD_EVENTS_CHAT_LOOKBACK_HOURS - используется в сводке "Куда ехать"
+    (по просьбе пользователя, 19.09.2026) как общий сигнал "сейчас в
+    городе есть активные перекрытия", без привязки к конкретному месту
+    (см. format_where_to_go_text). ИЗМЕНЕНО 24.09.2026 - см.
+    _road_events_chat_window (то же окно 6ч, что у "Дороги"/"События")."""
+    return sum(1 for e in _road_events_chat_window(city) if e.get('is_closure'))
 
 _concert_events_cache = None
 _concert_events_mtime = None
@@ -7443,10 +7467,16 @@ def eta_minutes_from_distance(dist_km):
 CANDIDATE_CLOSURE_RADIUS_KM = 6
 
 def get_nearby_road_closures(city, lat, lon, radius_km=CANDIDATE_CLOSURE_RADIUS_KM):
+    """ИЗМЕНЕНО 24.09.2026 - читает _road_events_chat_window (окно 6ч), а не
+    сырой get_road_events_for_city без ограничения по времени (см. её
+    докстринг) - та же причина, что у count_active_road_closures: иначе
+    отдельный кандидат "Куда ехать" мог получить предупреждение
+    "⚠️ рядом возможны перекрытия" по событию, которого уже нет на экране
+    "Дороги"/"События"."""
     if lat is None or lon is None:
         return []
     nearby = []
-    for e in get_road_events_for_city(city):
+    for e in _road_events_chat_window(city):
         if not e.get('is_closure'):
             continue
         e_lat, e_lon = e.get('lat'), e.get('lon')
