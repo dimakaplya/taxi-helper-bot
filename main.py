@@ -10144,12 +10144,40 @@ def map_webapp_html():
             f'<script src="https://api-maps.yandex.ru/2.1/?lang=ru_RU&apikey={YANDEX_MAPS_API_KEY}"></script>\n'
             '<script src="https://cdn.jsdelivr.net/npm/leaflet-plugins@3.4.0/layer/tile/Yandex.js"></script>'
         )
+    # ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "чтобы быстрее
+    # карта подложка загружалась"): <link rel="preconnect"> заранее
+    # открывает DNS+TCP+TLS к серверам, с которых реально будут грузиться
+    # тайлы подложки - раньше браузер начинал это соединение только в
+    # момент, когда Leaflet уже дошёл до первого запроса тайла (т.е. ПОСЛЕ
+    # загрузки и разбора leaflet.min.js). Список хостов зависит от того,
+    # какая подложка реально используется (см. YANDEX_MAPS_API_KEY_SET
+    # ниже в самом JS) - Яндекс.Карты или OSM.
+    if YANDEX_MAPS_API_KEY:
+        map_preconnect_hints = (
+            '<link rel="preconnect" href="https://api-maps.yandex.ru">\n'
+            '<link rel="preconnect" href="https://vec01.maps.yandex.net">\n'
+            '<link rel="preconnect" href="https://sat01.maps.yandex.net">'
+        )
+    else:
+        map_preconnect_hints = (
+            '<link rel="preconnect" href="https://a.tile.openstreetmap.org">\n'
+            '<link rel="preconnect" href="https://b.tile.openstreetmap.org">\n'
+            '<link rel="preconnect" href="https://c.tile.openstreetmap.org">'
+        )
+    # ДОБАВЛЕНО 23.09.2026 (та же просьба) - координаты условного центра
+    # КАЖДОГО из 12 городов (тот же RAIN_CITY_COORDS, что уже используется
+    # для погоды/облаков спроса), чтобы карта СРАЗУ открывалась на нужном
+    # городе, а не всегда на Москве - см. комментарий у L.map(...).setView
+    # в самом JS ниже.
+    city_centers_json = json.dumps(RAIN_CITY_COORDS, ensure_ascii=False)
     return f"""<!doctype html>
 <html lang="ru">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Карта водителей</title>
+<link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
+{map_preconnect_hints}
 <script src="{TG_WEBAPP_JS_PROXY_PATH}"></script>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
@@ -10273,7 +10301,22 @@ def map_webapp_html():
   }}
   renderTariffPanel();
   renderLegend();
-  const map = L.map('map').setView([55.7558, 37.6173], 11);
+  // ИСПРАВЛЕНО 23.09.2026 (прямая просьба пользователя - "чтобы быстрее
+  // карта подложка загружалась"): раньше карта ВСЕГДА открывалась
+  // центрированной на Москве, независимо от реального города водителя, и
+  // только когда приходила GPS-координата (watchPosition, см. updateSelfMarker
+  // ниже - это могло занять до 15 секунд или вообще не сработать, если
+  // геолокация запрещена) - перецентровывалась на настоящий город. Тайлы
+  // подложки из-за этого грузились ДВАЖДЫ (сначала для Москвы, потом для
+  // настоящего города), а если геолокация не срабатывала - карта так и
+  // оставалась неверно на Москве. Теперь сразу открываем на условном центре
+  // ЕГО города (CITY_CENTERS, тот же RAIN_CITY_COORDS, что и у погоды) -
+  // GPS по-прежнему уточняет позицию (map.setView внутри updateSelfMarker
+  // при первом фиксе), но подложка грузится с правильного места с первого
+  // раза.
+  const CITY_CENTERS = {city_centers_json};
+  const initialCenter = CITY_CENTERS[city] || [55.7558, 37.6173];
+  const map = L.map('map').setView(initialCenter, 11);
   // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "добавить какой-то
   // лёгкой зернистости, прям лёгкой-лёгкой") - L.svg().addTo(map) заранее
   // создаёт SVG-рендерер Leaflet (иначе он появляется только при первом
