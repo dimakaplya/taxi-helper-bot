@@ -11021,14 +11021,21 @@ def map_webapp_html():
   // мультивыбор конкретных тарифов. selectedTariffs - Set строк вида
   // "category::tariff" (например "taxi::Комфорт") - водитель отмечает,
   // ЧТО именно показывать на карте, а не просто "свою категорию или все".
-  // По умолчанию - как и раньше: если своя категория известна (myCategory
-  // из URL), отмечены только ЕЁ тарифы; иначе (категория не передана) -
-  // отмечены все тарифы всех категорий.
+  // ИЗМЕНЕНО 24.09.2026 (прямая просьба пользователя, скриншот панели
+  // "Тарифы" - "тарифы включай сначала только фильтр базового тарифа в
+  // такси эконом в ультима бизнес") - по умолчанию отмечен только БАЗОВЫЙ
+  // тариф каждой категории (первый в списке TARIFF_OPTIONS[cat].tariffs -
+  // тот же порядок, что и CATEGORIES[cat]['tariffs'] в Python: у такси это
+  // Эконом, у Ultima - Business), а не ВСЕ тарифы категории сразу - водитель
+  // сам доотмечает остальные тарифы, если они ему тоже интересны. Если
+  // своя категория известна (myCategory из URL) - только её базовый тариф;
+  // иначе (категория не передана) - базовый тариф КАЖДОЙ категории.
   const tariffKey = (cat, t) => `${{cat}}::${{t}}`;
   const selectedTariffs = new Set();
   Object.keys(TARIFF_OPTIONS).forEach(cat => {{
     if (myCategory && cat !== myCategory) return;
-    (TARIFF_OPTIONS[cat].tariffs || []).forEach(t => selectedTariffs.add(tariffKey(cat, t)));
+    const tariffs = TARIFF_OPTIONS[cat].tariffs || [];
+    if (tariffs.length) selectedTariffs.add(tariffKey(cat, tariffs[0]));
   }});
   const tariffPanel = document.getElementById('tariffToggle');
   const tariffBtn = document.getElementById('tariffToggleBtn');
