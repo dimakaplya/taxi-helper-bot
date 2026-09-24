@@ -11469,6 +11469,25 @@ def map_webapp_html():
     if (myCategory && cat !== myCategory) return;
     if (tariffs.length) selectedTariffs.add(tariffKey(cat, tariffs[0]));
   }});
+  // ДОБАВЛЕНО 24.09.2026 (прямая просьба пользователя - "спрос показывал
+  // только по тем тарифам что выбрано в активном тарифе при включенной
+  // кнопке выйти на линию") - пока смена АКТИВНА (myCategory + shiftTariffs
+  // из URL заполнены - см. shift_tariff_button_text/live_shift_tariffs_done
+  // в main.py, которые формируют ссылку на карту), облака спроса должны
+  // строго следовать тарифам, отмеченным как АКТИВНЫЕ на кнопке смены, а НЕ
+  // тому, что водитель мог доотметить/снять в самой панели "Тарифы" на
+  // карте (та панель по-прежнему свободно редактируется и продолжает
+  // управлять тем, каких ДРУГИХ ВОДИТЕЛЕЙ показывать на карте - см.
+  // selectedTariffs в фильтре маркеров ниже, его это не касается).
+  // activeShiftTariffs - ВСЕ тарифы активной смены (без лимита в 2, этот
+  // лимит - только для панели "Тарифы"/маркеров водителей).
+  const activeShiftTariffs = (myCategory && shiftTariffs && shiftTariffs.length)
+    ? shiftTariffs.filter(t => (TARIFF_OPTIONS[myCategory] && TARIFF_OPTIONS[myCategory].tariffs || []).includes(t))
+    : null;
+  function isDemandTariffSelected(cat, t) {{
+    if (activeShiftTariffs && cat === myCategory) return activeShiftTariffs.includes(t);
+    return selectedTariffs.has(tariffKey(cat, t));
+  }}
   const tariffPanel = document.getElementById('tariffToggle');
   const tariffBtn = document.getElementById('tariffToggleBtn');
   function renderTariffPanel() {{
@@ -13028,7 +13047,7 @@ def map_webapp_html():
     // так что реально рисуется намного меньше полигонов, чем всего районов.
     const bounds = map.getBounds().pad(0.25);
     const layers = (DISTRICT_CLOUD_LAYERS[myCategory] || []).filter(
-      layer => selectedTariffs.has(tariffKey(myCategory, layer.tariff))
+      layer => isDemandTariffSelected(myCategory, layer.tariff)
     );
     const timeBucket = demandCloudTimeBucket();
     // Сначала СОБИРАЕМ все проходящие порог облака по тарифам (без отрисовки),
@@ -13117,7 +13136,7 @@ def map_webapp_html():
       }}
       const data = await resp.json();
       const layerKeys = (DISTRICT_CLOUD_LAYERS[myCategory] || [])
-        .filter(layer => selectedTariffs.has(tariffKey(myCategory, layer.tariff)))
+        .filter(layer => isDemandTariffSelected(myCategory, layer.tariff))
         .map(layer => layer.field);
       const signature = JSON.stringify({{
         city, myCategory, layerKeys,
