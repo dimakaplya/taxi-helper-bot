@@ -13130,7 +13130,12 @@ def map_webapp_html():
   // DISTRICT_DEMAND_FILES в Python) - должно быть синхронизировано вручную,
   // отдельного API чтобы спросить сервер "для каких городов есть районные
   // данные" нет, но список короткий и меняется редко.
-  const DISTRICT_DEMAND_CITIES = ['moscow', 'spb'];
+  // ЕЩЁ РАЗ ОБОБЩЕНО 24.09.2026 (загружены новые данные спроса по районам) -
+  // добавлены Краснодар и Сочи (48 и 95 рабочих зон соответственно, без
+  // тарифа Элит - у них его просто нет в данных, см. DISTRICT_CLOUD_LAYERS/
+  // MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_ELITE в Python, для этих городов
+  // соответствующее поле всегда null и просто не рисует свой слой).
+  const DISTRICT_DEMAND_CITIES = ['moscow', 'spb', 'krasnodar', 'sochi'];
 
   async function loadDemandCloud() {{
     try {{
@@ -15165,10 +15170,32 @@ async def handle_map_demand_api(request):
 # теперь обобщена тоже, но с составным ключом (city, name) везде в этой
 # подсистеме (файл district_weather_data.json, _district_last_fetched_at,
 # rain_state), см. _district_weather_key ниже.
+# ДОБАВЛЕНО 24.09.2026 (пользователь загрузил новые таблицы спроса) -
+# Краснодар (48 рабочих зон) и Сочи (95 рабочих зон) добавлены как города с
+# районными облаками спроса, тем же способом, что Москва/СПб - геокодирование
+# через OpenStreetMap/Nominatim + та же JSON-схема (tariff_order/districts/
+# weekday/слоты). У обоих городов в исходных данных НЕТ тарифа Элит (только
+# Эконом/Комфорт/Комфорт+/Бизнес/Премьер) - соответствующее поле demand_elite
+# всегда null, слой Элит для них просто не рисуется на карте (см.
+# DISTRICT_DEMAND_CITIES в map_webapp_html). moscow_district_demand.json
+# заодно расширен (та же просьба) - помимо 129 районов внутри МКАД теперь
+# содержит ещё 414 рабочих зон Московской области за МКАДом (слит в один
+# файл/карту, а не отдельный город - методика загруженной таблицы прямо
+# предполагала, что "Москва внутри МКАД уже есть"). spb_district_demand.json
+# заменён на новую, более подробную таблицу (264 рабочие зоны вместо 18
+# административных районов).
 DISTRICT_DEMAND_FILES = {
     'moscow': 'moscow_district_demand.json',
     'spb': 'spb_district_demand.json',
+    'krasnodar': 'krasnodar_district_demand.json',
+    'sochi': 'sochi_district_demand.json',
 }
+# У Краснодара и Сочи в исходных таблицах вообще нет колонки "Элит" (только
+# Эконом/Комфорт/Комфорт+/Бизнес/Премьер) - demand_elite у них всегда None
+# (см. handle_map_district_demand_api). Нужно отдельным списком, чтобы
+# дождевой "пол" (district_raining в том же handle_map_district_demand_api)
+# не поднимал несуществующий тариф до порога - см. использование ниже.
+CITIES_WITHOUT_ELITE_DEMAND_DATA = {'krasnodar', 'sochi'}
 _district_demand_cache = {}  # city -> data (или False, если загрузка не удалась)
 
 def get_district_demand(city):
@@ -15484,7 +15511,15 @@ async def handle_map_district_demand_api(request):
                     # та же правка: свой floor на тариф вместо общего 85%.
                     business = max(business or 0, DISTRICT_CLOUD_THRESHOLDS_BY_FIELD['demand_business'][1])
                     premium = max(premium or 0, DISTRICT_CLOUD_THRESHOLDS_BY_FIELD['demand_premier'][1])
-                    elite = max(elite or 0, DISTRICT_CLOUD_THRESHOLDS_BY_FIELD['demand_elite'][1])
+                    # ДОБАВЛЕНО 24.09.2026 (загружены данные Краснодара/Сочи -
+                    # в их таблицах вообще НЕТ колонки Элит, demand_elite
+                    # всегда None) - дождевой пол НЕ должен поднимать элит
+                    # там, где для него в принципе нет реальных данных, иначе
+                    # дождь рисовал бы несуществующий "спрос на Элит" в
+                    # городах без этого тарифа вовсе. См.
+                    # CITIES_WITHOUT_ELITE_DEMAND_DATA ниже.
+                    if city not in CITIES_WITHOUT_ELITE_DEMAND_DATA:
+                        elite = max(elite or 0, DISTRICT_CLOUD_THRESHOLDS_BY_FIELD['demand_elite'][1])
                 item['demand_business'] = business
                 item['demand_premier'] = premium
                 item['demand_elite'] = elite
