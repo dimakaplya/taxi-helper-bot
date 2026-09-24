@@ -855,24 +855,41 @@ def temperature_demand_multiplier(city):
 
 # Радиус, в котором мероприятие из афиши (TimePad/подборка концертов, см.
 # load_timepad_data/get_concert_events_for_city) считается "рядом" с
-# конкретным районом-кандидатом - события начинающиеся в ближайшие
-# EVENT_DEMAND_LOOKAHEAD_HOURS часов рядом с районом поднимают его балл
-# (люди едут на мероприятие/с мероприятия - спрос на такси растёт именно
-# в этой точке города, а не по всему городу, в отличие от праздника выше).
+# конкретным районом-кандидатом - поднимает его балл (люди едут на
+# мероприятие/с мероприятия - спрос на такси растёт именно в этой точке
+# города, а не по всему городу, в отличие от праздника выше).
 EVENT_DEMAND_RADIUS_KM = 3
-EVENT_DEMAND_LOOKAHEAD_HOURS = 3
+# ИЗМЕНЕНО 24.09.2026 (прямая просьба пользователя - "не 3 часа учитывать
+# а на момент куда поехать если в этот час будет конец мероприятия за 1
+# час до конца мероприятия"): раньше событие считалось "рядом" по началу
+# (начинается в ближайшие EVENT_DEMAND_LOOKAHEAD_HOURS=3 часа) - это
+# ловило только подвоз ГОСТЕЙ на мероприятие, а событие, которое уже идёт
+# (началось раньше окна), вообще переставало учитываться, хотя самый
+# реальный всплеск спроса - это РАЗЪЕЗД, ближе к концу. Теперь наоборот -
+# по КОНЦУ: событие "рядом" ровно EVENT_DEMAND_END_LEAD_HOURS часов ДО
+# его окончания и вплоть до самого конца (см. nearest_event_near ниже).
+EVENT_DEMAND_END_LEAD_HOURS = 1
 EVENT_DEMAND_BOOST = 1.20
 
-def nearest_event_near(city, lat, lon, radius_km=EVENT_DEMAND_RADIUS_KM, lookahead_hours=EVENT_DEMAND_LOOKAHEAD_HOURS):
+def nearest_event_near(city, lat, lon, radius_km=EVENT_DEMAND_RADIUS_KM, end_lead_hours=EVENT_DEMAND_END_LEAD_HOURS):
     """БЛИЖАЙШЕЕ мероприятие (TimePad/подборка концертов, см.
-    load_timepad_data/get_concert_events_for_city) рядом с (lat, lon),
-    начинающееся в ближайшие lookahead_hours часов - ДОБАВЛЕНО 24.09.2026
-    (прямая просьба пользователя, "Куда ехать" - "мероприятия учитываются
-    в принятие решения... если в этом районе есть мероприятия то по
-    кнопке поехать не бесплатная парковка а адрес мероприятия"), вынесено
-    из nearby_event_demand_multiplier (которая теперь просто спрашивает
-    "есть ли что-то" через эту функцию) - здесь нужен САМ найденный
-    объект (название + координаты), а не просто множитель балла.
+    load_timepad_data/get_concert_events_for_city) рядом с (lat, lon) -
+    ДОБАВЛЕНО 24.09.2026 (прямая просьба пользователя, "Куда ехать" -
+    "мероприятия учитываются в принятие решения... если в этом районе
+    есть мероприятия то по кнопке поехать не бесплатная парковка а адрес
+    мероприятия"), вынесено из nearby_event_demand_multiplier (которая
+    теперь просто спрашивает "есть ли что-то" через эту функцию) - здесь
+    нужен САМ найденный объект (название + координаты), а не просто
+    множитель балла.
+
+    ИЗМЕНЕНО 24.09.2026 (та же просьба, уточнение - "не 3 часа учитывать
+    а... за 1 час до конца мероприятия") - критерий актуальности события
+    теперь считается ПО ОКОНЧАНИЮ, а не по началу: событие попадает в
+    выборку, если до его конца осталось НЕ БОЛЬШЕ end_lead_hours часов
+    (и оно ещё не закончилось) - то есть именно в тот момент, когда
+    приближается разъезд гостей (самый реальный спрос у площадки), а не
+    произвольно за несколько часов до старта.
+
     Возвращает dict {'title', 'lat', 'lon', 'address', 'dist_km'} для
     БЛИЖАЙШЕГО подходящего события из ОБОИХ источников сразу (не первого
     попавшегося), или None, если рядом ничего актуального нет. Событие
@@ -883,12 +900,12 @@ def nearest_event_near(city, lat, lon, radius_km=EVENT_DEMAND_RADIUS_KM, lookahe
     best = None
     try:
         now_ts = datetime.now(ZoneInfo('UTC')).timestamp()
-        cutoff_ts = now_ts + lookahead_hours * 3600
+        lead_seconds = end_lead_hours * 3600
         timepad_data = load_timepad_data()
         for ev in (timepad_data or {}).get('cities', {}).get(city, []):
             ev_lat, ev_lon = ev.get('place_lat'), ev.get('place_lon')
-            start = ev.get('start') or 0
-            if ev_lat is None or ev_lon is None or start < now_ts or start > cutoff_ts:
+            end = ev.get('end') or ev.get('start') or 0
+            if ev_lat is None or ev_lon is None or end < now_ts or end - now_ts > lead_seconds:
                 continue
             dist_km = haversine_km(lat, lon, ev_lat, ev_lon)
             if dist_km <= radius_km and (best is None or dist_km < best['dist_km']):
@@ -898,14 +915,15 @@ def nearest_event_near(city, lat, lon, radius_km=EVENT_DEMAND_RADIUS_KM, lookahe
             ev_lat, ev_lon = post.get('lat'), post.get('lon')
             if ev_lat is None or ev_lon is None:
                 continue
-            start_iso = post.get('start')
-            if start_iso:
-                try:
-                    start_ts = datetime.fromisoformat(start_iso).timestamp()
-                    if start_ts < now_ts or start_ts > cutoff_ts:
-                        continue
-                except Exception:
-                    pass
+            end_iso = post.get('end') or post.get('start')
+            if not end_iso:
+                continue
+            try:
+                end_ts = datetime.fromisoformat(end_iso).timestamp()
+            except Exception:
+                continue
+            if end_ts < now_ts or end_ts - now_ts > lead_seconds:
+                continue
             dist_km = haversine_km(lat, lon, ev_lat, ev_lon)
             if dist_km <= radius_km and (best is None or dist_km < best['dist_km']):
                 best = {'title': post.get('title') or 'Мероприятие', 'lat': ev_lat, 'lon': ev_lon,
@@ -915,10 +933,10 @@ def nearest_event_near(city, lat, lon, radius_km=EVENT_DEMAND_RADIUS_KM, lookahe
     return best
 
 def nearby_event_demand_multiplier(city, lat, lon):
-    """1.0 если рядом с (lat, lon) в ближайшие EVENT_DEMAND_LOOKAHEAD_HOURS
-    часов нет мероприятий с известными координатами, иначе EVENT_DEMAND_BOOST.
-    ИЗМЕНЕНО 24.09.2026 - просто спрашивает nearest_event_near (общая
-    логика поиска вынесена туда, см. её докстринг)."""
+    """1.0 если рядом с (lat, lon) сейчас нет мероприятия, приближающегося
+    к концу (см. EVENT_DEMAND_END_LEAD_HOURS), иначе EVENT_DEMAND_BOOST.
+    Просто спрашивает nearest_event_near (общая логика поиска вынесена
+    туда, см. её докстринг)."""
     return EVENT_DEMAND_BOOST if nearest_event_near(city, lat, lon) else 1.0
 
 # За сколько дней ДО праздника слать разовый пуш-напоминание.
@@ -8006,9 +8024,13 @@ async def score_district_candidates(city, category, user_lat=None, user_lon=None
         # ИЗМЕНЕНО 24.09.2026 (прямая просьба пользователя - см. комментарий
         # у nearby_event выше) - вместо общей фразы "рядом скоро крупное
         # мероприятие" теперь называем САМО мероприятие, если оно известно.
+        # ИЗМЕНЕНО 24.09.2026 (уточнение той же просьбы - критерий теперь
+        # "до конца события ≤1ч", см. EVENT_DEMAND_END_LEAD_HOURS/
+        # nearest_event_near) - формулировка обновлена под РАЗЪЕЗД
+        # (скоро заканчивается), а не абстрактное "рядом мероприятие".
         nearby_event = d.get('nearby_event')
         if nearby_event:
-            reasons.append(f"🎭 рядом мероприятие «{nearby_event['title']}» - спрос выше обычного")
+            reasons.append(f"🎭 рядом скоро закончится «{nearby_event['title']}» - жди разъезд гостей")
         elif d['event_nearby']:
             reasons.append("🎭 рядом скоро крупное мероприятие - спрос выше обычного")
         level = 'peak' if d['demand'] >= 90 else ('high' if d['demand'] >= 70 else ('mid' if d['demand'] >= 40 else 'low'))
