@@ -728,8 +728,9 @@ PARKING_AIRPORT_ZONE_RADIUS_KM = 8
 # После "🅿️ Стою на бесплатной парковке" пуш не глушится навсегда - через
 # столько минут (если водитель так и не поехал дальше) спрашиваем снова
 # (вдруг парковка на самом деле стала платной/сменилась зона и т.п.), по
-# просьбе пользователя.
-PARKING_FREE_ACK_RECHECK_MINUTES = 15
+# просьбе пользователя. ИЗМЕНЕНО 24.09.2026 (прямая просьба пользователя) -
+# было 15 минут, стало 10.
+PARKING_FREE_ACK_RECHECK_MINUTES = 10
 # Ссылки на приложения для оплаты городских парковок, по городам и
 # платформам (iOS/Android). Если для города+платформы своей ссылки нет -
 # используется общий фолбэк PARKING_APP_LINK_FALLBACK ниже (одно
@@ -5232,6 +5233,10 @@ def services_keyboard(category=None, city=None, user_id=None):
         where_to_go_row = [KeyboardButton(text="💰 КУДА ЕХАТЬ AI ➡️")]
     if category in MAP_CATEGORY_STYLE and PUBLIC_URL and city:
         map_url = f"{PUBLIC_URL}{MAP_WEBAPP_PATH}?city={urllib.parse.quote(city)}&category={urllib.parse.quote(category)}"
+        # ДОБАВЛЕНО 24.09.2026 (прямая просьба пользователя, скриншот панели
+        # "Тарифы" - см. map_webapp_tariffs_param) - карта сразу открывается
+        # с фильтром по тарифам, отмеченным на старте смены (если она идёт).
+        map_url += map_webapp_tariffs_param(user_state.get(user_id, {}) if user_id is not None else {})
         where_to_go_row.append(KeyboardButton(text="🗺 КАРТА ВОДИТЕЛЕЙ", web_app=WebAppInfo(url=map_url)))
     top_rows.append(where_to_go_row)
 
@@ -7885,7 +7890,7 @@ def district_distance_penalty(dist_km):
         return 1.0
     return DISTRICT_DEMAND_PENALTY_FREE_KM / dist_km
 
-async def score_district_candidates(city, category, user_lat=None, user_lon=None, limit=3):
+async def score_district_candidates(city, category, user_lat=None, user_lon=None, limit=3, selected_tariffs=None):
     """Кандидаты "Город/центр" для Москвы такси/Ultima - ДОБАВЛЕНО
     22.09.2026, прямая просьба пользователя: вместо общей эвристики по часу
     пика (score_city_candidate) и вместо ОДНОГО лучшего района (первая
@@ -7903,9 +7908,34 @@ async def score_district_candidates(city, category, user_lat=None, user_lon=None
 
     ОБОБЩЕНО 23.09.2026 (прямая просьба пользователя - "на оба города") -
     таблица теперь берётся ПО ГОРОДУ (get_district_demand(city)), не только
-    для Москвы - см. DISTRICT_DEMAND_FILES."""
+    для Москвы - см. DISTRICT_DEMAND_FILES.
+
+    ДОБАВЛЕНО 24.09.2026 (прямая просьба пользователя - "куда поехать
+    показывает относительно чекбоксов что выбрал на старте смены, а если
+    смена не начата - по общему") - selected_tariffs (список строк тарифа
+    из state['shift']['tariffs'], см. handle_where_to_go_data_api) сужает
+    индексы колонок матрицы спроса до КОНКРЕТНО отмеченных водителем
+    тарифов (см. SHIFT_TARIFF_TO_DEMAND_INDEX), вместо максимума по ВСЕЙ
+    категории. Если смена не активна, initData не пришёл/не проверился, или
+    ни один из отмеченных тарифов не нашёлся в этом словаре (например,
+    водитель отметил только "Минивэн"/"Cruise", для которых своей колонки
+    нет) - откатываемся на прежнее поведение (индексы всей категории)."""
     table = get_district_demand(city)
     indices = MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES.get(category) if table else None
+    # used_specific_tariffs - только те отмеченные тарифы, что реально нашлись
+    # в SHIFT_TARIFF_TO_DEMAND_INDEX (см. докстринг выше) - непустой список
+    # значит, что подбор районов реально сузился под смену, а не под всю
+    # категорию; используется ниже, чтобы явно написать это в reasons КАЖДОГО
+    # района (прямая просьба пользователя, 24.09.2026 - "эти тарифы обязательно
+    # тогда прописывать куда поехать").
+    used_specific_tariffs = None
+    if selected_tariffs:
+        tariff_map = SHIFT_TARIFF_TO_DEMAND_INDEX.get(category, {})
+        matched = [t for t in selected_tariffs if t in tariff_map]
+        specific_indices = tuple(sorted({tariff_map[t] for t in matched}))
+        if specific_indices:
+            indices = specific_indices
+            used_specific_tariffs = matched
     if not table or not indices:
         return [await score_city_candidate(city, category=category)]
 
@@ -7995,6 +8025,12 @@ async def score_district_candidates(city, category, user_lat=None, user_lon=None
     result = []
     for d in scored[:limit]:
         reasons = [f"{d['demand']}% спроса в районе"]
+        # ДОБАВЛЕНО 24.09.2026 (прямая просьба пользователя - "эти тарифы
+        # обязательно тогда прописывать куда поехать") - явно показываем,
+        # что спрос посчитан именно под отмеченные на старте смены тарифы,
+        # а не под всю категорию целиком (см. used_specific_tariffs выше).
+        if used_specific_tariffs:
+            reasons.append(f"🚕 подобрано под тарифы смены: {', '.join(used_specific_tariffs)}")
         # ДОБАВЛЕНО 24.09.2026 (прямая просьба пользователя, скриншот
         # "Район Арбат" - "ожидаемый спрос с 21:00 до 23:00... давай это
         # тоже реализуем на основе наших данных") - окно из ТОЙ ЖЕ строки
@@ -8212,7 +8248,7 @@ def score_concert_event_candidates(city, category, limit=3):
     candidates.sort(key=lambda c: c['score'], reverse=True)
     return candidates[:limit]
 
-async def compute_where_to_go(city, category, user_lat=None, user_lon=None):
+async def compute_where_to_go(city, category, user_lat=None, user_lon=None, selected_tariffs=None):
     """Считает и сортирует всех кандидатов (аэропорты + вокзалы + актуальные
     события афиши + "Город/центр") по баллу - возвращает список dict от
     score_airport_candidate/score_station_candidate/score_concert_event_candidates/
@@ -8232,7 +8268,13 @@ async def compute_where_to_go(city, category, user_lat=None, user_lon=None):
     им не релевантны (это про пассажирские поездки с рейсов/на мероприятия) -
     для этих категорий единственный кандидат - "Город/центр", но посчитанный
     по СВОЕЙ таблице часов пика и советам (см. score_city_candidate/
-    get_city_advice, category передаётся туда)."""
+    get_city_advice, category передаётся туда).
+
+    selected_tariffs (ДОБАВЛЕНО 24.09.2026, прямая просьба пользователя) -
+    список отмеченных водителем тарифов при активной смене (см.
+    handle_where_to_go_data_api/score_district_candidates); влияет только на
+    подбор районов "Город/центр" - на всё остальное (аэропорты считаются по
+    классу экономкласс/бизнес/всё, см. CATEGORY_TO_CLASS) не влияет."""
     if category in CATEGORIES_WITHOUT_AIRPORTS:
         return [await score_city_candidate(city, category=category)]
 
@@ -8298,7 +8340,7 @@ async def compute_where_to_go(city, category, user_lat=None, user_lon=None):
         # спроса загружена пользователем), не только для Москвы -
         # см. DISTRICT_DEMAND_FILES/CITY_CENTER_COORDS.
         if city in DISTRICT_DEMAND_FILES and category in ('taxi', 'ultima'):
-            candidates.extend(await score_district_candidates(city, category, user_lat=user_lat, user_lon=user_lon, limit=3))
+            candidates.extend(await score_district_candidates(city, category, user_lat=user_lat, user_lon=user_lon, limit=3, selected_tariffs=selected_tariffs))
             candidates.append(await score_city_center_candidate(city, category))
         else:
             candidates.append(await score_city_candidate(city, category=category))
@@ -8594,8 +8636,15 @@ async def send_where_to_go(message: types.Message, user_id, city, category, extr
         # вернёт None, и score_airport_candidate сам откатится на fallback.
         shift = user_state.get(user_id, {}).get('shift') or {}
         user_lat, user_lon = shift.get('last_lat'), shift.get('last_lon')
+        # ДОБАВЛЕНО 24.09.2026 (прямая просьба пользователя - "куда поехать
+        # показывает относительно чекбоксов что выбрал на старте смены, а
+        # если смена не начата - по общему") - в отличие от WebApp-версии
+        # (handle_where_to_go_data_api) здесь user_id уже известен напрямую
+        # (это обычный хендлер бота, не публичный API) - просто читаем
+        # тарифы активной смены из user_state, без всякой initData.
+        selected_tariffs = shift.get('tariffs') if shift else None
         try:
-            candidates = await compute_where_to_go(city, category, user_lat=user_lat, user_lon=user_lon)
+            candidates = await compute_where_to_go(city, category, user_lat=user_lat, user_lon=user_lon, selected_tariffs=selected_tariffs)
         except Exception:
             anim_task.cancel()
             # logger.exception (не просто logger.error с str(e)) - пишет
@@ -9702,8 +9751,9 @@ async def process_parking_ping(user_id, lat, lon):
         recheck_minutes = (now - free_ack_time).total_seconds() / 60
         if recheck_minutes < PARKING_FREE_ACK_RECHECK_MINUTES:
             return
-        # Прошло 15 минут, а водитель всё ещё не поехал - снимаем
-        # глушение и спрашиваем ещё раз, как будто новый заход стоянки.
+        # Прошло PARKING_FREE_ACK_RECHECK_MINUTES (10 минут), а водитель всё
+        # ещё не поехал - снимаем глушение и спрашиваем ещё раз, как будто
+        # новый заход стоянки.
         parking['free_ack'] = False
         parking.pop('free_ack_time', None)
         parking['pushed'] = False
@@ -9947,6 +9997,28 @@ SELF_MARKER_STYLE = {
 }
 
 MAP_WEBAPP_PATH = '/map'
+
+def map_webapp_tariffs_param(state):
+    """Строка `&tariffs=Эконом,Комфорт` (url-encoded) для добавления к ссылке
+    на карту - список тарифов, отмеченных водителем на старте смены (см.
+    start_shift/shift_tariffs_keyboard). ДОБАВЛЕНО 24.09.2026 (прямая просьба
+    пользователя, скриншот панели "Тарифы" - "выбираешь тариф... и у тебя
+    отображение на карте сразу фильтр ставится того тарифа который ты
+    выбрал, либо один либо несколько") - карта по умолчанию должна
+    показывать именно ТЕ тарифы, что водитель отметил при старте смены, а
+    не всегда только "базовый" тариф категории (как было с 24.09.2026, см.
+    map_webapp_html - JS считывает этот параметр и, если он есть и хотя бы
+    один тариф из него реально существует у категории, использует их вместо
+    дефолта). Пустая строка, если смена не активна или тарифы не
+    отмечены - тогда карта сама откатывается на прежнее поведение (базовый
+    тариф категории)."""
+    if not is_shift_active(state):
+        return ''
+    tariffs = (state.get('shift') or {}).get('tariffs') or []
+    if not tariffs:
+        return ''
+    return '&tariffs=' + urllib.parse.quote(','.join(tariffs), safe=',')
+
 MAP_POSITIONS_API_PATH = '/map/positions'
 MAP_AIRPORTS_API_PATH = '/map/airports'
 # ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "пусть по нажатию на
@@ -11030,11 +11102,32 @@ def map_webapp_html():
   // сам доотмечает остальные тарифы, если они ему тоже интересны. Если
   // своя категория известна (myCategory из URL) - только её базовый тариф;
   // иначе (категория не передана) - базовый тариф КАЖДОЙ категории.
+  // ЕЩЁ РАЗ ИЗМЕНЕНО 24.09.2026 (прямая просьба пользователя, скриншот
+  // этой же панели - "выбираешь тариф... и у тебя отображение на карте
+  // сразу фильтр ставится того тарифа который ты выбрал, либо один либо
+  // несколько") - если водитель сейчас на смене и отметил конкретные
+  // тарифы при её старте (см. map_webapp_tariffs_param в main.py,
+  // передаётся сюда параметром ?tariffs=Эконом,Комфорт), используем ИМЕННО
+  // их для своей категории - один или сразу несколько, а не только базовый.
+  // Без активной смены/без отмеченных тарифов - прежнее поведение (базовый
+  // тариф категории), ничего не ломаем.
   const tariffKey = (cat, t) => `${{cat}}::${{t}}`;
   const selectedTariffs = new Set();
+  const shiftTariffsParam = params.get('tariffs');
+  const shiftTariffs = shiftTariffsParam ? shiftTariffsParam.split(',').filter(Boolean) : null;
   Object.keys(TARIFF_OPTIONS).forEach(cat => {{
-    if (myCategory && cat !== myCategory) return;
     const tariffs = TARIFF_OPTIONS[cat].tariffs || [];
+    if (myCategory && cat === myCategory && shiftTariffs && shiftTariffs.length) {{
+      const matched = shiftTariffs.filter(t => tariffs.includes(t));
+      if (matched.length) {{
+        matched.forEach(t => selectedTariffs.add(tariffKey(cat, t)));
+        return;
+      }}
+      // Ни один из отмеченных тарифов не нашёлся в TARIFF_OPTIONS (данные
+      // повреждены/рассинхрон) - не оставляем категорию вообще без фильтра,
+      // откатываемся на базовый тариф ниже, как в обычном случае.
+    }}
+    if (myCategory && cat !== myCategory) return;
     if (tariffs.length) selectedTariffs.add(tariffKey(cat, tariffs[0]));
   }});
   const tariffPanel = document.getElementById('tariffToggle');
@@ -13470,7 +13563,11 @@ def where_to_go_webapp_html():
       stateEl.textContent = '🧭 Считаю варианты…';
       let url = '""" + WHERE_TO_GO_DATA_API_PATH + """?city=' + encodeURIComponent(city) + '&category=' + encodeURIComponent(category);
       if (myPos) { url += '&lat=' + myPos.lat + '&lon=' + myPos.lon; }
-      const resp = await fetch(url);
+      // ДОБАВЛЕНО 24.09.2026 (прямая просьба пользователя - подбор районов
+      // по тарифам, отмеченным на старте смены) - initData опционален на
+      // бэкенде (см. handle_where_to_go_data_api), шлём если есть, сводка
+      // не сломается, если его нет/он не пройдёт проверку.
+      const resp = await fetch(url, { headers: { 'X-Telegram-Init-Data': (tg && tg.initData) || '' } });
       if (!resp.ok) throw new Error('http_' + resp.status);
       const data = await resp.json();
 
@@ -13674,13 +13771,26 @@ async def handle_where_to_go_data_api(request):
     """JSON для WebApp "Куда ехать" - переиспользует ТОТ ЖЕ compute_where_to_go,
     что и текстовая версия (send_where_to_go/format_where_to_go_text), просто
     отдаёт кандидатов как JSON вместо готового текста. Не персональные данные
-    (город/категория публичны, как и у карты/погоды) - initData не проверяется.
+    (город/категория публичны, как и у карты/погоды) - initData НЕ
+    ОБЯЗАТЕЛЕН (в отличие от /cabinet/*), см. ниже.
     ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "сделай это на основе
     текущей локации и расстояния") - опциональные lat/lon (browser
     navigator.geolocation, см. where_to_go_webapp_html) для штрафа
     аэропортов за удалённость ОТ ВОДИТЕЛЯ (см. score_airport_candidate/
     airport_distance_penalty) вместо условного центра города; координаты не
-    сохраняются, используются только для этого одного расчёта."""
+    сохраняются, используются только для этого одного расчёта.
+
+    ДОБАВЛЕНО 24.09.2026 (прямая просьба пользователя - "куда поехать
+    показывает относительно чекбоксов что выбрал на старте смены, а если
+    смена не начата - по общему") - X-Telegram-Init-Data ЗДЕСЬ
+    ОПЦИОНАЛЕН (не 401 при отсутствии/невалидности, в отличие от
+    /cabinet/data) - персонализация по тарифам смены "best effort":
+    прочитали/провалидировали заголовок, нашли активную смену с
+    отмеченными тарифами (state['shift']['tariffs'], см. start_shift) -
+    сузили районы под них (см. score_district_candidates); что угодно
+    пошло не так (заголовка нет, initData не распознан, смены нет) - просто
+    остаёмся на прежнем поведении (по всей категории), сама сводка
+    "Куда ехать" не должна ломаться из-за этой персонализации."""
     city = request.query.get('city', '')
     category = request.query.get('category', '')
     if not city or not category:
@@ -13692,8 +13802,23 @@ async def handle_where_to_go_data_api(request):
             user_lat, user_lon = float(lat_raw), float(lon_raw)
     except (TypeError, ValueError):
         user_lat = user_lon = None
+    selected_tariffs = None
     try:
-        candidates = await compute_where_to_go(city, category, user_lat=user_lat, user_lon=user_lon)
+        init_data = request.headers.get('X-Telegram-Init-Data', '')
+        parsed = validate_telegram_webapp_init_data(init_data, BOT_TOKEN) if (init_data and BOT_TOKEN) else None
+        if parsed:
+            tg_user = json.loads(parsed.get('user', '{}'))
+            req_user_id = tg_user.get('id')
+            state = user_state.get(req_user_id) if req_user_id else None
+            if isinstance(state, dict) and is_shift_active(state):
+                shift_tariffs = (state.get('shift') or {}).get('tariffs')
+                if shift_tariffs:
+                    selected_tariffs = shift_tariffs
+    except Exception:
+        logger.exception(f"❌ Не удалось определить тарифы активной смены для 'Куда ехать' ({city}/{category}) - откат на подбор по всей категории")
+        selected_tariffs = None
+    try:
+        candidates = await compute_where_to_go(city, category, user_lat=user_lat, user_lon=user_lon, selected_tariffs=selected_tariffs)
     except Exception:
         logger.exception(f"❌ Не удалось посчитать варианты 'Куда ехать' (WebApp) для {city}/{category}")
         return web.json_response({'error': 'compute_failed'}, status=500)
@@ -14332,6 +14457,20 @@ MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_ELITE = (5,)  # своя реальная 
 MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES = {
     'taxi': (0, 1, 2),
     'ultima': (3, 4, 5),
+}
+
+# ДОБАВЛЕНО 24.09.2026 (прямая просьба пользователя - "куда ехать" должно
+# показывать районы относительно ЧЕКБОКСОВ тарифов, отмеченных водителем на
+# старте смены (см. start_shift/shift_tariffs_keyboard), а не всегда по
+# максимуму всей категории) - соответствие человекочитаемой строки тарифа
+# (ровно как она хранится в state['shift']['tariffs'], см. CATEGORIES) её
+# колонке в матрице спроса. У такси "Минивэн"/"Детский" и у Ultima "Cruise"
+# своей колонки в матрице нет - они просто не попадают в этот словарь, см.
+# score_district_candidates (если из выбранных тарифов ни один не
+# отобразился - откат на полный набор индексов категории, а не отказ).
+SHIFT_TARIFF_TO_DEMAND_INDEX = {
+    'taxi': {'Эконом': 0, 'Комфорт': 1, 'Комфорт+': 2},
+    'ultima': {'Business': 3, 'Premier': 4, 'Elite': 5},
 }
 
 # Пороги показа облака (первое значение) и порог "ярко" (второе значение)
@@ -19274,7 +19413,7 @@ async def show_fuel_bot(message: types.Message):
         fuel_map_url = (
             f"{PUBLIC_URL}{MAP_WEBAPP_PATH}?city={urllib.parse.quote(city)}"
             f"&category={urllib.parse.quote(category)}&layer=fuel"
-        )
+        ) + map_webapp_tariffs_param(state)
         buttons.append([InlineKeyboardButton(text="🗺 ЗАПРАВКИ НА НАШЕЙ КАРТЕ", web_app=WebAppInfo(url=fuel_map_url))])
     keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
     text = (
@@ -20555,9 +20694,9 @@ async def handle_parking_free_ack(callback_query: types.CallbackQuery):
     якорем), просто глушит дальнейшие пуши для ТЕКУЩЕГО захода стоянки
     (free_ack=True) до первого из двух событий: водитель отъехал дальше
     PARKING_MOVEMENT_THRESHOLD_METERS от якоря (новый заход стоянки,
-    free_ack сбрасывается) ИЛИ прошло PARKING_FREE_ACK_RECHECK_MINUTES (15
-    минут) без движения - тогда process_parking_ping спросит ещё раз, по
-    просьбе пользователя."""
+    free_ack сбрасывается) ИЛИ прошло PARKING_FREE_ACK_RECHECK_MINUTES (10
+    минут, ИЗМЕНЕНО 24.09.2026 - было 15) без движения - тогда
+    process_parking_ping спросит ещё раз, по просьбе пользователя."""
     user_id = callback_query.from_user.id
     state = user_state.get(user_id)
     if not state:
@@ -21666,7 +21805,7 @@ async def push_rain_alert(city, event):
             rows.append([InlineKeyboardButton(text="🌤 Посмотреть погоду", web_app=WebAppInfo(url=weather_url))])
             category = state.get('category')
             if category:
-                map_url = f"{PUBLIC_URL}{MAP_WEBAPP_PATH}?city={urllib.parse.quote(city)}&category={urllib.parse.quote(category)}"
+                map_url = f"{PUBLIC_URL}{MAP_WEBAPP_PATH}?city={urllib.parse.quote(city)}&category={urllib.parse.quote(category)}" + map_webapp_tariffs_param(state)
                 rows.append([InlineKeyboardButton(text="🗺 Карта водителей", web_app=WebAppInfo(url=map_url))])
         return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
 
@@ -21813,7 +21952,7 @@ async def push_district_rain_alert(city, district_name, event, user_ids):
             rows.append([InlineKeyboardButton(text="🌤 Посмотреть погоду", web_app=WebAppInfo(url=weather_url))])
             category = state.get('category')
             if category:
-                map_url = f"{PUBLIC_URL}{MAP_WEBAPP_PATH}?city={urllib.parse.quote(city)}&category={urllib.parse.quote(category)}"
+                map_url = f"{PUBLIC_URL}{MAP_WEBAPP_PATH}?city={urllib.parse.quote(city)}&category={urllib.parse.quote(category)}" + map_webapp_tariffs_param(state)
                 rows.append([InlineKeyboardButton(text="🗺 Карта водителей", web_app=WebAppInfo(url=map_url))])
         return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
 
