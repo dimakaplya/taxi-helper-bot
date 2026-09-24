@@ -871,6 +871,13 @@ EVENT_DEMAND_RADIUS_KM = 3
 # его окончания и вплоть до самого конца (см. nearest_event_near ниже).
 EVENT_DEMAND_END_LEAD_HOURS = 1
 EVENT_DEMAND_BOOST = 1.20
+# ДОБАВЛЕНО 24.09.2026 (прямая просьба пользователя - пуш "час пик" должен
+# сообщать про мероприятия В РАЙОНЕ водителя "с такого-то по такой-то", а
+# не только про разъезд перед самым концом) - см. find_event_window_near
+# ниже, отдельная от nearest_event_near функция (та заточена именно под
+# разъезд для "Куда ехать", здесь нужен более широкий признак "мероприятие
+# сейчас актуально рядом").
+PEAK_PUSH_EVENT_LOOKAHEAD_HOURS = 3
 
 def nearest_event_near(city, lat, lon, radius_km=EVENT_DEMAND_RADIUS_KM, end_lead_hours=EVENT_DEMAND_END_LEAD_HOURS):
     """БЛИЖАЙШЕЕ мероприятие (TimePad/подборка концертов, см.
@@ -929,6 +936,58 @@ def nearest_event_near(city, lat, lon, radius_km=EVENT_DEMAND_RADIUS_KM, end_lea
             if dist_km <= radius_km and (best is None or dist_km < best['dist_km']):
                 best = {'title': post.get('title') or 'Мероприятие', 'lat': ev_lat, 'lon': ev_lon,
                         'address': post.get('place') or '', 'dist_km': dist_km}
+    except Exception:
+        pass
+    return best
+
+def find_event_window_near(city, lat, lon, radius_km=EVENT_DEMAND_RADIUS_KM, lookahead_hours=PEAK_PUSH_EVENT_LOOKAHEAD_HOURS):
+    """БЛИЖАЙШЕЕ мероприятие рядом с (lat, lon), которое либо ИДЁТ прямо
+    сейчас, либо начнётся в течение lookahead_hours - ДОБАВЛЕНО 24.09.2026
+    (прямая просьба пользователя к пушу "час пик" - "будут какие-то
+    мероприятия там с такого-то по такой-то"). В отличие от
+    nearest_event_near (та отбирает события, близкие к ОКОНЧАНИЮ - для
+    "Куда ехать", где важен момент разъезда), здесь просто нужно сообщить
+    водителю факт и время начала/конца мероприятия рядом с его районом.
+
+    Возвращает dict {'title','start_ts','end_ts','dist_km'} для БЛИЖАЙШЕГО
+    подходящего события из ОБОИХ источников (TimePad + подборка концертов),
+    или None."""
+    if lat is None or lon is None:
+        return None
+    best = None
+    try:
+        now_ts = datetime.now(ZoneInfo('UTC')).timestamp()
+        lookahead_seconds = lookahead_hours * 3600
+        timepad_data = load_timepad_data()
+        for ev in (timepad_data or {}).get('cities', {}).get(city, []):
+            ev_lat, ev_lon = ev.get('place_lat'), ev.get('place_lon')
+            start = ev.get('start') or 0
+            end = ev.get('end') or start
+            if ev_lat is None or ev_lon is None or not start:
+                continue
+            if end < now_ts or start - now_ts > lookahead_seconds:
+                continue
+            dist_km = haversine_km(lat, lon, ev_lat, ev_lon)
+            if dist_km <= radius_km and (best is None or dist_km < best['dist_km']):
+                best = {'title': ev.get('title') or 'Мероприятие', 'start_ts': start, 'end_ts': end, 'dist_km': dist_km}
+        for post in get_concert_events_for_city(city):
+            ev_lat, ev_lon = post.get('lat'), post.get('lon')
+            if ev_lat is None or ev_lon is None:
+                continue
+            start_iso = post.get('start')
+            end_iso = post.get('end') or start_iso
+            if not start_iso:
+                continue
+            try:
+                start_ts = datetime.fromisoformat(start_iso).timestamp()
+                end_ts = datetime.fromisoformat(end_iso).timestamp() if end_iso else start_ts
+            except Exception:
+                continue
+            if end_ts < now_ts or start_ts - now_ts > lookahead_seconds:
+                continue
+            dist_km = haversine_km(lat, lon, ev_lat, ev_lon)
+            if dist_km <= radius_km and (best is None or dist_km < best['dist_km']):
+                best = {'title': post.get('title') or 'Мероприятие', 'start_ts': start_ts, 'end_ts': end_ts, 'dist_km': dist_km}
     except Exception:
         pass
     return best
@@ -9847,8 +9906,11 @@ async def send_parking_push(user_id, city, lat=None, lon=None):
         nearest = nearest_nearby_points('parking', city, lat, lon, count=1)
         if nearest:
             dist_km, point = nearest[0]
+            # ИЗМЕНЕНО 24.09.2026 (прямая просьба пользователя - "переименуй
+            # БЕСПЛАТНАЯ ПАРКОВКА и расстояние до неё в км рядом с кнопкой"):
+            # было "🚗 Поехали на ближайшую бесплатную парковку (X км)".
             buttons.append([InlineKeyboardButton(
-                text=f"🚗 Поехали на ближайшую бесплатную парковку ({format_nearby_distance(dist_km)})",
+                text=f"🚗 БЕСПЛАТНАЯ ПАРКОВКА ({format_nearby_distance(dist_km)})",
                 url=yandex_navi_url(point['lat'], point['lon']),
             )])
     # Сначала ссылка конкретно для города (если пользователь её пришлёт),
@@ -12600,11 +12662,14 @@ def map_webapp_html():
         // тултипа убран - число из сырой таблицы (по часу/дню недели) не
         // всегда совпадает с реальной картиной в моменте (особенно
         // ночью), и выглядело как "облако показывает 85%, а на деле
-        // спроса нет" - вводило в заблуждение. Остаётся только
-        // название района и тариф, сама яркость/насыщенность облака
-        // по-прежнему передаёт уровень (см. demandCloudColorByLevel/
-        // demandCloudOpacityByLevel).
-        marker.bindTooltip(`${{d.name}} · ${{layer.label}}`, {{ direction: 'top', offset: [0, -6], className: 'airport-label' }});
+        // спроса нет" - вводило в заблуждение.
+        // ЕЩЁ РАЗ УБРАНО 24.09.2026 (прямая просьба пользователя со
+        // скриншотом - "вот эти обозначения убери они тоже делают хуже
+        // карте"): и подпись "Район · Тариф" тоже убрана целиком - по
+        // тапу на облако спроса теперь вообще ничего не всплывает
+        // (bindTooltip не вызывается), сама яркость/насыщенность облака
+        // по-прежнему передаёт уровень спроса (см. demandCloudColorByLevel/
+        // demandCloudOpacityByLevel) без всплывающего текста поверх карты.
         districtDemandMarkers.push(marker);
       }});
     }});
@@ -14778,11 +14843,18 @@ SHIFT_TARIFF_TO_DEMAND_INDEX = {
 # реальная граница спроса всего ~16%, фиксированная прибавка вроде +10
 # сломала бы порог совсем). Облака теперь загораются заметно реже -
 # только при реально более высоком спросе, чем раньше.
-MOSCOW_DISTRICT_CLOUD_THRESHOLDS_ECONOM = (70, 95)
-MOSCOW_DISTRICT_CLOUD_THRESHOLDS_COMFORT = (46, 72)
-MOSCOW_DISTRICT_CLOUD_THRESHOLDS_COMFORT_PLUS = (29, 50)
-MOSCOW_DISTRICT_CLOUD_THRESHOLDS_BUSINESS = (14, 28)
-MOSCOW_DISTRICT_CLOUD_THRESHOLDS_PREMIER = (6, 14)
+# ЕЩЁ РАЗ ИЗМЕНЕНО 24.09.2026 (прямая просьба пользователя - "давай сместим
+# порог в большую сторону на 5% все тарифы", уточнение "На 5% от общее
+# значения" / "Не просто +5%"): прибавка ОТНОСИТЕЛЬНАЯ - каждое число
+# умножено на 1.05 от исходного (70->74, а не 70->75) и округлено, а не
+# сдвинуто на фиксированные +5 процентных пунктов (так было в первой,
+# ошибочной версии этого изменения - тут же исправлено по уточнению
+# пользователя, деплой той версии не состоялся).
+MOSCOW_DISTRICT_CLOUD_THRESHOLDS_ECONOM = (74, 100)
+MOSCOW_DISTRICT_CLOUD_THRESHOLDS_COMFORT = (48, 76)
+MOSCOW_DISTRICT_CLOUD_THRESHOLDS_COMFORT_PLUS = (30, 52)
+MOSCOW_DISTRICT_CLOUD_THRESHOLDS_BUSINESS = (15, 29)
+MOSCOW_DISTRICT_CLOUD_THRESHOLDS_PREMIER = (6, 15)
 MOSCOW_DISTRICT_CLOUD_THRESHOLDS_ELITE = (3, 8)
 
 # Тот же набор порогов, но ключами по JSON-полю ответа /map/district_demand
@@ -14805,6 +14877,50 @@ def _district_slot_value(slots, hour, indices):
         if start_h <= hour < end_h:
             return max(slot[2 + i] for i in indices)
     return None
+
+# ДОБАВЛЕНО 24.09.2026 (прямая просьба пользователя - пуш "час пик" должен
+# писать конкретно про РАЙОН, где сейчас водитель, а не размазанно "едь в
+# аэропорт либо будь в центре", и слаться, только если в этом районе
+# РЕАЛЬНО есть спрос) - см. push_peak_hour_alert ниже.
+_DISTRICT_DEMAND_INDEX_TO_FIELD = {
+    0: 'demand_econom', 1: 'demand_comfort', 2: 'demand_comfort_plus',
+    3: 'demand_business', 4: 'demand_premier', 5: 'demand_elite',
+}
+
+def _district_demand_indices_for_driver(category, tariffs):
+    """Индексы колонок матрицы спроса, релевантные ИМЕННО этому водителю -
+    по чекбоксам тарифов, отмеченным на старте смены (SHIFT_TARIFF_TO_DEMAND_INDEX,
+    тот же принцип, что у score_district_candidates/"Куда ехать"). Если
+    тарифы не выбраны или ни один не сматчился - откат на полный набор
+    индексов категории (MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES)."""
+    tariff_map = SHIFT_TARIFF_TO_DEMAND_INDEX.get(category, {})
+    indices = [tariff_map[t] for t in (tariffs or []) if t in tariff_map]
+    if not indices:
+        indices = list(MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES.get(category, ()))
+    return indices
+
+def district_has_real_demand_at_hour(city, district_name, category, tariffs, weekday, hour):
+    """Есть ли в КОНКРЕТНОМ районе на конкретный час/день недели спрос выше
+    порога показа облака (DISTRICT_CLOUD_THRESHOLDS_BY_FIELD) хотя бы по
+    одному из тарифов водителя - используется, чтобы НЕ слать пуш "час
+    пик", если в районе, где реально находится водитель, спроса нет (см.
+    push_peak_hour_alert)."""
+    table = get_district_demand(city)
+    if not table:
+        return False
+    entry = (table.get('districts') or {}).get(district_name)
+    if not entry:
+        return False
+    slots = entry.get('weekday', {}).get(str(weekday), [])
+    for idx in _district_demand_indices_for_driver(category, tariffs):
+        value = _district_slot_value(slots, hour, (idx,))
+        if value is None:
+            continue
+        field = _DISTRICT_DEMAND_INDEX_TO_FIELD.get(idx)
+        thresholds = DISTRICT_CLOUD_THRESHOLDS_BY_FIELD.get(field)
+        if thresholds and value >= thresholds[0]:
+            return True
+    return False
 
 async def handle_map_district_demand_api(request):
     """JSON API для районных облаков спроса (см. loadDistrictDemandClouds
@@ -27307,8 +27423,22 @@ async def push_peak_hour_alert(city, category, target_date, target_hour, label, 
     предлагай тогда, когда там ДЕЙСТВИТЕЛЬНО есть спрос": ищем через
     find_elevated_airport_for_push() аэропорт города, где ПРЯМО СЕЙЧАС
     загрузка выше 50% (зелёный/фиолетовый уровень) - если такой есть,
-    называем его прямо, иначе оставляем общую фразу."""
+    называем его прямо, иначе оставляем общую фразу.
+
+    ЕЩЁ РАЗ ПЕРЕРАБОТАНО 24.09.2026 (прямая просьба пользователя - жалоба
+    на скриншот: "он размазано даёт либо едь в аэропорт либо будь в
+    центре... нужно писать конкретно район, в котором находится сейчас
+    водитель - час ли пик в этом районе, осадки, мероприятия с такого-то
+    по такой-то... если спроса нет - пуш не давать"): для городов с
+    районными данными (DISTRICT_DEMAND_FILES - Москва/Питер) текст теперь
+    СВОЙ для КАЖДОГО водителя, а не один общий на весь город - см.
+    _push_peak_hour_alert_personalized ниже. Для остальных городов (нет
+    районной матрицы) старое поведение (общий текст, опциональный аэропорт)
+    осталось без изменений."""
     if not bot:
+        return
+    if city in DISTRICT_DEMAND_FILES:
+        await _push_peak_hour_alert_personalized(city, category, target_date, target_hour, start_dt)
         return
     city_name = CITY_DISPLAY_NAMES.get(city, city)
     peak_color_emoji = '🟣'  # та же палитра, что у аэропортов (get_load_emoji) - фиолетовый = максимальный спрос
@@ -27351,6 +27481,96 @@ async def push_peak_hour_alert(city, category, target_date, target_hour, label, 
             failed += 1
         await asyncio.sleep(0.05)  # Telegram допускает ~30 сообщений/сек в разные чаты
     logger.info(f"📅 Пуш о часе пика по городу {city} разослан: {sent} успешно, {failed} ошибок")
+
+async def _push_peak_hour_alert_personalized(city, category, target_date, target_hour, start_dt):
+    """ДОБАВЛЕНО 24.09.2026 (прямая просьба пользователя, см. докстринг
+    push_peak_hour_alert выше) - персонализированная версия пуша "час пик"
+    для городов с районными данными спроса (DISTRICT_DEMAND_FILES).
+
+    Для КАЖДОГО водителя отдельно:
+    1) Берём последнюю известную геопозицию из активной смены
+       (shift['last_lat']/['last_lon'], тот же источник, что у "Куда
+       ехать"/карты) - если её ещё нет, пуш этому водителю НЕ шлём вообще
+       (не с чем сверять район).
+    2) Ищем ближайший район (find_nearest_district) и проверяем, есть ли
+       там РЕАЛЬНО спрос выше порога показа облака на целевой час
+       (district_has_real_demand_at_hour, по тарифам водителя) - если
+       спроса нет, пуш тоже не шлём (жалоба пользователя: "если спроса
+       нету пуш не даёт").
+    3) Если спрос есть - формируем текст ПРО ЭТОТ РАЙОН: час пик, идут ли
+       сейчас осадки (district_rain_now), и мероприятие рядом с окном
+       времени (find_event_window_near), если есть - вместо размазанной
+       общей фразы "едь в аэропорт либо будь в центре"."""
+    city_name = CITY_DISPLAY_NAMES.get(city, city)
+    peak_color_emoji = '🟣'
+    peak_bar = '🟪🟪🟪🟪🟪'
+    weekday = start_dt.weekday()
+    tz = start_dt.tzinfo
+    candidates = [
+        (uid, state) for uid, state in list(user_state.items())
+        if isinstance(state, dict) and state.get('city') == city
+        and state.get('category') == category
+        and notifications_enabled(state, 'peak_hours')
+    ]
+    if not candidates:
+        logger.info(f"📅 Час пика через {PEAK_HOUR_PUSH_LEAD_MINUTES} мин в городе {city} ({target_date} {target_hour:02d}:00) для категории {category}, но нет известных водителей этой категории (либо все отключили эти пуши)")
+        return
+    # Общегородской rain_now - фолбэк для district_rain_now, если у района
+    # ещё нет собственного снепшота погоды (тот же паттерн, что в
+    # handle_map_district_demand_api).
+    rain_now_fallback = False
+    try:
+        forecast = get_cached_weather_forecast(city)
+        current_code = (forecast or {}).get('current', {}).get('weathercode')
+        rain_now_fallback = current_code in PRECIP_WEATHERCODES
+    except Exception:
+        pass
+    sent, skipped_no_geo, skipped_no_demand = 0, 0, 0
+    for user_id, state in candidates:
+        shift = state.get('shift') or {}
+        user_lat, user_lon = shift.get('last_lat'), shift.get('last_lon')
+        if user_lat is None or user_lon is None:
+            skipped_no_geo += 1
+            continue
+        nearest = find_nearest_district(city, user_lat, user_lon)
+        if not nearest:
+            skipped_no_geo += 1
+            continue
+        district_name, _dist_km, district_lat, district_lon = nearest
+        tariffs = shift.get('tariffs')
+        if not district_has_real_demand_at_hour(city, district_name, category, tariffs, weekday, target_hour):
+            skipped_no_demand += 1
+            continue
+        lines = [
+            f"📅 *{city_name} · {district_name}*",
+            "",
+            f"Через {PEAK_HOUR_PUSH_LEAD_MINUTES} минут ({start_dt.strftime('%H:%M')}) начинается "
+            f"{peak_color_emoji} *час пик* {peak_bar} в твоём районе - спрос здесь вырастет, самое время быть на линии.",
+        ]
+        if district_rain_now(city, district_name, fallback_rain_now=rain_now_fallback):
+            lines.append("🌧 В районе сейчас идут осадки.")
+        else:
+            lines.append("☀️ Осадков в районе сейчас нет.")
+        event = find_event_window_near(city, district_lat, district_lon)
+        if event:
+            start_txt = datetime.fromtimestamp(event['start_ts'], tz=tz).strftime('%H:%M')
+            end_txt = datetime.fromtimestamp(event['end_ts'], tz=tz).strftime('%H:%M')
+            lines.append(f"🎉 Рядом мероприятие «{event['title']}»: с {start_txt} до {end_txt}.")
+        text = "\n".join(lines)
+        # см. комментарий в push_rain_alert - "кнопки нет, поломалось
+        # после рестарта".
+        ok = await send_push_with_retry(
+            user_id, text, state=state, parse_mode='Markdown',
+            reply_markup=services_keyboard(category, city, user_id),
+        )
+        if ok:
+            sent += 1
+        await asyncio.sleep(0.05)  # Telegram допускает ~30 сообщений/сек в разные чаты
+    logger.info(
+        f"📅 Пуш о часе пика (персонализированный по районам) по городу {city}/{category} "
+        f"({target_date} {target_hour:02d}:00): отправлено {sent}, "
+        f"пропущено без геопозиции {skipped_no_geo}, пропущено без спроса в районе {skipped_no_demand}"
+    )
 
 async def check_peak_hour_alerts():
     """Проверяет каждый город бота на предмет "час пик начинается через
