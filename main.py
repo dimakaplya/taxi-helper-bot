@@ -15286,12 +15286,27 @@ SHIFT_TARIFF_TO_DEMAND_INDEX = {
 # сдвинуто на фиксированные +5 процентных пунктов (так было в первой,
 # ошибочной версии этого изменения - тут же исправлено по уточнению
 # пользователя, деплой той версии не состоялся).
-MOSCOW_DISTRICT_CLOUD_THRESHOLDS_ECONOM = (74, 100)
-MOSCOW_DISTRICT_CLOUD_THRESHOLDS_COMFORT = (48, 76)
-MOSCOW_DISTRICT_CLOUD_THRESHOLDS_COMFORT_PLUS = (30, 52)
-MOSCOW_DISTRICT_CLOUD_THRESHOLDS_BUSINESS = (15, 29)
-MOSCOW_DISTRICT_CLOUD_THRESHOLDS_PREMIER = (6, 15)
-MOSCOW_DISTRICT_CLOUD_THRESHOLDS_ELITE = (3, 8)
+# ЕЩЁ РАЗ ИЗМЕНЕНО 24.09.2026 (прямая просьба пользователя - "он прям сильно
+# явно эти спросы рисуют, надо всё-таки больше на реальных данных, если
+# спроса нет значит спроса не рисовать") - уточнили, что дождевой "пол"
+# (district_raining в handle_map_district_demand_api) трогать НЕ нужно,
+# проблема именно в пороге ПОКАЗА (первое число пары) - слабый/
+# полупрозрачный уровень зажигался уже на медиане тарифа, создавая
+# ощущение "спрос рисуется, даже когда его реально нет". Порог показа
+# поднят ЕЩЁ РАЗ, тем же приёмом (относительно, ×1.10 с округлением вверх,
+# а не фиксированной прибавкой), порог "ярко" (второе число) не трогали -
+# он и так уже около 90-го процентиля, работает как надо.
+# ЕЩЁ РАЗ ИЗМЕНЕНО 24.09.2026 (прямая просьба пользователя - "в тарифах
+# Premier, Elite подними ещё порог выше") - точечно, только эти два (у
+# Business/остальных тарифов порог показа не трогали) - более заметный
+# относительный шаг (×~1.4), чем прошлые +10%, т.к. прошлого шага водителю
+# показалось мало именно для этой пары. Порог "ярко" по-прежнему не трогали.
+MOSCOW_DISTRICT_CLOUD_THRESHOLDS_ECONOM = (82, 100)
+MOSCOW_DISTRICT_CLOUD_THRESHOLDS_COMFORT = (53, 76)
+MOSCOW_DISTRICT_CLOUD_THRESHOLDS_COMFORT_PLUS = (33, 52)
+MOSCOW_DISTRICT_CLOUD_THRESHOLDS_BUSINESS = (17, 29)
+MOSCOW_DISTRICT_CLOUD_THRESHOLDS_PREMIER = (10, 15)
+MOSCOW_DISTRICT_CLOUD_THRESHOLDS_ELITE = (6, 8)
 
 # Тот же набор порогов, но ключами по JSON-полю ответа /map/district_demand
 # (см. handle_map_district_demand_api) - удобно передавать прямо в JS одним
