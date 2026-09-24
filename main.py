@@ -5204,8 +5204,13 @@ def services_keyboard(category=None, city=None, user_id=None):
     # них есть своя версия сводки на своих часах пика (см.
     # compute_where_to_go/score_city_candidate) - убрано условие
     # "category not in CATEGORIES_WITHOUT_AIRPORTS" для этой кнопки.
-    shift_active = is_shift_active(user_state.get(user_id, {})) if user_id is not None else False
-    top_rows = [[KeyboardButton(text="⏹ ЗАВЕРШИТЬ СМЕНУ" if shift_active else "✅ НАЧАТЬ СМЕНУ")]]
+    # ИЗМЕНЕНО 24.09.2026 (прямая просьба пользователя - "сделай кнопки
+    # ВЫЙТИ НА ЛИНИЮ / УЙТИ С ЛИНИИ... встроить секундомер, по аналогии с
+    # подпиской сколько дней") - текст кнопки теперь строит
+    # shift_toggle_button_text (см. ниже) - переименованные подписи +, пока
+    # смена идёт, время на линии прямо в тексте кнопки (тот же приём, что и
+    # у кнопки подписки - см. subscription_menu_button_text).
+    top_rows = [[KeyboardButton(text=shift_toggle_button_text(user_state.get(user_id, {}) if user_id is not None else {}))]]
     # "🗺 КАРТА ВОДИТЕЛЕЙ" (по просьбе пользователя, 21.09.2026) - в одном
     # ряду с "💰 КУДА ЕХАТЬ AI ➡️", а не отдельной строкой внизу меню - открывает
     # интерактивную WebApp-карту через web_app=WebAppInfo (единственный
@@ -5298,11 +5303,17 @@ def services_keyboard(category=None, city=None, user_id=None):
     # не мешает - тот же принцип, что уже у "🗺 КАРТА ВОДИТЕЛЕЙ"). Если
     # PUBLIC_URL/city не заданы - остаётся старая текстовая кнопка
     # (show_weather_forecast ниже сама разберётся, если city вдруг пуст).
+    # ИЗМЕНЕНО 24.09.2026 (прямая просьба пользователя - "место кнопки
+    # погода дай текущие погоду температура и через сколько будет дождь
+    # или снег") - текст кнопки теперь строит weather_button_text (см.
+    # выше) - живая температура + время до дождя/снега прямо в подписи,
+    # тот же приём, что и у кнопки подписки/смены.
+    weather_button_label = weather_button_text(city)
     if PUBLIC_URL and city:
         weather_url = f"{PUBLIC_URL}{WEATHER_WEBAPP_PATH}?city={urllib.parse.quote(city)}"
-        items.append(KeyboardButton(text="🌤 ПОГОДА", web_app=WebAppInfo(url=weather_url)))
+        items.append(KeyboardButton(text=weather_button_label, web_app=WebAppInfo(url=weather_url)))
     else:
-        items.append(KeyboardButton(text="🌤 ПОГОДА"))
+        items.append(KeyboardButton(text=weather_button_label))
     # "💳 ЧАЕВЫЕ" вынесена в главное меню (по просьбе пользователя,
     # 21.09.2026) - раньше была только внутри "🧰 ИНСТРУМЕНТЫ ВОДИТЕЛЯ"
     # (сейчас недоступной с главного меню, см. комментарий выше), тот же
@@ -8922,7 +8933,7 @@ async def check_long_shifts():
                             f"⏰ *Смена скоро завершится автоматически* (через ~{SHIFT_AUTO_FINISH_WARN_MINUTES} мин, "
                             f"по достижении {SHIFT_AUTO_FINISH_HOURS} часов секундомера) - если ты всё ещё за рулём, "
                             "ничего делать не нужно, просто учти это. Завершить сейчас можно кнопкой "
-                            "«⏹ ЗАВЕРШИТЬ СМЕНУ» в главном меню.",
+                            "«⛔️⛔️УЙТИ С ЛИНИИ⛔️⛔️» в главном меню.",
                             parse_mode='Markdown',
                         )
                     except Exception as e:
@@ -8941,7 +8952,7 @@ async def check_long_shifts():
                         f"⚠️ *Ты за рулём уже больше {SHIFT_LONG_WARNING_HOURS} часов подряд!*\n\n"
                         "Долгая смена без отдыха повышает риск аварии - сделай перерыв, "
                         "если получится.\n\n"
-                        "Завершить смену можно кнопкой «⏹ ЗАВЕРШИТЬ СМЕНУ» в главном меню.",
+                        "Завершить смену можно кнопкой «⛔️⛔️УЙТИ С ЛИНИИ⛔️⛔️» в главном меню.",
                         parse_mode='Markdown',
                     )
                 except Exception as e:
@@ -9008,6 +9019,39 @@ def format_shift_duration(minutes):
         return f"{hours} ч"
     return f"{mins} мин"
 
+# ДОБАВЛЕНО 24.09.2026 (прямая просьба пользователя - "место начать и
+# завершить смену сделай две кнопки ВЫЙТИ НА ЛИНИЮ / УЙТИ С ЛИНИИ и когда
+# нажимаешь кнопку... он пишет сколько времени ты на линии по аналогии с
+# подпиской сколько дней грубо говоря встроить секундомер") - та же
+# кнопка-переключатель, что и раньше (см. services_keyboard/toggle_shift),
+# просто с новыми подписями + "встроенным секундомером" ПРЯМО В ТЕКСТЕ
+# кнопки, пока смена идёт - тот же приём, что уже используется у кнопки
+# подписки (см. subscription_menu_button_text - "✅ Подписка до ... (N дн.)").
+# Текст кнопки не тикает посекундно сам по себе (Reply-клавиатуры Telegram
+# так не умеют - обновить их может только новое сообщение с reply_markup),
+# а пересчитывается заново каждый раз, когда бот пересылает меню - на
+# практике это происходит при каждом действии в боте, так что счётчик
+# ощущается "живым", хоть и не идёт в реальном времени сам по себе.
+# ЕЩЁ РАЗ ИЗМЕНЕНО 24.09.2026 (прямая просьба пользователя) - эмодзи в
+# подписях кнопки поменяны с ✅/❌ на ❇️/⛔️, каждый теперь двойной.
+SHIFT_TOGGLE_BUTTON_OFF_TEXT = "❇️❇️ВЫЙТИ НА ЛИНИЮ❇️❇️"
+SHIFT_TOGGLE_BUTTON_ON_PREFIX = "⛔️⛔️УЙТИ С ЛИНИИ⛔️⛔️"
+
+def shift_toggle_button_text(state):
+    """Текст верхней кнопки-переключателя смены (см. services_keyboard) -
+    вне смены статичный SHIFT_TOGGLE_BUTTON_OFF_TEXT, во время смены -
+    SHIFT_TOGGLE_BUTTON_ON_PREFIX + текущее время на линии в скобках,
+    например "⛔️⛔️УЙТИ С ЛИНИИ⛔️⛔️ (2 ч 15 мин)"."""
+    if not is_shift_active(state):
+        return SHIFT_TOGGLE_BUTTON_OFF_TEXT
+    shift = state.get('shift') or {}
+    try:
+        started_at = datetime.fromisoformat(shift['started_at'])
+        elapsed_minutes = int((datetime.now(timezone.utc) - started_at).total_seconds() / 60)
+    except Exception:
+        return SHIFT_TOGGLE_BUTTON_ON_PREFIX
+    return f"{SHIFT_TOGGLE_BUTTON_ON_PREFIX} ({format_shift_duration(max(0, elapsed_minutes))})"
+
 RU_WEEKDAYS = ('понедельник', 'вторник', 'среда', 'четверг', 'пятница', 'суббота', 'воскресенье')
 
 def format_shift_start_label(started_at):
@@ -9019,11 +9063,14 @@ def format_shift_start_label(started_at):
     weekday = RU_WEEKDAYS[local.weekday()]
     return f"{local.strftime('%H:%M')}, {weekday}"
 
-@router.message(lambda message: message.text in ("✅ НАЧАТЬ СМЕНУ", "⏹ ЗАВЕРШИТЬ СМЕНУ"))
+@router.message(lambda message: message.text == SHIFT_TOGGLE_BUTTON_OFF_TEXT or (message.text or '').startswith(SHIFT_TOGGLE_BUTTON_ON_PREFIX))
 async def toggle_shift(message: types.Message):
     """Одна кнопка-переключатель наверху главного меню (выше "💰 КУДА ЕХАТЬ AI",
     см. services_keyboard) - текст меняется в зависимости от того, идёт ли
-    смена, т.к. это одна и та же позиция клавиатуры."""
+    смена, т.к. это одна и та же позиция клавиатуры. ИЗМЕНЕНО 24.09.2026 -
+    во время смены текст кнопки динамический (SHIFT_TOGGLE_BUTTON_ON_PREFIX +
+    время на линии в скобках, см. shift_toggle_button_text), поэтому фильтр
+    матчит по префиксу, а не по точному тексту."""
     user_id = message.from_user.id
     state = user_state.get(user_id, {})
     category = state.get('category')
@@ -9032,7 +9079,7 @@ async def toggle_shift(message: types.Message):
         await message.answer("Сначала выбери город!")
         return
 
-    if message.text == "✅ НАЧАТЬ СМЕНУ":
+    if message.text == SHIFT_TOGGLE_BUTTON_OFF_TEXT:
         if is_shift_active(state):
             return  # защитный случай - кнопка не должна была показать "Начать", если смена уже идёт
         # По прямой просьбе пользователя (21.09.2026): "когда он нажимает
@@ -9199,7 +9246,7 @@ async def finish_shift_and_notify(user_id, category, city, send_func, header=Non
     сообщение "СМЕНА ЗАВЕРШЕНА" и предлагает указать доход за день - вынесена
     из toggle_shift (по просьбе пользователя, 20.09.2026: "сделай так чтобы
     смена автоматически завершалась после 18 часов"), чтобы тем же кодом
-    пользовался и хендлер кнопки "⏹ ЗАВЕРШИТЬ СМЕНУ", и фоновая
+    пользовался и хендлер кнопки "⛔️⛔️УЙТИ С ЛИНИИ⛔️⛔️", и фоновая
     автозавершающая задача (см. check_long_shifts). send_func - функция
     отправки сообщения с сигнатурой message.answer (kwargs reply_markup/
     parse_mode) - у ручного завершения это message.answer, у автоматического
@@ -9768,14 +9815,22 @@ async def process_parking_ping(user_id, lat, lon):
     if stationary_minutes >= PARKING_STATIONARY_MINUTES:
         parking['pushed'] = True
         state['parking'] = parking
-        await send_parking_push(user_id, state.get('city'))
+        await send_parking_push(user_id, state.get('city'), lat, lon)
 
-async def send_parking_push(user_id, city):
+async def send_parking_push(user_id, city, lat=None, lon=None):
     """Пуш "похоже, ты припарковался" - кнопки оплаты платной парковки
     (по городу/платформе, см. PARKING_APP_LINKS - пока пусто, ссылки
-    добавит пользователь позже, до этого кнопок оплаты просто нет) и
-    кнопка "🅿️ Стою на бесплатной парковке" (глушит пуш до следующей
-    поездки, см. handle_parking_free_ack)."""
+    добавит пользователь позже, до этого кнопок оплаты просто нет),
+    кнопка "🚗 Поехали на ближайшую бесплатную парковку" (ДОБАВЛЕНО
+    24.09.2026, прямая просьба пользователя - "чтобы он предлагал кнопку
+    поехали на ближайшую бесплатную парковку и определял местоположение
+    текущее и определял ближайшую бесплатную парковку исходя из наших
+    баз" - используем ТЕ ЖЕ данные и тот же принцип поиска ближайшей
+    точки, что и раздел "🅿️ БЕСПЛАТНАЯ ПАРКОВКА" в "Рядом", см.
+    nearest_nearby_points/parking_data.json/yandex_navi_url выше;
+    lat/lon - точка последнего пинга, на которой водитель стоит, её же
+    передаёт process_parking_ping) и кнопка "🅿️ Стою на бесплатной
+    парковке" (глушит пуш до следующей поездки, см. handle_parking_free_ack)."""
     if not bot:
         return
     text = (
@@ -9783,6 +9838,19 @@ async def send_parking_push(user_id, city):
         "Если парковка платная - не забудь оплатить, чтобы не словить штраф."
     )
     buttons = []
+    # Кнопка "Поехали на ближайшую бесплатную парковку" - только если есть
+    # текущие координаты И для города вообще собраны данные по бесплатным
+    # парковкам (см. nearest_nearby_points: None - файла нет, [] - город
+    # пока не покрыт сбором) - в обоих случаях просто не показываем кнопку,
+    # без ошибки, точно так же, как и в разделе "Рядом".
+    if lat is not None and lon is not None:
+        nearest = nearest_nearby_points('parking', city, lat, lon, count=1)
+        if nearest:
+            dist_km, point = nearest[0]
+            buttons.append([InlineKeyboardButton(
+                text=f"🚗 Поехали на ближайшую бесплатную парковку ({format_nearby_distance(dist_km)})",
+                url=yandex_navi_url(point['lat'], point['lon']),
+            )])
     # Сначала ссылка конкретно для города (если пользователь её пришлёт),
     # иначе - общий фолбэк PARKING_APP_LINK_FALLBACK ("Парковки России",
     # покрывает все города).
@@ -14496,12 +14564,19 @@ SHIFT_TARIFF_TO_DEMAND_INDEX = {
 # моменты, а не по чужой шкале. Заодно убран зелёный цвет (прямая просьба
 # пользователя "цвета только фиолетовые без зелёных") - остался только
 # фиолетовый двух степеней прозрачности, см. demandCloudOpacityByLevel в JS.
-MOSCOW_DISTRICT_CLOUD_THRESHOLDS_ECONOM = (60, 85)
-MOSCOW_DISTRICT_CLOUD_THRESHOLDS_COMFORT = (40, 65)
-MOSCOW_DISTRICT_CLOUD_THRESHOLDS_COMFORT_PLUS = (25, 45)
-MOSCOW_DISTRICT_CLOUD_THRESHOLDS_BUSINESS = (12, 25)
-MOSCOW_DISTRICT_CLOUD_THRESHOLDS_PREMIER = (5, 12)
-MOSCOW_DISTRICT_CLOUD_THRESHOLDS_ELITE = (2, 7)
+# ЕЩЁ РАЗ ИЗМЕНЕНО 24.09.2026 (прямая просьба пользователя - "повысим порог
+# отображения, чтобы отображались они при более высоком спросе") - оба
+# порога (показ/"ярко") подняты примерно на 15-17% у КАЖДОГО тарифа
+# (пропорционально, не на фиксированное число - у Элит и так верхняя
+# реальная граница спроса всего ~16%, фиксированная прибавка вроде +10
+# сломала бы порог совсем). Облака теперь загораются заметно реже -
+# только при реально более высоком спросе, чем раньше.
+MOSCOW_DISTRICT_CLOUD_THRESHOLDS_ECONOM = (70, 95)
+MOSCOW_DISTRICT_CLOUD_THRESHOLDS_COMFORT = (46, 72)
+MOSCOW_DISTRICT_CLOUD_THRESHOLDS_COMFORT_PLUS = (29, 50)
+MOSCOW_DISTRICT_CLOUD_THRESHOLDS_BUSINESS = (14, 28)
+MOSCOW_DISTRICT_CLOUD_THRESHOLDS_PREMIER = (6, 14)
+MOSCOW_DISTRICT_CLOUD_THRESHOLDS_ELITE = (3, 8)
 
 # Тот же набор порогов, но ключами по JSON-полю ответа /map/district_demand
 # (см. handle_map_district_demand_api) - удобно передавать прямо в JS одним
@@ -18721,7 +18796,7 @@ async def show_shift_breakdown(callback_query: types.CallbackQuery):
 
     if not rows:
         await callback_query.message.answer(
-            "📊 Пока нет ни одной завершённой смены - начни смену кнопкой «✅ НАЧАТЬ СМЕНУ» в главном меню.",
+            "📊 Пока нет ни одной завершённой смены - начни смену кнопкой «❇️❇️ВЫЙТИ НА ЛИНИЮ❇️❇️» в главном меню.",
         )
         return
 
@@ -18831,8 +18906,8 @@ async def advance_finance_step(target, user_id, state, draft):
     step = draft['step']
 
     if step == 'km':
-        # Если сегодня уже есть завершённые смены (см. "✅ НАЧАТЬ СМЕНУ"/
-        # "⏹ ЗАВЕРШИТЬ СМЕНУ") - подставляем км/часы автоматически и сразу
+        # Если сегодня уже есть завершённые смены (см. "❇️❇️ВЫЙТИ НА ЛИНИЮ❇️❇️"/
+        # "⛔️⛔️УЙТИ С ЛИНИИ⛔️⛔️") - подставляем км/часы автоматически и сразу
         # переходим дальше, без лишнего вопроса (по просьбе пользователя,
         # 20.09.2026: "километраж... берётся из данных по кнопке начала
         # смены"). Если данных нет - явно предлагаем ввести самостоятельно.
@@ -18855,7 +18930,7 @@ async def advance_finance_step(target, user_id, state, draft):
             await advance_finance_step(target, user_id, state, draft)
             return
         await target(
-            "🚗 За сегодня нет данных по сменам (кнопка «✅ НАЧАТЬ СМЕНУ» не нажималась) - "
+            "🚗 За сегодня нет данных по сменам (кнопка «❇️❇️ВЫЙТИ НА ЛИНИЮ❇️❇️» не нажималась) - "
             + COURIER_FINANCE_STEP_PROMPTS['km'],
             reply_markup=courier_finance_cancel_keyboard(),
         )
@@ -19365,7 +19440,22 @@ async def enable_airport_queue_now(callback_query: types.CallbackQuery):
     enable_airport_queue_tracking(user_id)
     await callback_query.message.answer(airport_queue_enable_text(), parse_mode='Markdown')
 
-@router.message(lambda message: message.text == "🌤 ПОГОДА")
+def _is_weather_button_press(message):
+    """Фильтр кнопки погоды - ДОБАВЛЕНО/ИЗМЕНЕНО 24.09.2026: текст кнопки
+    теперь полностью динамический (температура + осадки, без фиксированного
+    слова "ПОГОДА" или эмодзи-префикса, см. weather_button_text) - точное
+    совпадение с фиксированной строкой больше не работает, поэтому просто
+    пересчитываем ожидаемый текст кнопки ДЛЯ ГОРОДА ЭТОГО ЖЕ пользователя
+    (тот же кэшированный снепшот, что использовался при показе меню) и
+    сравниваем. Это только фолбэк-режим без PUBLIC_URL (с PUBLIC_URL кнопка
+    открывает WebApp и текстового сообщения вообще не шлёт) - текст кнопки
+    в обоих режимах строится одной и той же функцией."""
+    if not message.text:
+        return False
+    state = user_state.get(message.from_user.id, {})
+    return message.text == weather_button_text(state.get('city'))
+
+@router.message(_is_weather_button_press)
 async def show_weather_forecast(message: types.Message):
     """Ручной просмотр погоды по своему городу - почасовая разбивка (вид
     осадков + температура) на RAIN_FORECAST_HOURS часов вперёд. Второй режим
@@ -21629,6 +21719,93 @@ def find_precip_event_end(forecast, start_offset):
         if codes[i] not in PRECIP_WEATHERCODES:
             return i - start_offset
     return None
+
+# Коды weathercode, которые считаем именно СНЕГОМ (для различения эмодзи
+# 🌧️/🌨️ в weather_button_text ниже) - остальные PRECIP_WEATHERCODES
+# (морось/дождь/ливень/гроза/ледяной дождь) считаем дождём.
+SNOW_WEATHERCODES = {71, 73, 75, 77, 85, 86}
+
+# ЕЩЁ РАЗ ИЗМЕНЕНО 24.09.2026 (прямая просьба пользователя, финальный
+# формат по её же примеру - "+18, 🌧️ Через 2 часа") - без слова "ПОГОДА" и
+# без слов "Дождь"/"Снег" - только температура со знаком и, если есть
+# осадки, эмодзи конкретного вида (🌧️ дождь / 🌨️ снег) перед "Через ...".
+PRECIP_KIND_EMOJI = {'rain': '🌧️', 'snow': '🌨️'}
+
+def _ru_hours_word(n):
+    """"час"/"часа"/"часов" по числу n - обычные русские правила склонения
+    (11-14 всегда "часов", иначе по последней цифре)."""
+    n = abs(n) % 100
+    last = n % 10
+    if 11 <= n <= 14:
+        return "часов"
+    if last == 1:
+        return "час"
+    if 2 <= last <= 4:
+        return "часа"
+    return "часов"
+
+def _format_signed_temp(temp):
+    """"+18"/"-3"/"0" - температура со знаком (без °C, по прямому примеру
+    пользователя), для weather_button_text."""
+    if temp is None:
+        return "н/д"
+    rounded = round(temp)
+    if rounded > 0:
+        return f"+{rounded}"
+    return str(rounded)  # round() уже даёт "-3"/"0" сам по себе
+
+def weather_button_text(city):
+    """Текст кнопки погоды в главном меню (раньше была статичная "🌤
+    ПОГОДА") - ДОБАВЛЕНО 24.09.2026 (прямая просьба пользователя - "место
+    кнопки погода дай текущие погоду температура и через сколько будет
+    дождь или снег"), финальный формат уточнён пользователем на её же
+    примере - "+18, 🌧️ Через 2 часа" (без слова "ПОГОДА", без слов
+    "Дождь"/"Снег" - только эмодзи конкретного вида осадков). Тот же общий
+    приём, что уже используется у кнопки подписки/смены (см.
+    subscription_menu_button_text/shift_toggle_button_text) - живые данные
+    прямо в подписи кнопки. Источник данных - тот же кэшированный снепшот
+    (get_cached_weather_forecast), что и у самой WebApp/текстового режима -
+    никаких дополнительных запросов к Open-Meteo на каждый показ меню.
+
+    Сначала используем find_upcoming_precip_event (тот же, что и у
+    автопуша - смотрит на ближайшие RAIN_LEAD_MINUTES минут); если в этом
+    ближнем окне осадков нет - ищем дальше по всему часовому прогнозу (как
+    в format_weather_forecast_text), уже в часах (точнее часовой прогноз не
+    даёт), с русским склонением "час/часа/часов" (см. _ru_hours_word)."""
+    if not city:
+        return "🌤 ПОГОДА"
+    forecast = get_cached_weather_forecast(city)
+    if not forecast:
+        return "🌤 ПОГОДА"
+    current = forecast.get('current', {})
+    temp_str = _format_signed_temp(current.get('temperature_2m'))
+
+    near_event = find_upcoming_precip_event(forecast, city)
+    if near_event is not None:
+        kind_key = 'snow' if near_event['code'] in SNOW_WEATHERCODES else 'rain'
+        kind_emoji = PRECIP_KIND_EMOJI[kind_key]
+        when = "Сейчас" if near_event['hour_offset'] == 0 else f"Через {RAIN_LEAD_MINUTES} минут"
+        return f"{temp_str}, {kind_emoji} {when}"
+
+    # Ближнего окна нет - ищем дальше по всему прогнозу (не только
+    # RAIN_LEAD_MINUTES, как find_upcoming_precip_event), в часах.
+    hourly = forecast.get('hourly', {})
+    times = hourly.get('time', [])
+    codes = hourly.get('weathercode', [])
+    base = _current_hour_index(forecast, city)
+    for offset in range(max(0, len(codes) - base)):
+        i = base + offset
+        if i >= len(times):
+            break
+        if codes[i] in PRECIP_WEATHERCODES:
+            kind_key = 'snow' if codes[i] in SNOW_WEATHERCODES else 'rain'
+            kind_emoji = PRECIP_KIND_EMOJI[kind_key]
+            when = f"Через {offset} {_ru_hours_word(offset)}" if offset else "Сейчас"
+            return f"{temp_str}, {kind_emoji} {when}"
+    # ДОБАВЛЕНО 24.09.2026 (прямая просьба пользователя - "если осадков нет
+    # то солнышко и написать осадки не ожидаются") - без осадков во всём
+    # прогнозе (RAIN_FORECAST_HOURS часов вперёд).
+    return f"{temp_str}, ☀️ осадки не ожидаются"
 
 # ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "с 23.30 до 6.30 утра
 # не присылать пуш о дожде и спросе в дождь"): ночная тишина для пуша о
