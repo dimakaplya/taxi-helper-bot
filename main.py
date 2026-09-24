@@ -11874,7 +11874,7 @@ def map_webapp_html():
     {{base: 0.558, min: 0.479, terms: [[7, 0.124], [5, 0.064], [9, 0.114]]}},
     {{base: 0.645, min: 0.546, terms: [[8, 0.066], [3, 0.146], [2, 0.1]]}},
   ];
-  function blobLatLngs(lat, lon, maxRadiusM, seed, pointsCount) {{
+  function blobLatLngs(lat, lon, maxRadiusM, seed, pointsCount, segments) {{
     pointsCount = pointsCount || 24;
     const metersPerDegLat = 111320;
     const profile = CLOUD_SHAPE_PROFILES[seed % CLOUD_SHAPE_PROFILES.length];
@@ -11898,21 +11898,36 @@ def map_webapp_html():
       const dLon = (r * Math.sin(angle)) / (metersPerDegLat * Math.cos(cLat * Math.PI / 180));
       latLngs.push([cLat + dLat, cLon + dLon]);
     }}
-    return smoothClosedLatLngs(latLngs);
+    return smoothClosedLatLngs(latLngs, segments);
   }}
   // Метки аэропортов - название, статус (открыт/по согласованию/закрыт),
   // текущая загрузка % и последняя отмеченная водителями очередь по каждой
   // категории (см. handle_map_airports_api). Загружаются один раз при
   // открытии карты и обновляются реже позиций водителей - эти данные не
   // такие "живые".
-  async function loadAirports() {{
-    try {{
-      const resp = await fetch(`/map/airports?city=${{encodeURIComponent(city)}}`);
-      if (!resp.ok) return;
-      const data = await resp.json();
+  // ИЗМЕНЕНО 24.09.2026 (прямая просьба пользователя - оптимизация тормозов
+  // карты, тот же набор фиксов, что уже применён к районным облакам спроса
+  // выше): 1) AIRPORT_CLOUD_POINTS/SEGMENTS - контур облака повышенного
+  // спроса у аэропорта/вокзала теперь 16×6=96 точек вместо 24×14=336 (в 3.5
+  // раза меньше вершин на SVG-путь + blur-фильтр); 2) отрисовка вынесена в
+  // renderAirports(data), а loadAirports() пересобирает маркеры только если
+  // подпись данных реально изменилась (_airportsSignature) - в подпись
+  // включена округлённая до ~100м собственная позиция (selfLat/selfLon),
+  // чтобы метка ETA на попапах не "зависала" пока водитель едет, но мелкий
+  // GPS-джиттер не вызывал пересборку зря; 3) viewport culling - рисуются
+  // только аэропорты в видимой области карты (+запас), с перерисовкой из
+  // кэша при panning/zoom без нового запроса к серверу (см. map.on(
+  // 'moveend zoomend', ...) ниже).
+  const AIRPORT_CLOUD_POINTS = 16;
+  const AIRPORT_CLOUD_SEGMENTS = 6;
+  let _airportsCache = null;
+  let _airportsSignature = null;
+
+  function renderAirports(data) {{
       airportMarkers.forEach(m => map.removeLayer(m));
       airportMarkers = [];
-      data.airports.forEach(a => {{
+      const bounds = map.getBounds().pad(0.25);
+      (data.airports || []).filter(a => bounds.contains([a.lat, a.lon])).forEach(a => {{
         // ИЗМЕНЕНО 21.09.2026 (прямая просьба пользователя): при высоком
         // спросе (загрузка >85% - тот же порог 🟣, что и в get_load_emoji
         // на сервере) рисуем вокруг аэропорта зону повышенного спроса,
@@ -11965,7 +11980,7 @@ def map_webapp_html():
         // при этом продолжает показываться как обычно.
         if (a.load !== null && a.load !== undefined && a.load > HIGH_DEMAND_LOAD_THRESHOLD && a.demand_cloud_allowed !== false) {{
           const cloudSeed = seedFromString(a.icao + '::' + demandCloudTimeBucket());
-          const blob = L.polygon(blobLatLngs(a.lat, a.lon, HIGH_DEMAND_RADIUS_METERS, cloudSeed), {{
+          const blob = L.polygon(blobLatLngs(a.lat, a.lon, HIGH_DEMAND_RADIUS_METERS, cloudSeed, AIRPORT_CLOUD_POINTS, AIRPORT_CLOUD_SEGMENTS), {{
             color: '#9b30ff',
             weight: 0,
             fillColor: cloudFill('#9b30ff'),
@@ -12074,30 +12089,59 @@ def map_webapp_html():
         // с готовым маршрутом.
         popup += goButtonHtml(a.lat, a.lon);
         popup += `</div>`;
-        // Постоянная подпись прямо на карте (без клика) - по просьбе
-        // пользователя (22.09.2026): "так же отметь на карте", т.е. статус/
-        // загрузка/очередь должны быть видны сразу, не только в попапе.
-        // ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "писать на
-        // метках примерное время прибытия... от текущей позиции") - та же
-        // оценка ETA, что и в попапе выше (см. airportEta), сразу в подписи.
-        let label = `<b>${{a.name}}</b>`;
-        if (airportEta) label += ` · ${{airportEta}}`;
-        label += `<br>${{STATUS_ICON[a.status] || ''}} ${{a.status_text}}`;
-        if (a.load !== null && a.load !== undefined) {{
-          label += ` · 📊 ${{a.load}}%`;
-        }}
-        if (queueLines.length) {{
-          label += '<br>' + queueLines.map(q => `🚗 ${{q.short}}`).join(' · ');
-        }}
+        // ИЗМЕНЕНО 24.09.2026 (прямая просьба пользователя - "Пиши тока рядом
+        // ✈️🟢 или ✈️⛔️", уточнение "✈️🟡 По согласованию"): вместо
+        // многострочной подписи (название/ETA/статус/загрузка/очередь) рядом
+        // с меткой теперь только компактный бейдж - эмодзи самолёта + цветной
+        // кружок по статусу (🟢 открыт / 🟡 по согласованию / ⛔️ закрыт).
+        // Вся подробная информация осталась в попапе (по клику) - см. popup
+        // выше, ничего оттуда не убрано.
+        const AIRPORT_STATUS_BADGE = {{ open: '🟢', coordinated: '🟡', closed: '⛔️' }};
+        const label = `${{a.emoji || '✈️'}}${{AIRPORT_STATUS_BADGE[a.status] || '🟢'}}`;
+        // ДОБАВЛЕНО 24.09.2026 (прямая просьба пользователя - "Скрывай так же
+        // по кнопке нажатия на аэропорт"): бейдж-подпись прячется, пока
+        // открыт попап с подробностями (по клику на метку), и появляется
+        // обратно, когда попап закрыт - тот же принцип "скрыть по нажатию",
+        // что уже был сделан для вокзалов, но здесь бейдж всё равно виден по
+        // умолчанию (не убран совсем), просто не мешает открытому попапу.
         const marker = L.marker([a.lat, a.lon], {{ icon }})
           .bindPopup(popup)
           .bindTooltip(label, {{ permanent: true, direction: 'right', offset: [10, 0], className: 'airport-label' }})
+          .on('popupopen', () => marker.closeTooltip())
+          .on('popupclose', () => marker.openTooltip())
           .addTo(map);
         airportMarkers.push(marker);
       }});
       airportsLoaded = true;
+  }}
+
+  async function loadAirports() {{
+    try {{
+      const resp = await fetch(`/map/airports?city=${{encodeURIComponent(city)}}`);
+      if (!resp.ok) return;
+      const data = await resp.json();
+      // Округляем собственную позицию до ~100м (3 знака после запятой) -
+      // ETA на попапах должна оставаться актуальной по мере движения
+      // водителя, но мелкое дрожание GPS не должно вызывать лишнюю
+      // пересборку всех маркеров каждую минуту.
+      const selfPosKey = (selfLat !== null && selfLon !== null) ? `${{selfLat.toFixed(3)}},${{selfLon.toFixed(3)}}` : null;
+      const signature = JSON.stringify({{ city, airports: data.airports, selfPosKey }});
+      _airportsCache = data;
+      if (signature === _airportsSignature) {{ airportsLoaded = true; return; }}
+      _airportsSignature = signature;
+      renderAirports(data);
     }} catch (e) {{ /* тихо */ }}
   }}
+  // ДОБАВЛЕНО 24.09.2026 - при панорамировании/зуме карты перерисовываем
+  // (без нового запроса к серверу, из _airportsCache) видимые метки
+  // аэропортов под новые границы экрана; debounce 250мс.
+  let _airportsRedrawTimer = null;
+  map.on('moveend zoomend', () => {{
+    if (!_airportsCache) return;
+    clearTimeout(_airportsRedrawTimer);
+    _airportsRedrawTimer = setTimeout(() => {{ renderAirports(_airportsCache); }}, 250);
+  }});
+
   // Вокзалы на карте (по просьбе пользователя, 21.09.2026 - "выведи на
   // карту жд вокзалы по типу аэропортов с процентом загрузки прибытия") -
   // та же идея, что loadAirports() выше, но проще: нет статуса Росавиации и
@@ -12105,15 +12149,21 @@ def map_webapp_html():
   // вокзалов, в отличие от аэропортов, бинарная шкала (см. get_train_load_symbol
   // на сервере: >50% = 🟢 ехать, иначе 🔴 не ехать), поэтому порог для круга
   // повышенного спроса тоже 50%, а не 85% как у аэропортов.
+  // ИЗМЕНЕНО 24.09.2026 (прямая просьба пользователя - оптимизация тормозов
+  // карты, тот же набор фиксов, что и у loadAirports выше): точки/сегменты
+  // облака вокзала сокращены (AIRPORT_CLOUD_POINTS/SEGMENTS, общие с
+  // аэропортами), отрисовка вынесена в renderStations(data) с пропуском
+  // пересборки при неизменившихся данных (_stationsSignature) и viewport
+  // culling + перерисовкой из кэша при panning/zoom без нового запроса.
   let stationMarkers = [];
-  async function loadStations() {{
-    try {{
-      const resp = await fetch(`/map/stations?city=${{encodeURIComponent(city)}}`);
-      if (!resp.ok) return;
-      const data = await resp.json();
+  let _stationsCache = null;
+  let _stationsSignature = null;
+
+  function renderStations(data) {{
       stationMarkers.forEach(m => map.removeLayer(m));
       stationMarkers = [];
-      data.stations.forEach(s => {{
+      const bounds = map.getBounds().pad(0.25);
+      (data.stations || []).filter(s => bounds.contains([s.lat, s.lon])).forEach(s => {{
         // ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя - "Над вокзалами
         // тока когда более 80%"): было 50%.
         const STATION_HIGH_LOAD_THRESHOLD = 80;
@@ -12129,7 +12179,7 @@ def map_webapp_html():
         const STATION_CLOUD_RADIUS_METERS = 1500;
         if (s.load !== null && s.load !== undefined && s.load > STATION_HIGH_LOAD_THRESHOLD) {{
           const stationSeed = seedFromString((s.name || String(s.lat)) + '::' + demandCloudTimeBucket());
-          const blob = L.polygon(blobLatLngs(s.lat, s.lon, STATION_CLOUD_RADIUS_METERS, stationSeed), {{
+          const blob = L.polygon(blobLatLngs(s.lat, s.lon, STATION_CLOUD_RADIUS_METERS, stationSeed, AIRPORT_CLOUD_POINTS, AIRPORT_CLOUD_SEGMENTS), {{
             color: '#2e7d32',
             weight: 0,
             fillColor: cloudFill('#2e7d32'),
@@ -12158,8 +12208,30 @@ def map_webapp_html():
           .addTo(map);
         stationMarkers.push(marker);
       }});
+  }}
+
+  async function loadStations() {{
+    try {{
+      const resp = await fetch(`/map/stations?city=${{encodeURIComponent(city)}}`);
+      if (!resp.ok) return;
+      const data = await resp.json();
+      const signature = JSON.stringify({{ city, stations: data.stations }});
+      _stationsCache = data;
+      if (signature === _stationsSignature) return;
+      _stationsSignature = signature;
+      renderStations(data);
     }} catch (e) {{ /* тихо */ }}
   }}
+  // ДОБАВЛЕНО 24.09.2026 - при панорамировании/зуме карты перерисовываем
+  // (без нового запроса к серверу, из _stationsCache) видимые метки
+  // вокзалов под новые границы экрана; debounce 250мс.
+  let _stationsRedrawTimer = null;
+  map.on('moveend zoomend', () => {{
+    if (!_stationsCache) return;
+    clearTimeout(_stationsRedrawTimer);
+    _stationsRedrawTimer = setTimeout(() => {{ renderStations(_stationsCache); }}, 250);
+  }});
+
   // Дорожные события (ДТП/перекрытия) с распознанным адресом - по просьбе
   // пользователя (22.09.2026): "вынеси на карту дорожные события города где
   // есть адреса". События без адреса в тексте поста не геокодируются на
