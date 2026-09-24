@@ -9921,12 +9921,22 @@ async def send_parking_push(user_id, city, lat=None, lon=None):
     # По прямой просьбе пользователя (22.09.2026) - если платформа водителя
     # известна (см. driver_platform_hint), показываем только его кнопку;
     # иначе (платформа неизвестна или desktop/web/macos) - обе, как раньше.
+    # ИЗМЕНЕНО 24.09.2026 (прямая просьба пользователя - "большими буквами
+    # весь текст в кнопках всегда и на всех") - эти две кнопки не следовали
+    # общему правилу ЗАГЛАВНЫХ БУКВ (см. комментарий в services_keyboard),
+    # исправлено: ОПЛАТИТЬ ПАРКОВКУ (IOS)/(ANDROID) - меняем регистр только
+    # у букв, эмодзи и скобки не трогаем.
     platform_hint = driver_platform_hint(user_id)
     if links.get('ios') and platform_hint in (None, 'ios'):
-        buttons.append([InlineKeyboardButton(text="💳 Оплатить парковку (iOS)", url=links['ios'])])
+        buttons.append([InlineKeyboardButton(text="💳 ОПЛАТИТЬ ПАРКОВКУ (IOS)", url=links['ios'])])
     if links.get('android') and platform_hint in (None, 'android'):
-        buttons.append([InlineKeyboardButton(text="💳 Оплатить парковку (Android)", url=links['android'])])
-    buttons.append([InlineKeyboardButton(text="🅿️ Стою на бесплатной парковке", callback_data="parking_free_ack")])
+        buttons.append([InlineKeyboardButton(text="💳 ОПЛАТИТЬ ПАРКОВКУ (ANDROID)", url=links['android'])])
+    # ЕЩЁ РАЗ ИЗМЕНЕНО 24.09.2026 (прямая просьба пользователя - "кнопку
+    # сделать большими буквами, УЖЕ НА БЕСПЛАТНОЙ ПАРКОВКЕ") - было "🅿️ Стою
+    # на бесплатной парковке" (строчными). callback_data не трогаем - она
+    # используется в handle_parking_free_ack, менять текст кнопки её не
+    # затрагивает.
+    buttons.append([InlineKeyboardButton(text="🅿️ УЖЕ НА БЕСПЛАТНОЙ ПАРКОВКЕ", callback_data="parking_free_ack")])
     reply_markup = InlineKeyboardMarkup(inline_keyboard=buttons)
     try:
         await bot.send_message(user_id, text, reply_markup=reply_markup)
