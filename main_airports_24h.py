@@ -23717,7 +23717,7 @@ async def admin_referral_password_flow(message: types.Message):
     (тот же приём, что и у phantom_password_flow). ДОБАВЛЕНО 23.09.2026
     (прямая просьба пользователя). При верном пароле: (1) выдаёт бесплатный
     месяц подписки (перенесено сюда с обычного пароля Фантома), (2)
-    переключает схему начислений на 'admin' (40/20/10%, см.
+    переключает схему начислений на 'admin' (40/30/20%, см.
     REFERRAL_RATES_PERCENT), (3) заводит/находит "компанию"-кабинет с этим
     же паролем в legal_entities и закрепляет владельцем - тот же механизм,
     что и у обычных юр.лиц (см. find_legal_entity_by_password/
@@ -23744,7 +23744,7 @@ async def admin_referral_password_flow(message: types.Message):
         claim_legal_entity_ownership(entity['id'], user_id)
 
     await message.answer(
-        f"✅ Схема начислений: «Админ» (40/20/10%). Подписка активирована бесплатно на "
+        f"✅ Схема начислений: «Админ» (40/30/20%). Подписка активирована бесплатно на "
         f"{SUBSCRIPTION_PERIOD_DAYS} дней, до *{new_paid_until.strftime('%d.%m.%Y')}*.",
         parse_mode='Markdown',
         reply_markup=services_keyboard(state.get('category'), state.get('city'), user_id)
@@ -24283,14 +24283,15 @@ REFERRAL_ADMIN_PASSWORD = "1122334455667788"
 #   'admin' (ДОБАВЛЕНО 23.09.2026) - доступна только через меню "Фантома"
 #   (см. REFERRAL_ADMIN_PASSWORD/admin_referral_password_flow), даёт
 #   бесплатный месяц подписки и "Личный кабинет" без оплаты (админский
-#   бэкдор) - 40% с платежа 1-го уровня, 20% со 2-го, 10% с 3-го.
+#   бэкдор) - 40% с платежа 1-го уровня, 30% со 2-го, 20% с 3-го
+#   (ИЗМЕНЕНО 24.09.2026, прямая просьба пользователя - было 40%/20%/10%).
 # Во всех случаях это ПРЯМОЙ процент от суммы платежа плательщика на каждом
 # уровне (не "доля от начисления уровня выше", как было раньше) - см.
 # distribute_referral_earnings ниже.
 REFERRAL_RATES_PERCENT = {
     'individual': [30, 15, 5],
     'legal_entity': [35, 20, 10],
-    'admin': [40, 20, 10],
+    'admin': [40, 30, 20],  # ИЗМЕНЕНО 24.09.2026 (прямая просьба пользователя - было 40/20/10%)
 }
 REFERRAL_DEFAULT_TYPE = 'individual'
 REFERRAL_WITHDRAWAL_FEE_PERCENT = 3
