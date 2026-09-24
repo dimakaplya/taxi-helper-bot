@@ -12182,12 +12182,60 @@ def map_webapp_html():
   // Цвет - тот же фиолетовый, что у облака спроса аэропортов, по прямой
   // просьбе пользователя.
   let rainCloudMarker = null;
+  // ДОБАВЛЕНО 24.09.2026 (прямая просьба пользователя - "облака осадков
+  // рисовать только при сигнале пошёл дождь, выключать как закончился,
+  // точно в том районе где он идёт") - для Москвы/Питера (те же
+  // DISTRICT_DEMAND_CITIES, что у районных облаков спроса выше) больше не
+  // рисуем одно большое облако "над городом" по единственной городской
+  // точке - вместо этого своё маленькое облако РОВНО над каждым районом,
+  // где по его СОБСТВЕННОМУ снепшоту погоды осадки идут прямо сейчас (см.
+  // /map/rain_districts, district_rain_now в Python) - появляется/исчезает
+  // ровно в том районе, где реально начался/закончился дождь. Для
+  // остальных городов (нет районных координат/своего опроса погоды) -
+  // прежнее поведение без изменений (rainCloudMarker/старая ветка ниже).
+  let rainDistrictMarkers = [];
+  let _rainDistrictsSignature = null;
   function rainCloudSeed(s) {{
     let h = 11;
     for (let i = 0; i < (s || '').length; i++) {{ h = (h * 31 + s.charCodeAt(i)) % 10000; }}
     return h;
   }}
+  const RAIN_DISTRICT_CLOUD_RADIUS_METERS = 3500;
+  async function loadRainDistrictClouds() {{
+    try {{
+      const resp = await fetch(`/map/rain_districts?city=${{encodeURIComponent(city)}}`);
+      if (!resp.ok) return;
+      const data = await resp.json();
+      const districts = data.districts || [];
+      const signature = JSON.stringify(districts.map(d => d.name).sort());
+      if (signature === _rainDistrictsSignature) return;  // тот же набор дождящих районов - не пересобираем
+      _rainDistrictsSignature = signature;
+      rainDistrictMarkers.forEach(m => map.removeLayer(m));
+      rainDistrictMarkers = [];
+      districts.forEach(d => {{
+        const seed = rainCloudSeed(city + '::' + d.name);
+        const marker = L.polygon(cityCloudLatLngs(d.lat, d.lon, RAIN_DISTRICT_CLOUD_RADIUS_METERS, seed, DISTRICT_CLOUD_POINTS, DISTRICT_CLOUD_SEGMENTS), {{
+          color: '#9b30ff',
+          weight: 0,
+          fillColor: cloudFill('#9b30ff'),
+          fillOpacity: 0.16,
+          smoothFactor: 3,
+        }}).addTo(map);
+        if (marker._path) {{ marker._path.style.filter = ensureCloudFilter(20); }}
+        marker.bindTooltip(`${{d.name}} · дождь/снег сейчас`, {{ direction: 'top', offset: [0, -6], className: 'airport-label' }});
+        rainDistrictMarkers.push(marker);
+      }});
+    }} catch (e) {{ /* тихо */ }}
+  }}
   async function loadRainCloud() {{
+    if (DISTRICT_DEMAND_CITIES.includes(city)) {{
+      if (rainCloudMarker) {{ map.removeLayer(rainCloudMarker); rainCloudMarker = null; }}
+      await loadRainDistrictClouds();
+      return;
+    }}
+    rainDistrictMarkers.forEach(m => map.removeLayer(m));
+    rainDistrictMarkers = [];
+    _rainDistrictsSignature = null;
     try {{
       const resp = await fetch(`/map/weather?city=${{encodeURIComponent(city)}}`);
       if (!resp.ok) return;
@@ -12333,7 +12381,17 @@ def map_webapp_html():
   // blobLatLngs выше) - seed выбирает один из 30 профилей, так что у
   // районных облаков теперь настоящее разнообразие силуэтов, а не только
   // поворот одной и той же формы.
-  function cityCloudLatLngs(lat, lon, radiusM, seed) {{
+  // ИЗМЕНЕНО 24.09.2026 (прямая просьба пользователя - "карта тормозит из-за
+  // слоёв облаков спроса, давай оптимизируем") - добавлены необязательные
+  // pointsCount/segments (по умолчанию прежние 28/CATMULL_ROM_SEGMENTS, для
+  // городского облака/дождя ничего не меняется). Районные облака (их может
+  // быть до ~90 одновременно - до 30 районов × до 3 слоя тарифов) теперь
+  // зовут эту функцию с уменьшенными значениями (см. loadDistrictDemandClouds
+  // ниже) - контур из 28×14=392 точек избыточен для облака на 3км радиуса
+  // при типичном масштабе карты, и был одной из главных причин тормозов
+  // (сложный SVG-путь + блюр-фильтр на каждый из ~90 полигонов).
+  function cityCloudLatLngs(lat, lon, radiusM, seed, pointsCount, segments) {{
+    pointsCount = pointsCount || 28;
     const metersPerDegLat = 111320;
     const profile = CLOUD_SHAPE_PROFILES[seed % CLOUD_SHAPE_PROFILES.length];
     const p1 = (seed % 628) / 100;
@@ -12344,7 +12402,6 @@ def map_webapp_html():
     const offsetDist = radiusM * 0.22;
     const cLat = lat + (offsetDist * Math.cos(offsetAngle)) / metersPerDegLat;
     const cLon = lon + (offsetDist * Math.sin(offsetAngle)) / (metersPerDegLat * Math.cos(lat * Math.PI / 180));
-    const pointsCount = 28;
     const latLngs = [];
     for (let i = 0; i < pointsCount; i++) {{
       const angle = (i / pointsCount) * Math.PI * 2;
@@ -12357,7 +12414,7 @@ def map_webapp_html():
       const dLon = (r * Math.sin(angle)) / (metersPerDegLat * Math.cos(cLat * Math.PI / 180));
       latLngs.push([cLat + dLat, cLon + dLon]);
     }}
-    return smoothClosedLatLngs(latLngs);
+    return smoothClosedLatLngs(latLngs, segments);
   }}
   // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя, реальная матрица
   // спроса по районам Москвы - "реальные облака по районам") - для Москвы в
@@ -12409,58 +12466,117 @@ def map_webapp_html():
       {{ field: 'demand_elite', label: 'Элит', tariff: 'Elite' }},
     ],
   }};
+  // ИЗМЕНЕНО 24.09.2026 (прямая просьба пользователя - оптимизация тормозов
+  // карты из-за слоёв облаков спроса) - три независимых изменения:
+  // 1) DISTRICT_CLOUD_POINTS/DISTRICT_CLOUD_SEGMENTS - контур районного
+  //    облака теперь из 16×6=96 точек вместо 28×14=392 (в 4 раза меньше) -
+  //    на радиусе 3км при обычном масштабе карты разница на глаз не видна,
+  //    а SVG-путь + блюр-фильтр на каждый из ~90 возможных полигонов
+  //    становится в разы дешевле для рендера.
+  // 2) _districtDemandCache/_districtDemandSignature - последний ответ
+  //    сервера + вычисленная "подпись" (город/категория/выбранные слои/
+  //    demand по районам/timeBucket) кэшируются; если подпись не
+  //    изменилась с прошлого раза - НЕ пересоздаём все полигоны заново
+  //    (раньше loadDistrictDemandClouds делала полный remove+recreate
+  //    КАЖДЫЙ раз, включая каждый тик 60-секундного интервала, даже когда
+  //    рисовать было бы ровно то же самое).
+  // 3) Отрисовка через renderDistrictDemandClouds(data) вынесена отдельно
+  //    от фетча - вызывается и после свежего /map/district_demand, и
+  //    повторно (БЕЗ нового запроса, из кэша) на пере-отрисовку по границам
+  //    экрана (см. map.on('moveend zoomend', ...) ниже) - при панорамировании/
+  //    зуме перерисовываем видимые полигоны без похода на сервер.
+  const DISTRICT_CLOUD_POINTS = 16;
+  const DISTRICT_CLOUD_SEGMENTS = 6;
+  let _districtDemandCache = null;
+  let _districtDemandSignature = null;
+
+  function renderDistrictDemandClouds(data) {{
+    districtDemandMarkers.forEach(m => map.removeLayer(m));
+    districtDemandMarkers = [];
+    // ДОБАВЛЕНО 24.09.2026 - отсекаем районы вне видимой области карты (+
+    // небольшой запас, чтобы полигон не исчезал резко на самом краю экрана)
+    // - при обычном приближении на экране обычно видна лишь часть города,
+    // так что реально рисуется намного меньше полигонов, чем всего районов.
+    const bounds = map.getBounds().pad(0.25);
+    const layers = (DISTRICT_CLOUD_LAYERS[myCategory] || []).filter(
+      layer => selectedTariffs.has(tariffKey(myCategory, layer.tariff))
+    );
+    const timeBucket = demandCloudTimeBucket();
+    (data.districts || []).forEach(d => {{
+      if (!bounds.contains([d.lat, d.lon])) return;
+      layers.forEach(layer => {{
+        const demand = d[layer.field];
+        // ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя - "отображение
+        // спроса облаков от матрицы давай настроим по тарифам") - свой
+        // порог показа/"ярко" НА ЭТОТ тариф вместо общего для всех.
+        const thresholds = DISTRICT_CLOUD_THRESHOLDS[layer.field] || [DEMAND_CLOUD_SHOW_THRESHOLD_PERCENT, DEMAND_CLOUD_STRONG_THRESHOLD_PERCENT];
+        const showThreshold = thresholds[0], strongThreshold = thresholds[1];
+        if (demand === null || demand === undefined || demand < showThreshold) return;
+        const seed = demandCloudSeed(d.name + '::' + myCategory + '::' + layer.field + '::' + timeBucket);
+        const color = demandCloudColorByLevel(demand);
+        const marker = L.polygon(cityCloudLatLngs(d.lat, d.lon, DISTRICT_CLOUD_RADIUS_METERS, seed, DISTRICT_CLOUD_POINTS, DISTRICT_CLOUD_SEGMENTS), {{
+          color: color,
+          weight: 0,
+          fillColor: cloudFill(color),
+          fillOpacity: demandCloudOpacityByLevel(demand, strongThreshold),
+          smoothFactor: 3,
+        }}).addTo(map);
+        if (marker._path) {{ marker._path.style.filter = ensureCloudFilter(20); }}
+        // УБРАНО 23.09.2026 (прямая просьба пользователя - "не
+        // информировать при нажатие на спрос в цифрах на облоко потому
+        // что щас 1 ночи и реально нет такого спроса"): точный % из
+        // тултипа убран - число из сырой таблицы (по часу/дню недели) не
+        // всегда совпадает с реальной картиной в моменте (особенно
+        // ночью), и выглядело как "облако показывает 85%, а на деле
+        // спроса нет" - вводило в заблуждение. Остаётся только
+        // название района и тариф, сама яркость/насыщенность облака
+        // по-прежнему передаёт уровень (см. demandCloudColorByLevel/
+        // demandCloudOpacityByLevel).
+        marker.bindTooltip(`${{d.name}} · ${{layer.label}}`, {{ direction: 'top', offset: [0, -6], className: 'airport-label' }});
+        districtDemandMarkers.push(marker);
+      }});
+    }});
+  }}
+
   async function loadDistrictDemandClouds() {{
     try {{
       const resp = await fetch(`/map/district_demand?city=${{encodeURIComponent(city)}}&category=${{encodeURIComponent(myCategory)}}`);
-      districtDemandMarkers.forEach(m => map.removeLayer(m));
-      districtDemandMarkers = [];
-      if (!resp.ok) return;
+      if (!resp.ok) {{
+        districtDemandMarkers.forEach(m => map.removeLayer(m));
+        districtDemandMarkers = [];
+        _districtDemandCache = null;
+        _districtDemandSignature = null;
+        return;
+      }}
       const data = await resp.json();
-      // ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "на эти кнопки
-      // не только отображение [водителей], а ещё и спрос облаков - при
-      // включённой галочке показывает, отключаешь - не показывает тот или
-      // иной тариф") - тумблеры тарифов (selectedTariffs, см. выше) теперь
-      // фильтруют и слои облаков спроса, а не только маркеры водителей на
-      // карте: снят галочка "Элит" - облако спроса Элит не рисуется.
-      const layers = (DISTRICT_CLOUD_LAYERS[myCategory] || []).filter(
-        layer => selectedTariffs.has(tariffKey(myCategory, layer.tariff))
-      );
-      const timeBucket = demandCloudTimeBucket();
-      (data.districts || []).forEach(d => {{
-        layers.forEach(layer => {{
-          const demand = d[layer.field];
-          // ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя - "отображение
-          // спроса облаков от матрицы давай настроим по тарифам") - свой
-          // порог показа/"ярко" НА ЭТОТ тариф вместо общего для всех.
-          const thresholds = DISTRICT_CLOUD_THRESHOLDS[layer.field] || [DEMAND_CLOUD_SHOW_THRESHOLD_PERCENT, DEMAND_CLOUD_STRONG_THRESHOLD_PERCENT];
-          const showThreshold = thresholds[0], strongThreshold = thresholds[1];
-          if (demand === null || demand === undefined || demand < showThreshold) return;
-          const seed = demandCloudSeed(d.name + '::' + myCategory + '::' + layer.field + '::' + timeBucket);
-          const color = demandCloudColorByLevel(demand);
-          const marker = L.polygon(cityCloudLatLngs(d.lat, d.lon, DISTRICT_CLOUD_RADIUS_METERS, seed), {{
-            color: color,
-            weight: 0,
-            fillColor: cloudFill(color),
-            fillOpacity: demandCloudOpacityByLevel(demand, strongThreshold),
-            smoothFactor: 3,
-          }}).addTo(map);
-          if (marker._path) {{ marker._path.style.filter = ensureCloudFilter(20); }}
-          // УБРАНО 23.09.2026 (прямая просьба пользователя - "не
-          // информировать при нажатие на спрос в цифрах на облоко потому
-          // что щас 1 ночи и реально нет такого спроса"): точный % из
-          // тултипа убран - число из сырой таблицы (по часу/дню недели) не
-          // всегда совпадает с реальной картиной в моменте (особенно
-          // ночью), и выглядело как "облако показывает 85%, а на деле
-          // спроса нет" - вводило в заблуждение. Остаётся только
-          // название района и тариф, сама яркость/насыщенность облака
-          // по-прежнему передаёт уровень (см. demandCloudColorByLevel/
-          // demandCloudOpacityByLevel).
-          marker.bindTooltip(`${{d.name}} · ${{layer.label}}`, {{ direction: 'top', offset: [0, -6], className: 'airport-label' }});
-          districtDemandMarkers.push(marker);
-        }});
+      const layerKeys = (DISTRICT_CLOUD_LAYERS[myCategory] || [])
+        .filter(layer => selectedTariffs.has(tariffKey(myCategory, layer.tariff)))
+        .map(layer => layer.field);
+      const signature = JSON.stringify({{
+        city, myCategory, layerKeys,
+        timeBucket: demandCloudTimeBucket(),
+        districts: data.districts,
       }});
+      _districtDemandCache = data;
+      if (signature === _districtDemandSignature) return;  // ничего не изменилось - не пересобираем
+      _districtDemandSignature = signature;
+      renderDistrictDemandClouds(data);
     }} catch (e) {{ /* тихо */ }}
   }}
+  // ДОБАВЛЕНО 24.09.2026 - при панорамировании/зуме карты перерисовываем
+  // (без нового запроса к серверу, из _districtDemandCache) видимые
+  // районные облака под новые границы экрана; debounce 250мс, чтобы не
+  // дёргать рендер на каждый промежуточный кадр жеста.
+  let _districtRedrawTimer = null;
+  map.on('moveend zoomend', () => {{
+    if (!_districtDemandCache) return;
+    clearTimeout(_districtRedrawTimer);
+    _districtRedrawTimer = setTimeout(() => {{
+      if (DISTRICT_DEMAND_CITIES.includes(city) && (myCategory === 'taxi' || myCategory === 'ultima')) {{
+        renderDistrictDemandClouds(_districtDemandCache);
+      }}
+    }}, 250);
+  }});
 
   // ОБОБЩЕНО 23.09.2026 (прямая просьба пользователя - "на оба города") -
   // города, для которых сервер отдаёт реальные районные облака (см.
@@ -12930,10 +13046,29 @@ def map_webapp_html():
   // (ROAD_EVENTS_UPDATE_INTERVAL_MINUTES 10->2 мин, см. main.py) свежее
   // событие теперь доходит до карты за секунды-минуты, а не до ~12 минут.
   setInterval(loadRoadEvents, 30000);
-  setInterval(loadAirports, 60000);
-  setInterval(loadStations, 60000);
-  setInterval(loadRainCloud, 60000);
-  setInterval(loadDemandCloud, 60000);
+  // ИЗМЕНЕНО 24.09.2026 (прямая просьба пользователя - оптимизация тормозов
+  // карты) - раньше все четыре 60-секундных опроса стартовали сразу друг за
+  // другом синхронно, поэтому КАЖДУЮ минуту они срабатывали одним пиком в
+  // одну и ту же миллисекунду (аэропорты+вокзалы+дождь+облака спроса разом,
+  // самый тяжёлый из них). Небольшой сдвиг старта каждого интервала
+  // (staggerStart) размазывает эту нагрузку по времени внутри минуты вместо
+  // одного общего скачка.
+  function staggerStart(fn, intervalMs, delayMs) {{
+    setTimeout(() => setInterval(fn, intervalMs), delayMs);
+  }}
+  staggerStart(loadAirports, 60000, 15000);
+  staggerStart(loadStations, 60000, 30000);
+  staggerStart(loadRainCloud, 60000, 45000);
+  // ИЗМЕНЕНО 24.09.2026 (прямая просьба пользователя - "обновление облаков
+  // спроса нет смысла обновлять каждую минуту, если у нас почасовой спрос
+  // из матрицы") - сами данные districts (moscow_district_demand.json)
+  // меняются по часовым слотам, а не поминутно; опрашивать чаще, чем
+  // "форма/зерно" облака вообще меняется (demandCloudTimeBucket - раз в
+  // 5 минут), смысла не было и раньше, а раз данные вообще часовые - тем
+  // более. Было 60000 (раз в минуту), стало 300000 (раз в 5 минут) - плюс
+  // кэш по подписи (см. loadDistrictDemandClouds) всё равно пропустит
+  // пересборку, если за эти 5 минут ничего по факту не поменялось.
+  staggerStart(loadDemandCloud, 300000, 60000);
   setInterval(loadCityEvents, 300000);
 </script>
 </body>
@@ -14747,6 +14882,43 @@ async def handle_map_weather_api(request):
             result['raining'] = code in PRECIP_WEATHERCODES
         except Exception:
             logger.exception("❌ Ошибка при получении текущей погоды для карты водителей")
+    return web.json_response(result)
+
+MAP_RAIN_DISTRICTS_API_PATH = '/map/rain_districts'
+
+async def handle_map_rain_districts_api(request):
+    """ДОБАВЛЕНО 24.09.2026 (прямая просьба пользователя - "облака осадков
+    рисовать только при сигнале пошёл дождь, выключать как закончился, точно
+    в том районе где он идёт") - точный, по РАЙОНАМ, аналог handle_map_
+    weather_api выше: тот раньше рисовал ОДНО облако дождя на весь город
+    (по единственной точке RAIN_CITY_COORDS), даже если реально осадки идут
+    только в одной части города. Здесь - список районов, где осадки идут
+    ПРЯМО СЕЙЧАС по их собственному снепшоту погоды (district_rain_now, та
+    же функция, что уже используется для "дождевого пола" облаков спроса и
+    для "Куда ехать" - см. handle_map_district_demand_api/
+    score_district_candidates), без общегородского fallback - если для
+    района ещё нет своего снепшота, он просто не попадает в список (не
+    гадаем по городской точке, точность важнее полноты здесь).
+
+    Только для городов из DISTRICT_DEMAND_FILES (Москва/Питер - там есть
+    районные координаты и свой опрос погоды на район, см. update_district_
+    weather_data). Для остальных городов - пустой список, WebApp-карта в
+    этом случае сама откатывается на старое общегородское облако
+    (handle_map_weather_api), см. loadRainCloud в map_webapp_html."""
+    city = request.query.get('city', '')
+    result = {'districts': []}
+    if city not in DISTRICT_DEMAND_FILES:
+        return web.json_response(result)
+    table = get_district_demand(city)
+    if not table:
+        return web.json_response(result)
+    try:
+        for name, entry in table.get('districts', {}).items():
+            if district_rain_now(city, name, fallback_rain_now=False):
+                result['districts'].append({'name': name, 'lat': entry['lat'], 'lon': entry['lon']})
+    except Exception:
+        logger.exception(f"❌ Ошибка при получении районных осадков для карты водителей ({city})")
+        result = {'districts': []}
     return web.json_response(result)
 
 async def handle_map_fuel_stations_api(request):
@@ -24333,6 +24505,7 @@ async def start_subscription_webhook_server():
     app.router.add_get(MAP_AIRPORTS_API_PATH, handle_map_airports_api)
     app.router.add_get(MAP_STATIONS_API_PATH, handle_map_stations_api)
     app.router.add_get(MAP_WEATHER_API_PATH, handle_map_weather_api)
+    app.router.add_get(MAP_RAIN_DISTRICTS_API_PATH, handle_map_rain_districts_api)
     app.router.add_get(MAP_DEMAND_API_PATH, handle_map_demand_api)
     app.router.add_get(MAP_DISTRICT_DEMAND_API_PATH, handle_map_district_demand_api)
     app.router.add_get(MAP_FUEL_STATIONS_API_PATH, handle_map_fuel_stations_api)
