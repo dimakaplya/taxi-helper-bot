@@ -20176,7 +20176,21 @@ async def send_courier_finance_result(message: types.Message, user_id, data):
     # (WebApp), эта reply-клавиатура за пределами самого пошагового расчёта
     # финансов больше нигде не нужна - убираем её после результата, чтобы не
     # показывать устаревшее меню.
-    await message.answer('\n'.join(lines), reply_markup=types.ReplyKeyboardRemove(), parse_mode='Markdown')
+    # ИСПРАВЛЕНО 24.09.2026 (прямая жалоба пользователя со скриншотом -
+    # "пропала кнопка меню"): ReplyKeyboardRemove() убирал устаревшую
+    # клавиатуру, но НИЧЕМ её не заменял - в итоге вместе с ней пропадала и
+    # обычная ГЛАВНАЯ клавиатура (⛔️/❇️ на линии, 💰 куда ехать, 🗺 карта и
+    # т.д.), и она больше никак не возвращалась сама, пока водитель не
+    # нажимал что-то ещё. Теперь вместо удаления клавиатуры сразу
+    # показываем актуальную главную (services_keyboard) - устаревшее меню
+    # "Инструменты водителя" ей не отображается, а рабочая клавиатура не
+    # исчезает.
+    state = user_state.get(user_id, {})
+    await message.answer(
+        '\n'.join(lines),
+        reply_markup=services_keyboard(state.get('category'), state.get('city'), user_id),
+        parse_mode='Markdown',
+    )
     save_finance_result(user_id, income, net_profit, trips_count)
 
 CITY_MAP = {
