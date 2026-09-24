@@ -5178,12 +5178,12 @@ def services_keyboard(category=None, city=None, user_id=None):
     # отдельной строкой в самом низу (перед "← НАЗАД"/"🏙 ВЫБОР ГОРОДА") - по
     # просьбе пользователя.
     # "▶️ НАЧАТЬ СМЕНУ"/"⏹ Завершить смену" - САМАЯ верхняя строка меню, ВЫШЕ
-    # "💰 КУДА ЕХАТЬ ➡️" (по прямой просьбе пользователя, 20.09.2026) - одна
+    # "💰 КУДА ЕХАТЬ AI ➡️" (по прямой просьбе пользователя, 20.09.2026) - одна
     # кнопка-переключатель (текст меняется в зависимости от того, идёт ли
     # смена, см. is_shift_active/toggle_shift), доступна ВСЕМ категориям (в
     # отличие от "Куда ехать" - секундомер и километраж смены равно полезны
     # курьеру/грузовому такси).
-    # "💰 КУДА ЕХАТЬ ➡️" - следующей строкой (по просьбе пользователя) -
+    # "💰 КУДА ЕХАТЬ AI ➡️" - следующей строкой (по просьбе пользователя) -
     # раньше была внутри "Инструменты водителя", перенесена сюда как самая
     # важная кнопка (решает, куда именно ехать прямо сейчас). Доступна
     # только категориям с аэропортами (см. CATEGORIES_WITHOUT_AIRPORTS) -
@@ -5198,7 +5198,7 @@ def services_keyboard(category=None, city=None, user_id=None):
     # По просьбе пользователя (20.09.2026): "Начать смену" и "Куда ехать" -
     # каждая на всю ширину, друг под другом (было в одном ряду) - крупнее и
     # заметнее как самые важные кнопки главного меню.
-    # "💰 КУДА ЕХАТЬ ➡️" теперь видна ВСЕМ категориям (20.09.2026) - раньше
+    # "💰 КУДА ЕХАТЬ AI ➡️" теперь видна ВСЕМ категориям (20.09.2026) - раньше
     # была скрыта для courier/cargo (не было данных для расчёта), теперь у
     # них есть своя версия сводки на своих часах пика (см.
     # compute_where_to_go/score_city_candidate) - убрано условие
@@ -5206,7 +5206,7 @@ def services_keyboard(category=None, city=None, user_id=None):
     shift_active = is_shift_active(user_state.get(user_id, {})) if user_id is not None else False
     top_rows = [[KeyboardButton(text="⏹ ЗАВЕРШИТЬ СМЕНУ" if shift_active else "✅ НАЧАТЬ СМЕНУ")]]
     # "🗺 КАРТА ВОДИТЕЛЕЙ" (по просьбе пользователя, 21.09.2026) - в одном
-    # ряду с "💰 КУДА ЕХАТЬ ➡️", а не отдельной строкой внизу меню - открывает
+    # ряду с "💰 КУДА ЕХАТЬ AI ➡️", а не отдельной строкой внизу меню - открывает
     # интерактивную WebApp-карту через web_app=WebAppInfo (единственный
     # надёжный способ открыть кастомную веб-страницу внутри Telegram).
     # Показывается только если PUBLIC_URL задан (Telegram требует HTTPS для
@@ -5215,7 +5215,7 @@ def services_keyboard(category=None, city=None, user_id=None):
     # видимость НА карте включается/выключается сменой (см. "▶️ Начать
     # смену"/"⏹ Завершить смену" - блок "СМЕНА" ниже), кнопка тут просто
     # открывает карту.
-    # "💰 КУДА ЕХАТЬ ➡️" сама стала WebApp (по просьбе пользователя,
+    # "💰 КУДА ЕХАТЬ AI ➡️" сама стала WebApp (по просьбе пользователя,
     # 21.09.2026, "и куда ехать тоже сделай миниапс") - тот же принцип, что
     # у "🌤 ПОГОДА" выше: город/категория не персональные данные (берутся из
     # ?city=&category= в URL, как у карты), поэтому initData не нужен и
@@ -5223,13 +5223,13 @@ def services_keyboard(category=None, city=None, user_id=None):
     # PUBLIC_URL/city не заданы - остаётся старая текстовая кнопка (шлёт
     # обычное сообщение через send_where_to_go, как раньше) - этот же
     # текстовый хендлер (@router.message(lambda message: message.text ==
-    # "💰 КУДА ЕХАТЬ ➡️")) НЕ удалён и продолжает работать всегда, в т.ч.
+    # "💰 КУДА ЕХАТЬ AI ➡️")) НЕ удалён и продолжает работать всегда, в т.ч.
     # как фолбэк, если WebApp по какой-то причине не откроется.
     if PUBLIC_URL and city and category:
         where_to_go_url = f"{PUBLIC_URL}{WHERE_TO_GO_WEBAPP_PATH}?city={urllib.parse.quote(city)}&category={urllib.parse.quote(category)}"
-        where_to_go_row = [KeyboardButton(text="💰 КУДА ЕХАТЬ ➡️", web_app=WebAppInfo(url=where_to_go_url))]
+        where_to_go_row = [KeyboardButton(text="💰 КУДА ЕХАТЬ AI ➡️", web_app=WebAppInfo(url=where_to_go_url))]
     else:
-        where_to_go_row = [KeyboardButton(text="💰 КУДА ЕХАТЬ ➡️")]
+        where_to_go_row = [KeyboardButton(text="💰 КУДА ЕХАТЬ AI ➡️")]
     if category in MAP_CATEGORY_STYLE and PUBLIC_URL and city:
         map_url = f"{PUBLIC_URL}{MAP_WEBAPP_PATH}?city={urllib.parse.quote(city)}&category={urllib.parse.quote(category)}"
         where_to_go_row.append(KeyboardButton(text="🗺 КАРТА ВОДИТЕЛЕЙ", web_app=WebAppInfo(url=map_url)))
@@ -5338,7 +5338,7 @@ def services_keyboard(category=None, city=None, user_id=None):
     # аэропортов (CATEGORIES_WITHOUT_AIRPORTS), в ряду остаётся только кнопка
     # событий - без второй кнопки.
     # Обе кнопки стали WebApp (21.09.2026, тот же публичный паттерн, что у
-    # "🌤 ПОГОДА"/"💰 КУДА ЕХАТЬ" выше - данные не персональные, берутся из
+    # "🌤 ПОГОДА"/"💰 КУДА ЕХАТЬ AI" выше - данные не персональные, берутся из
     # ?city=&category= в URL) - при PUBLIC_URL/city заданных вешаем web_app=
     # прямо на кнопку Reply-клавиатуры; иначе (как и везде выше) остаётся
     # старая обычная текстовая кнопка, старые текстовые хендлеры
@@ -5453,7 +5453,7 @@ def courier_module_keyboard(category=None):
         # Play), см. show_tips_app.
         [KeyboardButton(text="💳 ПОЛУЧИТЬ ЧАЕВЫЕ")],
     ]
-    # "💰 КУДА ЕХАТЬ ➡️" отсюда убрана - перенесена в services_keyboard как
+    # "💰 КУДА ЕХАТЬ AI ➡️" отсюда убрана - перенесена в services_keyboard как
     # верхняя строка главного меню (по просьбе пользователя, 19.09.2026).
     # "🔔 Уведомления" тоже отсюда убрана - теперь доступна через
     # "⚙️ НАСТРОЙКИ" в главном меню (по просьбе пользователя, 19.09.2026).
@@ -8461,7 +8461,7 @@ def format_where_to_go_text(city, category, candidates, extra_header=None):
         lines.append(extra_header)
         lines.append(WHERE_TO_GO_DIVIDER)
     lines.extend([
-        f"🧭 *КУДА ЕХАТЬ · {city_name.upper()}*",
+        f"🧭 *КУДА ЕХАТЬ AI · {city_name.upper()}*",
         f"🕐 {now.strftime('%H:%M')} · {WEEKDAY_NAMES[now.weekday()]}",
     ])
 
@@ -8567,7 +8567,7 @@ _where_to_go_in_progress = set()  # user_id-ы, для которых сейча
 async def send_where_to_go(message: types.Message, user_id, city, category, extra_header=None):
     """Общая логика сводки "Куда ехать" - вынесена из show_where_to_go, чтобы
     её же можно было вызвать программно сразу после начала смены (по просьбе
-    пользователя, 20.09.2026), а не только по нажатию кнопки "💰 КУДА ЕХАТЬ".
+    пользователя, 20.09.2026), а не только по нажатию кнопки "💰 КУДА ЕХАТЬ AI".
     Не делает проверок города/категории - это ответственность вызывающего.
     extra_header - см. format_where_to_go_text (встраивает "СМЕНА НАЧАТА" в
     начало этого же сообщения, вместо отдельного - по просьбе пользователя,
@@ -8628,7 +8628,7 @@ async def send_where_to_go(message: types.Message, user_id, city, category, extr
     finally:
         _where_to_go_in_progress.discard(user_id)
 
-@router.message(lambda message: message.text == "💰 КУДА ЕХАТЬ ➡️")
+@router.message(lambda message: message.text == "💰 КУДА ЕХАТЬ AI ➡️")
 async def show_where_to_go(message: types.Message):
     user_id = message.from_user.id
     state = user_state.get(user_id, {})
@@ -8972,7 +8972,7 @@ def format_shift_start_label(started_at):
 
 @router.message(lambda message: message.text in ("✅ НАЧАТЬ СМЕНУ", "⏹ ЗАВЕРШИТЬ СМЕНУ"))
 async def toggle_shift(message: types.Message):
-    """Одна кнопка-переключатель наверху главного меню (выше "💰 КУДА ЕХАТЬ",
+    """Одна кнопка-переключатель наверху главного меню (выше "💰 КУДА ЕХАТЬ AI",
     см. services_keyboard) - текст меняется в зависимости от того, идёт ли
     смена, т.к. это одна и та же позиция клавиатуры."""
     user_id = message.from_user.id
@@ -9083,7 +9083,7 @@ async def start_shift_and_notify(target, user_id, category, city, tariffs):
             "ехать», чтобы увидеть маршрут и доехать за пару тапов."
         )
         cta_keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="💰 КУДА ЕХАТЬ", web_app=WebAppInfo(url=where_to_go_url))]
+            [InlineKeyboardButton(text="💰 КУДА ЕХАТЬ AI", web_app=WebAppInfo(url=where_to_go_url))]
         ])
         await target(cta_text, parse_mode='Markdown', reply_markup=cta_keyboard)
     else:
@@ -13467,7 +13467,7 @@ def where_to_go_webapp_html():
       if (!resp.ok) throw new Error('http_' + resp.status);
       const data = await resp.json();
 
-      document.getElementById('cityTitle').textContent = '🧭 Куда ехать · ' + (data.city_name || '');
+      document.getElementById('cityTitle').textContent = '🧭 Куда ехать AI · ' + (data.city_name || '');
       document.getElementById('timeSub').textContent = data.time_label || '';
 
       const content = document.getElementById('content');
@@ -13711,7 +13711,12 @@ async def handle_where_to_go_data_api(request):
             _name, _lvl, emoji = describe_weathercode(cur_code) if cur_code is not None else (None, None, '🌤')
             cur_precip = current.get('precipitation')
             precip_part = f" · {cur_precip:.1f} мм осадков" if cur_precip else ""
-            weather_label = f"{emoji} {round(cur_temp)}°C{precip_part}"
+            # ДОБАВЛЕНО 24.09.2026 (прямая просьба пользователя, скриншот -
+            # "где погода указывай там если дождь или снег со скольки и до
+            # скольки он продлится") - см. precip_window_label.
+            window = precip_window_label(city, forecast)
+            window_part = f" · {window}" if window else ""
+            weather_label = f"{emoji} {round(cur_temp)}°C{precip_part}{window_part}"
     except Exception:
         weather_label = None
 
@@ -21378,6 +21383,46 @@ def _current_hour_index(forecast, city):
         if t >= now_hour_str:
             return i
     return max(0, len(times) - 1)  # весь массив в прошлом (снепшот совсем устарел) - берём последний час как least-bad вариант
+
+def precip_window_label(city, forecast):
+    """ДОБАВЛЕНО 24.09.2026 (прямая просьба пользователя, скриншот "Куда
+    ехать" - "где погода указывай там если дождь или снег со скольки и до
+    скольки он продлится") - если СЕЙЧАС идёт дождь/снег (current.weathercode
+    в PRECIP_WEATHERCODES - тот же, более точный nowcast-источник, что уже
+    используется для решения "дождь сейчас", см. find_upcoming_precip_event),
+    возвращает строку "с ЧЧ:00 до ЧЧ:00" - конец окна ищем по почасовому
+    прогнозу (hourly.weathercode), начиная с текущего часа (_current_hour_index)
+    и дальше, пока подряд идут коды осадков; конец = час, СЛЕДУЮЩИЙ за
+    последним "дождливым" часом.
+
+    Если почасовой прогноз для текущего часа (тот же индекс) НЕ согласен,
+    что сейчас осадки (типичный, но редкий разнобой между nowcast и
+    моделью снятого раньше снепшота - см. докстринг find_upcoming_precip_event
+    про то же расхождение) - возвращает None, а не гадает: лучше не
+    показать окно вовсе, чем показать неверное время окончания.
+    Возвращает None, если сейчас не идёт дождь/снег вообще."""
+    if not forecast:
+        return None
+    current = forecast.get('current', {})
+    if current.get('weathercode') not in PRECIP_WEATHERCODES:
+        return None
+    hourly = forecast.get('hourly', {})
+    times = hourly.get('time', [])
+    codes = hourly.get('weathercode', [])
+    if not times or not codes:
+        return None
+    base = _current_hour_index(forecast, city)
+    if base >= len(codes) or codes[base] not in PRECIP_WEATHERCODES:
+        return None  # снепшот hourly[] разошёлся с current - не гадаем, см. докстринг
+    end_idx = base
+    while end_idx + 1 < len(codes) and codes[end_idx + 1] in PRECIP_WEATHERCODES:
+        end_idx += 1
+    start_hour = times[base][11:13]
+    if end_idx + 1 < len(times):
+        end_hour = times[end_idx + 1][11:13]
+    else:
+        end_hour = f"{(int(times[end_idx][11:13]) + 1) % 24:02d}"
+    return f"с {start_hour}:00 до {end_hour}:00"
 
 def find_upcoming_precip_event(forecast, city):
     """Ищет ближайшее почасовое окно с осадками в пределах RAIN_LEAD_MINUTES
