@@ -12032,7 +12032,22 @@ def map_webapp_html():
     {{base: 0.661, min: 0.592, terms: [[7, 0.086], [8, 0.079], [1, 0.069]]}},
     {{base: 0.572, min: 0.504, terms: [[7, 0.11], [8, 0.078], [3, 0.121]]}},
   ];
+  // ДОБАВЛЕНО 24.09.2026 (прямая просьба пользователя - "чтобы облака были
+  // рандомно распределены... разной формы, разного размера, не постоянно
+  // одни и те же над городом") - раньше все облака ОДНОГО типа (все
+  // районные, все аэропортов) рисовались ОДНИМ и тем же фиксированным
+  // радиусом (DISTRICT_CLOUD_RADIUS_METERS/HIGH_DEMAND_RADIUS_METERS/...),
+  // менялась только форма контура (CLOUD_SHAPE_PROFILES по seed). Теперь
+  // радиус тоже варьируется от seed - детерминированно (тот же seed даёт
+  // тот же размер, пока не сменится timeBucket, т.е. без "дёргания" на
+  // каждый повторный рендер), но от 70% до 130% базового радиуса - вместе
+  // с формой это даёт ощутимо более хаотичную, живую картину вместо
+  // одинаковых по размеру пятен.
+  function cloudSizeFactor(seed) {{
+    return 0.7 + ((seed * 17) % 601) / 1000;  // 0.70 .. 1.30
+  }}
   function blobLatLngs(lat, lon, maxRadiusM, seed, pointsCount, segments) {{
+    maxRadiusM = maxRadiusM * cloudSizeFactor(seed);
     pointsCount = pointsCount || 24;
     const metersPerDegLat = 111320;
     const profile = CLOUD_SHAPE_PROFILES[seed % CLOUD_SHAPE_PROFILES.length];
@@ -12485,9 +12500,9 @@ def map_webapp_html():
       const data = await resp.json();
       if (rainCloudMarker) {{ map.removeLayer(rainCloudMarker); rainCloudMarker = null; }}
       if (!data.raining || data.lat === null || data.lon === null) return;
-      const RAIN_CLOUD_RADIUS_METERS = 15000; // "над городом" - заметно больше, чем облако спроса аэропорта (5 км)
-      const metersPerDegLat = 111320;
       const seed = rainCloudSeed(city);
+      const RAIN_CLOUD_RADIUS_METERS = 15000 * cloudSizeFactor(seed); // "над городом" - заметно больше, чем облако спроса аэропорта (5 км); размер варьируется (см. cloudSizeFactor)
+      const metersPerDegLat = 111320;
       const p1 = (seed % 628) / 100;
       const p2 = ((seed * 3) % 628) / 100;
       const p3 = ((seed * 7) % 628) / 100;
@@ -12634,6 +12649,7 @@ def map_webapp_html():
   // при типичном масштабе карты, и был одной из главных причин тормозов
   // (сложный SVG-путь + блюр-фильтр на каждый из ~90 полигонов).
   function cityCloudLatLngs(lat, lon, radiusM, seed, pointsCount, segments) {{
+    radiusM = radiusM * cloudSizeFactor(seed);  // ДОБАВЛЕНО 24.09.2026 (см. cloudSizeFactor выше)
     pointsCount = pointsCount || 28;
     const metersPerDegLat = 111320;
     const profile = CLOUD_SHAPE_PROFILES[seed % CLOUD_SHAPE_PROFILES.length];
