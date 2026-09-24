@@ -11349,6 +11349,16 @@ def map_webapp_html():
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.markercluster/1.5.3/MarkerCluster.css">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.markercluster/1.5.3/MarkerCluster.Default.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.markercluster/1.5.3/leaflet.markercluster.js"></script>
+<!-- ДОБАВЛЕНО 24.09.2026 (прямая просьба пользователя - "облака спроса
+     которые пересекаются нужно объединять хотя бы теми сторонами которыми
+     не соприкасаются, как в одно облако... меньше нагрузка так как это
+     будет одно, а не куча слоёв") - Turf.js даёт геометрическое объединение
+     полигонов (turf.union) и проверку пересечения (turf.booleanIntersects),
+     см. mergeOverlappingClouds/unionCloudCluster в renderDistrictDemandClouds
+     ниже. Касается ТОЛЬКО районных облаков спроса - погода/дождь (loadRainCloud)
+     не трогали, как и просил пользователь ("погода сверху может настраиваться,
+     но не спрос матрицы" - т.е. это разные независимые слои). -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Turf.js/6.5.0/turf.min.js"></script>
 <style>
   {MAP_CHROME_CSS}
 </style>
@@ -12913,6 +12923,80 @@ def map_webapp_html():
   let _districtDemandCache = null;
   let _districtDemandSignature = null;
 
+  // ДОБАВЛЕНО 24.09.2026 (прямая просьба пользователя - "облака спроса
+  // которые рядом пересекаются нужно объединять в одно, хотя бы теми
+  // сторонами которыми не соприкасаются", уточнение - "меньше нагрузка, так
+  // как это будет одно, а не куча слоёв - погода сверху отдельно
+  // настраивается, но не спрос матрицы") - соседние/пересекающиеся облака
+  // ОДНОГО тарифа (layer.field) склеиваются в единый полигон через Turf.js
+  // (turf.union) вместо кучи отдельно наложенных друг на друга полупрозрачных
+  // слоёв - убирает видимый "шов" на стыке (двойная заливка в зоне
+  // пересечения) и уменьшает число полигонов на карте. Между РАЗНЫМИ
+  // тарифами не объединяем - у них разный смысл, слои остаются раздельными.
+  // Погоду/дождь (loadRainCloud) это не затрагивает - отдельный независимый
+  // слой, как и просил пользователь.
+  function _cloudLatLngsBBox(latlngs) {{
+    let minLat = Infinity, maxLat = -Infinity, minLon = Infinity, maxLon = -Infinity;
+    latlngs.forEach(p => {{
+      if (p[0] < minLat) minLat = p[0];
+      if (p[0] > maxLat) maxLat = p[0];
+      if (p[1] < minLon) minLon = p[1];
+      if (p[1] > maxLon) maxLon = p[1];
+    }});
+    return [minLon, minLat, maxLon, maxLat];
+  }}
+  function _cloudLatLngsToTurfPolygon(latlngs) {{
+    const ring = latlngs.map(p => [p[1], p[0]]);
+    ring.push(ring[0]);
+    return turf.polygon([ring]);
+  }}
+  function _cloudsIntersect(a, b) {{
+    const ba = a._bbox, bb = b._bbox;
+    if (ba[2] < bb[0] || bb[2] < ba[0] || ba[3] < bb[1] || bb[3] < ba[1]) return false;  // bbox не пересекаются - точно нет смысла звать turf
+    try {{
+      return turf.booleanIntersects(_cloudLatLngsToTurfPolygon(a.latlngs), _cloudLatLngsToTurfPolygon(b.latlngs));
+    }} catch (e) {{
+      return false;
+    }}
+  }}
+  function _groupOverlappingClouds(clouds) {{
+    // Union-Find по индексам - облака в одну группу, если пересекаются
+    // (напрямую или через цепочку других облаков группы).
+    const n = clouds.length;
+    const parent = Array.from({{ length: n }}, (_, i) => i);
+    function find(x) {{ while (parent[x] !== x) {{ parent[x] = parent[parent[x]]; x = parent[x]; }} return x; }}
+    function unite(a, b) {{ const ra = find(a), rb = find(b); if (ra !== rb) parent[ra] = rb; }}
+    for (let i = 0; i < n; i++) {{
+      for (let j = i + 1; j < n; j++) {{
+        if (_cloudsIntersect(clouds[i], clouds[j])) unite(i, j);
+      }}
+    }}
+    const groups = new Map();
+    for (let i = 0; i < n; i++) {{
+      const root = find(i);
+      if (!groups.has(root)) groups.set(root, []);
+      groups.get(root).push(clouds[i]);
+    }}
+    return Array.from(groups.values());
+  }}
+  function _turfGeometryToLatLngRings(geom) {{
+    // Polygon -> одно кольцо, MultiPolygon -> несколько (редко: union облаков,
+    // касающихся только уголком, теоретически может дать 2 несвязных куска) -
+    // внешний контур каждого куска, дырки (holes) игнорируем - у мягкого
+    // полупрозрачного облака дырка внутри визуально не нужна.
+    const polys = geom.type === 'Polygon' ? [geom.coordinates] : geom.coordinates;
+    return polys.map(rings => rings[0].map(([lon, lat]) => [lat, lon]));
+  }}
+  function _unionCloudGroup(group) {{
+    let merged = _cloudLatLngsToTurfPolygon(group[0].latlngs);
+    for (let i = 1; i < group.length; i++) {{
+      const next = _cloudLatLngsToTurfPolygon(group[i].latlngs);
+      const u = turf.union(merged, next);
+      if (u) merged = u;  // если union не смог (вырожденная геометрия) - оставляем что уже накопили
+    }}
+    return merged.geometry || merged;
+  }}
+
   function renderDistrictDemandClouds(data) {{
     districtDemandMarkers.forEach(m => map.removeLayer(m));
     districtDemandMarkers = [];
@@ -12925,6 +13009,10 @@ def map_webapp_html():
       layer => selectedTariffs.has(tariffKey(myCategory, layer.tariff))
     );
     const timeBucket = demandCloudTimeBucket();
+    // Сначала СОБИРАЕМ все проходящие порог облака по тарифам (без отрисовки),
+    // потом внутри каждого тарифа склеиваем пересекающиеся между собой (см.
+    // комментарий у _groupOverlappingClouds выше).
+    const byField = new Map();
     (data.districts || []).forEach(d => {{
       if (!bounds.contains([d.lat, d.lon])) return;
       layers.forEach(layer => {{
@@ -12936,12 +13024,34 @@ def map_webapp_html():
         const showThreshold = thresholds[0], strongThreshold = thresholds[1];
         if (demand === null || demand === undefined || demand < showThreshold) return;
         const seed = demandCloudSeed(d.name + '::' + myCategory + '::' + layer.field + '::' + timeBucket);
-        const color = demandCloudColorByLevel(demand);
-        const marker = L.polygon(cityCloudLatLngs(d.lat, d.lon, DISTRICT_CLOUD_RADIUS_METERS, seed, DISTRICT_CLOUD_POINTS, DISTRICT_CLOUD_SEGMENTS), {{
+        const latlngs = cityCloudLatLngs(d.lat, d.lon, DISTRICT_CLOUD_RADIUS_METERS, seed, DISTRICT_CLOUD_POINTS, DISTRICT_CLOUD_SEGMENTS);
+        if (!byField.has(layer.field)) byField.set(layer.field, []);
+        byField.get(layer.field).push({{ latlngs, demand, strongThreshold, _bbox: _cloudLatLngsBBox(latlngs) }});
+      }});
+    }});
+    byField.forEach(clouds => {{
+      _groupOverlappingClouds(clouds).forEach(group => {{
+        // Цвет/яркость объединённого облака - по САМОМУ высокому спросу в
+        // группе (сильнейший район "тянет" всю склеенную зону на себя).
+        const maxDemand = Math.max(...group.map(c => c.demand));
+        const strongThreshold = group[0].strongThreshold;
+        const color = demandCloudColorByLevel(maxDemand);
+        const fillOpacity = demandCloudOpacityByLevel(maxDemand, strongThreshold);
+        let ringsLatLngs;
+        if (group.length === 1) {{
+          ringsLatLngs = [group[0].latlngs];
+        }} else {{
+          try {{
+            ringsLatLngs = _turfGeometryToLatLngRings(_unionCloudGroup(group));
+          }} catch (e) {{
+            ringsLatLngs = group.map(c => c.latlngs);  // union не удался - фолбэк на отдельные полигоны той же группы
+          }}
+        }}
+        const marker = L.polygon(ringsLatLngs, {{
           color: color,
           weight: 0,
           fillColor: cloudFill(color),
-          fillOpacity: demandCloudOpacityByLevel(demand, strongThreshold),
+          fillOpacity: fillOpacity,
           smoothFactor: 3,
         }}).addTo(map);
         // УБРАНО 24.09.2026 (прямая просьба пользователя, со скриншотами -
@@ -12950,8 +13060,10 @@ def map_webapp_html():
         // сливались в одно сплошное пятно без видимых границ между
         // районами - убрали ensureCloudFilter на всех типах облаков (тот
         // же комментарий у airportMarkers/stationMarkers/rainCloudMarker
-        // выше), края облаков стали чуть резче, но соседние облака больше
-        // не сливаются визуально в кашу.
+        // выше), края облаков стали чуть резче. ДОБАВЛЕНО 24.09.2026 - а
+        // теперь пересекающиеся облака ОДНОГО тарифа вместо этого
+        // геометрически СКЛЕИВАЮТСЯ (см. _unionCloudGroup выше), так что
+        // видимого шва между ними больше нет вообще - единый плавный контур.
         // УБРАНО 23.09.2026 (прямая просьба пользователя - "не
         // информировать при нажатие на спрос в цифрах на облоко потому
         // что щас 1 ночи и реально нет такого спроса"): точный % из
