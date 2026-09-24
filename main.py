@@ -18358,9 +18358,13 @@ async def handle_airport_queue_location(message: types.Message):
     """Срабатывает только на ПЕРВЫЙ пинг живой геопозиции (сама отправка -
     обычное новое сообщение); все следующие обновления той же трансляции
     приходят как edited_message, см. handle_airport_queue_location_update
-    ниже - отдельный хендлер их не трогает. Поэтому именно тут (а не там)
-    место для разового "геопозиция получена" - по просьбе пользователя,
-    чтобы после отправки геопозиции чат не оставался без клавиатуры меню.
+    ниже - отдельный хендлер их не трогает.
+
+    По просьбе пользователя (24.09.2026) статусное сообщение "📍 Геопозиция
+    получена..." после старта трансляции убрано полностью - сообщение
+    "СМЕНА НАЧАТА"/старт трансляции перед этим уже несёт нужную клавиатуру,
+    отдельное текстовое подтверждение не нужно.
+
     Обслуживает ОБЕ фичи на живой геопозиции (очередь у аэропорта и счётчик
     км, см. _location_tracking_active) - они независимы, каждая читает один
     и тот же пинг своей функцией (process_airport_queue_ping/km_counter_ping)
@@ -18390,14 +18394,6 @@ async def handle_airport_queue_location(message: types.Message):
     remember_live_location(user_id, lat, lon)
     await maybe_update_map_position(user_id, lat, lon, heading=heading)
     await maybe_start_pending_shift(message, user_id)
-    state = user_state.get(user_id) or {}
-    if state.get('airport_queue_active') and is_shift_active(state):
-        status_text = "📍 Геопозиция получена, слежу за очередью и считаю километраж смены."
-    elif state.get('airport_queue_active'):
-        status_text = "📍 Геопозиция получена, слежу за расстоянием до аэропорта."
-    else:
-        status_text = "📍 Геопозиция получена, считаю километраж смены."
-    await message.answer(status_text, reply_markup=services_keyboard(state.get('category'), state.get('city'), user_id))
 
 @router.edited_message(lambda message: getattr(message, 'location', None) is not None and _location_tracking_active(message.from_user.id))
 async def handle_airport_queue_location_update(message: types.Message):
