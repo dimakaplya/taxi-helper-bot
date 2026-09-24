@@ -11494,6 +11494,16 @@ def map_webapp_html():
     tariffPanel.innerHTML = '';
     const atLimit = selectedTariffs.size >= TARIFF_SELECTION_MAX;
     Object.keys(TARIFF_OPTIONS).forEach(cat => {{
+      // ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя со скриншотом
+      // панели "Тарифы" - "сделай возможность просматривать только тарифы
+      // свои зашел в ultima значит тока бизнес премьер элит") - панель
+      // раньше показывала ВСЕ категории сразу (Такси/Ultima/Курьер/
+      // Грузовое такси), даже если водитель сам работает только в одной из
+      // них. Теперь, если своя категория известна (myCategory из URL),
+      // панель показывает ТОЛЬКО тарифы этой категории - водителю в Ultima
+      // незачем видеть и переключать тарифы такси/курьера. Если категория
+      // не передана (myCategory пуст) - показываем все, как раньше.
+      if (myCategory && cat !== myCategory) return;
       const info = TARIFF_OPTIONS[cat];
       const tariffs = info.tariffs || [];
       if (!tariffs.length) return;
@@ -11561,14 +11571,17 @@ def map_webapp_html():
   // раза.
   const CITY_CENTERS = {city_centers_json};
   const initialCenter = CITY_CENTERS[city] || [55.7558, 37.6173];
-  const map = L.map('map').setView(initialCenter, 11);
-  // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "добавить какой-то
-  // лёгкой зернистости, прям лёгкой-лёгкой") - L.svg().addTo(map) заранее
-  // создаёт SVG-рендерер Leaflet (иначе он появляется только при первом
-  // добавленном полигоне) - нужно, чтобы сразу вставить в него <defs> с
-  // фильтром зернистости/размытия (см. ensureCloudFilter ниже), который потом
-  // переиспользуют ВСЕ "облака" спроса (аэропорты/вокзалы/город/районы).
-  L.svg().addTo(map);
+  // ИЗМЕНЕНО 25.09.2026 (прямая жалоба пользователя - "карта сильно
+  // виснет") - preferCanvas: true переключает ВСЕ полигоны Leaflet (облака
+  // спроса районов - их теперь по 543/264/95/48 на город, см.
+  // moscow/spb/krasnodar/sochi_district_demand.json) с SVG (каждый полигон -
+  // свой DOM-узел, сотни узлов ощутимо тормозят браузер) на единый <canvas>
+  // (все полигоны рисуются на одном холсте, на порядок дешевле при таком
+  // количестве фигур). ensureCloudFilter (SVG-only blur-фильтр) ниже больше
+  // не вызывается нигде в коде (блюр убран с облаков ещё 24.09.2026) -
+  // прежний L.svg().addTo(map), который существовал только ради него,
+  // убран вместе с ним.
+  const map = L.map('map', {{ preferCanvas: true }}).setView(initialCenter, 11);
   // ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя, прислал API-ключ
   // Яндекс.Карт - "ключ яндекса подложка ключ апи" / "перейти на Яндекс
   // Карты полностью"): подложка (тайлы) карты теперь Яндекс.Карты через
@@ -13000,6 +13013,20 @@ def map_webapp_html():
       return false;
     }}
   }}
+  // ИЗМЕНЕНО 25.09.2026 (прямая жалоба пользователя - "карта сильно
+  // виснет") - раньше здесь был ПОЛНЫЙ перебор всех пар облаков (двойной
+  // цикл i×j) - при видимых 200-300 районах одновременно (Москва выросла
+  // со 129 до 543 районов, СПб с 18 до 264 - см. moscow/spb_district_
+  // demand.json) это десятки тысяч вызовов turf.booleanIntersects НА
+  // КАЖДУЮ перерисовку (а перерисовка идёт на каждый пан/зум, см.
+  // map.on('moveend zoomend', ...) ниже). Два облака физически могут
+  // пересекаться, только если их центры не дальше ~2×DISTRICT_CLOUD_RADIUS_
+  // METERS (3км) друг от друга - т.е. заведомо не пересекаются, если лежат
+  // в разных, далёких друг от друга ячейках грубой сетки. Раскладываем
+  // облака по ячейкам ~8.9км (с запасом) и сравниваем КАЖДОЕ облако только с
+  // облаками из своей и 8 соседних ячеек - на практике на порядки меньше
+  // сравнений при типичной плотности районов, результат группировки (какие
+  // облака в итоге считаются пересекающимися) не меняется.
   function _groupOverlappingClouds(clouds) {{
     // Union-Find по индексам - облака в одну группу, если пересекаются
     // (напрямую или через цепочку других облаков группы).
@@ -13007,9 +13034,29 @@ def map_webapp_html():
     const parent = Array.from({{ length: n }}, (_, i) => i);
     function find(x) {{ while (parent[x] !== x) {{ parent[x] = parent[parent[x]]; x = parent[x]; }} return x; }}
     function unite(a, b) {{ const ra = find(a), rb = find(b); if (ra !== rb) parent[ra] = rb; }}
+    const CELL_DEG = 0.08;  // ~8.9км по широте - заведомо больше диаметра облака (6км), с запасом
+    const grid = new Map();
+    const cellKey = (gx, gy) => gx + ':' + gy;
+    const gx = new Array(n), gy = new Array(n);
     for (let i = 0; i < n; i++) {{
-      for (let j = i + 1; j < n; j++) {{
-        if (_cloudsIntersect(clouds[i], clouds[j])) unite(i, j);
+      const b = clouds[i]._bbox;
+      const cx = (b[0] + b[2]) / 2, cy = (b[1] + b[3]) / 2;
+      gx[i] = Math.floor(cx / CELL_DEG);
+      gy[i] = Math.floor(cy / CELL_DEG);
+      const key = cellKey(gx[i], gy[i]);
+      if (!grid.has(key)) grid.set(key, []);
+      grid.get(key).push(i);
+    }}
+    for (let i = 0; i < n; i++) {{
+      for (let dx = -1; dx <= 1; dx++) {{
+        for (let dy = -1; dy <= 1; dy++) {{
+          const bucket = grid.get(cellKey(gx[i] + dx, gy[i] + dy));
+          if (!bucket) continue;
+          bucket.forEach(j => {{
+            if (j <= i) return;  // каждая пара сравнивается ровно один раз
+            if (_cloudsIntersect(clouds[i], clouds[j])) unite(i, j);
+          }});
+        }}
       }}
     }}
     const groups = new Map();
@@ -14356,10 +14403,19 @@ def where_to_go_webapp_html():
         resolve(null);
         return;
       }
+      // ИЗМЕНЕНО 25.09.2026 (прямая жалоба пользователя - сводка "Куда
+      // ехать" писала расстояние "от центра города", хотя должна была от
+      // текущей точки водителя) - таймаут 2с был слишком коротким: холодный
+      // GPS/сеть-геолокация в закрытом помещении часто не успевает
+      // ответить за 2с, getCurrentPositionQuiet тихо резолвился в null, и
+      // сервер (см. handle_where_to_go_data_api ниже) откатывался на центр
+      // города. Увеличен до 6с - тот же молчаливый fallback на null при
+      // реальном отказе/запрете остаётся, просто даём геолокации больше
+      // шансов успеть.
       navigator.geolocation.getCurrentPosition(
         (pos) => resolve({ lat: pos.coords.latitude, lon: pos.coords.longitude }),
         () => resolve(null),
-        { enableHighAccuracy: false, timeout: 2000, maximumAge: 300000 }
+        { enableHighAccuracy: false, timeout: 6000, maximumAge: 300000 }
       );
     });
   }
@@ -14631,9 +14687,24 @@ async def handle_where_to_go_data_api(request):
             req_user_id = tg_user.get('id')
             state = user_state.get(req_user_id) if req_user_id else None
             if isinstance(state, dict) and is_shift_active(state):
-                shift_tariffs = (state.get('shift') or {}).get('tariffs')
+                shift = state.get('shift') or {}
+                shift_tariffs = shift.get('tariffs')
                 if shift_tariffs:
                     selected_tariffs = shift_tariffs
+                # ДОБАВЛЕНО 25.09.2026 (прямая жалоба пользователя - сводка
+                # "Куда ехать" в WebApp писала расстояние "от центра
+                # города" вместо текущей точки водителя) - если браузер не
+                # прислал geolocation (запрещена/не успела ответить, см.
+                # getCurrentPositionQuiet выше), но смена активна и хотя бы
+                # раз пришёл пинг живой геопозиции (km_counter_ping,
+                # shift['last_lat']/['last_lon']) - берём ЕГО вместо отката
+                # на условный центр города. Тот же fallback, что уже
+                # использовался в текстовой версии этой сводки
+                # (send_where_to_go, см. комментарий там же).
+                if user_lat is None or user_lon is None:
+                    last_lat, last_lon = shift.get('last_lat'), shift.get('last_lon')
+                    if last_lat is not None and last_lon is not None:
+                        user_lat, user_lon = last_lat, last_lon
     except Exception:
         logger.exception(f"❌ Не удалось определить тарифы активной смены для 'Куда ехать' ({city}/{category}) - откат на подбор по всей категории")
         selected_tariffs = None
