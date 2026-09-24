@@ -12400,6 +12400,7 @@ def map_webapp_html():
           const blob = L.polygon(blobLatLngs(a.lat, a.lon, HIGH_DEMAND_RADIUS_METERS, cloudSeed, AIRPORT_CLOUD_POINTS, AIRPORT_CLOUD_SEGMENTS), {{
             color: '#9b30ff',
             weight: 0,
+            stroke: false,
             fillColor: cloudFill('#9b30ff'),
             fillOpacity: highDemandBlobOpacity(a.load),
             smoothFactor: 3,
@@ -12603,6 +12604,7 @@ def map_webapp_html():
           const blob = L.polygon(blobLatLngs(s.lat, s.lon, STATION_CLOUD_RADIUS_METERS, stationSeed, AIRPORT_CLOUD_POINTS, AIRPORT_CLOUD_SEGMENTS), {{
             color: '#2e7d32',
             weight: 0,
+            stroke: false,
             fillColor: cloudFill('#2e7d32'),
             fillOpacity: 0.18,
             smoothFactor: 3,
@@ -12711,6 +12713,7 @@ def map_webapp_html():
         const marker = L.polygon(cityCloudLatLngs(d.lat, d.lon, RAIN_DISTRICT_CLOUD_RADIUS_METERS, seed, DISTRICT_CLOUD_POINTS, DISTRICT_CLOUD_SEGMENTS), {{
           color: '#9b30ff',
           weight: 0,
+          stroke: false,
           fillColor: cloudFill('#9b30ff'),
           fillOpacity: 0.16,
           smoothFactor: 3,
@@ -12762,6 +12765,7 @@ def map_webapp_html():
       rainCloudMarker = L.polygon(latLngs, {{
         color: '#9b30ff',
         weight: 0,
+        stroke: false,
         fillColor: cloudFill('#9b30ff'),
         fillOpacity: 0.16,
         smoothFactor: 3,
@@ -13090,14 +13094,36 @@ def map_webapp_html():
     const polys = geom.type === 'Polygon' ? [geom.coordinates] : geom.coordinates;
     return polys.map(rings => rings[0].map(([lon, lat]) => [lat, lon]));
   }}
+  // ИСПРАВЛЕНО 25.09.2026 (жалоба пользователя со скриншотами - "надо
+  // объединить в одно облако", на карте были видны отдельные пятна со
+  // швами вместо одного слитного облака): try/catch раньше стоял СНАРУЖИ,
+  // вокруг всего цикла union в renderDistrictDemandClouds - если turf.union
+  // падал хотя бы на ОДНОЙ паре где-то в середине цепочки (обычное дело у
+  // вырожденной/самопересекающейся геометрии при склейке БОЛЬШОЙ группы -
+  // а группы стали большими: Москва теперь 543 района, соседние облака
+  // одного тарифа в центре легко образуют цепочку из 20-40+ пересекающихся
+  // полигонов), это роняло ВЕСЬ union целиком, и вся группа откатывалась на
+  // необъединённые исходные полигоны - отсюда видимые "швы"/пятна вместо
+  // одного облака. Теперь try/catch - НА КАЖДУЮ ПАРУ внутри цикла: если
+  // конкретная пара не смогла объединиться, эта пара просто пропускается
+  // (не мержится ни в накопленный merged, ни друг с другом) и попадает в
+  // failed - вызывающий код дорисует эти немногие проблемные куски
+  // отдельными полигонами (см. renderDistrictDemandClouds), а не потеряет
+  // всю склейку целиком.
   function _unionCloudGroup(group) {{
-    let merged = _cloudLatLngsToTurfPolygon(group[0].latlngs);
-    for (let i = 1; i < group.length; i++) {{
-      const next = _cloudLatLngsToTurfPolygon(group[i].latlngs);
-      const u = turf.union(merged, next);
-      if (u) merged = u;  // если union не смог (вырожденная геометрия) - оставляем что уже накопили
-    }}
-    return merged.geometry || merged;
+    let merged = null;
+    const failed = [];
+    group.forEach(c => {{
+      const poly = _cloudLatLngsToTurfPolygon(c.latlngs);
+      if (merged === null) {{ merged = poly; return; }}
+      try {{
+        const u = turf.union(merged, poly);
+        if (u) {{ merged = u; }} else {{ failed.push(c.latlngs); }}
+      }} catch (e) {{
+        failed.push(c.latlngs);
+      }}
+    }});
+    return {{ geometry: merged ? (merged.geometry || merged) : null, failed }};
   }}
 
   function renderDistrictDemandClouds(data) {{
@@ -13132,6 +13158,51 @@ def map_webapp_html():
         byField.get(layer.field).push({{ latlngs, demand, strongThreshold, _bbox: _cloudLatLngsBBox(latlngs) }});
       }});
     }});
+    // ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - "сделай объём") -
+    // раньше "объём" рисовался SVG-радиальным градиентом (ensureCloudGradient),
+    // который сломался при переходе на Canvas-рендеринг (см. cloudFill выше,
+    // "облака цвет неправильный"). Дешёвая замена, одинаково работающая в
+    // Canvas и SVG: два плоских слоя одного цвета друг на друге - широкий
+    // приглушённый "ореол" (сам контур облака целиком, ослабленная
+    // прозрачность) и уменьшенное к центру ядро на полной прозрачности -
+    // вместе читается как мягкое свечение вместо плоского пятна, без
+    // настоящего градиента. Стоит на порядок дешевле градиента (два flat
+    // fill вместо вычисления градиента на каждый кадр), а финальных фигур
+    // теперь немного (после склейки), так что 2× слоёв не страшно.
+    function _shrinkRingTowardCentroid(ring, factor) {{
+      let sumLat = 0, sumLon = 0;
+      ring.forEach(p => {{ sumLat += p[0]; sumLon += p[1]; }});
+      const n = ring.length;
+      const cLat = sumLat / n, cLon = sumLon / n;
+      return ring.map(p => [cLat + (p[0] - cLat) * factor, cLon + (p[1] - cLon) * factor]);
+    }}
+    function _pushVolumeCloudPolygon(ring, color, fillOpacity) {{
+      const outer = L.polygon([ring], {{
+        color, weight: 0, stroke: false,
+        fillColor: color, fillOpacity: fillOpacity * 0.55,
+        smoothFactor: 3,
+      }}).addTo(map);
+      districtDemandMarkers.push(outer);
+      const inner = L.polygon([_shrinkRingTowardCentroid(ring, 0.55)], {{
+        color, weight: 0, stroke: false,
+        fillColor: color, fillOpacity,
+        smoothFactor: 3,
+      }}).addTo(map);
+      districtDemandMarkers.push(inner);
+    }}
+    // ИСПРАВЛЕНО 25.09.2026 (жалоба пользователя со скриншотами - "надо
+    // объединить в одно облако", на карте были видны разрозненные пятна со
+    // швами): раньше при неудачном union ВСЯ группа (в т.ч. успешно
+    // объединённая часть) откатывалась на массив ОТДЕЛЬНЫХ колец, переданный
+    // в ОДИН L.polygon(...) - Leaflet при таком виде входных данных (ровно 2
+    // уровня вложенности) трактует все кольца, кроме первого, как ДЫРКИ в
+    // одном полигоне, а не как отдельные фигуры - отсюда визуальные
+    // "прорехи"/швы вместо одного слитного облака. Теперь _unionCloudGroup
+    // (см. выше) возвращает {{ geometry, failed }} - geometry рисуется по
+    // частям (каждая часть - свой L.polygon, не общие "дырки"), а failed
+    // (пары, которые не удалось склеить) дорисовываются каждая отдельным
+    // полигоном того же цвета - видимых швов почти не остаётся, а то, что
+    // реально не удалось объединить, всё равно видно, а не пропадает молча.
     byField.forEach(clouds => {{
       _groupOverlappingClouds(clouds).forEach(group => {{
         // Цвет/яркость объединённого облака - по САМОМУ высокому спросу в
@@ -13140,33 +13211,15 @@ def map_webapp_html():
         const strongThreshold = group[0].strongThreshold;
         const color = demandCloudColorByLevel(maxDemand);
         const fillOpacity = demandCloudOpacityByLevel(maxDemand, strongThreshold);
-        let ringsLatLngs;
         if (group.length === 1) {{
-          ringsLatLngs = [group[0].latlngs];
-        }} else {{
-          try {{
-            ringsLatLngs = _turfGeometryToLatLngRings(_unionCloudGroup(group));
-          }} catch (e) {{
-            ringsLatLngs = group.map(c => c.latlngs);  // union не удался - фолбэк на отдельные полигоны той же группы
-          }}
+          _pushVolumeCloudPolygon(group[0].latlngs, color, fillOpacity);
+          return;
         }}
-        const marker = L.polygon(ringsLatLngs, {{
-          color: color,
-          weight: 0,
-          fillColor: cloudFill(color),
-          fillOpacity: fillOpacity,
-          smoothFactor: 3,
-        }}).addTo(map);
-        // УБРАНО 24.09.2026 (прямая просьба пользователя, со скриншотами -
-        // "убери блюр с облаков"): при большом числе соседних районов
-        // одновременно показывающих спрос их blur-облака перекрывались и
-        // сливались в одно сплошное пятно без видимых границ между
-        // районами - убрали ensureCloudFilter на всех типах облаков (тот
-        // же комментарий у airportMarkers/stationMarkers/rainCloudMarker
-        // выше), края облаков стали чуть резче. ДОБАВЛЕНО 24.09.2026 - а
-        // теперь пересекающиеся облака ОДНОГО тарифа вместо этого
-        // геометрически СКЛЕИВАЮТСЯ (см. _unionCloudGroup выше), так что
-        // видимого шва между ними больше нет вообще - единый плавный контур.
+        const {{ geometry, failed }} = _unionCloudGroup(group);
+        if (geometry) {{
+          _turfGeometryToLatLngRings(geometry).forEach(ring => _pushVolumeCloudPolygon(ring, color, fillOpacity));
+        }}
+        failed.forEach(ring => _pushVolumeCloudPolygon(ring, color, fillOpacity));
         // УБРАНО 23.09.2026 (прямая просьба пользователя - "не
         // информировать при нажатие на спрос в цифрах на облоко потому
         // что щас 1 ночи и реально нет такого спроса"): точный % из
@@ -13181,7 +13234,6 @@ def map_webapp_html():
         // (bindTooltip не вызывается), сама яркость/насыщенность облака
         // по-прежнему передаёт уровень спроса (см. demandCloudColorByLevel/
         // demandCloudOpacityByLevel) без всплывающего текста поверх карты.
-        districtDemandMarkers.push(marker);
       }});
     }});
   }}
@@ -13261,6 +13313,7 @@ def map_webapp_html():
       demandCloudMarker = L.polygon(cityCloudLatLngs(data.lat, data.lon, DEMAND_CLOUD_RADIUS_METERS, seed), {{
         color: cloudColor,
         weight: 0,
+        stroke: false,
         fillColor: cloudFill(cloudColor),
         fillOpacity: demandCloudOpacityByLevel(data.demand),
         smoothFactor: 3,
