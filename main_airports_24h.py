@@ -5274,7 +5274,16 @@ def services_keyboard(category=None, city=None, user_id=None):
     # shift_toggle_button_text (см. ниже) - переименованные подписи +, пока
     # смена идёт, время на линии прямо в тексте кнопки (тот же приём, что и
     # у кнопки подписки - см. subscription_menu_button_text).
-    top_rows = [[KeyboardButton(text=shift_toggle_button_text(user_state.get(user_id, {}) if user_id is not None else {}))]]
+    # ДОБАВЛЕНО 24.09.2026 (прямая просьба пользователя - "кнопка будет
+    # появляться только тогда когда человек на линии, самая верхняя кнопка,
+    # выше кнопки на линии - выбор тарифа") - см. SHIFT_TARIFF_BUTTON_TEXT/
+    # open_live_shift_tariffs выше; видна только пока смена идёт И у
+    # категории вообще есть тарифы на выбор (у cargo их нет).
+    _kb_state = user_state.get(user_id, {}) if user_id is not None else {}
+    top_rows = []
+    if is_shift_active(_kb_state) and shift_tariff_options(category):
+        top_rows.append([KeyboardButton(text=shift_tariff_button_text(_kb_state))])
+    top_rows.append([KeyboardButton(text=shift_toggle_button_text(_kb_state))])
     # "🗺 КАРТА ВОДИТЕЛЕЙ" (по просьбе пользователя, 21.09.2026) - в одном
     # ряду с "💰 КУДА ЕХАТЬ AI ➡️", а не отдельной строкой внизу меню - открывает
     # интерактивную WebApp-карту через web_app=WebAppInfo (единственный
@@ -9122,6 +9131,65 @@ def shift_toggle_button_text(state):
         return SHIFT_TOGGLE_BUTTON_ON_PREFIX
     return f"{SHIFT_TOGGLE_BUTTON_ON_PREFIX} ({format_shift_duration(max(0, elapsed_minutes))})"
 
+# ДОБАВЛЕНО 24.09.2026 (прямая просьба пользователя - "надо сделать кнопку
+# она будет появляться только тогда когда человек на линии, самая верхняя
+# кнопка, выше кнопки на линии - выбор тарифа, чтобы водитель мог в режиме
+# на линии постоянно переключаться между тарифами... чтобы эти данные
+# влияли на отображение себя на карте и учитывались в расчётах по матрице
+# спроса") - в отличие от shift_tariffs_keyboard (выбор ДО старта смены,
+# применяется только по кнопке "▶️ Начать смену"), эта клавиатура работает
+# ПРЯМО ВО ВРЕМЯ СМЕНЫ: каждый тап сразу меняет state['shift']['tariffs']
+# (без отдельного подтверждения) - его и так постоянно читают "вживую"
+# матрица спроса (низкий спрос по тарифу, пуш "час пик" и т.д.) и
+# отображение маркера на карте (см. live_shift_tariff_toggle ниже).
+SHIFT_TARIFF_BUTTON_TEXT = "⚠️ВЫБОР ТАРИФА⚠️"
+
+# ДОБАВЛЕНО 24.09.2026 (уточнение пользователя - "кнопка обычная показывает
+# выбор тарифа, а когда тариф выбран - пишет активный тариф и через запятую
+# перечисляет какие тарифы выбраны") - текст кнопки теперь ДИНАМИЧЕСКИЙ, как
+# у shift_toggle_button_text: пока ничего не выбрано - статичный
+# SHIFT_TARIFF_BUTTON_TEXT ("⚠️ВЫБОР ТАРИФА⚠️"), как только выбран хотя бы
+# один тариф - "✅АКТИВНЫЙ ТАРИФ: " + сами тарифы через запятую
+# (format_shift_tariffs_label) + "✅" (ЕЩЁ РАЗ ИЗМЕНЕНО 24.09.2026 - точный
+# формат/эмодзи по прямому примеру пользователя: "⚠️ВЫБОР ТАРИФА⚠️" /
+# "✅АКТИВНЫЙ ТАРИФ: Эконом✅"), чтобы активные тарифы смены были видны прямо
+# на кнопке, без захода в подменю.
+def shift_tariff_button_text(state):
+    """Текст верхней кнопки "выбор тарифа" (см. SHIFT_TARIFF_BUTTON_TEXT
+    выше) - без выбранных тарифов статичная подпись, с выбранными - список
+    активных тарифов через запятую прямо на кнопке."""
+    tariffs = (state.get('shift') or {}).get('tariffs') or []
+    if not tariffs:
+        return SHIFT_TARIFF_BUTTON_TEXT
+    return f"✅АКТИВНЫЙ ТАРИФ: {format_shift_tariffs_label(tariffs)}✅"
+
+def _is_shift_tariff_button_press(message):
+    """Фильтр нажатия динамической кнопки "выбор тарифа" - раньше сравнивали
+    message.text с константой SHIFT_TARIFF_BUTTON_TEXT напрямую, но кнопка
+    теперь показывает список активных тарифов (см. shift_tariff_button_text
+    выше), поэтому сверяем с тем текстом, который сейчас реально должен быть
+    на кнопке у ЭТОГО конкретного пользователя."""
+    user_id = message.from_user.id if message.from_user else None
+    if user_id is None:
+        return False
+    state = user_state.get(user_id, {})
+    if not is_shift_active(state):
+        return False
+    return message.text == shift_tariff_button_text(state)
+
+def live_shift_tariffs_keyboard(category, selected):
+    """Инлайн-клавиатура переключения тарифов ВО ВРЕМЯ СМЕНЫ (см. комментарий
+    у SHIFT_TARIFF_BUTTON_TEXT выше) - тот же принцип чекбоксов, что и у
+    shift_tariffs_keyboard, но "✅ ГОТОВО" просто закрывает клавиатуру, не
+    запускает ничего (смена уже идёт)."""
+    tariffs = shift_tariff_options(category)
+    buttons = []
+    for idx, label in enumerate(tariffs):
+        mark = '✅' if label in selected else '☐'
+        buttons.append([InlineKeyboardButton(text=f"{mark} {label}", callback_data=f"live_shift_tariff_toggle_{idx}")])
+    buttons.append([InlineKeyboardButton(text="✅ ГОТОВО", callback_data="live_shift_tariffs_done")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
 RU_WEEKDAYS = ('понедельник', 'вторник', 'среда', 'четверг', 'пятница', 'суббота', 'воскресенье')
 
 def format_shift_start_label(started_at):
@@ -9179,6 +9247,87 @@ async def toggle_shift(message: types.Message):
     if not is_shift_active(state):
         return  # защитный случай - кнопка не должна была показать "Завершить", если смены нет
     await finish_shift_and_notify(user_id, category, city, message.answer)
+
+@router.message(_is_shift_tariff_button_press)
+async def open_live_shift_tariffs(message: types.Message):
+    """Кнопка "🚕 ВЫБОР ТАРИФА" (см. SHIFT_TARIFF_BUTTON_TEXT/
+    live_shift_tariffs_keyboard выше) - показывается только пока смена идёт
+    (см. services_keyboard), открывает переключалку тарифов "вживую"."""
+    user_id = message.from_user.id
+    state = user_state.get(user_id, {})
+    if not is_shift_active(state):
+        return  # защитный случай - кнопка не должна быть видна вне смены
+    category = state.get('category')
+    if not shift_tariff_options(category):
+        return
+    selected = set((state.get('shift') or {}).get('tariffs') or [])
+    await message.answer(
+        "🚕 Тарифы, в которых сейчас работаешь - включай/выключай на ходу. "
+        "Изменения сразу повлияют на отображение на карте, очередь у аэропорта "
+        "и расчёт спроса по районам.",
+        reply_markup=live_shift_tariffs_keyboard(category, selected),
+    )
+
+@router.callback_query(lambda c: c.data.startswith("live_shift_tariff_toggle_"))
+async def live_shift_tariff_toggle(callback_query: types.CallbackQuery):
+    """Тоггл одного тарифа ВО ВРЕМЯ СМЕНЫ (см. комментарий у
+    SHIFT_TARIFF_BUTTON_TEXT выше) - в отличие от shift_tariff_toggle (выбор
+    ДО старта, хранится во временном shift_tariff_pending), здесь каждый тап
+    сразу пишет в state['shift']['tariffs'] и сразу же обновляет маркер на
+    карте (update_map_position) по последней известной позиции - матрицу
+    спроса/пуши отдельно обновлять не нужно, они и так читают
+    shift['tariffs'] заново на каждой своей проверке."""
+    await callback_query.answer()
+    user_id = callback_query.from_user.id
+    state = user_state.get(user_id, {})
+    if not is_shift_active(state):
+        return  # смена уже завершилась - клавиатура устарела
+    category = state.get('category')
+    tariffs = shift_tariff_options(category)
+    try:
+        idx = int(callback_query.data[len("live_shift_tariff_toggle_"):])
+        label = tariffs[idx]
+    except (ValueError, IndexError):
+        return
+    shift = state['shift']
+    selected = set(shift.get('tariffs') or [])
+    if label in selected:
+        selected.discard(label)
+    else:
+        selected.add(label)
+    shift['tariffs'] = [t for t in tariffs if t in selected]  # сохраняем порядок CATEGORIES, не порядок нажатий
+    city = state.get('city')
+    if city and category in MAP_CATEGORY_STYLE:
+        last_lat, last_lon = shift.get('last_lat'), shift.get('last_lon')
+        if last_lat is not None and last_lon is not None:
+            try:
+                update_map_position(user_id, city, category, last_lat, last_lon, tariffs=shift['tariffs'])
+            except Exception:
+                logger.exception(f"❌ Не удалось обновить тарифы на карте user_id={user_id}")
+    await callback_query.message.edit_reply_markup(reply_markup=live_shift_tariffs_keyboard(category, set(shift['tariffs'])))
+
+@router.callback_query(lambda c: c.data == "live_shift_tariffs_done")
+async def live_shift_tariffs_done(callback_query: types.CallbackQuery):
+    await callback_query.answer()
+    user_id = callback_query.from_user.id
+    state = user_state.get(user_id, {})
+    tariffs = (state.get('shift') or {}).get('tariffs') or []
+    label = format_shift_tariffs_label(tariffs) if tariffs else "не выбраны"
+    try:
+        await callback_query.message.edit_text(f"🚕 Тарифы обновлены: {label}")
+    except Exception:
+        pass
+    # ДОБАВЛЕНО 24.09.2026 (уточнение пользователя - кнопка "выбор тарифа"
+    # должна сразу писать активные тарифы через запятую) - Reply-клавиатуру
+    # нельзя обновить через edit (как инлайн-кнопки выше), нужно новое
+    # сообщение с reply_markup - короткое техническое сообщение, тот же
+    # приём, что у toggle_shift ("✅ Смена начата").
+    category = state.get('category')
+    city = state.get('city')
+    try:
+        await callback_query.message.answer("🚕 Клавиатура обновлена", reply_markup=services_keyboard(category, city, user_id))
+    except Exception:
+        pass
 
 class _AnswerFuncAsMessage:
     """Тонкая обёртка вокруг функции-отправителя (message.answer или
@@ -11220,6 +11369,14 @@ def map_webapp_html():
     </div>
   </div>
   <div class="layer-toggle-btn" id="trafficToggleBtn">🚦 Пробки</div>
+  <!-- ДОБАВЛЕНО 24.09.2026 (прямая просьба пользователя - "добавь кнопку на
+       карту сверху в одну строчку с другими кнопками, кнопку спрос, по этой
+       кнопке люди включают отображение спроса на карте либо выключают его,
+       по умолчанию спрос при загрузке карты включён") - тот же стиль/
+       принцип, что и "🚦 Пробки" (layer-toggle-btn + .active), см.
+       demandToggleBtn ниже в JS. class="active" сразу в разметке - спрос
+       включён по умолчанию при открытии карты. -->
+  <div class="layer-toggle-btn active" id="demandToggleBtn">📊 Спрос</div>
   <!-- ИЗМЕНЕНО 23.09.2026 (фильтр карты "свои водители/все") - скрыта по
        умолчанию, показывается любому, у кого get_referrer_type ==
        'legal_entity' (см. is_legal_entity_referrer/loadMyProfile ниже),
@@ -12845,7 +13002,7 @@ def map_webapp_html():
   // дёргать рендер на каждый промежуточный кадр жеста.
   let _districtRedrawTimer = null;
   map.on('moveend zoomend', () => {{
-    if (!_districtDemandCache) return;
+    if (!_districtDemandCache || !demandShownState) return;
     clearTimeout(_districtRedrawTimer);
     _districtRedrawTimer = setTimeout(() => {{
       if (DISTRICT_DEMAND_CITIES.includes(city) && (myCategory === 'taxi' || myCategory === 'ultima')) {{
@@ -13269,6 +13426,32 @@ def map_webapp_html():
       trafficToggleBtn.classList.toggle('active', trafficShownState);
     }});
   }}
+  // ДОБАВЛЕНО 24.09.2026 (прямая просьба пользователя - кнопка "📊 Спрос",
+  // включает/выключает отображение облаков спроса на карте, по умолчанию
+  // включено при загрузке карты) - охватывает оба вида облаков спроса:
+  // районные (renderDistrictDemandClouds/districtDemandMarkers, Москва/СПб
+  // такси и Ultima) и единое городское облако-фолбэк (loadDemandCloud/
+  // demandCloudMarker, остальные города/категории) - см. clearDemandClouds.
+  const demandToggleBtn = document.getElementById('demandToggleBtn');
+  let demandShownState = true;
+  function clearDemandClouds() {{
+    districtDemandMarkers.forEach(m => map.removeLayer(m));
+    districtDemandMarkers = [];
+    if (demandCloudMarker) {{ map.removeLayer(demandCloudMarker); demandCloudMarker = null; }}
+    _districtDemandCache = null;
+    _districtDemandSignature = null;
+  }}
+  if (demandToggleBtn) {{
+    demandToggleBtn.addEventListener('click', () => {{
+      demandShownState = !demandShownState;
+      demandToggleBtn.classList.toggle('active', demandShownState);
+      if (demandShownState) {{
+        loadDemandCloud();
+      }} else {{
+        clearDemandClouds();
+      }}
+    }});
+  }}
   // ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - фильтр карты "свои
   // водители/все" для владельца кабинета юрлица) - кнопка скрыта по
   // умолчанию (см. loadMyProfile выше), появляется только владельцу.
@@ -13312,7 +13495,7 @@ def map_webapp_html():
   loadAirports();
   loadStations();
   loadRainCloud();
-  loadDemandCloud();
+  if (demandShownState) loadDemandCloud();
   loadRoadEvents();
   loadCityEvents();
   setInterval(loadPositions, 15000);
@@ -13344,7 +13527,7 @@ def map_webapp_html():
   // более. Было 60000 (раз в минуту), стало 300000 (раз в 5 минут) - плюс
   // кэш по подписи (см. loadDistrictDemandClouds) всё равно пропустит
   // пересборку, если за эти 5 минут ничего по факту не поменялось.
-  staggerStart(loadDemandCloud, 300000, 60000);
+  staggerStart(() => {{ if (demandShownState) loadDemandCloud(); }}, 300000, 60000);
   setInterval(loadCityEvents, 300000);
 </script>
 </body>
@@ -21020,14 +21203,26 @@ async def show_queue_menu(callback_query: types.CallbackQuery):
 
     category = user_state[user_id]['category']
     tariffs = CATEGORIES.get(category, {}).get('tariffs', [])
-    if tariffs:
-        # Сначала спрашиваем классы (можно несколько сразу - см.
-        # queue_tariff_multiselect_keyboard) - у ТАКСИ и ТАКСИ ULTIMA свои
-        # варианты (эконом/комфорт/... у такси, business/premier/... у ultima),
-        # поэтому кнопки берутся из тарифов уже выбранной категории. Начинаем
-        # с чистого выбора при каждом открытии меню - предыдущий набор не
-        # запоминается между заходами, чтобы не отметить случайно старым
-        # набором тарифов.
+    # ДОБАВЛЕНО 24.09.2026 (прямая просьба пользователя - "выбор тарифа
+    # влиял на выбор очереди в аэропорту, он не спрашивал уже, а те тарифы
+    # которые выбраны на старте смены (и потом обновлены "🚕 ВЫБОР ТАРИФА",
+    # см. live_shift_tariff_toggle) сразу выбирались в очереди") - если
+    # смена идёт и у неё есть известные тарифы, экран ручного выбора класса
+    # (queue_tariff_multiselect_keyboard) пропускается целиком, идём сразу к
+    # выбору аэропорта с тарифами смены.
+    shift = user_state[user_id].get('shift')
+    shift_tariffs = [t for t in (shift.get('tariffs') or []) if t in tariffs] if shift else []
+    if tariffs and shift_tariffs:
+        user_state[user_id]['queue_tariff'] = shift_tariffs[0] if len(shift_tariffs) == 1 else None
+        user_state[user_id]['queue_tariffs_multi'] = shift_tariffs
+        user_state[user_id]['queue_tariffs_selected'] = [tariffs.index(t) for t in shift_tariffs]
+        await show_queue_airport_picker(callback_query.message, user_id)
+    elif tariffs:
+        # Смена не идёт (или тарифы на ней не выбраны) - спрашиваем классы
+        # вручную, как раньше (можно несколько сразу - см.
+        # queue_tariff_multiselect_keyboard). Начинаем с чистого выбора при
+        # каждом открытии меню - предыдущий набор не запоминается между
+        # заходами, чтобы не отметить случайно старым набором тарифов.
         user_state[user_id]['queue_tariffs_selected'] = []
         keyboard = queue_tariff_multiselect_keyboard(tariffs, [])
         await callback_query.message.edit_text("Выбери класс(ы) - можно несколько 👇", reply_markup=keyboard)
