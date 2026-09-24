@@ -11194,6 +11194,7 @@ MAP_CHROME_CSS = """
   .tariff-toggle.collapsed { display: none; }
   .tariff-toggle .tariff-group-title { display: flex; align-items: center; gap: 5px; font-weight: 600; cursor: pointer; user-select: none; }
   .tariff-toggle .tariff-item { display: flex; align-items: center; gap: 5px; margin-left: 18px; cursor: pointer; user-select: none; white-space: nowrap; }
+  .tariff-toggle .tariff-item-disabled { opacity: 0.35; cursor: not-allowed; }
   /* ИЗМЕНЕНО 23.09.2026 (жалоба пользователя, скриншот - "плохо видно"
      значки заправок/зарядок на карте): раньше это были голые эмодзи с
      drop-shadow - на пёстрой тайловой подложке почти не различить.
@@ -11429,27 +11430,36 @@ def map_webapp_html():
   // из-за чего облака спроса РАЗНЫХ тарифов могли показываться и визуально
   // накладываться друг на друга разом (склейка через turf.union, добавленная
   // чуть раньше в этот же день, объединяет только облака ОДНОГО тарифа -
-  // разные тарифы она не трогает и не должна была). Теперь выбор тарифа
-  // ВНУТРИ каждой категории - РАДИО-КНОПКИ (ровно один тариф категории
-  // одновременно, как переключатель канала); сами категории друг на друга
-  // не влияют (у разных категорий разные DISTRICT_CLOUD_LAYERS, между ними
-  // наложения не было и раньше). Групповой чекбокс "выбрать все тарифы
-  // категории сразу" убран целиком - с радио-кнопками он не имеет смысла.
+  // разные тарифы она не трогает и не должна была). Выбор тарифа ВНУТРИ
+  // каждой категории временно был РАДИО-КНОПКАМИ.
+  // И ЕЩЁ РАЗ ИЗМЕНЕНО 24.09.2026 (прямая просьба пользователя со
+  // скриншотом панели "Тарифы" - "выбор отображение других водителей только
+  // два чекбокса для любых тарифов не более 2 для всех за использование")
+  // - радио-кнопки (ровно 1 тариф НА КАЖДУЮ категорию, то есть до 4 сразу
+  // при 4 категориях) заменены обратно на чекбоксы, но с ОБЩИМ лимитом на
+  // всю панель сразу: не более TARIFF_SELECTION_MAX тарифов суммарно по
+  // ВСЕМ категориям вместе (Такси/Ultima/Курьер/Грузовое такси), а не по
+  // одному на категорию. Как только лимит достигнут, остальные неотмеченные
+  // чекбоксы дизейблятся (серые, некликабельные), пока один из отмеченных
+  // не будет снят.
   const tariffKey = (cat, t) => `${{cat}}::${{t}}`;
+  const TARIFF_SELECTION_MAX = 2;
   const selectedTariffs = new Set();
   const shiftTariffsParam = params.get('tariffs');
   const shiftTariffs = shiftTariffsParam ? shiftTariffsParam.split(',').filter(Boolean) : null;
   Object.keys(TARIFF_OPTIONS).forEach(cat => {{
+    if (selectedTariffs.size >= TARIFF_SELECTION_MAX) return;
     const tariffs = TARIFF_OPTIONS[cat].tariffs || [];
     if (myCategory && cat === myCategory && shiftTariffs && shiftTariffs.length) {{
       // ИЗМЕНЕНО 24.09.2026 (см. комментарий выше) - если во время смены
       // отмечено НЕСКОЛЬКО тарифов (см. live_shift_tariffs_keyboard в
-      // main.py), для отображения на карте берём только ПЕРВЫЙ из них -
-      // радио-панель всё равно держит один тариф категории одновременно,
-      // водитель в любой момент переключит на карте вручную.
+      // main.py), для отображения на карте по умолчанию берём столько
+      // первых из них, сколько влезает в общий лимит панели.
       const matched = shiftTariffs.filter(t => tariffs.includes(t));
       if (matched.length) {{
-        selectedTariffs.add(tariffKey(cat, matched[0]));
+        matched.forEach(t => {{
+          if (selectedTariffs.size < TARIFF_SELECTION_MAX) selectedTariffs.add(tariffKey(cat, t));
+        }});
         return;
       }}
       // Ни один из отмеченных тарифов не нашёлся в TARIFF_OPTIONS (данные
@@ -11463,6 +11473,7 @@ def map_webapp_html():
   const tariffBtn = document.getElementById('tariffToggleBtn');
   function renderTariffPanel() {{
     tariffPanel.innerHTML = '';
+    const atLimit = selectedTariffs.size >= TARIFF_SELECTION_MAX;
     Object.keys(TARIFF_OPTIONS).forEach(cat => {{
       const info = TARIFF_OPTIONS[cat];
       const tariffs = info.tariffs || [];
@@ -11473,16 +11484,25 @@ def map_webapp_html():
       tariffPanel.appendChild(groupTitle);
       tariffs.forEach(t => {{
         const row = document.createElement('div');
-        row.className = 'tariff-item';
         const checked = selectedTariffs.has(tariffKey(cat, t));
-        // РАДИО, не чекбокс - см. комментарий выше у selectedTariffs. Одно и
-        // то же name на все тарифы категории - браузер сам гарантирует, что
-        // в рамках категории отмечен ровно один вариант.
-        row.innerHTML = `<input type="radio" name="tariff-radio-${{cat}}" data-cat="${{cat}}" data-tariff="${{t}}" ${{checked ? 'checked' : ''}}> ${{t}}`;
+        const disabled = !checked && atLimit;
+        row.className = disabled ? 'tariff-item tariff-item-disabled' : 'tariff-item';
+        // ЧЕКБОКС - см. комментарий выше у TARIFF_SELECTION_MAX. Общий
+        // лимит на всю панель контролируется в обработчике change, а не
+        // группировкой по name (как было бы у радио).
+        row.innerHTML = `<input type="checkbox" data-cat="${{cat}}" data-tariff="${{t}}" ${{checked ? 'checked' : ''}} ${{disabled ? 'disabled' : ''}}> ${{t}}`;
         row.querySelector('input').addEventListener('change', (e) => {{
+          const key = tariffKey(cat, t);
           if (e.target.checked) {{
-            tariffs.forEach(other => selectedTariffs.delete(tariffKey(cat, other)));
-            selectedTariffs.add(tariffKey(cat, t));
+            if (selectedTariffs.size >= TARIFF_SELECTION_MAX) {{
+              // Подстраховка (не должно случаться - чекбокс должен быть
+              // disabled), но на всякий случай не даём превысить лимит.
+              e.target.checked = false;
+              return;
+            }}
+            selectedTariffs.add(key);
+          }} else {{
+            selectedTariffs.delete(key);
           }}
           renderTariffPanel();
           loadPositions();
