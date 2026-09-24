@@ -11420,15 +11420,21 @@ def map_webapp_html():
   // сам доотмечает остальные тарифы, если они ему тоже интересны. Если
   // своя категория известна (myCategory из URL) - только её базовый тариф;
   // иначе (категория не передана) - базовый тариф КАЖДОЙ категории.
-  // ЕЩЁ РАЗ ИЗМЕНЕНО 24.09.2026 (прямая просьба пользователя, скриншот
-  // этой же панели - "выбираешь тариф... и у тебя отображение на карте
-  // сразу фильтр ставится того тарифа который ты выбрал, либо один либо
-  // несколько") - если водитель сейчас на смене и отметил конкретные
-  // тарифы при её старте (см. map_webapp_tariffs_param в main.py,
-  // передаётся сюда параметром ?tariffs=Эконом,Комфорт), используем ИМЕННО
-  // их для своей категории - один или сразу несколько, а не только базовый.
-  // Без активной смены/без отмеченных тарифов - прежнее поведение (базовый
-  // тариф категории), ничего не ломаем.
+  // ЕЩЁ РАЗ ИЗМЕНЕНО 24.09.2026 (прямая просьба пользователя - "чтобы
+  // невозможно было настраивать разные зоны спроса разных тарифов, можно
+  // было выбрать спрос по тарифам только один - либо Комфорт+ смотришь
+  // слои, либо Эконом смотришь слои, тогда не будет наложения, не будет
+  // лишней нагрузки и будет только стыковка области облаков") - панель
+  // "Тарифы" была мультивыбором (несколько тарифов категории одновременно),
+  // из-за чего облака спроса РАЗНЫХ тарифов могли показываться и визуально
+  // накладываться друг на друга разом (склейка через turf.union, добавленная
+  // чуть раньше в этот же день, объединяет только облака ОДНОГО тарифа -
+  // разные тарифы она не трогает и не должна была). Теперь выбор тарифа
+  // ВНУТРИ каждой категории - РАДИО-КНОПКИ (ровно один тариф категории
+  // одновременно, как переключатель канала); сами категории друг на друга
+  // не влияют (у разных категорий разные DISTRICT_CLOUD_LAYERS, между ними
+  // наложения не было и раньше). Групповой чекбокс "выбрать все тарифы
+  // категории сразу" убран целиком - с радио-кнопками он не имеет смысла.
   const tariffKey = (cat, t) => `${{cat}}::${{t}}`;
   const selectedTariffs = new Set();
   const shiftTariffsParam = params.get('tariffs');
@@ -11436,9 +11442,14 @@ def map_webapp_html():
   Object.keys(TARIFF_OPTIONS).forEach(cat => {{
     const tariffs = TARIFF_OPTIONS[cat].tariffs || [];
     if (myCategory && cat === myCategory && shiftTariffs && shiftTariffs.length) {{
+      // ИЗМЕНЕНО 24.09.2026 (см. комментарий выше) - если во время смены
+      // отмечено НЕСКОЛЬКО тарифов (см. live_shift_tariffs_keyboard в
+      // main.py), для отображения на карте берём только ПЕРВЫЙ из них -
+      // радио-панель всё равно держит один тариф категории одновременно,
+      // водитель в любой момент переключит на карте вручную.
       const matched = shiftTariffs.filter(t => tariffs.includes(t));
       if (matched.length) {{
-        matched.forEach(t => selectedTariffs.add(tariffKey(cat, t)));
+        selectedTariffs.add(tariffKey(cat, matched[0]));
         return;
       }}
       // Ни один из отмеченных тарифов не нашёлся в TARIFF_OPTIONS (данные
@@ -11450,43 +11461,34 @@ def map_webapp_html():
   }});
   const tariffPanel = document.getElementById('tariffToggle');
   const tariffBtn = document.getElementById('tariffToggleBtn');
-  function categoryFullySelected(cat) {{
-    const tariffs = TARIFF_OPTIONS[cat].tariffs || [];
-    return tariffs.length > 0 && tariffs.every(t => selectedTariffs.has(tariffKey(cat, t)));
-  }}
   function renderTariffPanel() {{
     tariffPanel.innerHTML = '';
     Object.keys(TARIFF_OPTIONS).forEach(cat => {{
       const info = TARIFF_OPTIONS[cat];
       const tariffs = info.tariffs || [];
       if (!tariffs.length) return;
-      const groupChecked = categoryFullySelected(cat);
       const groupTitle = document.createElement('div');
       groupTitle.className = 'tariff-group-title';
-      groupTitle.innerHTML = `<input type="checkbox" data-cat="${{cat}}" ${{groupChecked ? 'checked' : ''}}> ${{info.icon || ''}} ${{info.label}}`;
-      groupTitle.querySelector('input').addEventListener('change', (e) => {{
-        tariffs.forEach(t => {{
-          if (e.target.checked) selectedTariffs.add(tariffKey(cat, t));
-          else selectedTariffs.delete(tariffKey(cat, t));
-        }});
-        renderTariffPanel();
-        loadPositions();
-        // ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - тумблеры
-        // тарифов должны скрывать/показывать и облака спроса, не только
-        // маркеры водителей, см. DISTRICT_CLOUD_LAYERS/selectedTariffs выше).
-        loadDemandCloud();
-      }});
+      groupTitle.textContent = `${{info.icon || ''}} ${{info.label}}`;
       tariffPanel.appendChild(groupTitle);
       tariffs.forEach(t => {{
         const row = document.createElement('div');
         row.className = 'tariff-item';
         const checked = selectedTariffs.has(tariffKey(cat, t));
-        row.innerHTML = `<input type="checkbox" data-cat="${{cat}}" data-tariff="${{t}}" ${{checked ? 'checked' : ''}}> ${{t}}`;
+        // РАДИО, не чекбокс - см. комментарий выше у selectedTariffs. Одно и
+        // то же name на все тарифы категории - браузер сам гарантирует, что
+        // в рамках категории отмечен ровно один вариант.
+        row.innerHTML = `<input type="radio" name="tariff-radio-${{cat}}" data-cat="${{cat}}" data-tariff="${{t}}" ${{checked ? 'checked' : ''}}> ${{t}}`;
         row.querySelector('input').addEventListener('change', (e) => {{
-          if (e.target.checked) selectedTariffs.add(tariffKey(cat, t));
-          else selectedTariffs.delete(tariffKey(cat, t));
+          if (e.target.checked) {{
+            tariffs.forEach(other => selectedTariffs.delete(tariffKey(cat, other)));
+            selectedTariffs.add(tariffKey(cat, t));
+          }}
           renderTariffPanel();
           loadPositions();
+          // ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - тумблеры
+          // тарифов должны скрывать/показывать и облака спроса, не только
+          // маркеры водителей, см. DISTRICT_CLOUD_LAYERS/selectedTariffs выше).
           loadDemandCloud();
         }});
         tariffPanel.appendChild(row);
