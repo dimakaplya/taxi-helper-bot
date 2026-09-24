@@ -228,6 +228,15 @@ def fetch_city_events(timepad_city):
             # координатами, как для KudaGo (см. build_event_message).
             address = (location.get('address') or '').strip()
 
+            # ДОБАВЛЕНО 24.09.2026 (прямая просьба пользователя - "легкое
+            # краткое описание мероприятия" в карточке события бота) -
+            # description_short УЖЕ запрашивался в 'fields' параметра API
+            # (см. выше), но раньше просто не сохранялся в normalized.json -
+            # бот его не показывал вообще. Обрезка длины - на стороне бота
+            # (см. _timepad_event_description/EVENT_DESCRIPTION_MAX_CHARS в
+            # main.py), здесь сохраняем как прислал TimePad.
+            description_short = (ev.get('description_short') or '').strip()
+
             normalized.append({
                 'title': (ev.get('name') or '').strip(),
                 'start': start_ts,
@@ -236,6 +245,7 @@ def fetch_city_events(timepad_city):
                 'place_address': address,
                 'place_lat': None,
                 'place_lon': None,
+                'description_short': description_short,
                 'tickets_total': tickets_total,
                 'categories': [c.get('name') for c in _as_list(ev.get('categories')) if c],
                 'url': ev.get('url', ''),

@@ -14739,6 +14739,68 @@ def _concert_event_info(post):
         return f"💵 от {price_rub} ₽"
     return '💵 цена не указана в афише'
 
+# ДОБАВЛЕНО 24.09.2026 (прямая просьба пользователя - "была возможность
+# провалиться в каждое событие и понять что это вообще такое, легкое
+# краткое описание... есть дешевые концерты если мододежнве исполнители,
+# есть абсолютно разные мероприятия для разных слоев населения и
+# тарифов") - "статус"/аудитория события в афише "События" (WebApp), на
+# основе того же порога PRICE_THRESHOLD_RUB (fetch_concert_events.py), по
+# которому уже строится price_category ('all'/'taxi_only') - дешёвые/
+# бесплатные/без цены события уже и так показываются ТОЛЬКО такси
+# (Ultima не видит их вовсе), а от PRICE_THRESHOLD_RUB и выше - обеим
+# категориям. Этот же порог теперь ещё и явной подписью объясняет
+# ВОДИТЕЛЮ, к какой публике идёт вызов, а не только фильтрует список.
+CONCERT_AUDIENCE_LABEL_BUDGET = "🎸 бюджетное/молодёжное мероприятие"
+CONCERT_AUDIENCE_LABEL_PREMIUM = "💎 премиум-мероприятие"
+
+def _concert_event_audience_label(post):
+    return CONCERT_AUDIENCE_LABEL_PREMIUM if post.get('price_category') == 'all' else CONCERT_AUDIENCE_LABEL_BUDGET
+
+# Ограничение длины описания в карточке события (WebApp "События") -
+# читаемый объём в развёрнутой карточке, не полотно текста с рекламными
+# хэштегами/ссылками на другие каналы (частый "хвост" постов канала).
+EVENT_DESCRIPTION_MAX_CHARS = 500
+
+def _concert_event_description(post):
+    """Краткое описание события из ПОЛНОГО текста поста Telegram-афиши
+    (post['text'], уже очищен от промо-приписок канала, см.
+    strip_channel_promo в fetch_concert_events.py) - убираем первую строку
+    (заголовок, он уже показан отдельным полем title) и "инфо-строку"
+    вида "дата / место / цена" (parse_event_fields уже вытащил её в
+    отдельные поля), если она идёт следующей - остальное и есть
+    содержательное описание. Обрезаем до EVENT_DESCRIPTION_MAX_CHARS -
+    длиннее в карточке не читается, да и часть постов заканчивается
+    ссылками на другие каналы/хэштегами, урезание заодно избавляет от
+    этого "хвоста" в большинстве случаев."""
+    text = post.get('text') or ''
+    lines = [ln for ln in text.split('\n')]
+    if lines:
+        lines = lines[1:]  # заголовок - первая строка, уже отдельное поле title
+    # Первая непустая строка, оставшаяся после заголовка - если это та
+    # самая "дата / место / цена", тоже убираем (уже разобрана в date_str/
+    # place/price_str), чтобы не дублировать её в описании.
+    for i, ln in enumerate(lines):
+        if ln.strip():
+            if ' / ' in ln and re.match(r'^\d{1,2}[\s,]', ln.strip()):
+                lines = lines[:i] + lines[i + 1:]
+            break
+    description = strip_urls_for_display('\n'.join(lines)).strip()
+    if len(description) > EVENT_DESCRIPTION_MAX_CHARS:
+        description = description[:EVENT_DESCRIPTION_MAX_CHARS].rstrip() + '…'
+    return description
+
+def _timepad_event_description(ev):
+    """Краткое описание TimePad-события - description_short из самого
+    TimePad API (см. fetch_timepad_data.py, поле уже запрашивалось в
+    'fields' у API, но раньше не сохранялось в normalized.json - см.
+    коммит 24.09.2026). Пустая строка, если TimePad не прислал его или
+    данные ещё собраны ПРЕЖНИМ запуском фетчера (обновится сам после
+    следующего запуска fetch_timepad_data.py)."""
+    description = (ev.get('description_short') or '').strip()
+    if len(description) > EVENT_DESCRIPTION_MAX_CHARS:
+        description = description[:EVENT_DESCRIPTION_MAX_CHARS].rstrip() + '…'
+    return description
+
 async def handle_map_city_events_api(request):
     """JSON API для меток афиши (концерты/мероприятия) на карте - по просьбе
     пользователя (22.09.2026, следом за дорожными событиями): "Афишу тоже
@@ -14854,6 +14916,17 @@ def events_webapp_html():
     transition: transform .12s;
   }
   .card a.go:active { transform: scale(.94); }
+  .card { cursor: pointer; }
+  .audience-badge {
+    display: inline-block; border-radius: 8px; padding: 2px 8px; font-size: 11px;
+    font-weight: 700; margin-bottom: 6px; background: rgba(255,196,0,.14); color: #FFC400;
+  }
+  .card .expand-hint { font-size: 11px; color: #6a6a6a; margin-top: 6px; }
+  .card .desc {
+    font-size: 12.5px; color: #d6d6d6; line-height: 1.45; margin-top: 8px;
+    padding-top: 8px; border-top: 1px solid rgba(255,255,255,.08); white-space: pre-line;
+  }
+  .card .status-line { font-size: 12.5px; color: #FFC400; margin-top: 8px; }
   .closure-badge {
     display: inline-block; background: rgba(255,68,68,.18); color: #ff6b6b;
     border-radius: 8px; padding: 2px 8px; font-size: 11px; font-weight: 700; margin-bottom: 6px;
@@ -14914,18 +14987,48 @@ def events_webapp_html():
       sec.innerHTML = '<div class="empty">На ближайшее время подходящих событий не нашлось. Загляни позже.</div>';
       return;
     }
-    sec.innerHTML = all.map(ev => {
-      let html = '<div class="card">';
+    // ДОБАВЛЕНО 24.09.2026 (прямая просьба пользователя - "была возможность
+    // провалиться в каждое событие и понять что это вообще такое, легкое
+    // краткое описание мероприятия и статус... есть дешевые концерты если
+    // мододежнве исполнители, есть абсолютно разные мероприятия для
+    // разных слоев населения и тарифов") - карточка теперь раскрывается по
+    // тапу: badge аудитории (бюджетное/молодёжное vs премиум - см.
+    // audience_label/_concert_event_audience_label в Python) виден СРАЗУ,
+    // статус (цена/категория+посещаемость - status_label) и краткое
+    // описание (description, из текста поста/TimePad description_short) -
+    // ТОЛЬКО в развёрнутом виде, чтобы свёрнутый список карточек оставался
+    // компактным. Клик по кнопке "Поехали" не должен схлопывать/
+    // разворачивать карточку - см. stopPropagation на ней ниже.
+    sec.innerHTML = all.map((ev, i) => {
+      let html = '<div class="card" data-idx="' + i + '">';
+      if (ev.audience_label) html += '<div class="audience-badge">' + esc(ev.audience_label) + '</div>';
       html += '<div class="title">' + esc(ev.title) + '</div>';
       if (ev.place) html += '<div class="row">📍 ' + esc(ev.place) + '</div>';
       if (ev.date_str) html += '<div class="row">🗓 ' + esc(ev.date_str) + '</div>';
       if (ev.attendance) html += '<div class="row">👥 ~' + esc(ev.attendance) + ' чел.</div>';
       if (ev.price_str) html += '<div class="row">💵 ' + esc(ev.price_str) + '</div>';
       if (ev.note) html += '<div class="note">' + esc(ev.note) + '</div>';
+      html += '<div class="details" hidden>';
+      if (ev.status_label) html += '<div class="status-line">' + esc(ev.status_label) + '</div>';
+      if (ev.description) html += '<div class="desc">' + esc(ev.description) + '</div>';
+      html += '</div>';
+      if (ev.status_label || ev.description) html += '<div class="expand-hint">▾ подробнее</div>';
       if (ev.maps_url) html += '<a class="go" href="' + ev.maps_url + '" target="_blank">🚗 ПОЕХАЛИ</a>';
       html += '</div>';
       return html;
     }).join('');
+    sec.querySelectorAll('.card').forEach(card => {
+      card.addEventListener('click', () => {
+        const details = card.querySelector('.details');
+        const hint = card.querySelector('.expand-hint');
+        if (!details) return;
+        const nowHidden = !details.hidden;
+        details.hidden = nowHidden;
+        if (hint) hint.textContent = nowHidden ? '▾ подробнее' : '▴ свернуть';
+      });
+      const goLink = card.querySelector('a.go');
+      if (goLink) goLink.addEventListener('click', e => e.stopPropagation());
+    });
   }
 
   function renderRoads(data) {
@@ -15035,15 +15138,43 @@ async def handle_events_data_api(request):
                 # ключом по фактическому времени начала - раньше два
                 # источника просто склеивались (concerts, потом timepad) без
                 # общей сортировки по времени, см. renderConcerts ниже.
+                # ДОБАВЛЕНО 24.09.2026 (прямая просьба пользователя -
+                # "была возможность провалиться в каждое событие и понять
+                # что это вообще такое, легкое краткое описание... есть
+                # дешевые концерты если мододежнве исполнители, есть
+                # абсолютно разные мероприятия для разных слоев населения
+                # и тарифов") - status_label (цена/бесплатно, см.
+                # _concert_event_info), audience_label (бюджетное/молодёжное
+                # vs премиум, по тому же порогу PRICE_THRESHOLD_RUB, что уже
+                # решает taxi-only/all) и description (текст поста без
+                # заголовка/инфо-строки, см. _concert_event_description) -
+                # разворачиваются в карточке по тапу (см. renderConcerts).
                 concerts_out.append({
                     'title': post.get('title') or 'Мероприятие',
                     'place': place.capitalize() if place else '',
                     'date_str': date_str, 'price_str': price_str, 'note': note,
                     'maps_url': maps_url,
                     'start_ts': datetime.fromisoformat(post['start']).timestamp() if post.get('start') else None,
+                    'status_label': _concert_event_info(post),
+                    'audience_label': _concert_event_audience_label(post),
+                    'description': _concert_event_description(post),
                 })
 
+            # ИЗМЕНЕНО 24.09.2026 (прямая просьба пользователя, подтверждено
+            # через AskUserQuestion - "TimePad тоже должен быть строго на
+            # сегодня") - get_events_for_user уже фильтрует по сегодняшней
+            # календарной дате города (см. её докстринг), но здесь ЯВНО
+            # повторяем ту же проверку прямо на месте сборки ответа этого
+            # экрана - чтобы оба источника афиши "События" были ВИДИМО
+            # защищены ОДНИМ и тем же условием в одном месте, без
+            # необходимости доверять фильтрации где-то в другой функции.
+            tz_today = ZoneInfo(EVENT_CITY_TIMEZONE.get(city, 'Europe/Moscow'))
+            today_local = datetime.now(tz_today).date()
             timepad_events, _ = get_events_for_user(city, category, limit=10)
+            timepad_events = [
+                e for e in timepad_events
+                if e.get('start') and datetime.fromtimestamp(e['start'], tz_today).date() == today_local
+            ]
             for event in timepad_events:
                 date_str = format_event_datetime(event, city)
                 lo, hi = estimate_attendance(event)
@@ -15054,6 +15185,9 @@ async def handle_events_data_api(request):
                     'date_str': date_str, 'attendance': f"{lo}–{hi}",
                     'maps_url': maps_url,
                     'start_ts': event.get('start'),  # уже unix-время, см. fetch_timepad_data.py
+                    'status_label': _timepad_event_info(event),
+                    'audience_label': '',  # у TimePad нет ценового деления такси/Ultima, как у Telegram-афиши
+                    'description': _timepad_event_description(event),
                 })
         except Exception:
             logger.exception(f"❌ Ошибка сборки афиши для /events/data city={city} category={category}")
