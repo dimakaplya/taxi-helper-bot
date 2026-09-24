@@ -544,6 +544,11 @@ NOTIFICATION_TYPES = {
     # EVENT_PROXIMITY_LEAD_MINUTES минут - см. check_event_proximity_pushes
     # ниже.
     'event_ending_nearby': {'label': 'СОБЫТИЯ РЯДОМ ЗАКАНЧИВАЮТСЯ', 'emoji': '🎭'},
+    # ДОБАВЛЕНО 24.09.2026 (прямая просьба пользователя - "пуш когда ты на
+    # линии чтобы он присылает пуш если в твоём тарифе мало заказов по
+    # матрице переключись на пониженный тариф") - см. блок "ПУШ НИЗКИЙ
+    # СПРОС НА ТАРИФЕ" ближе к концу файла (check_low_tariff_demand_alerts).
+    'low_tariff_demand': {'label': 'НИЗКИЙ СПРОС НА ТАРИФЕ', 'emoji': '📉'},
 }
 
 def notifications_enabled(state, notif_key):
@@ -5514,8 +5519,14 @@ def courier_module_keyboard(category=None):
     см. notification_settings_keyboard/toggle_airport_queue_inline, по
     просьбе пользователя 19.09.2026)."""
     buttons = [
-        [KeyboardButton(text="💰 ФИНАНСЫ"), KeyboardButton(text="📈 СПРОС СЕЙЧАС")],
-        [KeyboardButton(text="📅 ЧАСЫ ПИКА"), KeyboardButton(text="🚻 ТУАЛЕТЫ")],
+        # УБРАНО 24.09.2026 (прямая просьба пользователя - "Спрос и часы
+        # пика убери из личного кабинета" + "из меню тоже убери"): кнопки
+        # "📈 СПРОС СЕЙЧАС"/"📅 ЧАСЫ ПИКА" здесь были дублем вкладок кабинета
+        # (уже убранных выше, см. cabinet_webapp_html) - убраны и отсюда,
+        # ФИНАНСЫ и ТУАЛЕТЫ переставлены в одну строку вместо осиротевших
+        # половин. Роутеры-обработчики (@router.message на эти тексты) не
+        # тронуты - по этим кнопкам просто больше некуда нажать.
+        [KeyboardButton(text="💰 ФИНАНСЫ"), KeyboardButton(text="🚻 ТУАЛЕТЫ")],
         [KeyboardButton(text="🅿️ БЕСПЛАТНАЯ ПАРКОВКА"), KeyboardButton(text="🔧 ШИНОМОНТАЖ")],
         [KeyboardButton(text="🚿 МОЙКИ"), KeyboardButton(text="🍷 АЛКОМАРКЕТЫ 24Ч")],
         [KeyboardButton(text="🛒 МАГАЗИНЫ 24Ч"), KeyboardButton(text="🔌 ЭЛЕКТРОЗАРЯДКИ")],
@@ -18091,8 +18102,13 @@ def cabinet_webapp_html():
 <div class="cabinet-nav" id="cabinetNav">
   <button class="nav-pill active" data-tab="profile">👤 Профиль</button>
   <button class="nav-pill" data-tab="finance">💰 Финансы</button>
-  <button class="nav-pill" data-tab="demand">📈 Спрос</button>
-  <button class="nav-pill" data-tab="peak">📅 Часы пика</button>
+  <!-- УБРАНО 24.09.2026 (прямая просьба пользователя - "Спрос и часы пика
+       убери из личного кабинета"): вкладки data-tab="demand"/"peak" здесь
+       больше не показываются - у водителя уже есть отдельные разделы
+       "📈 СПРОС СЕЙЧАС"/"📅 ЧАСЫ ПИКА" в обычном меню бота (см.
+       services_keyboard), в кабинете они были дублем. Сам контент вкладок
+       (#tab-demand/#tab-peak ниже) не удалён - просто больше не открыть
+       через навигацию, чтобы не трогать лишний JS без явной просьбы. -->
   <button class="nav-pill" data-tab="nearby">📍 Рядом</button>
   <button class="nav-pill" data-tab="fuel">⛽ Бензин</button>
   <button class="nav-pill" data-tab="maintenance">🛠 ТО</button>
@@ -27620,6 +27636,187 @@ async def peak_hour_alert_checker():
             logger.error(f"❌ Ошибка фоновой проверки часов пика: {e}")
         await asyncio.sleep(PEAK_HOUR_CHECK_INTERVAL_MINUTES * 60)
 
+# ==================== ПУШ "НИЗКИЙ СПРОС НА ТАРИФЕ - ПЕРЕКЛЮЧИСЬ" ====================
+# ДОБАВЛЕНО 24.09.2026 (прямая просьба пользователя - "надо ещё реализовать
+# пуш когда ты на линии чтобы он присылает пуш если в твоём тарифе мало
+# заказов по матрице переключись на пониженный тариф"): пока у водителя
+# активна смена, периодически сверяем спрос в ЕГО районе (по последней живой
+# геопозиции, тот же принцип, что у персонализированного пуша "час пик") на
+# его САМЫЙ ДЕШЁВЫЙ выбранный на старте смены тариф - если там спрос НИЖЕ
+# порога показа облака на карте (тот же порог, что и у DISTRICT_CLOUD_
+# THRESHOLDS_BY_FIELD), а на тариф СТУПЕНЬЮ НИЖЕ (который водитель ещё не
+# выбрал) спрос, наоборот, реально есть (выше ЕГО порога) - предлагаем
+# переключиться. Только для городов с районной матрицей (Москва/Питер, по
+# прямому уточнению пользователя - точных данных по тарифам в остальных
+# городах нет). Дедуп - не спамим на каждый тик, повторно напоминаем про тот
+# же район/тариф только если прошло больше LOW_TARIFF_DEMAND_RECHECK_MINUTES
+# (по уточнению пользователя - "периодически, если ситуация не изменилась").
+LOW_TARIFF_DEMAND_CHECK_INTERVAL_MINUTES = 20
+LOW_TARIFF_DEMAND_RECHECK_MINUTES = 60
+
+# Порядок тарифов ОТ ДОРОГОГО К ДЕШЁВОМУ - "пониженный" тариф это следующий
+# по списку. Курьер/грузовое такси сюда не входят (своей колонки в районной
+# матрице у них нет, см. SHIFT_TARIFF_TO_DEMAND_INDEX).
+TARIFF_HIERARCHY = {
+    'taxi': ['Комфорт+', 'Комфорт', 'Эконом'],
+    'ultima': ['Elite', 'Premier', 'Business'],
+}
+
+def _lowest_selected_tariff(category, tariffs):
+    """Самый ДЕШЁВЫЙ тариф из выбранных водителем на старте смены (по
+    TARIFF_HIERARCHY) - или None, если тарифы не выбраны/не сматчились
+    (тогда пуш не актуален - неясно, с чем сравнивать)."""
+    hierarchy = TARIFF_HIERARCHY.get(category) or []
+    selected = set(tariffs or [])
+    for tariff in reversed(hierarchy):  # с конца списка - от дешёвого к дорогому
+        if tariff in selected:
+            return tariff
+    return None
+
+def _lower_tariff_candidates(category, tariff):
+    """Список тарифов ДЕШЕВЛЕ текущего, в порядке приоритета (ближайший
+    первым) - для такси с Комфорт+ это ОБА более дешёвых тарифа (Комфорт,
+    потом Эконом - т.к. у такси можно опускаться сразу через ступень), а
+    для Ultima - строго один шаг вниз (Elite→Premier, Premier→Business).
+    Пустой список, если tariff уже самый дешёвый в своей категории -
+    переключаться некуда."""
+    hierarchy = TARIFF_HIERARCHY.get(category) or []
+    if tariff not in hierarchy:
+        return []
+    idx = hierarchy.index(tariff)
+    remaining = hierarchy[idx + 1:]
+    if not remaining:
+        return []
+    if category == 'taxi':
+        return remaining  # с Комфорт+ можно сразу и в Комфорт, и в Эконом
+    return remaining[:1]  # ultima - строго одна ступень вниз
+
+def _district_tariff_demand_value(city, district_name, category, tariff, weekday, hour):
+    """Значение спроса (0-100) КОНКРЕТНОГО тарифа в КОНКРЕТНОМ районе на
+    конкретный час/день недели - или None, если данных для этого слота нет
+    (например, ночью на "мёртвых" часах у некоторых районов)."""
+    table = get_district_demand(city)
+    if not table:
+        return None
+    entry = (table.get('districts') or {}).get(district_name)
+    if not entry:
+        return None
+    idx = SHIFT_TARIFF_TO_DEMAND_INDEX.get(category, {}).get(tariff)
+    if idx is None:
+        return None
+    slots = entry.get('weekday', {}).get(str(weekday), [])
+    return _district_slot_value(slots, hour, (idx,))
+
+def _district_tariff_demand_threshold(category, tariff):
+    """Порог показа облака (см. DISTRICT_CLOUD_THRESHOLDS_BY_FIELD) для
+    конкретного тарифа - или None, если тариф/индекс не сматчились."""
+    idx = SHIFT_TARIFF_TO_DEMAND_INDEX.get(category, {}).get(tariff)
+    if idx is None:
+        return None
+    field = _DISTRICT_DEMAND_INDEX_TO_FIELD.get(idx)
+    return DISTRICT_CLOUD_THRESHOLDS_BY_FIELD.get(field)
+
+async def push_low_tariff_demand_alert(user_id, state, city, category, district_name, current_tariff, lower_tariff):
+    if not bot:
+        return False
+    text = (
+        f"📉 *{CITY_DISPLAY_NAMES.get(city, city)} · {district_name}*\n\n"
+        f"На тарифе *{current_tariff}* сейчас мало заказов в твоём районе.\n"
+        f"А вот на *{lower_tariff}* спрос сейчас повышенный - есть смысл переключиться, чтобы не терять время в простое."
+    )
+    return await send_push_with_retry(
+        user_id, text, state=state, parse_mode='Markdown',
+        reply_markup=services_keyboard(category, city, user_id),
+    )
+
+async def check_low_tariff_demand_alerts():
+    """Раз в LOW_TARIFF_DEMAND_CHECK_INTERVAL_MINUTES проверяет ВСЕХ
+    водителей на активной смене (такси/Ultima, только Москва/Питер - см.
+    докстринг у блока выше) на предмет "твой тариф сейчас невыгоден,
+    переключись на более дешёвый"."""
+    now_utc = datetime.now(timezone.utc)
+    for user_id, state in list(user_state.items()):
+        if not isinstance(state, dict):
+            continue
+        city = state.get('city')
+        category = state.get('category')
+        if city not in DISTRICT_DEMAND_FILES or category not in ('taxi', 'ultima'):
+            continue
+        if not notifications_enabled(state, 'low_tariff_demand'):
+            continue
+        shift = state.get('shift')
+        if not shift:
+            continue
+        user_lat, user_lon = shift.get('last_lat'), shift.get('last_lon')
+        if user_lat is None or user_lon is None:
+            continue
+        current_tariff = _lowest_selected_tariff(category, shift.get('tariffs'))
+        if not current_tariff:
+            continue
+        candidates = _lower_tariff_candidates(category, current_tariff)
+        if not candidates:
+            continue  # уже самый дешёвый тариф в категории - переключаться некуда
+        nearest = find_nearest_district(city, user_lat, user_lon)
+        if not nearest:
+            continue
+        district_name = nearest[0]
+        now = get_city_now(city)
+        weekday = now.weekday()
+        try:
+            current_value = _district_tariff_demand_value(city, district_name, category, current_tariff, weekday, now.hour)
+            current_threshold = _district_tariff_demand_threshold(category, current_tariff)
+        except Exception as e:
+            logger.error(f"❌ Не удалось проверить спрос по тарифам для {user_id} ({city}/{category}): {e}")
+            continue
+        is_current_low = (current_value is not None and current_threshold and current_value < current_threshold[0])
+        if not is_current_low:
+            continue
+        # Перебираем кандидатов на понижение по приоритету (ближайший
+        # сначала) и берём первый, у которого реально есть спрос сейчас.
+        lower_tariff = None
+        try:
+            for candidate in candidates:
+                candidate_value = _district_tariff_demand_value(city, district_name, category, candidate, weekday, now.hour)
+                candidate_threshold = _district_tariff_demand_threshold(category, candidate)
+                if candidate_value is not None and candidate_threshold and candidate_value >= candidate_threshold[0]:
+                    lower_tariff = candidate
+                    break
+        except Exception as e:
+            logger.error(f"❌ Не удалось проверить спрос по тарифам для {user_id} ({city}/{category}): {e}")
+            continue
+        if not lower_tariff:
+            continue
+        # Дедуп - тот же район/тариф/подсказка уже отправлялись недавно - не
+        # повторяем раньше LOW_TARIFF_DEMAND_RECHECK_MINUTES.
+        alert_state = state.get('low_tariff_demand_alert') or {}
+        if (alert_state.get('district') == district_name
+                and alert_state.get('tariff') == current_tariff
+                and alert_state.get('suggested') == lower_tariff):
+            try:
+                last_sent = datetime.fromisoformat(alert_state['last_sent'])
+            except Exception:
+                last_sent = None
+            if last_sent and (now_utc - last_sent).total_seconds() < LOW_TARIFF_DEMAND_RECHECK_MINUTES * 60:
+                continue
+        ok = await push_low_tariff_demand_alert(user_id, state, city, category, district_name, current_tariff, lower_tariff)
+        if ok:
+            state['low_tariff_demand_alert'] = {
+                'district': district_name, 'tariff': current_tariff, 'suggested': lower_tariff,
+                'last_sent': now_utc.isoformat(),
+            }
+        await asyncio.sleep(0.05)  # Telegram допускает ~30 сообщений/сек в разные чаты
+
+async def low_tariff_demand_checker():
+    """Фоновая задача: раз в LOW_TARIFF_DEMAND_CHECK_INTERVAL_MINUTES минут
+    проверяет спрос по тарифам всех активных водителей (см. докстринг у
+    блока выше)."""
+    while True:
+        try:
+            await check_low_tariff_demand_alerts()
+        except Exception as e:
+            logger.error(f"❌ Ошибка фоновой проверки низкого спроса по тарифу: {e}")
+        await asyncio.sleep(LOW_TARIFF_DEMAND_CHECK_INTERVAL_MINUTES * 60)
+
 CAMPAIGN_PROFIT_REPORT_CHECK_INTERVAL_MINUTES = 60  # как часто проверяем, не настало ли 1-е число
 
 async def campaign_profit_monthly_report():
@@ -27887,6 +28084,7 @@ async def main():
     asyncio.create_task(holiday_checker())
     asyncio.create_task(airport_queue_checker())
     asyncio.create_task(peak_hour_alert_checker())
+    asyncio.create_task(low_tariff_demand_checker())
     asyncio.create_task(campaign_profit_monthly_report())
     asyncio.create_task(check_long_shifts())
     asyncio.create_task(nearby_drivers_checker())
