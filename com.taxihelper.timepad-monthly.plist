@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd-задача для ежемесячного автообновления афиши (TimePad).
+  Разовая установка - см. AFISHA_MONTHLY_SETUP.md.
+
+  launchd выбран вместо обычного crontab (24.09.2026, прямая просьба
+  пользователя - "чтоб повторно было без моего участия"): launchd - родной
+  планировщик macOS, при StartCalendarInterval он САМ досрочно запустит
+  пропущенный таск вскоре после того, как компьютер проснётся/включится,
+  если в момент по расписанию он спал или был выключен - голый cron это
+  требование молча игнорирует (пропущенный запуск просто теряется).
+  Запускается 1 числа каждого месяца в 09:00 по местному времени Mac.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.taxihelper.timepad-monthly</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>REPO_DIR_PLACEHOLDER/run_monthly_afisha_update.sh</string>
+    </array>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Day</key>
+        <integer>1</integer>
+        <key>Hour</key>
+        <integer>9</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <!-- Если Mac был выключен/спал в момент запуска по расписанию -
+         launchd выполнит пропущенный запуск, как только компьютер снова
+         станет доступен (в отличие от cron). -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/taxi-bot-afisha-monthly.stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/taxi-bot-afisha-monthly.stderr.log</string>
+</dict>
+</plist>
