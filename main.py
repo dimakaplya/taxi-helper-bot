@@ -863,26 +863,37 @@ EVENT_DEMAND_RADIUS_KM = 3
 EVENT_DEMAND_LOOKAHEAD_HOURS = 3
 EVENT_DEMAND_BOOST = 1.20
 
-def nearby_event_demand_multiplier(city, lat, lon):
-    """1.0 если рядом с (lat, lon) в ближайшие EVENT_DEMAND_LOOKAHEAD_HOURS
-    часов нет мероприятий с известными координатами, иначе EVENT_DEMAND_BOOST.
-    Источники те же, что у карты (см. handle_map_events_api) - TimePad
-    (load_timepad_data) и подборка концертов (get_concert_events_for_city).
-    Событие без геокоординат (place_lat/place_lon = None) в эту проверку не
+def nearest_event_near(city, lat, lon, radius_km=EVENT_DEMAND_RADIUS_KM, lookahead_hours=EVENT_DEMAND_LOOKAHEAD_HOURS):
+    """БЛИЖАЙШЕЕ мероприятие (TimePad/подборка концертов, см.
+    load_timepad_data/get_concert_events_for_city) рядом с (lat, lon),
+    начинающееся в ближайшие lookahead_hours часов - ДОБАВЛЕНО 24.09.2026
+    (прямая просьба пользователя, "Куда ехать" - "мероприятия учитываются
+    в принятие решения... если в этом районе есть мероприятия то по
+    кнопке поехать не бесплатная парковка а адрес мероприятия"), вынесено
+    из nearby_event_demand_multiplier (которая теперь просто спрашивает
+    "есть ли что-то" через эту функцию) - здесь нужен САМ найденный
+    объект (название + координаты), а не просто множитель балла.
+    Возвращает dict {'title', 'lat', 'lon', 'address', 'dist_km'} для
+    БЛИЖАЙШЕГО подходящего события из ОБОИХ источников сразу (не первого
+    попавшегося), или None, если рядом ничего актуального нет. Событие
+    без геокоординат (place_lat/place_lon = None) в эту проверку не
     попадает - оно всё равно остаётся видно в обычной афише внутри бота."""
     if lat is None or lon is None:
-        return 1.0
+        return None
+    best = None
     try:
         now_ts = datetime.now(ZoneInfo('UTC')).timestamp()
-        cutoff_ts = now_ts + EVENT_DEMAND_LOOKAHEAD_HOURS * 3600
+        cutoff_ts = now_ts + lookahead_hours * 3600
         timepad_data = load_timepad_data()
         for ev in (timepad_data or {}).get('cities', {}).get(city, []):
             ev_lat, ev_lon = ev.get('place_lat'), ev.get('place_lon')
             start = ev.get('start') or 0
             if ev_lat is None or ev_lon is None or start < now_ts or start > cutoff_ts:
                 continue
-            if haversine_km(lat, lon, ev_lat, ev_lon) <= EVENT_DEMAND_RADIUS_KM:
-                return EVENT_DEMAND_BOOST
+            dist_km = haversine_km(lat, lon, ev_lat, ev_lon)
+            if dist_km <= radius_km and (best is None or dist_km < best['dist_km']):
+                best = {'title': ev.get('title') or 'Мероприятие', 'lat': ev_lat, 'lon': ev_lon,
+                        'address': ev.get('place_address') or '', 'dist_km': dist_km}
         for post in get_concert_events_for_city(city):
             ev_lat, ev_lon = post.get('lat'), post.get('lon')
             if ev_lat is None or ev_lon is None:
@@ -895,11 +906,20 @@ def nearby_event_demand_multiplier(city, lat, lon):
                         continue
                 except Exception:
                     pass
-            if haversine_km(lat, lon, ev_lat, ev_lon) <= EVENT_DEMAND_RADIUS_KM:
-                return EVENT_DEMAND_BOOST
+            dist_km = haversine_km(lat, lon, ev_lat, ev_lon)
+            if dist_km <= radius_km and (best is None or dist_km < best['dist_km']):
+                best = {'title': post.get('title') or 'Мероприятие', 'lat': ev_lat, 'lon': ev_lon,
+                        'address': post.get('place') or '', 'dist_km': dist_km}
     except Exception:
         pass
-    return 1.0
+    return best
+
+def nearby_event_demand_multiplier(city, lat, lon):
+    """1.0 если рядом с (lat, lon) в ближайшие EVENT_DEMAND_LOOKAHEAD_HOURS
+    часов нет мероприятий с известными координатами, иначе EVENT_DEMAND_BOOST.
+    ИЗМЕНЕНО 24.09.2026 - просто спрашивает nearest_event_near (общая
+    логика поиска вынесена туда, см. её докстринг)."""
+    return EVENT_DEMAND_BOOST if nearest_event_near(city, lat, lon) else 1.0
 
 # За сколько дней ДО праздника слать разовый пуш-напоминание.
 HOLIDAY_LEAD_DAYS = 1
@@ -7928,7 +7948,17 @@ async def score_district_candidates(city, category, user_lat=None, user_lon=None
         dist_km = None
         if origin_lat is not None and origin_lon is not None:
             dist_km = haversine_km(origin_lat, origin_lon, entry['lat'], entry['lon'])
-        event_mult = nearby_event_demand_multiplier(city, entry['lat'], entry['lon'])
+        # ИЗМЕНЕНО 24.09.2026 (прямая просьба пользователя - "мероприятия
+        # учитываются в принятие решения ехать в тот или иной район... в
+        # описание района где сейчас вся информация пишется и если в этом
+        # районе есть мероприятия то по кнопке поехать не бесплатная
+        # парковка а адрес мероприятия") - раньше здесь спрашивался только
+        # МНОЖИТЕЛЬ (nearby_event_demand_multiplier), теперь нужен САМ
+        # найденный event (название + координаты) - и для текста в reasons
+        # (какое именно мероприятие рядом), и чтобы where_to_go_button_target
+        # мог направить кнопку "Поехали" на его адрес вместо парковки.
+        nearby_event = nearest_event_near(city, entry['lat'], entry['lon'])
+        event_mult = EVENT_DEMAND_BOOST if nearby_event else 1.0
         adjusted = (
             demand * district_distance_penalty(dist_km)
             * holiday_mult * temp_mult * event_mult
@@ -7937,7 +7967,7 @@ async def score_district_candidates(city, category, user_lat=None, user_lon=None
             'name': name, 'demand': demand, 'lat': entry['lat'], 'lon': entry['lon'],
             'adjusted': adjusted, 'raining': district_raining,
             'holiday': holiday_mult != 1.0, 'temp_extreme': temp_mult != 1.0, 'event_nearby': event_mult != 1.0,
-            'slot_start_h': slot_start_h, 'slot_end_h': slot_end_h,
+            'slot_start_h': slot_start_h, 'slot_end_h': slot_end_h, 'nearby_event': nearby_event,
         })
 
     if not scored:
@@ -7973,13 +8003,21 @@ async def score_district_candidates(city, category, user_lat=None, user_lon=None
             reasons.append("🎉 сегодня праздник - спрос по городу выше обычного")
         if d['temp_extreme']:
             reasons.append("🌡 экстремальная температура - спрос на такси выше обычного")
-        if d['event_nearby']:
+        # ИЗМЕНЕНО 24.09.2026 (прямая просьба пользователя - см. комментарий
+        # у nearby_event выше) - вместо общей фразы "рядом скоро крупное
+        # мероприятие" теперь называем САМО мероприятие, если оно известно.
+        nearby_event = d.get('nearby_event')
+        if nearby_event:
+            reasons.append(f"🎭 рядом мероприятие «{nearby_event['title']}» - спрос выше обычного")
+        elif d['event_nearby']:
             reasons.append("🎭 рядом скоро крупное мероприятие - спрос выше обычного")
         level = 'peak' if d['demand'] >= 90 else ('high' if d['demand'] >= 70 else ('mid' if d['demand'] >= 40 else 'low'))
         advice = get_city_advice(city, level, category=category)
         result.append({
             'label': f"Район {d['name']}", 'score': d['adjusted'], 'reasons': reasons, 'closed': False,
             'advice': advice, 'lat': d['lat'], 'lon': d['lon'], 'kind': 'district',
+            'nearby_event_lat': nearby_event['lat'] if nearby_event else None,
+            'nearby_event_lon': nearby_event['lon'] if nearby_event else None,
         })
     return result
 
@@ -8311,17 +8349,29 @@ def where_to_go_button_target(city, c):
     конкретная точка (терминал, вокзал, реальный центр, адрес площадки),
     кнопка ведёт прямо туда, как и раньше. "Район" (kind == 'district') -
     это ЦЕЛАЯ территория, а не одна точка, ехать буквально "в район"
-    некуда - поэтому кнопка ведёт на ближайшую к его центру бесплатную
-    парковку из нашей базы (см. NEARBY_SERVICES['parking']/
-    nearest_nearby_points), а не на условный центр района. Если рядом с
-    районом бесплатных парковок в базе нет (город/район ещё не покрыт
-    сбором, см. fetch_parking_data.py) - откатываемся на прежнее поведение
-    (координаты самого района), чтобы кнопка не пропадала вовсе.
+    некуда:
+    - ИЗМЕНЕНО 24.09.2026 (прямая просьба пользователя - "если в этом
+      районе есть мероприятия то по кнопке поехать не бесплатная парковка
+      а адрес мероприятия а во всех остальных случаях на бесплатную
+      парковку") - если рядом с районом сейчас есть релевантное
+      мероприятие (см. nearest_event_near/score_district_candidates,
+      nearby_event_lat/lon уже посчитаны там), кнопка ведёт ПРЯМО К НЕМУ -
+      именно там будет реальный спрос (разъезд/подвоз гостей), а не куда
+      попало внутри района;
+    - иначе, как раньше - на ближайшую к его центру бесплатную парковку
+      из нашей базы (см. NEARBY_SERVICES['parking']/nearest_nearby_points).
+    Если рядом с районом нет ни мероприятия, ни бесплатных парковок в базе
+    (город/район ещё не покрыт сбором, см. fetch_parking_data.py) -
+    откатываемся на прежнее поведение (координаты самого района), чтобы
+    кнопка не пропадала вовсе.
     Возвращает (lat, lon) или (None, None)."""
     lat, lon = c.get('lat'), c.get('lon')
     if lat is None or lon is None:
         return None, None
     if c.get('kind') == 'district':
+        event_lat, event_lon = c.get('nearby_event_lat'), c.get('nearby_event_lon')
+        if event_lat is not None and event_lon is not None:
+            return event_lat, event_lon
         try:
             nearest = nearest_nearby_points('parking', city, lat, lon, count=1)
         except Exception:
