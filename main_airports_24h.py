@@ -23914,11 +23914,31 @@ async def push_district_rain_alert(city, district_name, event, user_ids):
         duration_text = f"продлится примерно {duration_hours} ч"
     else:
         duration_text = f"по прогнозу не прекратится в ближайшие {RAIN_FORECAST_HOURS} ч"
-    text = (
+    header_text = (
         f"{event['emoji']} *Район {district_name} ({city_display})*\n\n"
         f"{event['name'].capitalize()} {when_text}, {duration_text}.\n\n"
         f"{demand_text}"
     )
+    # ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - "при таком
+    # сообщении сразу пиши ещё какие тариф рекомендуешь, один или два") -
+    # см. recommended_district_tariffs выше. Персонально КАЖДОМУ получателю
+    # (у разных водителей может быть разная category - Такси/Ultima), т.к.
+    # список тарифов зависит именно от категории - единого текста на всех,
+    # как раньше, тут уже не сделать. lat/lon района - для Москвы, чтобы
+    # Бизнес/Премьер/Элит считались по ЕГО зоне (центр/область/Рублёвка-
+    # Новая Рига), а не по общему городскому порогу.
+    now = get_city_now(city)
+    weekday = now.weekday()
+    district_entry = (get_district_demand(city) or {}).get('districts', {}).get(district_name) or {}
+    district_lat, district_lon = district_entry.get('lat'), district_entry.get('lon')
+
+    def _text_for(state):
+        category = state.get('category') if isinstance(state, dict) else None
+        tariffs = recommended_district_tariffs(city, district_name, category, weekday, now.hour, district_lat, district_lon) if category else []
+        if not tariffs:
+            return header_text
+        tariffs_word = "тариф" if len(tariffs) == 1 else "тарифа"
+        return f"{header_text}\n\n🚕 Рекомендуемый {tariffs_word}: *{', '.join(tariffs)}*"
 
     def _rain_push_keyboard(state):
         rows = []
@@ -23942,7 +23962,7 @@ async def push_district_rain_alert(city, district_name, event, user_ids):
     logger.info(f"{event['emoji']} Район {district_name} ({city_display}): осадки ({event['name']}) - точечно рассылаю {len(recipients)} водителям в этом районе")
     sent, failed = 0, 0
     for user_id, state in recipients:
-        ok = await send_push_with_retry(user_id, text, state=state, parse_mode='Markdown', reply_markup=_rain_push_keyboard(state))
+        ok = await send_push_with_retry(user_id, _text_for(state), state=state, parse_mode='Markdown', reply_markup=_rain_push_keyboard(state))
         if ok:
             sent += 1
         else:
@@ -29137,6 +29157,27 @@ def _district_tariff_demand_threshold(city, category, tariff, lat=None, lon=None
         return None
     field = _DISTRICT_DEMAND_INDEX_TO_FIELD.get(idx)
     return district_premium_threshold(city, field, lat, lon)
+
+def recommended_district_tariffs(city, district_name, category, weekday, hour, lat=None, lon=None):
+    """ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - "при таком
+    сообщении сразу пиши ещё какие тариф рекомендуешь, один или два" - про
+    пуш о дожде в конкретном районе, см. push_district_rain_alert ниже) -
+    какие 1-2 тарифа этой категории СЕЙЧАС реально показывают повышенный
+    спрос в этом районе (значение >= порог показа облака - тот же порог,
+    что и у самой карты/матрицы, district_premium_threshold). Не больше 2 -
+    по прямой просьбе пользователя ("один или два"), самые сильные по
+    значению спроса первыми. Пустой список - ни для одного тарифа этой
+    категории спрос сейчас не поднялся выше порога (не значит, что дождь не
+    идёт - просто спрос по факту ещё не вырос) ИЛИ категория без тарифной
+    колонки в матрице (курьер/грузовое такси, см. SHIFT_TARIFF_TO_DEMAND_INDEX)."""
+    scored = []
+    for tariff in shift_tariff_options(category):
+        value = _district_tariff_demand_value(city, district_name, category, tariff, weekday, hour)
+        threshold = _district_tariff_demand_threshold(city, category, tariff, lat, lon)
+        if value is not None and threshold and value >= threshold[0]:
+            scored.append((tariff, value))
+    scored.sort(key=lambda pair: -pair[1])
+    return [tariff for tariff, _value in scored[:2]]
 
 def _live_shift_tariff_toggle_button(text, category, tariff):
     """Кнопка "➕/➖ <тариф>" под пушем про низкий/повышенный спрос - тап
