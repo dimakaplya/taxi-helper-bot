@@ -11360,7 +11360,15 @@ MAP_CHROME_CSS = """
      центру левого края (см. .leaflet-control-zoom выше); .filter-toggle
      и .map-toggles-row сдвинуты правее (left:80px), чтобы не перекрываться
      с этой кнопкой (56px ширина + 14px отступ от края + зазор). */
-  .shift-toggle-btn { position: absolute; top: 14px; left: 14px; z-index: 1000; width: 56px; height: 56px; border-radius: 50%; background: #8E8E93; border: 3px solid #fff; box-shadow: 0 2px 8px rgba(0,0,0,.45); display: flex; align-items: center; justify-content: center; cursor: pointer; user-select: none; overflow: hidden; transition: background .25s, transform .12s; }
+  /* ИЗМЕНЕНО 25.09.2026 (прямая просьба пользователя - "кружок слева
+     всегда жёлтый... с этим вот локатором он постоянно горел, больше
+     ничего не трогай"): кнопка теперь ВСЕГДА показывает жёлтый фон и
+     крутящийся радар-луч, независимо от реального статуса смены - это
+     чисто визуальное изменение, JS-логика клика и статус смены не
+     затронуты (.active/.pending классы по-прежнему навешиваются JS как
+     раньше, просто больше не меняют внешний вид, т.к. и то, и другое
+     состояние теперь выглядит одинаково - жёлтым). */
+  .shift-toggle-btn { position: absolute; top: 14px; left: 14px; z-index: 1000; width: 56px; height: 56px; border-radius: 50%; background: #FFB800; border: 3px solid #fff; box-shadow: 0 2px 8px rgba(0,0,0,.45); display: flex; align-items: center; justify-content: center; cursor: pointer; user-select: none; overflow: hidden; transition: background .25s, transform .12s; }
   .shift-toggle-btn:active { transform: scale(.93); }
   .shift-toggle-btn.active { background: #FFB800; }
   .shift-toggle-btn.pending { opacity: .6; pointer-events: none; }
@@ -11369,11 +11377,10 @@ MAP_CHROME_CSS = """
      вращающийся conic-gradient "луч", замаскированный кругом кнопки - тот
      же приём, что у классической радар-развёртки: полупрозрачный сектор
      крутится вокруг центра, за пределами кнопки не виден (overflow:hidden
-     у .shift-toggle-btn). Виден и крутится ТОЛЬКО пока смена активна -
-     вне смены (серая кнопка) неподвижен и скрыт (opacity:0), чтобы не
-     наводить на мысль, что кнопка "работает", когда смены на самом деле
-     нет. */
-  .shift-toggle-btn .radar-sweep { position: absolute; inset: 0; border-radius: 50%; background: conic-gradient(from 0deg, rgba(255,255,255,.6), rgba(255,255,255,0) 40%); opacity: 0; }
+     у .shift-toggle-btn). ИЗМЕНЕНО 25.09.2026: раньше был виден только
+     при активной смене, теперь виден и крутится ВСЕГДА (по прямой
+     просьбе пользователя - кружок должен постоянно "гореть"). */
+  .shift-toggle-btn .radar-sweep { position: absolute; inset: 0; border-radius: 50%; background: conic-gradient(from 0deg, rgba(255,255,255,.6), rgba(255,255,255,0) 40%); opacity: 1; animation: shift-radar-spin 2.4s linear infinite; }
   .shift-toggle-btn.active .radar-sweep { opacity: 1; animation: shift-radar-spin 2.4s linear infinite; }
   @keyframes shift-radar-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
   @media (prefers-reduced-motion: reduce) { .shift-toggle-btn .radar-sweep { animation: none !important; } }
