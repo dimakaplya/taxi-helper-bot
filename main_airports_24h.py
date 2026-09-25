@@ -13126,9 +13126,20 @@ def map_webapp_html():
     return {{ geometry: merged ? (merged.geometry || merged) : null, failed }};
   }}
 
+  // ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - "давай сделаем ещё
+  // производительнее") - раньше renderDistrictDemandClouds на КАЖДЫЙ вызов
+  // (а вызывается она на каждый пан/зум, см. map.on('moveend zoomend', ...)
+  // ниже, даже без нового запроса к серверу - просто пересчёт по
+  // _districtDemandCache под новые границы экрана) безусловно сносила ВСЕ
+  // текущие полигоны и пересобирала всё заново - группировку, склейку
+  // turf.union, теперь ещё и объёмный turf.buffer - даже если набор
+  // видимых районов после микро-панорамирования фактически не изменился.
+  // _lastCloudRenderSignature - "отпечаток" входных данных ЭТОГО рендера
+  // (какие районы/тарифы/уровни спроса видны сейчас); если он совпадает с
+  // прошлым - выходим СРАЗУ, ничего не трогая на карте (полигоны и так уже
+  // отражают этот набор), не тратя ресурсы на группировку/union/buffer.
+  let _lastCloudRenderSignature = null;
   function renderDistrictDemandClouds(data) {{
-    districtDemandMarkers.forEach(m => map.removeLayer(m));
-    districtDemandMarkers = [];
     // ДОБАВЛЕНО 24.09.2026 - отсекаем районы вне видимой области карты (+
     // небольшой запас, чтобы полигон не исчезал резко на самом краю экрана)
     // - при обычном приближении на экране обычно видна лишь часть города,
@@ -13142,6 +13153,7 @@ def map_webapp_html():
     // потом внутри каждого тарифа склеиваем пересекающиеся между собой (см.
     // комментарий у _groupOverlappingClouds выше).
     const byField = new Map();
+    const signatureParts = [];
     (data.districts || []).forEach(d => {{
       if (!bounds.contains([d.lat, d.lon])) return;
       layers.forEach(layer => {{
@@ -13156,8 +13168,15 @@ def map_webapp_html():
         const latlngs = cityCloudLatLngs(d.lat, d.lon, DISTRICT_CLOUD_RADIUS_METERS, seed, DISTRICT_CLOUD_POINTS, DISTRICT_CLOUD_SEGMENTS);
         if (!byField.has(layer.field)) byField.set(layer.field, []);
         byField.get(layer.field).push({{ latlngs, demand, strongThreshold, _bbox: _cloudLatLngsBBox(latlngs) }});
+        signatureParts.push(d.name + ':' + layer.field + ':' + demand);
       }});
     }});
+    signatureParts.sort();
+    const renderSignature = timeBucket + '|' + signatureParts.join(',');
+    if (renderSignature === _lastCloudRenderSignature) return;  // набор видимых облаков не изменился - карту не трогаем
+    _lastCloudRenderSignature = renderSignature;
+    districtDemandMarkers.forEach(m => map.removeLayer(m));
+    districtDemandMarkers = [];
     // ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - "сделай объём") -
     // раньше "объём" рисовался SVG-радиальным градиентом (ensureCloudGradient),
     // который сломался при переходе на Canvas-рендеринг (см. cloudFill выше,
@@ -13738,6 +13757,13 @@ def map_webapp_html():
     if (demandCloudMarker) {{ map.removeLayer(demandCloudMarker); demandCloudMarker = null; }}
     _districtDemandCache = null;
     _districtDemandSignature = null;
+    // ДОБАВЛЕНО 25.09.2026 (см. _lastCloudRenderSignature у
+    // renderDistrictDemandClouds) - полигоны только что снесены вручную
+    // здесь, но renderDistrictDemandClouds об этом не знает и при
+    // следующем вызове может решить, что видимый набор облаков не
+    // изменился, и пропустить перерисовку - сбрасываем сигнатуру, чтобы
+    // повторное включение "📊 Спрос" гарантированно перерисовало карту.
+    _lastCloudRenderSignature = null;
   }}
   if (demandToggleBtn) {{
     demandToggleBtn.addEventListener('click', () => {{
