@@ -5288,15 +5288,24 @@ def services_keyboard(category=None, city=None, user_id=None):
         top_rows.append([KeyboardButton(text=shift_tariff_button_text(_kb_state))])
     top_rows.append([KeyboardButton(text=shift_toggle_button_text(_kb_state))])
     # "🗺 КАРТА ВОДИТЕЛЕЙ" (по просьбе пользователя, 21.09.2026) - в одном
-    # ряду с "💰 КУДА ЕХАТЬ AI ➡️", а не отдельной строкой внизу меню - открывает
-    # интерактивную WebApp-карту через web_app=WebAppInfo (единственный
-    # надёжный способ открыть кастомную веб-страницу внутри Telegram).
-    # Показывается только если PUBLIC_URL задан (Telegram требует HTTPS для
-    # WebApp - на локальном/без Public Networking запуске такой ссылки нет) и
-    # известен город (карта показывает водителей конкретного города). Сама
-    # видимость НА карте включается/выключается сменой (см. "▶️ Начать
-    # смену"/"⏹ Завершить смену" - блок "СМЕНА" ниже), кнопка тут просто
-    # открывает карту.
+    # ряду с "💰 КУДА ЕХАТЬ AI ➡️", а не отдельной строкой внизу меню.
+    # ИЗМЕНЕНО 25.09.2026 (жалоба пользователя после долгого расследования -
+    # "плашка снизу карты пишет не на смене, хотя по факту на смене" -
+    # initData на карте оказался пустым КАЖДЫЙ раз, даже через штатную
+    # кнопку, даже после полного перезапуска Telegram): нашли ту же самую
+    # проблему, что уже была задокументирована и решена для личного кабинета
+    # и "✈️🚆 АВИА/ЖД" (см. комментарий про initData.len=0 у
+    # set_cabinet_menu_button/show_transport_menu ниже) - web_app= ПРЯМО на
+    # кнопке Reply-клавиатуры НЕ передаёт initData на этом Telegram-клиенте,
+    # только выглядит как обычная кнопка карты, но по факту ломает всё, что
+    # требует подписанных данных (статус смены, тариф на смену). Раньше это
+    # не было заметно, т.к. сама карта отдавала только публичные данные без
+    # проверки подписи (см. handle_map_positions_api) - теперь на карте есть
+    # плашка с реальным статусом смены, которая как раз и вскрыла проблему.
+    # Кнопка теперь снова обычная текстовая - по нажатию хендлер
+    # show_driver_map (см. ниже, тот же рабочий паттерн, что у
+    # show_transport_menu) шлёт отдельным сообщением инлайн-кнопку с
+    # web_app= - у инлайн-кнопок initData передаётся штатно.
     # "💰 КУДА ЕХАТЬ AI ➡️" сама стала WebApp (по просьбе пользователя,
     # 21.09.2026, "и куда ехать тоже сделай миниапс") - тот же принцип, что
     # у "🌤 ПОГОДА" выше: город/категория не персональные данные (берутся из
@@ -5313,12 +5322,10 @@ def services_keyboard(category=None, city=None, user_id=None):
     else:
         where_to_go_row = [KeyboardButton(text="💰 КУДА ЕХАТЬ AI ➡️")]
     if category in MAP_CATEGORY_STYLE and PUBLIC_URL and city:
-        map_url = f"{PUBLIC_URL}{MAP_WEBAPP_PATH}?city={urllib.parse.quote(city)}&category={urllib.parse.quote(category)}"
-        # ДОБАВЛЕНО 24.09.2026 (прямая просьба пользователя, скриншот панели
-        # "Тарифы" - см. map_webapp_tariffs_param) - карта сразу открывается
-        # с фильтром по тарифам, отмеченным на старте смены (если она идёт).
-        map_url += map_webapp_tariffs_param(user_state.get(user_id, {}) if user_id is not None else {})
-        where_to_go_row.append(KeyboardButton(text="🗺 КАРТА ВОДИТЕЛЕЙ", web_app=WebAppInfo(url=map_url)))
+        # ИЗМЕНЕНО 25.09.2026 - см. подробный комментарий выше про
+        # initData.len=0: URL/тарифный параметр теперь строятся В ХЕНДЛЕРЕ
+        # show_driver_map (по нажатию), а не здесь - кнопка просто текстовая.
+        where_to_go_row.append(KeyboardButton(text="🗺 КАРТА ВОДИТЕЛЕЙ"))
     top_rows.append(where_to_go_row)
 
     # По просьбе пользователя (21.09.2026): "надо обьеденить кнопки
@@ -22374,6 +22381,48 @@ async def show_city_events(message: types.Message, user_id_override=None):
             await asyncio.sleep(0.1)
     finally:
         _skip_message_trim.reset(token)
+
+@router.message(lambda message: message.text == "🗺 КАРТА ВОДИТЕЛЕЙ")
+async def show_driver_map(message: types.Message):
+    """ИЗМЕНЕНО 25.09.2026 (жалоба пользователя - плашка внизу карты стабильно
+    писала "не на смене" даже при реально активной смене, воспроизводилось
+    КАЖДЫЙ раз, даже после полного перезапуска Telegram): расследование
+    привело к уже задокументированному ранее выводу (см. комментарий про
+    initData.len=0 у построения этой самой кнопки в services_keyboard/
+    build_reply_keyboard выше) - web_app= ПРЯМО на кнопке Reply-клавиатуры не
+    передаёт Telegram initData на этом клиенте. Раньше карта не показывала
+    эту проблему, потому что отдавала только публичные данные без проверки
+    подписи (handle_map_positions_api и т.п.) - подписанные данные (статус
+    смены, тариф на смену, свой профиль - handle_map_my_profile_api/
+    handle_map_toggle_shift_api) появились только с введением кликабельной
+    кнопки смены и плашки внизу карты, и оказались тихо сломаны с самого
+    начала.
+
+    Кнопка "🗺 КАРТА ВОДИТЕЛЕЙ" в Reply-клавиатуре теперь снова обычная
+    текстовая (см. правку в services_keyboard) - по нажатию сюда шлём
+    отдельным сообщением инлайн-кнопку с web_app= (тот же рабочий паттерн,
+    что у show_transport_menu/open_cabinet_from_menu) - у инлайн-кнопок
+    initData передаётся штатно."""
+    user_id = message.from_user.id
+    if user_id not in user_state:
+        await message.answer("Сначала выбери город!")
+        return
+    category = user_state[user_id].get('category')
+    city = user_state[user_id].get('city')
+    if category not in MAP_CATEGORY_STYLE or not PUBLIC_URL or not city:
+        await message.answer("Карта водителей сейчас недоступна для этой категории/города.")
+        return
+    map_url = f"{PUBLIC_URL}{MAP_WEBAPP_PATH}?city={urllib.parse.quote(city)}&category={urllib.parse.quote(category)}"
+    # См. комментарий у прежнего места этой строки в services_keyboard -
+    # карта сразу открывается с фильтром по тарифам, отмеченным на старте
+    # смены (если она идёт).
+    map_url += map_webapp_tariffs_param(user_state.get(user_id, {}))
+    await message.answer(
+        "🗺 КАРТА ВОДИТЕЛЕЙ",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="ОТКРЫТЬ КАРТУ", web_app=WebAppInfo(url=map_url)),
+        ]]),
+    )
 
 AIRPORT_MENU_KEYBOARD = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="📥 ПРИЛЕТЫ", callback_data="airport_arrivals")],
