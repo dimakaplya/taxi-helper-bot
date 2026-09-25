@@ -4454,7 +4454,9 @@ def _fire_and_forget(coro):
 # ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя - "оставлял на 5 минут"):
 # было 30 секунд, теперь 5 минут - больше времени прочитать сообщение,
 # прежде чем оно удалится из чата.
-DELETE_MESSAGE_DELAY_SECONDS = 300
+# ИЗМЕНЕНО 25.09.2026 (прямая просьба пользователя - "остальное удаляй через
+# 1 мин"): было 5 минут, теперь 1 минута.
+DELETE_MESSAGE_DELAY_SECONDS = 60
 
 async def _delayed_delete_message(chat_id, message_id, delay=DELETE_MESSAGE_DELAY_SECONDS):
     await asyncio.sleep(delay)
@@ -10436,6 +10438,14 @@ MAP_AIRPORTS_API_PATH = '/map/airports'
 # отдаём ничего (см. handle_map_my_profile_api).
 MAP_MY_PROFILE_API_PATH = '/map/my_profile'
 
+# ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя, прислал референс -
+# кликабельный жёлтый/серый кружок-индикатор смены с радар-анимацией внутри,
+# уточнено в диалоге: элемент в углу экрана карты, не привязан к позиции
+# водителя, тап переключает смену) - POST-эндпоинт для этого индикатора (см.
+# handle_map_toggle_shift_api ниже). Как и /map/my_profile, initData здесь
+# ОБЯЗАТЕЛЕН - это переключение РЕАЛЬНОЙ смены водителя, а не просто чтение.
+MAP_TOGGLE_SHIFT_API_PATH = '/map/toggle_shift'
+
 # ==================== ЗАПРАВКИ + ЭЛЕКТРОЗАРЯДКИ НА КАРТЕ ====================
 # ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "вынеси на карту все
 # заправки города и сделай фильтр чтоб можно было отключать/включать,
@@ -11206,12 +11216,38 @@ MAP_CHROME_CSS = """
      .legend/.legend div/.legend .dot и сам div#legend/renderLegend() ниже
      удалены вместе с этим. */
   /* ИСПРАВЛЕНО 22.09.2026 (жалоба пользователя со скриншотом - "надпись
-     наехала на плюс/минус"): у Leaflet зум-контрол (+/-) тоже стоит в
+     наехала на плюс/минус"): у Leaflet зум-контрол (+/-) тоже стоял в
      левом верхнем углу (.leaflet-top.leaflet-left), left: 10px совпадал
      с нашей жёлтой кнопкой "Показать все категории" и она перекрывала
      кнопки зума. Сдвинули кнопку правее зум-контрола (его ширина ~26px +
-     штатный отступ Leaflet ~10px от края). */
-  .filter-toggle { position: absolute; top: 10px; left: 56px; z-index: 1000; background: #FFC400; color: #000; border-radius: 8px; padding: 8px 12px; font-family: -apple-system, sans-serif; font-size: 12.5px; font-weight: 600; box-shadow: 0 1px 4px rgba(0,0,0,.35); cursor: pointer; user-select: none; text-transform: uppercase; }
+     штатный отступ Leaflet ~10px от края).
+     ИЗМЕНЕНО 25.09.2026 (прямая просьба пользователя - "кнопки + и -
+     хочу переделать и сместить их в центр слева сбоку", следом - "индикатор
+     смены переместить в левый верхний угол"): зум-контрол переехал по
+     центру левого края карты (см. .leaflet-control-zoom ниже), а левый
+     верхний угол теперь занимает круглая кнопка-индикатор смены
+     (.shift-toggle-btn, см. её блок ниже) - отступ слева увеличен с 56px
+     до 80px, чтобы жёлтая кнопка/ряд тулбара не перекрывали эту кнопку
+     (56px её ширина + 14px отступ от края + зазор). */
+  .filter-toggle { position: absolute; top: 10px; left: 80px; z-index: 1000; background: #FFC400; color: #000; border-radius: 8px; padding: 8px 12px; font-family: -apple-system, sans-serif; font-size: 12.5px; font-weight: 600; box-shadow: 0 1px 4px rgba(0,0,0,.35); cursor: pointer; user-select: none; text-transform: uppercase; }
+  /* ИЗМЕНЕНО 25.09.2026 (см. комментарий у .filter-toggle выше) - Leaflet
+     зум-контрол (+/- ) редизайн: вместо штатных белых прямоугольных кнопок
+     в левом верхнем углу - тёмные круглые кнопки (тот же визуальный язык,
+     что у .layer-toggle-btn/.shift-toggle-btn), расположены по вертикали
+     по центру у левого края карты (top:50% + translateY(-50%), а не
+     фиксированный угол). !important - у Leaflet собственные инлайновые/
+     базовые стили на .leaflet-control-zoom и вложенных <a>, иначе не
+     перебить. */
+  .leaflet-control-zoom { position: absolute !important; top: 50% !important; left: 14px !important; transform: translateY(-50%) !important; margin: 0 !important; border: none !important; box-shadow: none !important; background: transparent !important; display: flex !important; flex-direction: column !important; gap: 8px !important; }
+  .leaflet-control-zoom a, .leaflet-control-zoom a:link, .leaflet-control-zoom a:visited {
+    display: flex !important; align-items: center !important; justify-content: center !important;
+    width: 40px !important; height: 40px !important; line-height: normal !important;
+    border-radius: 50% !important; background: rgba(28,28,30,.86) !important; color: #fff !important;
+    font-size: 20px !important; font-weight: 600 !important; border: 2px solid #fff !important;
+    box-shadow: 0 2px 8px rgba(0,0,0,.4) !important; transition: transform .12s, background .2s !important;
+  }
+  .leaflet-control-zoom a:active { transform: scale(.92) !important; }
+  .leaflet-control-zoom a.leaflet-disabled { opacity: .45 !important; background: rgba(28,28,30,.5) !important; }
   .airport-icon { display: flex; align-items: center; justify-content: center; font-size: 20px; filter: drop-shadow(0 1px 2px rgba(0,0,0,.5)); }
   /* ВОЗВРАЩЕНО 22.09.2026 (прямая просьба пользователя - на карте
      оказались ДВЕ стрелки друг на друге вместо своей стрелки + кружков
@@ -11272,7 +11308,7 @@ MAP_CHROME_CSS = """
      край карты. flex-wrap: wrap - если места не хватает, лишние кнопки
      сами переносятся на вторую строку (right: 10px ограничивает ряд
      правым краем карты), а не обрезаются/наезжают на другие элементы. */
-  .map-toggles-row { position: absolute; top: 10px; left: 56px; right: 10px; z-index: 1000; display: flex; flex-direction: row; flex-wrap: wrap; align-items: flex-start; gap: 8px; }
+  .map-toggles-row { position: absolute; top: 10px; left: 80px; right: 10px; z-index: 1000; display: flex; flex-direction: row; flex-wrap: wrap; align-items: flex-start; gap: 8px; }
   .layer-toggle-btn { display: inline-block; background: #1c1c1c; color: #fff; border: 1px solid rgba(255,196,0,.4); border-radius: 8px; padding: 6px 10px; font-family: -apple-system, sans-serif; font-size: 12px; font-weight: 600; box-shadow: 0 1px 4px rgba(0,0,0,.35); cursor: pointer; user-select: none; white-space: nowrap; transition: transform .12s; }
   .layer-toggle-btn:active, .filter-toggle:active { transform: scale(.94); }
   /* ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - редизайн
@@ -11284,6 +11320,39 @@ MAP_CHROME_CSS = """
   /* ДОБАВЛЕНО 23.09.2026 (уточнение пользователя - "включи тумблер пробки") -
      подсветка кнопки "🚦 Пробки", когда слой пробок включён. */
   .layer-toggle-btn.active { background: #ffc400; color: #1c1c1c; border-color: #ffc400; }
+  /* ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя, прислал референс-
+     скриншот жёлтой круглой кнопки с иконкой питания - "такой индикатор
+     жёлтый когда водитель на линии и серый когда нет, работает от кнопки,
+     будет на карте анимация радари внутри кнопки"; уточнено в диалоге:
+     статус смены, в углу экрана карты, не привязан к позиции - кликабельная
+     кнопка, тап переключает смену) - круглая кнопка-индикатор смены.
+     Серый (#8E8E93) вне смены, жёлтый (#FFB800, тот же оттенок, что на
+     референсе) во время смены - см. shiftToggleBtn/updateShiftToggleBtnUI
+     в JS ниже.
+     ПЕРЕМЕЩЕНО 25.09.2026 (прямая просьба пользователя - "индикатор смены
+     переместить в левый верхний угол"): раньше стояла в правом нижнем
+     углу карты, теперь - в левом верхнем (top/left вместо bottom/right).
+     Этот угол освободился, т.к. штатный Leaflet зум-контрол переехал по
+     центру левого края (см. .leaflet-control-zoom выше); .filter-toggle
+     и .map-toggles-row сдвинуты правее (left:80px), чтобы не перекрываться
+     с этой кнопкой (56px ширина + 14px отступ от края + зазор). */
+  .shift-toggle-btn { position: absolute; top: 14px; left: 14px; z-index: 1000; width: 56px; height: 56px; border-radius: 50%; background: #8E8E93; border: 3px solid #fff; box-shadow: 0 2px 8px rgba(0,0,0,.45); display: flex; align-items: center; justify-content: center; cursor: pointer; user-select: none; overflow: hidden; transition: background .25s, transform .12s; }
+  .shift-toggle-btn:active { transform: scale(.93); }
+  .shift-toggle-btn.active { background: #FFB800; }
+  .shift-toggle-btn.pending { opacity: .6; pointer-events: none; }
+  .shift-toggle-btn .power-icon { position: relative; z-index: 2; width: 26px; height: 26px; filter: drop-shadow(0 1px 1px rgba(0,0,0,.35)); }
+  /* ДОБАВЛЕНО 25.09.2026 (уточнение "внутри анимация радара крутится") -
+     вращающийся conic-gradient "луч", замаскированный кругом кнопки - тот
+     же приём, что у классической радар-развёртки: полупрозрачный сектор
+     крутится вокруг центра, за пределами кнопки не виден (overflow:hidden
+     у .shift-toggle-btn). Виден и крутится ТОЛЬКО пока смена активна -
+     вне смены (серая кнопка) неподвижен и скрыт (opacity:0), чтобы не
+     наводить на мысль, что кнопка "работает", когда смены на самом деле
+     нет. */
+  .shift-toggle-btn .radar-sweep { position: absolute; inset: 0; border-radius: 50%; background: conic-gradient(from 0deg, rgba(255,255,255,.6), rgba(255,255,255,0) 40%); opacity: 0; }
+  .shift-toggle-btn.active .radar-sweep { opacity: 1; animation: shift-radar-spin 2.4s linear infinite; }
+  @keyframes shift-radar-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .shift-toggle-btn .radar-sweep { animation: none !important; } }
   .layer-toggle { display: flex; flex-direction: row; flex-wrap: wrap; gap: 4px 10px; margin-top: 6px; background: #1c1c1c; color: #fff; border: 1px solid rgba(255,196,0,.4); border-radius: 8px; padding: 6px 10px; font-family: -apple-system, sans-serif; font-size: 12px; box-shadow: 0 1px 4px rgba(0,0,0,.35); }
   .layer-toggle.collapsed { display: none; }
   .layer-toggle label { display: flex; align-items: center; gap: 5px; cursor: pointer; user-select: none; white-space: nowrap; }
@@ -11547,6 +11616,16 @@ def map_webapp_html():
        'legal_entity' (см. is_legal_entity_referrer/loadMyProfile ниже),
        не только владельцу кабинета. -->
   <div class="layer-toggle-btn" id="mineToggleBtn" style="display:none">👥 Все</div>
+</div>
+<!-- ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя, референс-скриншот -
+     жёлтый/серый круглый индикатор смены с анимацией радара, кликабельная
+     кнопка в углу экрана) - см. .shift-toggle-btn в CSS выше и
+     shiftToggleBtn/updateShiftToggleBtnUI в JS ниже. -->
+<div class="shift-toggle-btn" id="shiftToggleBtn" title="Начать/завершить смену">
+  <div class="radar-sweep"></div>
+  <svg class="power-icon" viewBox="0 0 24 24" fill="#fff">
+    <path d="M13 3h-2v10h2V3zm4.83 2.17-1.42 1.42A6.92 6.92 0 0 1 19 12c0 3.87-3.13 7-7 7s-7-3.13-7-7c0-2.24 1.06-4.32 2.83-5.65L6.41 5.17A8.936 8.936 0 0 0 3 12c0 4.97 4.03 9 9 9s9-4.03 9-9c0-2.78-1.28-5.3-3.17-6.83z"/>
+  </svg>
 </div>
 <script>
   const CATEGORY_STYLE = {style_json};
@@ -11816,6 +11895,23 @@ def map_webapp_html():
   // облаками матрицы/дождя) идёт через _redrawUnifiedDemandClouds() -
   // см. её определение и unifiedDemandMarkers ниже.
   let _airportCloudCandidates = [];
+  // ДОБАВЛЕНО 25.09.2026 (жалоба пользователя - "сильно лагает карта" после
+  // объединения облаков в _redrawUnifiedDemandClouds): renderAirports
+  // перерисовывается на КАЖДЫЙ пан/зум карты (см. map.on('moveend zoomend',
+  // ...) ниже, debounce 250мс) - раньше это было дёшево (просто иконки
+  // аэропортов), но теперь в конце функции безусловно дёргался
+  // _redrawUnifiedDemandClouds(), который заново группирует И СКЛЕИВАЕТ
+  // (turf.union) ВСЕ облака разом - аэропорты + дождь + ВСЮ матрицу спроса
+  // (а матрица - это сотни районных полигонов, при высоком спросе легко
+  // сливающихся в одно огромное облако на весь город, см. скриншот
+  // пользователя). У матрицы (_lastCloudRenderSignature) и у дождя
+  // (_rainDistrictsSignature) уже была защита "пересобирать облака, только
+  // если реально что-то изменилось" - у аэропортов её не было. Теперь
+  // сигнатура набора аэропортовых кандидатов (icao+прозрачность) сравнивается
+  // с прошлым проходом - если она не поменялась (просто подвигали карту, ни
+  // один аэропорт не появился/не пропал/не сменил load%), дорогой общий
+  // union вообще не запускается.
+  let _airportCloudSignature = null;
   let airportsLoaded = false;
   // ДОБАВЛЕНО 22.09.2026 (см. .self-icon-wrap/.self-icon-rotate выше -
   // прямая просьба пользователя показывать себя треугольником, остриё
@@ -11981,6 +12077,14 @@ def map_webapp_html():
   // handle_map_my_profile_api) и хранится про запас, но больше НЕ управляет
   // видимостью своей стрелки.
   let myShiftActive = false;
+  // ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - жёлтый/серый
+  // кликабельный индикатор смены с радар-анимацией, см. .shift-toggle-btn
+  // в CSS и div#shiftToggleBtn в HTML выше) - .active вешает жёлтый цвет +
+  // запускает вращение радара (см. CSS), снят - серый и неподвижен.
+  const shiftToggleBtn = document.getElementById('shiftToggleBtn');
+  function updateShiftToggleBtnUI() {{
+    if (shiftToggleBtn) shiftToggleBtn.classList.toggle('active', myShiftActive);
+  }}
   async function loadMyProfile() {{
     try {{
       const initData = tg ? tg.initData : '';
@@ -11989,6 +12093,7 @@ def map_webapp_html():
       if (!resp.ok) return;
       const data = await resp.json();
       myShiftActive = !!data.shift_active;
+      updateShiftToggleBtnUI();
       // ИЗМЕНЕНО 23.09.2026 (прямое уточнение пользователя - кнопка видна
       // любому с подтверждённой схемой юрлица в реферальной системе, а не
       // только владельцу кабинета - см. is_legal_entity_referrer в
@@ -12011,6 +12116,48 @@ def map_webapp_html():
     }} catch (e) {{ /* тихо - карта просто останется без попапа у своей стрелки */ }}
   }}
   loadMyProfile();
+  // ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - "кликабельная
+  // кнопка", подтверждено в диалоге) - тап переключает реальную смену
+  // (POST /map/toggle_shift, initData обязателен на сервере - см.
+  // handle_map_toggle_shift_api). .pending на время запроса защищает от
+  // повторных тапов, пока предыдущий ещё не завершился (двойной тап мог бы
+  // и начать, и сразу завершить смену, или отправить два запроса на старт
+  // тарифного экрана подряд). Сервер переиспользует ТУ ЖЕ логику, что и
+  // обычная кнопка в чате бота - если для старта нужен выбор тарифов или
+  // ещё не включена трансляция геопозиции, смена НЕ стартует сразу, а в
+  // чат уходит соответствующий экран/просьба - короткое всплывающее
+  // уведомление (tg.showAlert, либо обычный alert как запасной вариант)
+  // говорит водителю проверить чат бота в этом случае.
+  if (shiftToggleBtn) {{
+    shiftToggleBtn.addEventListener('click', async () => {{
+      if (shiftToggleBtn.classList.contains('pending')) return;
+      const initData = tg ? tg.initData : '';
+      if (!initData) return;
+      shiftToggleBtn.classList.add('pending');
+      try {{
+        const resp = await fetch('/map/toggle_shift', {{
+          method: 'POST',
+          headers: {{ 'X-Telegram-Init-Data': initData }},
+        }});
+        const data = await resp.json().catch(() => ({{}}));
+        if (!resp.ok || !data.ok) {{
+          const msg = data.reason === 'no_city' ? 'Сначала выбери город в боте' : 'Не удалось переключить смену - попробуй ещё раз';
+          if (tg && tg.showAlert) tg.showAlert(msg); else alert(msg);
+          return;
+        }}
+        myShiftActive = !!data.shift_active;
+        updateShiftToggleBtnUI();
+        if (data.opened_tariff_picker || data.awaiting_location) {{
+          const msg = data.opened_tariff_picker ? 'Выбери тарифы в чате бота, чтобы начать смену' : 'Включи трансляцию геопозиции в чате бота, чтобы начать смену';
+          if (tg && tg.showAlert) tg.showAlert(msg); else alert(msg);
+        }}
+      }} catch (e) {{
+        /* тихо - кнопка просто останется в прежнем состоянии */
+      }} finally {{
+        shiftToggleBtn.classList.remove('pending');
+      }}
+    }});
+  }}
   function updateSelfMarker(lat, lon, heading) {{
     selfLat = lat;
     selfLon = lon;
@@ -12532,6 +12679,44 @@ def map_webapp_html():
   // renderDistrictDemandClouds).
   const HIGH_DEMAND_LOAD_THRESHOLD = 70;
 
+  // ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя, прислал референс -
+  // скругленный цветной квадрат-бейдж с белым силуэтом самолёта вместо
+  // эмодзи ✈️ в качестве иконки метки аэропорта на карте) - уточнение "в
+  // трёх цветах": цвет бейджа теперь отражает статус аэропорта тем же
+  // "светофором", что уже используют STATUS_ICON/AIRPORT_STATUS_BADGE
+  // (🟢/🟡/🔴 open/coordinated/closed) - просто в виде цвета фона значка, а
+  // не отдельного эмодзи-кружка рядом. Плоский силуэт самолёта - путь
+  // стандартной иконки "flight" (Material Design), а не текстовый эмодзи -
+  // одинаково выглядит на всех платформах/шрифтах, в отличие от ✈️,
+  // который на части Android-устройств рендерится иначе, чем на iOS.
+  const AIRPORT_BADGE_COLOR = {{ open: '#34C759', coordinated: '#FFCC00', closed: '#FF3B30' }};
+  function airportBadgeIconHtml(status) {{
+    const color = AIRPORT_BADGE_COLOR[status] || AIRPORT_BADGE_COLOR.open;
+    return `<svg width="26" height="26" viewBox="0 0 26 26" xmlns="http://www.w3.org/2000/svg">` +
+      `<rect x="1" y="1" width="24" height="24" rx="7" fill="${{color}}" stroke="#fff" stroke-width="1.5"/>` +
+      `<path transform="translate(4.5,4.5) scale(0.7)" fill="#fff" ` +
+      `d="M21 16v-2l-8-5V3.5c0-.83-.67-1.5-1.5-1.5S10 2.67 10 3.5V9l-8 5v2l8-2.5V19l-2.5 1.5V22l4-1 4 1v-1.5L13 19v-5.5l8 2.5z"/>` +
+      `</svg>`;
+  }}
+
+  // ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - "жд такие же
+  // сделай", т.е. тот же стиль значка, что и у аэропортов выше, но для
+  // вокзалов) - вместо эмодзи 🚆 такой же скруглённый квадрат-бейдж с белым
+  // силуэтом поезда (путь стандартной иконки "train", Material Design).
+  // У вокзалов только ДВА состояния (см. STATION_HIGH_LOAD_THRESHOLD/symbol
+  // в renderStations - бинарная загрузка, не светофор из трёх статусов, как
+  // у аэропортов), поэтому и цветов два - зелёный/красный, те же коды, что
+  // уже использует остальной интерфейс (#34C759/#FF3B30).
+  const STATION_BADGE_COLOR = {{ high: '#34C759', low: '#FF3B30' }};
+  function stationBadgeIconHtml(isHighLoad) {{
+    const color = isHighLoad ? STATION_BADGE_COLOR.high : STATION_BADGE_COLOR.low;
+    return `<svg width="26" height="26" viewBox="0 0 26 26" xmlns="http://www.w3.org/2000/svg">` +
+      `<rect x="1" y="1" width="24" height="24" rx="7" fill="${{color}}" stroke="#fff" stroke-width="1.5"/>` +
+      `<path transform="translate(4.5,4.5) scale(0.7)" fill="#fff" ` +
+      `d="M12 2c-4.42 0-8 .5-8 4v9.5C4 17.43 5.57 19 7.5 19L6 20.5V21h12v-.5L16.5 19c1.93 0 3.5-1.57 3.5-3.5V6c0-3.5-3.58-4-8-4zM7.5 17c-.83 0-1.5-.67-1.5-1.5S6.67 14 7.5 14s1.5.67 1.5 1.5S8.33 17 7.5 17zM11 10H6V6h5v4zm2 0V6h5v4h-5zm3.5 7c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5z"/>` +
+      `</svg>`;
+  }}
+
   function renderAirports(data) {{
       airportMarkers.forEach(m => map.removeLayer(m));
       airportMarkers = [];
@@ -12539,6 +12724,10 @@ def map_webapp_html():
       // спроса аэропортов больше не рисуются тут напрямую - только
       // собираются в кэш кандидатов, сбрасываем его на новый проход.
       _airportCloudCandidates = [];
+      // ДОБАВЛЕНО 25.09.2026 (см. _airportCloudSignature выше, "лагает
+      // карта") - копим "отпечаток" набора кандидатов ЭТОГО прохода, чтобы
+      // ниже решить, нужен ли вообще дорогой _redrawUnifiedDemandClouds().
+      const airportCloudSignatureParts = [];
       const bounds = map.getBounds().pad(0.25);
       (data.airports || []).filter(a => bounds.contains([a.lat, a.lon])).forEach(a => {{
         // ИЗМЕНЕНО 21.09.2026 (прямая просьба пользователя): при высоком
@@ -12612,7 +12801,9 @@ def map_webapp_html():
             a.demand_cloud_allowed !== false && (a.status === 'open' || a.status === 'coordinated')) {{
           const cloudSeed = seedFromString(a.icao + '::' + demandCloudTimeBucket());
           const latlngs = blobLatLngs(a.lat, a.lon, HIGH_DEMAND_RADIUS_METERS, cloudSeed, AIRPORT_CLOUD_POINTS, AIRPORT_CLOUD_SEGMENTS);
-          _airportCloudCandidates.push({{ latlngs, _bbox: _cloudLatLngsBBox(latlngs), fillOpacity: highDemandBlobOpacity(a.load) }});
+          const cloudFillOpacity = highDemandBlobOpacity(a.load);
+          _airportCloudCandidates.push({{ latlngs, _bbox: _cloudLatLngsBBox(latlngs), fillOpacity: cloudFillOpacity }});
+          airportCloudSignatureParts.push(a.icao + ':' + cloudFillOpacity);
         }}
         // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "полигон для
         // карты отображения"): контуры конкретных парковок зоны (см.
@@ -12673,7 +12864,7 @@ def map_webapp_html():
           polygon.bindPopup(ppopup);
           airportMarkers.push(polygon);
         }});
-        const icon = L.divIcon({{ className: 'airport-icon', html: a.emoji || '✈️', iconSize: [26, 26] }});
+        const icon = L.divIcon({{ className: 'airport-icon airport-icon-badge', html: airportBadgeIconHtml(a.status), iconSize: [26, 26] }});
         const airportEta = etaText(a.lat, a.lon);
         let popup = `<div class="airport-popup"><h4>${{a.emoji || '✈️'}} ${{a.name}}</h4>`;
         if (airportEta) popup += `<div class="row">${{airportEta}} (~${{AVG_SPEED_KMH}} км/ч)</div>`;
@@ -12738,7 +12929,18 @@ def map_webapp_html():
       }});
       // Единая перерисовка слитых облаков спроса (матрица + дождь +
       // аэропорты) - см. _redrawUnifiedDemandClouds ниже.
-      _redrawUnifiedDemandClouds();
+      // ИЗМЕНЕНО 25.09.2026 (жалоба пользователя - "сильно лагает карта",
+      // см. _airportCloudSignature выше) - renderAirports вызывается на
+      // КАЖДЫЙ пан/зум карты; перезапускать дорогой общий union по всем
+      // источникам (матрица - потенциально сотни районных полигонов) имеет
+      // смысл, только если набор аэропортовых облаков-кандидатов реально
+      // изменился с прошлого прохода - иначе просто двигать карту само по
+      // себе заново пересчитывало union каждые ~250мс без всякой пользы.
+      const airportCloudSignature = airportCloudSignatureParts.sort().join(',');
+      if (airportCloudSignature !== _airportCloudSignature) {{
+        _airportCloudSignature = airportCloudSignature;
+        _redrawUnifiedDemandClouds();
+      }}
       airportsLoaded = true;
   }}
 
@@ -12818,8 +13020,9 @@ def map_webapp_html():
           // же фикс, единый принцип для всех типов облаков).
           stationMarkers.push(blob);
         }}
-        const icon = L.divIcon({{ className: 'airport-icon', html: '🚆', iconSize: [26, 26] }});
-        const symbol = (s.load !== null && s.load !== undefined && s.load > STATION_HIGH_LOAD_THRESHOLD) ? '🟢' : '🔴';
+        const isStationHighLoad = s.load !== null && s.load !== undefined && s.load > STATION_HIGH_LOAD_THRESHOLD;
+        const icon = L.divIcon({{ className: 'airport-icon airport-icon-badge', html: stationBadgeIconHtml(isStationHighLoad), iconSize: [26, 26] }});
+        const symbol = isStationHighLoad ? '🟢' : '🔴';
         let popup = `<div class="airport-popup"><h4>🚆 ${{s.name}}</h4>`;
         if (s.load !== null && s.load !== undefined) {{
           popup += `<div class="row">📊 Загрузка сейчас: ${{s.load}}% ${{symbol}}</div>`;
@@ -14138,6 +14341,13 @@ def map_webapp_html():
     // ДОБАВЛЕНО 25.09.2026 - облака аэропортов по загрузке (пины
     // аэропортов НЕ трогаем, только их облако) и дождевые облака.
     _airportCloudCandidates = [];
+    // ДОБАВЛЕНО 25.09.2026 (см. _airportCloudSignature у renderAirports,
+    // тот же баг, что и у _lastCloudRenderSignature выше) - без сброса
+    // сигнатуры повторное включение "📊 Спрос" могло бы не перерисовать
+    // облака аэропортов, если набор активных аэропортов не поменялся за
+    // время, пока спрос был выключен (renderAirports решит, что "ничего не
+    // изменилось" и пропустит перерисовку, хотя карту только что снесли).
+    _airportCloudSignature = null;
     if (rainCloudMarker) {{ map.removeLayer(rainCloudMarker); rainCloudMarker = null; }}
     _rainCloudCandidates = [];
     _rainDistrictsSignature = null;
@@ -15492,6 +15702,71 @@ async def handle_map_my_profile_api(request):
     except Exception:
         is_legal_entity_referrer = False
     return web.json_response({'profile': profile, 'shift_active': shift_active, 'is_legal_entity_referrer': is_legal_entity_referrer})
+
+async def handle_map_toggle_shift_api(request):
+    """POST-эндпоинт кликабельного индикатора смены на карте (см.
+    MAP_TOGGLE_SHIFT_API_PATH выше, кнопка shiftToggleBtn в map_webapp_html) -
+    прямая просьба пользователя, прислал референс-скриншот жёлтого кружка с
+    иконкой питания и радар-анимацией. initData ОБЯЗАТЕЛЕН и строго
+    проверяется - это переключение РЕАЛЬНОЙ смены, а не просто чтение
+    данных.
+
+    Намеренно НЕ дублирует логику старта/завершения смены - переиспользует
+    ровно те же функции, что и хендлер кнопки "⛔️⛔️УЙТИ С ЛИНИИ⛔️⛔️"/
+    "▶️ НАЧАТЬ СМЕНУ" в чате бота (см. toggle_shift выше), чтобы поведение
+    (проверка живой геопозиции, экран выбора тарифов, итоги смены) было
+    идентичным независимо от того, откуда водитель нажал - из чата или с
+    карты. Единственное отличие: send_func = bot.send_message(user_id, ...)
+    вместо message.answer, т.к. тут нет объекта message (запрос пришёл из
+    WebApp, не из чата) - тот же приём, что уже используется у
+    автозавершения долгих смен (см. functools.partial(bot.send_message,
+    user_id) в check_long_shifts).
+
+    Если для старта нужен экран выбора тарифов (категории с картой и
+    непустым shift_tariff_options) - смена НЕ стартует сразу, а в чат
+    уходит тот же самый экран выбора тарифов, что и при обычном старте из
+    меню - в один тап с карты стартовать смену с тарифами по умолчанию было
+    бы неверно (тарифы влияют на матрицу спроса/пуши/видимость на карте
+    другим водителям)."""
+    init_data = request.headers.get('X-Telegram-Init-Data', '')
+    if not BOT_TOKEN or not init_data:
+        return web.json_response({'ok': False, 'reason': 'no_auth'}, status=401)
+    parsed = validate_telegram_webapp_init_data(init_data, BOT_TOKEN)
+    if parsed is None:
+        logger.warning("⚠️ /map/toggle_shift: не прошла проверка initData")
+        return web.json_response({'ok': False, 'reason': 'no_auth'}, status=401)
+    try:
+        user_json = json.loads(parsed.get('user', '{}'))
+        user_id = user_json.get('id')
+    except Exception:
+        user_id = None
+    if not user_id:
+        return web.json_response({'ok': False, 'reason': 'no_auth'}, status=401)
+    state = user_state.setdefault(user_id, {})
+    category = state.get('category')
+    city = state.get('city')
+    if not city:
+        return web.json_response({'ok': False, 'reason': 'no_city'})
+    send_func = functools.partial(bot.send_message, user_id)
+    try:
+        if is_shift_active(state):
+            await finish_shift_and_notify(user_id, category, city, send_func)
+            return web.json_response({'ok': True, 'shift_active': False})
+        if category in MAP_CATEGORY_STYLE and shift_tariff_options(category):
+            state['shift_tariff_pending'] = set()
+            await send_func(
+                "🚕 В каких тарифах работаешь эту смену? Выбери один или несколько, потом нажми «▶️ Начать смену».",
+                reply_markup=shift_tariffs_keyboard(category, set()),
+            )
+            return web.json_response({'ok': True, 'shift_active': False, 'opened_tariff_picker': True})
+        fake_message = _AnswerFuncAsMessage(send_func)
+        if await require_live_location_for_shift_start(fake_message, user_id, state, tariffs=[]):
+            return web.json_response({'ok': True, 'shift_active': False, 'awaiting_location': True})
+        await start_shift_and_notify(send_func, user_id, category, city, tariffs=[])
+        return web.json_response({'ok': True, 'shift_active': True})
+    except Exception:
+        logger.exception(f"❌ /map/toggle_shift: ошибка переключения смены user_id={user_id}")
+        return web.json_response({'ok': False, 'reason': 'error'}, status=500)
 
 async def handle_map_airports_api(request):
     """JSON API для меток аэропортов на карте (по просьбе пользователя,
@@ -26176,6 +26451,7 @@ async def start_subscription_webhook_server():
     app.router.add_get(MAP_WEBAPP_PATH, handle_map_webapp)
     app.router.add_get(MAP_POSITIONS_API_PATH, handle_map_positions_api)
     app.router.add_get(MAP_MY_PROFILE_API_PATH, handle_map_my_profile_api)
+    app.router.add_post(MAP_TOGGLE_SHIFT_API_PATH, handle_map_toggle_shift_api)
     app.router.add_get(MAP_AIRPORTS_API_PATH, handle_map_airports_api)
     app.router.add_get(MAP_STATIONS_API_PATH, handle_map_stations_api)
     app.router.add_get(MAP_WEATHER_API_PATH, handle_map_weather_api)
