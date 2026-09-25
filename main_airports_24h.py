@@ -11536,9 +11536,12 @@ def map_webapp_html():
        кнопке люди включают отображение спроса на карте либо выключают его,
        по умолчанию спрос при загрузке карты включён") - тот же стиль/
        принцип, что и "🚦 Пробки" (layer-toggle-btn + .active), см.
-       demandToggleBtn ниже в JS. class="active" сразу в разметке - спрос
-       включён по умолчанию при открытии карты. -->
-  <div class="layer-toggle-btn active" id="demandToggleBtn">📊 Спрос</div>
+       demandToggleBtn ниже в JS. ИЗМЕНЕНО 25.09.2026 (прямая просьба
+       пользователя - "карта отображение при включение должна быть
+       выключена по умолчанию") - class="active" убран: спрос теперь
+       выключен по умолчанию при открытии карты, водитель включает его
+       сам тапом по кнопке (см. demandShownState в JS ниже). -->
+  <div class="layer-toggle-btn" id="demandToggleBtn">📊 Спрос</div>
   <!-- ИЗМЕНЕНО 23.09.2026 (фильтр карты "свои водители/все") - скрыта по
        умолчанию, показывается любому, у кого get_referrer_type ==
        'legal_entity' (см. is_legal_entity_referrer/loadMyProfile ниже),
@@ -11594,7 +11597,12 @@ def map_webapp_html():
   // чекбоксы дизейблятся (серые, некликабельные), пока один из отмеченных
   // не будет снят.
   const tariffKey = (cat, t) => `${{cat}}::${{t}}`;
-  const TARIFF_SELECTION_MAX = 2;
+  // ИЗМЕНЕНО 25.09.2026 (прямая просьба пользователя - "спрос только один
+  // может отображаться на карте от одного тарифа") - было 2 (лимит подняли
+  // 24.09.2026 по отдельной просьбе показывать до двух тарифов сразу),
+  // снова вернули к 1 - на карте одновременно показывается спрос только
+  // ОДНОГО тарифа, без наложения облаков разных тарифов друг на друга.
+  const TARIFF_SELECTION_MAX = 1;
   const selectedTariffs = new Set();
   const shiftTariffsParam = params.get('tariffs');
   const shiftTariffs = shiftTariffsParam ? shiftTariffsParam.split(',').filter(Boolean) : null;
@@ -11799,7 +11807,15 @@ def map_webapp_html():
   // отдельно от пина аэропорта. Теперь облако - в своём массиве, пин
   // аэропорта остаётся виден всегда (это не "спрос", это сам аэропорт),
   // гасится только облако - см. demandToggleBtn/clearDemandClouds ниже.
-  let airportDemandClouds = [];
+  // ИЗМЕНЕНО 25.09.2026 (прямая просьба пользователя - "облака спроса
+  // осадков, матрицы и аэропортов должен всегда сливаться в одно облако",
+  // уточнение - "невкоем случае не накладывается, так мы выиграем в
+  // ресурсе") - это больше не массив нарисованных L.polygon-слоёв, а кэш
+  // СЫРЫХ кандидатов ({{latlngs, _bbox, fillOpacity}}), собранных
+  // renderAirports; фактическая отрисовка (с геометрическим слиянием с
+  // облаками матрицы/дождя) идёт через _redrawUnifiedDemandClouds() -
+  // см. её определение и unifiedDemandMarkers ниже.
+  let _airportCloudCandidates = [];
   let airportsLoaded = false;
   // ДОБАВЛЕНО 22.09.2026 (см. .self-icon-wrap/.self-icon-rotate выше -
   // прямая просьба пользователя показывать себя треугольником, остриё
@@ -12519,10 +12535,10 @@ def map_webapp_html():
   function renderAirports(data) {{
       airportMarkers.forEach(m => map.removeLayer(m));
       airportMarkers = [];
-      // ДОБАВЛЕНО 25.09.2026 (см. airportDemandClouds выше) - облака
-      // спроса аэропортов теперь в своём массиве, сносим и их тут же.
-      airportDemandClouds.forEach(m => map.removeLayer(m));
-      airportDemandClouds = [];
+      // ИЗМЕНЕНО 25.09.2026 (см. _airportCloudCandidates выше) - облака
+      // спроса аэропортов больше не рисуются тут напрямую - только
+      // собираются в кэш кандидатов, сбрасываем его на новый проход.
+      _airportCloudCandidates = [];
       const bounds = map.getBounds().pad(0.25);
       (data.airports || []).filter(a => bounds.contains([a.lat, a.lon])).forEach(a => {{
         // ИЗМЕНЕНО 21.09.2026 (прямая просьба пользователя): при высоком
@@ -12583,24 +12599,20 @@ def map_webapp_html():
         // по согласованию") - добавлена проверка статуса (раньше облако не
         // смотрело на статус вообще, только на load%) + проверка
         // demandShownState ("📊 Спрос" теперь гасит и это облако тоже, см.
-        // airportDemandClouds выше).
+        // _airportCloudCandidates выше).
+        // ИЗМЕНЕНО 25.09.2026 (прямая просьба пользователя - "облака спроса
+        // осадков, матрицы и аэропортов должен всегда сливаться в одно
+        // облако... невкоем случае не накладывается, так мы выиграем в
+        // ресурсе") - больше не рисуем L.polygon тут же: копим кандидат
+        // ({{latlngs, _bbox, fillOpacity}}) в общий кэш, отрисовка (с
+        // геометрическим слиянием с облаками матрицы/дождя, если они
+        // физически пересекаются) идёт одним проходом в
+        // _redrawUnifiedDemandClouds() ниже по файлу, после этого forEach.
         if (demandShownState && a.load !== null && a.load !== undefined && a.load > HIGH_DEMAND_LOAD_THRESHOLD &&
             a.demand_cloud_allowed !== false && (a.status === 'open' || a.status === 'coordinated')) {{
           const cloudSeed = seedFromString(a.icao + '::' + demandCloudTimeBucket());
-          const blob = L.polygon(blobLatLngs(a.lat, a.lon, HIGH_DEMAND_RADIUS_METERS, cloudSeed, AIRPORT_CLOUD_POINTS, AIRPORT_CLOUD_SEGMENTS), {{
-            color: '#9b30ff',
-            weight: 0,
-            stroke: false,
-            fillColor: cloudFill('#9b30ff'),
-            fillOpacity: highDemandBlobOpacity(a.load),
-            smoothFactor: 3,
-          }}).addTo(map);
-          // УБРАНО 24.09.2026 (прямая просьба пользователя - "убери блюр с
-          // облаков"): при наложении нескольких полупрозрачных blur-облаков
-          // друг на друга (много районов/зон рядом) их края сливались в
-          // одно сплошное пятно без видимых границ - без blur края облака
-          // чуть резче, но сами облака не сливаются визуально в кашу.
-          airportDemandClouds.push(blob);
+          const latlngs = blobLatLngs(a.lat, a.lon, HIGH_DEMAND_RADIUS_METERS, cloudSeed, AIRPORT_CLOUD_POINTS, AIRPORT_CLOUD_SEGMENTS);
+          _airportCloudCandidates.push({{ latlngs, _bbox: _cloudLatLngsBBox(latlngs), fillOpacity: highDemandBlobOpacity(a.load) }});
         }}
         // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "полигон для
         // карты отображения"): контуры конкретных парковок зоны (см.
@@ -12724,6 +12736,9 @@ def map_webapp_html():
           .addTo(map);
         airportMarkers.push(marker);
       }});
+      // Единая перерисовка слитых облаков спроса (матрица + дождь +
+      // аэропорты) - см. _redrawUnifiedDemandClouds ниже.
+      _redrawUnifiedDemandClouds();
       airportsLoaded = true;
   }}
 
@@ -12879,7 +12894,10 @@ def map_webapp_html():
   // ровно в том районе, где реально начался/закончился дождь. Для
   // остальных городов (нет районных координат/своего опроса погоды) -
   // прежнее поведение без изменений (rainCloudMarker/старая ветка ниже).
-  let rainDistrictMarkers = [];
+  // ИЗМЕНЕНО 25.09.2026 (см. _airportCloudCandidates выше) - тоже больше не
+  // массив нарисованных слоёв, а кэш сырых кандидатов для общей отрисовки
+  // через _redrawUnifiedDemandClouds().
+  let _rainCloudCandidates = [];
   let _rainDistrictsSignature = null;
   function rainCloudSeed(s) {{
     let h = 11;
@@ -12923,22 +12941,23 @@ def map_webapp_html():
       const signature = JSON.stringify(districts.map(d => d.name).sort());
       if (signature === _rainDistrictsSignature) return;  // тот же набор дождящих районов - не пересобираем
       _rainDistrictsSignature = signature;
-      rainDistrictMarkers.forEach(m => map.removeLayer(m));
-      rainDistrictMarkers = [];
-      districts.forEach(d => {{
+      // ИЗМЕНЕНО 25.09.2026 (прямая просьба пользователя - "облака спроса
+      // осадков, матрицы и аэропортов должен всегда сливаться в одно
+      // облако... невкоем случае не накладывается, так мы выиграем в
+      // ресурсе") - раньше каждый район дождя рисовался своим отдельным
+      // L.polygon с тултипом по наведению; теперь копим сырые кандидаты, а
+      // отрисовку (с геометрическим слиянием, если облако района физически
+      // пересекается с облаком матрицы/аэропорта) делает
+      // _redrawUnifiedDemandClouds() одним общим проходом ниже по файлу -
+      // индивидуальный тултип с именем района при этом убран (после
+      // слияния облако может закрывать сразу несколько источников, один
+      // текст на район был бы неточен).
+      _rainCloudCandidates = districts.map(d => {{
         const seed = rainCloudSeed(city + '::' + d.name);
-        const marker = L.polygon(cityCloudLatLngs(d.lat, d.lon, RAIN_DISTRICT_CLOUD_RADIUS_METERS, seed, DISTRICT_CLOUD_POINTS, DISTRICT_CLOUD_SEGMENTS), {{
-          color: '#9b30ff',
-          weight: 0,
-          stroke: false,
-          fillColor: cloudFill('#9b30ff'),
-          fillOpacity: 0.16,
-          smoothFactor: 3,
-        }}).addTo(map);
-        // УБРАНО 24.09.2026 (см. комментарий у airportMarkers выше).
-        marker.bindTooltip(`${{d.name}} · дождь/снег сейчас`, {{ direction: 'top', offset: [0, -6], className: 'airport-label' }});
-        rainDistrictMarkers.push(marker);
+        const latlngs = cityCloudLatLngs(d.lat, d.lon, RAIN_DISTRICT_CLOUD_RADIUS_METERS, seed, DISTRICT_CLOUD_POINTS, DISTRICT_CLOUD_SEGMENTS);
+        return {{ latlngs, _bbox: _cloudLatLngsBBox(latlngs), fillOpacity: 0.16 }};
       }});
+      _redrawUnifiedDemandClouds();
     }} catch (e) {{ /* тихо */ }}
   }}
   async function loadRainCloud() {{
@@ -12947,9 +12966,9 @@ def map_webapp_html():
       await loadRainDistrictClouds();
       return;
     }}
-    rainDistrictMarkers.forEach(m => map.removeLayer(m));
-    rainDistrictMarkers = [];
+    _rainCloudCandidates = [];
     _rainDistrictsSignature = null;
+    _redrawUnifiedDemandClouds();
     try {{
       const resp = await fetch(`/map/weather?city=${{encodeURIComponent(city)}}`);
       if (!resp.ok) return;
@@ -13019,7 +13038,10 @@ def map_webapp_html():
   // ниже), а не процедурными случайными спутниками вокруг центра - свой
   // массив маркеров, отдельный от demandCloudMarker (тот используется как
   // fallback для остальных городов/категорий).
-  let districtDemandMarkers = [];
+  // ИЗМЕНЕНО 25.09.2026 (см. _airportCloudCandidates/_rainCloudCandidates
+  // выше) - тоже больше не массив нарисованных слоёв, а кэш сырых
+  // кандидатов для общей отрисовки через _redrawUnifiedDemandClouds().
+  let _matrixCloudCandidates = [];
   function demandCloudSeed(s) {{
     let h = 17;
     for (let i = 0; i < (s || '').length; i++) {{ h = (h * 31 + s.charCodeAt(i)) % 10000; }}
@@ -13394,6 +13416,89 @@ def map_webapp_html():
     return {{ geometry: merged ? (merged.geometry || merged) : null, failed }};
   }}
 
+  // ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - "облака спроса
+  // осадков, матрицы и аэропортов должен всегда сливаться в одно облако",
+  // уточнение мид-тёрн - "невкоем случае не накладывается так мы выиграем
+  // в ресурсе") - раньше три источника облака спроса (районная матрица -
+  // renderDistrictDemandClouds, дождь по районам - loadRainDistrictClouds,
+  // аэропорты - renderAirports) рисовали КАЖДЫЙ свой набор L.polygon
+  // независимо, в свой собственный массив - физически пересекающиеся
+  // облака РАЗНЫХ источников просто лежали друг на друге (два/три
+  // полупрозрачных слоя, заметная более тёмная "линза" на стыке) вместо
+  // одной слитной фигуры, и на каждый источник тратился свой bundle
+  // ресурсов (лишние полигоны на карте). Теперь у каждого источника только
+  // кэш СЫРЫХ кандидатов (_matrixCloudCandidates/_rainCloudCandidates/
+  // _airportCloudCandidates выше по файлу, формат {{latlngs, _bbox,
+  // fillOpacity}}), а фактическая отрисовка идёт ОДИН раз здесь -
+  // _groupOverlappingClouds/_unionCloudGroup (см. выше, полностью общие,
+  // без завязки на конкретный источник) вызываются на ОБЪЕДИНЁННОМ списке
+  // кандидатов из всех трёх сразу, так что физически пересекающиеся облака
+  // разных источников гарантированно склеиваются turf.union в одну фигуру
+  // (не просто рисуются рядом), а не пересекающиеся - остаются раздельными
+  // полигонами, как и раньше. Цвет у всех трёх источников и так один и тот
+  // же (DEMAND_CLOUD_COLOR, '#9b30ff') - для объединённой группы берём
+  // максимальную прозрачность (fillOpacity) среди её кандидатов, чтобы
+  // самый "плотный" источник в группе не терялся после слияния.
+  // "Объёмный" двухслойный рендер (широкий приглушённый ореол + плотное
+  // ядро с отступом внутрь через turf.buffer) - тот же приём, что раньше
+  // был только у районной матрицы (см. историю у _pushVolumeCloudPolygon
+  // ниже) - перенесён сюда на общий уровень, чтобы облака дождя/аэропортов
+  // тоже получили тот же "объём", а не плоскую заливку.
+  const CLOUD_VOLUME_INSET_KM = 0.8;
+  function _insetPolygonRings(ring, insetKm) {{
+    try {{
+      const poly = _cloudLatLngsToTurfPolygon(ring);
+      const inset = turf.buffer(poly, -insetKm, {{ units: 'kilometers' }});
+      if (!inset || !inset.geometry) return null;
+      return _turfGeometryToLatLngRings(inset.geometry);
+    }} catch (e) {{
+      return null;
+    }}
+  }}
+  let unifiedDemandMarkers = [];
+  function _pushVolumeCloudPolygon(ring, fillOpacity) {{
+    const color = DEMAND_CLOUD_COLOR;
+    const outer = L.polygon([ring], {{
+      color, weight: 0, stroke: false,
+      fillColor: color, fillOpacity: fillOpacity * 0.55,
+      smoothFactor: 3,
+    }}).addTo(map);
+    unifiedDemandMarkers.push(outer);
+    // Внутренний "отступ" может не получиться (совсем маленькое облако,
+    // вырожденная геометрия) - тогда просто остаётся один внешний слой,
+    // без ядра, а не сломанная фигура.
+    const innerRings = _insetPolygonRings(ring, CLOUD_VOLUME_INSET_KM);
+    if (innerRings) {{
+      innerRings.forEach(innerRing => {{
+        const inner = L.polygon([innerRing], {{
+          color, weight: 0, stroke: false,
+          fillColor: color, fillOpacity,
+          smoothFactor: 3,
+        }}).addTo(map);
+        unifiedDemandMarkers.push(inner);
+      }});
+    }}
+  }}
+  function _redrawUnifiedDemandClouds() {{
+    unifiedDemandMarkers.forEach(m => map.removeLayer(m));
+    unifiedDemandMarkers = [];
+    if (!demandShownState) return;
+    const all = [].concat(_matrixCloudCandidates, _rainCloudCandidates, _airportCloudCandidates);
+    if (!all.length) return;
+    _groupOverlappingClouds(all).forEach(group => {{
+      const fillOpacity = Math.max(...group.map(c => c.fillOpacity));
+      if (group.length === 1) {{
+        _pushVolumeCloudPolygon(group[0].latlngs, fillOpacity);
+        return;
+      }}
+      const {{ geometry, failed }} = _unionCloudGroup(group);
+      if (geometry) {{
+        _turfGeometryToLatLngRings(geometry).forEach(ring => _pushVolumeCloudPolygon(ring, fillOpacity));
+      }}
+      failed.forEach(ring => _pushVolumeCloudPolygon(ring, fillOpacity));
+    }});
+  }}
+
   // ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - "аэропорты делать
   // спрос только когда появляются зелёная и фиолетовые спросы", уточнено
   // через AskUserQuestion - районное облако рядом с аэропортом должно
@@ -13461,10 +13566,21 @@ def map_webapp_html():
       layer => isDemandTariffSelected(myCategory, layer.tariff)
     );
     const timeBucket = demandCloudTimeBucket();
-    // Сначала СОБИРАЕМ все проходящие порог облака по тарифам (без отрисовки),
-    // потом внутри каждого тарифа склеиваем пересекающиеся между собой (см.
-    // комментарий у _groupOverlappingClouds выше).
-    const byField = new Map();
+    // ИЗМЕНЕНО 25.09.2026 (прямая просьба пользователя - "облака спроса
+    // осадков, матрицы и аэропортов должен всегда сливаться в одно
+    // облако... невкоем случае не накладывается, так мы выиграем в
+    // ресурсе") - раньше тут же группировали (byField) и рисовали через
+    // turf.union ПРЯМО В ЭТОЙ функции, отдельно от дождя/аэропортов. Цвет и
+    // прозрачность облака матрицы (demandCloudColorByLevel/
+    // demandCloudOpacityByLevel) на практике всегда возвращают одну и ту же
+    // константу (DEMAND_CLOUD_COLOR/DEMAND_CLOUD_OPACITY) независимо от
+    // demand - "яркость по уровню" убрана в более ранней правке - так что
+    // разбивка по byField (нужная только чтобы взять maxDemand группы для
+    // цвета) больше ничего не даёт: просто копим ПЛОСКИЙ список кандидатов,
+    // а группировку/склейку/отрисовку (в т.ч. слияние с облаками дождя и
+    // аэропортов, если они физически пересекаются) делает один общий
+    // проход _redrawUnifiedDemandClouds() (см. выше по файлу).
+    const candidates = [];
     const signatureParts = [];
     // ДОБАВЛЕНО 25.09.2026 (см. _districtsWithMatrixCloudNames выше) -
     // копим имена районов, где облако реально проходит все проверки в
@@ -13501,8 +13617,7 @@ def map_webapp_html():
         matrixCloudNamesThisPass.add(d.name);
         const seed = demandCloudSeed(d.name + '::' + myCategory + '::' + layer.field + '::' + timeBucket);
         const latlngs = cityCloudLatLngs(d.lat, d.lon, DISTRICT_CLOUD_RADIUS_METERS, seed, DISTRICT_CLOUD_POINTS, DISTRICT_CLOUD_SEGMENTS);
-        if (!byField.has(layer.field)) byField.set(layer.field, []);
-        byField.get(layer.field).push({{ latlngs, demand, _bbox: _cloudLatLngsBBox(latlngs) }});
+        candidates.push({{ latlngs, _bbox: _cloudLatLngsBBox(latlngs), fillOpacity: DEMAND_CLOUD_OPACITY }});
         signatureParts.push(d.name + ':' + layer.field + ':' + demand);
       }});
     }});
@@ -13511,118 +13626,16 @@ def map_webapp_html():
     if (renderSignature === _lastCloudRenderSignature) return;  // набор видимых облаков не изменился - карту не трогаем
     _lastCloudRenderSignature = renderSignature;
     _districtsWithMatrixCloudNames = matrixCloudNamesThisPass;
-    districtDemandMarkers.forEach(m => map.removeLayer(m));
-    districtDemandMarkers = [];
-    // ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - "сделай объём") -
-    // раньше "объём" рисовался SVG-радиальным градиентом (ensureCloudGradient),
-    // который сломался при переходе на Canvas-рендеринг (см. cloudFill выше,
-    // "облака цвет неправильный"). Дешёвая замена, одинаково работающая в
-    // Canvas и SVG: два плоских слоя одного цвета друг на друге - широкий
-    // приглушённый "ореол" (сам контур облака целиком, ослабленная
-    // прозрачность) и уменьшенное к центру ядро на полной прозрачности -
-    // вместе читается как мягкое свечение вместо плоского пятна, без
-    // настоящего градиента. Стоит на порядок дешевле градиента (два flat
-    // fill вместо вычисления градиента на каждый кадр), а финальных фигур
-    // теперь немного (после склейки), так что 2× слоёв не страшно.
-    // ИСПРАВЛЕНО 25.09.2026 (жалоба пользователя со скриншотами - "нет 3д
-    // эффекта как было, нет слияние в одно облако"): первая версия "объёма"
-    // сжимала контур К ОДНОЙ СРЕДНЕЙ ТОЧКЕ (центроиду) - для маленького
-    // круглого облака одного района это ещё худо-бедно работало, но после
-    // склейки турф-юнионом облака часто превращаются в ОГРОМНУЮ вытянутую
-    // невыпуклую фигуру (в кадре у пользователя - половина Москвы одним
-    // пятном) - равномерное сжатие такой фигуры к единственной средней
-    // точке уводит часть вершин за пределы исходного контура и ломает форму
-    // (самопересечения) - именно поэтому "ядро" не было видно, и вся заливка
-    // выглядела плоской. Заменено на turf.buffer(-N км) - геометрический
-    // "отступ внутрь" контура, корректно работающий на ЛЮБОЙ форме (выпуклой,
-    // вытянутой, с несколькими частями) без искажений, т.к. следует за
-    // реальной границей фигуры, а не тянется к одной точке.
-    const CLOUD_VOLUME_INSET_KM = 0.8;
-    function _insetPolygonRings(ring, insetKm) {{
-      try {{
-        const poly = _cloudLatLngsToTurfPolygon(ring);
-        const inset = turf.buffer(poly, -insetKm, {{ units: 'kilometers' }});
-        if (!inset || !inset.geometry) return null;
-        return _turfGeometryToLatLngRings(inset.geometry);
-      }} catch (e) {{
-        return null;
-      }}
-    }}
-    function _pushVolumeCloudPolygon(ring, color, fillOpacity) {{
-      const outer = L.polygon([ring], {{
-        color, weight: 0, stroke: false,
-        fillColor: color, fillOpacity: fillOpacity * 0.55,
-        smoothFactor: 3,
-      }}).addTo(map);
-      districtDemandMarkers.push(outer);
-      // Внутренний "отступ" может не получиться (совсем маленькое облако,
-      // вырожденная геометрия) - тогда просто остаётся один внешний слой,
-      // без ядра, а не сломанная фигура.
-      const innerRings = _insetPolygonRings(ring, CLOUD_VOLUME_INSET_KM);
-      if (innerRings) {{
-        innerRings.forEach(innerRing => {{
-          const inner = L.polygon([innerRing], {{
-            color, weight: 0, stroke: false,
-            fillColor: color, fillOpacity,
-            smoothFactor: 3,
-          }}).addTo(map);
-          districtDemandMarkers.push(inner);
-        }});
-      }}
-    }}
-    // ИСПРАВЛЕНО 25.09.2026 (жалоба пользователя со скриншотами - "надо
-    // объединить в одно облако", на карте были видны разрозненные пятна со
-    // швами): раньше при неудачном union ВСЯ группа (в т.ч. успешно
-    // объединённая часть) откатывалась на массив ОТДЕЛЬНЫХ колец, переданный
-    // в ОДИН L.polygon(...) - Leaflet при таком виде входных данных (ровно 2
-    // уровня вложенности) трактует все кольца, кроме первого, как ДЫРКИ в
-    // одном полигоне, а не как отдельные фигуры - отсюда визуальные
-    // "прорехи"/швы вместо одного слитного облака. Теперь _unionCloudGroup
-    // (см. выше) возвращает {{ geometry, failed }} - geometry рисуется по
-    // частям (каждая часть - свой L.polygon, не общие "дырки"), а failed
-    // (пары, которые не удалось склеить) дорисовываются каждая отдельным
-    // полигоном того же цвета - видимых швов почти не остаётся, а то, что
-    // реально не удалось объединить, всё равно видно, а не пропадает молча.
-    byField.forEach(clouds => {{
-      _groupOverlappingClouds(clouds).forEach(group => {{
-        // Цвет/яркость объединённого облака - по САМОМУ высокому спросу в
-        // группе (сильнейший район "тянет" всю склеенную зону на себя).
-        const maxDemand = Math.max(...group.map(c => c.demand));
-        const color = demandCloudColorByLevel(maxDemand);
-        const fillOpacity = demandCloudOpacityByLevel(maxDemand);
-        if (group.length === 1) {{
-          _pushVolumeCloudPolygon(group[0].latlngs, color, fillOpacity);
-          return;
-        }}
-        const {{ geometry, failed }} = _unionCloudGroup(group);
-        if (geometry) {{
-          _turfGeometryToLatLngRings(geometry).forEach(ring => _pushVolumeCloudPolygon(ring, color, fillOpacity));
-        }}
-        failed.forEach(ring => _pushVolumeCloudPolygon(ring, color, fillOpacity));
-        // УБРАНО 23.09.2026 (прямая просьба пользователя - "не
-        // информировать при нажатие на спрос в цифрах на облоко потому
-        // что щас 1 ночи и реально нет такого спроса"): точный % из
-        // тултипа убран - число из сырой таблицы (по часу/дню недели) не
-        // всегда совпадает с реальной картиной в моменте (особенно
-        // ночью), и выглядело как "облако показывает 85%, а на деле
-        // спроса нет" - вводило в заблуждение.
-        // ЕЩЁ РАЗ УБРАНО 24.09.2026 (прямая просьба пользователя со
-        // скриншотом - "вот эти обозначения убери они тоже делают хуже
-        // карте"): и подпись "Район · Тариф" тоже убрана целиком - по
-        // тапу на облако спроса теперь вообще ничего не всплывает
-        // (bindTooltip не вызывается), сама яркость/насыщенность облака
-        // по-прежнему передаёт уровень спроса (см. demandCloudColorByLevel/
-        // demandCloudOpacityByLevel) без всплывающего текста поверх карты.
-      }});
-    }});
+    _matrixCloudCandidates = candidates;
+    _redrawUnifiedDemandClouds();
   }}
 
   async function loadDistrictDemandClouds() {{
     try {{
       const resp = await fetch(`/map/district_demand?city=${{encodeURIComponent(city)}}&category=${{encodeURIComponent(myCategory)}}`);
       if (!resp.ok) {{
-        districtDemandMarkers.forEach(m => map.removeLayer(m));
-        districtDemandMarkers = [];
+        _matrixCloudCandidates = [];
+        _redrawUnifiedDemandClouds();
         _districtDemandCache = null;
         _districtDemandSignature = null;
         return;
@@ -13679,8 +13692,8 @@ def map_webapp_html():
         await loadDistrictDemandClouds();
         return;
       }}
-      districtDemandMarkers.forEach(m => map.removeLayer(m));
-      districtDemandMarkers = [];
+      _matrixCloudCandidates = [];
+      _redrawUnifiedDemandClouds();
       const resp = await fetch(`/map/demand?city=${{encodeURIComponent(city)}}&category=${{encodeURIComponent(myCategory)}}`);
       if (!resp.ok) return;
       const data = await resp.json();
@@ -14081,7 +14094,7 @@ def map_webapp_html():
   // ДОБАВЛЕНО 24.09.2026 (прямая просьба пользователя - кнопка "📊 Спрос",
   // включает/выключает отображение облаков спроса на карте, по умолчанию
   // включено при загрузке карты) - охватывает оба вида облаков спроса:
-  // районные (renderDistrictDemandClouds/districtDemandMarkers, Москва/СПб
+  // районные (renderDistrictDemandClouds/_matrixCloudCandidates, Москва/СПб
   // такси и Ultima) и единое городское облако-фолбэк (loadDemandCloud/
   // demandCloudMarker, остальные города/категории) - см. clearDemandClouds.
   // ЕЩЁ РАЗ ИЗМЕНЕНО 25.09.2026 (прямая просьба пользователя - "по кнопке
@@ -14089,16 +14102,28 @@ def map_webapp_html():
   // матрицу спроса, все три слоя одной кнопкой, включались тоже все одной
   // кнопкой") - кнопка теперь гасит/включает ВСЕ источники фиолетовых
   // облаков спроса разом: районную матрицу, городской фолбэк, облака
-  // аэропортов по live-загрузке (airportDemandClouds - пины аэропортов
+  // аэропортов по live-загрузке (_airportCloudCandidates - пины аэропортов
   // при этом остаются видны, гасится только облако) и дождевые облака
-  // (rainCloudMarker/rainDistrictMarkers). Вокзалы (stationMarkers) НЕ
+  // (rainCloudMarker/_rainCloudCandidates). Вокзалы (stationMarkers) НЕ
   // затронуты - пользователь явно перечислил три слоя (дождь/аэропорт/
   // матрица), вокзалы среди них не назвал.
+  // ЕЩЁ РАЗ ИЗМЕНЕНО 25.09.2026 (см. unifiedDemandMarkers/
+  // _redrawUnifiedDemandClouds выше - "облака спроса осадков, матрицы и
+  // аэропортов должен всегда сливаться в одно облако") - матрица/дождь/
+  // аэропорт больше не три отдельных массива нарисованных слоёв, а три
+  // кэша сырых кандидатов + один общий массив ИТОГОВЫХ (уже слитых, где
+  // нужно) слоёв на карте - гасить/поднимать кнопкой теперь нужно только
+  // его, отдельно чистить три старых массива слоёв уже не требуется.
   const demandToggleBtn = document.getElementById('demandToggleBtn');
-  let demandShownState = true;
+  // ИЗМЕНЕНО 25.09.2026 (прямая просьба пользователя - "карта отображение
+  // при включение должна быть выключена по умолчанию") - было true (спрос
+  // сразу рисовался при каждом открытии карты); теперь по умолчанию
+  // выключено, водитель сам включает кнопкой "📊 Спрос" при необходимости -
+  // ниже по коду (`if (demandShownState) loadRainCloud()/loadDemandCloud()`)
+  // уже само ничего не загрузит первым запуском, раз состояние false.
+  let demandShownState = false;
   function clearDemandClouds() {{
-    districtDemandMarkers.forEach(m => map.removeLayer(m));
-    districtDemandMarkers = [];
+    _matrixCloudCandidates = [];
     if (demandCloudMarker) {{ map.removeLayer(demandCloudMarker); demandCloudMarker = null; }}
     _districtDemandCache = null;
     _districtDemandSignature = null;
@@ -14112,12 +14137,15 @@ def map_webapp_html():
     _districtsWithMatrixCloudNames = new Set();
     // ДОБАВЛЕНО 25.09.2026 - облака аэропортов по загрузке (пины
     // аэропортов НЕ трогаем, только их облако) и дождевые облака.
-    airportDemandClouds.forEach(m => map.removeLayer(m));
-    airportDemandClouds = [];
+    _airportCloudCandidates = [];
     if (rainCloudMarker) {{ map.removeLayer(rainCloudMarker); rainCloudMarker = null; }}
-    rainDistrictMarkers.forEach(m => map.removeLayer(m));
-    rainDistrictMarkers = [];
+    _rainCloudCandidates = [];
     _rainDistrictsSignature = null;
+    // Кандидаты у всех трёх источников обнулены выше - единый проход
+    // снесёт с карты всё, что сейчас нарисовано в unifiedDemandMarkers
+    // (сам _redrawUnifiedDemandClouds тоже уважает demandShownState -
+    // вызов ниже в любом случае просто уберёт оставшиеся слои).
+    _redrawUnifiedDemandClouds();
   }}
   if (demandToggleBtn) {{
     demandToggleBtn.addEventListener('click', () => {{
