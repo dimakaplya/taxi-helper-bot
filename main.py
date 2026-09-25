@@ -711,7 +711,7 @@ PARKING_MOVEMENT_THRESHOLD_METERS = 40
 # Сколько минут подряд без смещения больше PARKING_MOVEMENT_THRESHOLD_METERS
 # считаем "стоит на месте, похоже, припарковался" - после этого шлём пуш
 # (один раз за этот заход стоянки, см. process_parking_ping).
-PARKING_STATIONARY_MINUTES = 2.5
+PARKING_STATIONARY_MINUTES = 3.5  # ИЗМЕНЕНО 25.09.2026 (прямая просьба пользователя) - было 2.5
 # Радиус "в черте города" вокруг центра города (см. RAIN_CITY_COORDS) для
 # фичи парковки - НЕ переиспользуем никакой из радиусов "Очереди у
 # аэропорта" (AIRPORT_QUEUE_*), это независимая зона: город целиком, а не
@@ -6719,6 +6719,61 @@ async def handle_platform_report_api(request):
         user_state.setdefault(user_id, {})['tg_platform'] = platform
     return web.json_response({'ok': True})
 
+PLATFORM_PROBE_WEBAPP_PATH = '/platform/probe'
+
+def platform_probe_webapp_html():
+    """ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - "бот понимает с
+    какого устройства и предлагает сразу что нужно, а не две кнопки",
+    уточнение - захватывать платформу уже "при старте смены") - раньше
+    платформа (см. handle_platform_report_api/driver_platform_hint выше)
+    узнавалась только КАК ПОБОЧНЫЙ ЭФФЕКТ открытия обычного WebApp (карта/
+    Куда ехать/погода и т.д.) - если водитель за смену ни разу не открывал
+    ни один из них (например, сразу уехал на заказ), платформа так и
+    оставалась неизвестной, и пуши вроде "Похоже, ты припарковался"
+    показывали СРАЗУ ОБЕ кнопки (iOS/Android) - см. push_parking_reminder_alert.
+    Эта страница - минимальный, максимально незаметный "зонд": открывается
+    ОДНИМ тапом по кнопке "📲 Быстрая настройка" в сообщении "СМЕНА НАЧАТА"
+    (см. start_shift_and_notify), мгновенно шлёт /platform/report и сразу
+    же сама закрывается (Telegram.WebApp.close()) - визуально это доля
+    секунды мигания, а не отдельный "экран". Кнопка показывается ТОЛЬКО пока
+    driver_platform_hint(user_id) ещё None - как только платформа узнана
+    (отсюда или из любого другого WebApp), кнопка при следующих стартах
+    смены больше не появляется."""
+    return """<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Настройка</title>
+<script src=\"""" + TG_WEBAPP_JS_PROXY_PATH + """\"></script>
+<style>
+  :root { color-scheme: light dark; }
+  body { margin: 0; padding: 24px; font: 15px -apple-system, sans-serif; background: #111; color: #ccc; }
+</style>
+</head>
+<body>
+готово ✅
+<script>
+  var tg = window.Telegram ? window.Telegram.WebApp : null;
+  if (tg) { tg.ready(); }
+  function done() { try { if (tg) tg.close(); } catch (e) {} }
+  if (tg && tg.platform) {
+    fetch('/platform/report', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': tg.initData || '' },
+      body: JSON.stringify({ platform: tg.platform }),
+    }).catch(function(){}).then(done);
+    setTimeout(done, 800);  // на случай, если fetch зависнет - страница всё равно закроется
+  } else {
+    done();
+  }
+</script>
+</body>
+</html>"""
+
+async def handle_platform_probe_webapp(request):
+    return web.Response(text=platform_probe_webapp_html(), content_type='text/html')
+
 @router.message(lambda message: message.text == "🔄 ОТДАТЬ ЗАКАЗ")
 async def start_shared_order(message: types.Message):
     user_id = message.from_user.id
@@ -9388,6 +9443,31 @@ async def start_shift_and_notify(target, user_id, category, city, tariffs):
     # Сначала обновляем клавиатуру коротким тех.сообщением (Reply-клавиатуру
     # нельзя приложить к тому же сообщению, что инлайн-кнопка ниже).
     await target("✅ Смена начата", reply_markup=services_keyboard(category, city, user_id))
+    # ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - "бот понимает с
+    # какого устройства и предлагает сразу что нужно, а не две кнопки",
+    # уточнение - захватывать платформу уже "при старте смены") - см.
+    # platform_probe_webapp_html/PLATFORM_PROBE_WEBAPP_PATH выше. Раньше
+    # платформа узнавалась только ПОПУТНО, если водитель сам открывал
+    # какой-то WebApp за смену (карта/Куда ехать/погода) - если ни разу не
+    # открывал, пуши вроде "Похоже, ты припарковался" показывали сразу ОБЕ
+    # кнопки (iOS/Android), см. driver_platform_hint/push_parking_reminder_alert.
+    # Кнопка показывается ТОЛЬКО пока платформа ещё не известна - открывается
+    # одним тапом и сама закрывается за долю секунды (не отдельный "экран").
+    # Как только платформа узнана (отсюда или из любого другого WebApp),
+    # кнопка на следующих сменах уже не появляется.
+    if PUBLIC_URL and driver_platform_hint(user_id) is None:
+        probe_url = f"{PUBLIC_URL}{PLATFORM_PROBE_WEBAPP_PATH}"
+        probe_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📲 Быстрая настройка (1 тап)", web_app=WebAppInfo(url=probe_url))]
+        ])
+        try:
+            await target(
+                "📲 Один тап - и бот запомнит, с какого ты телефона (дальше не будет "
+                "спрашивать), чтобы в пушах сразу показывать нужную кнопку, а не обе сразу.",
+                reply_markup=probe_keyboard,
+            )
+        except Exception:
+            logger.exception(f"❌ Не удалось отправить кнопку захвата платформы user_id={user_id}")
     # ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя) - раньше сразу же
     # следом отправлялась ПОЛНАЯ сводка "Куда ехать" одним длинным
     # сообщением (см. extra_header у send_where_to_go/format_where_to_go_text
@@ -26065,6 +26145,7 @@ async def start_subscription_webhook_server():
     app.router.add_get(SHARE_ORDER_WEBAPP_PATH, handle_share_order_webapp)
     app.router.add_post(SHARE_ORDER_SUBMIT_API_PATH, handle_share_order_submit_api)
     app.router.add_post(PLATFORM_REPORT_API_PATH, handle_platform_report_api)
+    app.router.add_get(PLATFORM_PROBE_WEBAPP_PATH, handle_platform_probe_webapp)
     # Личный кабинет (см. блок "ЛИЧНЫЙ КАБИНЕТ (WebApp)" выше)
     app.router.add_get(CABINET_WEBAPP_PATH, handle_cabinet_webapp)
     app.router.add_get(CABINET_DATA_API_PATH, handle_cabinet_data_api)
