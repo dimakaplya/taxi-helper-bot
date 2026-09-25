@@ -11332,7 +11332,12 @@ MAP_CHROME_CSS = """
      содержит ничего, что могло бы сломать JS/рендер тайлов, поэтому
      применяется отдельно и осторожно, с проверкой на устройстве перед тем,
      как переходить к следующей правке. */
-  .map-toggles-row { position: absolute; top: 10px; left: 80px; right: 10px; z-index: 1000; display: flex; flex-direction: row; flex-wrap: wrap; align-items: flex-start; gap: 5px; }
+  /* ИЗМЕНЕНО 25.09.2026 (прямая просьба пользователя - "сдвинь кнопки
+     чуть правее чтобы по центру было"): добавлен justify-content:center,
+     чтобы ряд кнопок (Тарифы/Слои/Пробки/Спрос) не прижимался к левому
+     краю (сразу после кнопки смены), а центрировался в доступной ширине
+     (от left:80px до right:10px). */
+  .map-toggles-row { position: absolute; top: 10px; left: 80px; right: 10px; z-index: 1000; display: flex; flex-direction: row; flex-wrap: wrap; align-items: flex-start; justify-content: center; gap: 5px; }
   .layer-toggle-btn { display: inline-block; background: #1c1c1c; color: #fff; border: 1px solid rgba(255,196,0,.4); border-radius: 8px; padding: 5px 7px; font-family: -apple-system, sans-serif; font-size: 11px; font-weight: 600; box-shadow: 0 1px 4px rgba(0,0,0,.35); cursor: pointer; user-select: none; white-space: nowrap; transition: transform .12s; }
   .layer-toggle-btn:active, .filter-toggle:active { transform: scale(.94); }
   /* ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - редизайн
@@ -11384,6 +11389,55 @@ MAP_CHROME_CSS = """
   .shift-toggle-btn.active .radar-sweep { opacity: 1; animation: shift-radar-spin 2.4s linear infinite; }
   @keyframes shift-radar-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
   @media (prefers-reduced-motion: reduce) { .shift-toggle-btn .radar-sweep { animation: none !important; } }
+  /* ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - прислал скриншот
+     Яндекс Навигатора с тёмной плашкой снизу экрана, "сделай бар снизу
+     такой", уточнено отдельным вопросом - "просто визуальный стиль
+     карточки снизу"). У карты водителей нет активного маршрута/ETA до
+     конкретного адреса (в отличие от навигатора), поэтому НЕ копируем
+     прогресс-бар/дистанцию/время в пути - только внешний вид самой плашки
+     (тёмная, скруглённая, по центру внизу, с тенью), а внутри - город и
+     текущее время устройства (та же пара данных, что уже есть на странице
+     погоды в .city/.datetime - см. tickBottomBar в JS ниже). Позиция
+     - bottom, с учётом safe-area (низ экрана на телефоне может перекрывать
+     системная панель жестов). */
+  .bottom-info-bar {
+    position: absolute; left: 50%; bottom: max(14px, env(safe-area-inset-bottom, 0px));
+    transform: translateX(-50%); z-index: 1000; display: flex; align-items: center; gap: 8px;
+    background: rgba(20,20,20,.82); backdrop-filter: blur(8px); color: #fff;
+    border: 1px solid rgba(255,196,0,.35); border-radius: 16px; padding: 10px 16px;
+    font-family: -apple-system, sans-serif; box-shadow: 0 4px 16px rgba(0,0,0,.45);
+    pointer-events: none;
+    /* ИЗМЕНЕНО 25.09.2026 (прямая просьба пользователя - "добавь через
+       сколько дождь или дождь не ожидается", третий сегмент bib-rain ниже)
+       - было white-space:nowrap на одну строку, но с третьим сегментом
+       плашка на узких экранах (~360-400px) уже не помещается в одну
+       строку - разрешаем перенос по центру вместо обрезки/наезда на края. */
+    flex-wrap: wrap; justify-content: center; max-width: min(92vw, 420px); text-align: center;
+  }
+  .bottom-info-bar .bib-icon { font-size: 16px; }
+  .bottom-info-bar .bib-label { font-size: 13.5px; font-weight: 700; }
+  .bottom-info-bar .bib-sep { width: 1px; height: 14px; background: rgba(255,255,255,.25); }
+  .bottom-info-bar .bib-time { font-size: 13.5px; font-weight: 700; color: #FFC400; font-variant-numeric: tabular-nums; }
+  /* ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - "добавь через
+     сколько дождь или дождь не ожидается") - третий сегмент плашки, тот же
+     принцип, что и .rain-eta на странице погоды (горизонт прогноза - тоже
+     8 часов, RAIN_ETA_HORIZON_HOURS в JS ниже, для единообразия с
+     погодной страницей): жёлтый текст, когда осадки ожидаются/уже идут,
+     приглушённый белый - когда в ближайшие 8ч ничего не ожидается. */
+  .bottom-info-bar .bib-rain { font-size: 13px; font-weight: 700; color: #FFC400; }
+  .bottom-info-bar .bib-rain.calm { color: rgba(255,255,255,.75); font-weight: 500; }
+  /* ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - "и баллы пробок")
+     - 4-й сегмент плашки, баллы пробок 0-10 от официального Яндекс-виджета
+     (ymaps.traffic.provider.Actual - тот же провайдер, что уже используется
+     кнопкой "🚦 Пробки", см. updateTrafficScoreBadge в JS ниже). Скрыт по
+     умолчанию (display:none и в HTML, и здесь через модификаторы) - если
+     подложка не Яндекс (OSM-фолбэк) или провайдер ещё не прислал данные,
+     сегмент просто не появляется, без "прочерка" на пустом месте. Цвет по
+     уровню - зелёный (0-3, спокойно), жёлтый (4-6, тот же акцент, что у
+     остальной плашки), красный (7-10, серьёзные пробки). */
+  .bottom-info-bar .bib-traffic { font-size: 13px; font-weight: 700; color: #FFC400; }
+  .bottom-info-bar .bib-traffic.low { color: #4CD964; }
+  .bottom-info-bar .bib-traffic.high { color: #FF3B30; }
   .layer-toggle { display: flex; flex-direction: row; flex-wrap: wrap; gap: 4px 10px; margin-top: 6px; background: #1c1c1c; color: #fff; border: 1px solid rgba(255,196,0,.4); border-radius: 8px; padding: 6px 10px; font-family: -apple-system, sans-serif; font-size: 12px; box-shadow: 0 1px 4px rgba(0,0,0,.35); }
   .layer-toggle.collapsed { display: none; }
   .layer-toggle label { display: flex; align-items: center; gap: 5px; cursor: pointer; user-select: none; white-space: nowrap; }
@@ -11572,6 +11626,15 @@ def map_webapp_html():
     # городе, а не всегда на Москве - см. комментарий у L.map(...).setView
     # в самом JS ниже.
     city_centers_json = json.dumps(RAIN_CITY_COORDS, ensure_ascii=False)
+    # ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - "сделай бар снизу
+    # такой [как в Яндекс Навигаторе]", уточнено - "просто визуальный стиль
+    # карточки снизу", затем "текущее время на линии, текущий тариф
+    # выбранный"): тёмная плашка внизу карты (см. .bottom-info-bar в CSS
+    # ниже) с временем текущей смены и выбранными на неё тарифами - БЕЗ
+    # реального прогресс-бара маршрута, т.к. у карты водителей нет активной
+    # навигации до конкретного адреса (данных для дистанции/ETA попросту
+    # нет). Данные берутся из handle_map_my_profile_api (shift_started_at/
+    # shift_tariffs) - см. loadMyProfile/tickBottomBar в JS ниже.
     return f"""<!doctype html>
 <html lang="ru">
 <head>
@@ -11617,6 +11680,15 @@ def map_webapp_html():
 </head>
 <body>
 <div id="map"></div>
+<div class="bottom-info-bar" id="bottomInfoBar">
+  <span class="bib-icon">⏱</span><span class="bib-time" id="bibShiftTime">не на смене</span>
+  <span class="bib-sep"></span>
+  <span class="bib-icon">🚕</span><span class="bib-label" id="bibTariff">—</span>
+  <span class="bib-sep"></span>
+  <span class="bib-icon">🌧</span><span class="bib-rain" id="bibRainEta">—</span>
+  <span class="bib-sep" id="bibTrafficSep" style="display:none"></span>
+  <span class="bib-icon" id="bibTrafficIcon" style="display:none">🚦</span><span class="bib-traffic" id="bibTrafficScore" style="display:none">—</span>
+</div>
 <div class="map-toggles-row">
   <div class="tariff-toggle-wrap">
     <div class="layer-toggle-btn" id="tariffToggleBtn">🚕 Тарифы</div>
@@ -11846,6 +11918,110 @@ def map_webapp_html():
   // раза.
   const CITY_CENTERS = {city_centers_json};
   const initialCenter = CITY_CENTERS[city] || [55.7558, 37.6173];
+  // ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя, скриншот Яндекс
+  // Навигатора - "сделай бар снизу такой", уточнено - "просто визуальный
+  // стиль карточки снизу", "на нашей [карте]") - плашка внизу карты (см.
+  // .bottom-info-bar в CSS выше и #bottomInfoBar в HTML). Определение
+  // функции здесь (наверху, до объявления myShiftStartedAtMs/
+  // myShiftTariffs ниже по файлу) безопасно - это просто function
+  // declaration, тело не выполняется, пока её явно не вызовут; САМ ВЫЗОВ
+  // (tickBottomBar()/setInterval) намеренно вынесен НИЖЕ, после
+  // loadMyProfile() - см. комментарий там, иначе обращение к let-переменным
+  // до их объявления кинуло бы ReferenceError и уронило бы весь скрипт
+  // карты (temporal dead zone).
+  function formatShiftDuration(ms) {{
+    const totalMin = Math.max(0, Math.floor(ms / 60000));
+    const h = Math.floor(totalMin / 60), m = totalMin % 60;
+    return (h > 0 ? h + 'ч ' : '') + m + 'мин';
+  }}
+  function tickBottomBar() {{
+    const timeEl = document.getElementById('bibShiftTime');
+    const tariffEl = document.getElementById('bibTariff');
+    if (timeEl) {{
+      timeEl.textContent = (myShiftActive && myShiftStartedAtMs)
+        ? 'на линии ' + formatShiftDuration(Date.now() - myShiftStartedAtMs)
+        : 'не на смене';
+    }}
+    if (tariffEl) {{
+      tariffEl.textContent = (myShiftActive && myShiftTariffs.length) ? myShiftTariffs.join(', ') : '—';
+    }}
+  }}
+  // ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - "добавь через
+  // сколько дождь или дождь не ожидается") - третий сегмент плашки (см.
+  // #bibRainEta в HTML выше), тот же источник и та же логика/горизонт, что
+  // у .rain-eta на странице погоды (см. renderRainEta в weather_webapp_html)
+  // - {WEATHER_DATA_API_PATH} отдаёт current.weathercode + почасовой
+  // hourly (тот же снепшот weather_data.json, без нового похода к API).
+  // Полностью изолированный блок - собственные переменные, ничего не
+  // читает из shift/loadMyProfile/loadRainCloud и не пишет туда.
+  const RAIN_ETA_HORIZON_HOURS = 8;
+  const RAIN_ETA_CODES = new Set([
+    51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82, 95, 96, 99, // дождь/гроза
+    71, 73, 75, 77, 85, 86, // снег
+  ]);
+  const RAIN_ETA_NAMES = {{
+    51: 'морось слабая', 53: 'морось', 55: 'морось сильная', 56: 'ледяная морось слабая',
+    57: 'ледяная морось сильная', 61: 'дождь слабый', 63: 'дождь', 65: 'сильный дождь',
+    66: 'ледяной дождь слабый', 67: 'ледяной дождь сильный', 71: 'снег слабый', 73: 'снег',
+    75: 'сильный снегопад', 77: 'снежная крупа', 80: 'ливень слабый', 81: 'ливень',
+    82: 'сильный ливень', 85: 'снежный заряд слабый', 86: 'снежный заряд сильный',
+    95: 'гроза', 96: 'гроза с градом слабая', 99: 'гроза с сильным градом',
+  }};
+  function renderRainEtaBar(current, hourly) {{
+    const el = document.getElementById('bibRainEta');
+    if (!el) return;
+    const now = new Date();
+    const horizonMs = RAIN_ETA_HORIZON_HOURS * 60 * 60 * 1000;
+    if (current && RAIN_ETA_CODES.has(current.weathercode)) {{
+      el.textContent = (RAIN_ETA_NAMES[current.weathercode] || 'Осадки') + ' сейчас';
+      el.className = 'bib-rain';
+      return;
+    }}
+    let found = null;
+    (hourly || []).forEach(h => {{
+      if (found) return;
+      const t = new Date(h.time);
+      if (t <= now || (t - now) > horizonMs) return;
+      if (RAIN_ETA_CODES.has(h.weathercode)) found = {{ t: t, code: h.weathercode }};
+    }});
+    if (found) {{
+      const diffMin = Math.round((found.t - now) / 60000);
+      el.textContent = (RAIN_ETA_NAMES[found.code] || 'Осадки') + ' через ' + formatShiftDuration(diffMin * 60000);
+      el.className = 'bib-rain';
+    }} else {{
+      el.textContent = 'дождь не ожидается';
+      el.className = 'bib-rain calm';
+    }}
+  }}
+  async function loadRainEtaForBar() {{
+    try {{
+      const resp = await fetch(`{WEATHER_DATA_API_PATH}?city=${{encodeURIComponent(city)}}`);
+      if (!resp.ok) return;
+      const data = await resp.json();
+      renderRainEtaBar(data.current, data.hourly);
+    }} catch (e) {{ /* тихо - плашка просто останется с прочерком */ }}
+  }}
+  // ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - "и баллы пробок")
+  // - обновляет 4-й сегмент плашки (см. #bibTrafficScore в HTML выше и
+  // .bib-traffic в CSS выше). Вызывается из подписки на событие 'update'
+  // провайдера ymaps.traffic.provider.Actual (см. её создание ниже, там же,
+  // где уже существующая кнопка "🚦 Пробки" - НЕ трогаем саму кнопку/её
+  // клик, только слушаем данные пассивно). Полностью необязательное
+  // улучшение - если подложка не Яндекс, событие 'update' не пришло или
+  // формат ответа неожиданный, сегмент просто остаётся скрытым (display:
+  // none по умолчанию и в HTML), карта при этом не страдает.
+  function updateTrafficScoreBadge(level) {{
+    if (typeof level !== 'number' || isNaN(level)) return;
+    const sepEl = document.getElementById('bibTrafficSep');
+    const iconEl = document.getElementById('bibTrafficIcon');
+    const scoreEl = document.getElementById('bibTrafficScore');
+    if (!scoreEl) return;
+    scoreEl.textContent = Math.round(level) + '/10';
+    scoreEl.className = 'bib-traffic' + (level <= 3 ? ' low' : level >= 7 ? ' high' : '');
+    if (sepEl) sepEl.style.display = '';
+    if (iconEl) iconEl.style.display = '';
+    scoreEl.style.display = '';
+  }}
   // ИЗМЕНЕНО 25.09.2026 (прямая жалоба пользователя - "карта сильно
   // виснет") - preferCanvas: true переключает ВСЕ полигоны Leaflet (облака
   // спроса районов - их теперь по 543/264/95/48 на город, см.
@@ -11894,6 +12070,20 @@ def map_webapp_html():
       try {{
         if (window.ymaps && ymaps.traffic && ymaps.traffic.provider && yandexLayer._yandex) {{
           yandexTrafficProvider = new ymaps.traffic.provider.Actual({{}}, {{ infoLayerShown: false }});
+          // ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - "и баллы
+          // пробок") - пассивная подписка на официальное событие 'update'
+          // провайдера (см. updateTrafficScoreBadge выше) - НЕ вызывает
+          // .setMap() сама по себе, слой пробок остаётся выключен по
+          // умолчанию (как и раньше), просто читаем баллы для плашки, если
+          // провайдер их присылает независимо от видимости слоя.
+          try {{
+            yandexTrafficProvider.events.add('update', function(e) {{
+              try {{
+                const state = e.get('state');
+                if (state && typeof state.level === 'number') updateTrafficScoreBadge(state.level);
+              }} catch (e2) {{ /* тихо */ }}
+            }});
+          }} catch (e3) {{ /* тихо */ }}
         }}
       }} catch (e) {{ /* тихо */ }}
     }});
@@ -12108,6 +12298,12 @@ def map_webapp_html():
   // handle_map_my_profile_api) и хранится про запас, но больше НЕ управляет
   // видимостью своей стрелки.
   let myShiftActive = false;
+  // ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - "текущее время на
+  // линии, текущий тариф выбранный" для плашки внизу карты) - заполняются
+  // в loadMyProfile() из shift_started_at/shift_tariffs (см.
+  // handle_map_my_profile_api), читаются в tickBottomBar() ниже.
+  let myShiftStartedAtMs = null;
+  let myShiftTariffs = [];
   // ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - жёлтый/серый
   // кликабельный индикатор смены с радар-анимацией, см. .shift-toggle-btn
   // в CSS и div#shiftToggleBtn в HTML выше) - .active вешает жёлтый цвет +
@@ -12125,6 +12321,13 @@ def map_webapp_html():
       const data = await resp.json();
       myShiftActive = !!data.shift_active;
       updateShiftToggleBtnUI();
+      // ДОБАВЛЕНО 25.09.2026 - см. myShiftStartedAtMs/myShiftTariffs выше.
+      // Дата парсится ОДИН раз здесь (не на каждый тик tickBottomBar) -
+      // dSince считаем от готового timestamp в мс.
+      try {{
+        myShiftStartedAtMs = data.shift_started_at ? new Date(data.shift_started_at).getTime() : null;
+      }} catch (e) {{ myShiftStartedAtMs = null; }}
+      myShiftTariffs = Array.isArray(data.shift_tariffs) ? data.shift_tariffs : [];
       // ИЗМЕНЕНО 23.09.2026 (прямое уточнение пользователя - кнопка видна
       // любому с подтверждённой схемой юрлица в реферальной системе, а не
       // только владельцу кабинета - см. is_legal_entity_referrer в
@@ -12147,6 +12350,21 @@ def map_webapp_html():
     }} catch (e) {{ /* тихо - карта просто останется без попапа у своей стрелки */ }}
   }}
   loadMyProfile();
+  // ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - "текущее время на
+  // линии, текущий тариф выбранный" для плашки внизу карты, см.
+  // tickBottomBar/formatShiftDuration выше) - раз в секунду, чтобы таймер
+  // "на линии" тикал плавно (сами данные обновляются раз в 15с через
+  // loadMyProfile - см. setInterval(loadMyProfile,...) ниже, tickBottomBar
+  // просто пересчитывает разницу с уже известным myShiftStartedAtMs).
+  tickBottomBar();
+  setInterval(tickBottomBar, 1000);
+  // ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - "добавь через
+  // сколько дождь или дождь не ожидается") - раз в 10 минут, тот же
+  // интервал, что у живого обновления снепшота погоды на сервере
+  // (WEATHER_UPDATE_INTERVAL_MINUTES) - чаще опрашивать бессмысленно,
+  // данные всё равно не изменятся раньше.
+  loadRainEtaForBar();
+  setInterval(loadRainEtaForBar, 10 * 60 * 1000);
   // ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - "кликабельная
   // кнопка", подтверждено в диалоге) - тап переключает реальную смену
   // (POST /map/toggle_shift, initData обязателен на сервере - см.
@@ -14574,6 +14792,20 @@ def weather_webapp_html():
   .now .emoji { font-size: 72px; line-height: 1; filter: drop-shadow(0 4px 10px rgba(0,0,0,.2)); }
   .now .temp { font-size: 64px; font-weight: 700; margin-top: 4px; font-variant-numeric: tabular-nums; color: #FFC400; text-shadow: 0 1px 6px rgba(0,0,0,.4); }
   .now .cond { font-size: 16px; opacity: .9; margin-top: 2px; }
+  /* ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - "пиши на этой
+     странице через сколько пойдет дождь чтобы понимать когда будет спрос,
+     но не позже [чем через] 8 часов прогноз") - строка-пилюля под
+     температурой/состоянием: когда начнётся ближайший дождь/снег/гроза в
+     пределах ближайших RAIN_ETA_HORIZON_HOURS часов (см. JS ниже), или что
+     осадков в этом окне не ожидается. Тот же чёрно-жёлтый стиль, что у
+     .dcard/.hcard. */
+  .rain-eta {
+    margin-top: 10px; padding: 7px 14px; border-radius: 20px;
+    background: rgba(0,0,0,.32); backdrop-filter: blur(6px);
+    border: 1px solid rgba(255,196,0,.4); font-size: 13px; font-weight: 600;
+    text-align: center; color: #FFC400;
+  }
+  .rain-eta.calm { color: #fff; opacity: .8; font-weight: 500; }
   /* ДОБАВЛЕНО 22.09.2026 (просьба пользователя - "сила ветра направления
      ветра давления") - три плашки под "сейчас": ветер (скорость+направление
      компасом), давление (переведено в мм рт.ст. - привычнее, чем гПа от
@@ -14621,6 +14853,7 @@ def weather_webapp_html():
       <div class="emoji" id="nowEmoji">🌤</div>
       <div class="temp" id="nowTemp">—</div>
       <div class="cond" id="nowCond"></div>
+      <div class="rain-eta" id="rainEta" style="display:none"></div>
       <div class="details">
         <div class="dcard"><div class="l">Ветер</div><div class="e">💨</div><div class="v" id="nowWind">—</div></div>
         <div class="dcard"><div class="l">Давление</div><div class="e">🧭</div><div class="v" id="nowPressure">—</div></div>
@@ -14669,6 +14902,71 @@ def weather_webapp_html():
     66: '🌧', 67: '🌧', 71: '🌨', 73: '🌨', 75: '❄️', 77: '🌨',
     80: '🌧', 81: '🌧', 82: '⛈', 85: '🌨', 86: '❄️', 95: '⛈', 96: '⛈', 99: '⛈',
   };
+  // ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - "ночью солнца при
+  // ясной погоде быть не может") - для кодов 0/1 ("ясно"/"малооблачно")
+  // ночью (см. isNightHour ниже, тот же принцип 21:00-06:00, что и у
+  // WEATHER_NIGHT_START_HOUR/END_HOUR в main.py, только для отображения,
+  // не для частоты опроса API) показываем луну вместо солнца - и в эмодзи
+  // "сейчас"/почасовки, и в фоновой canvas-анимации (см. draw() ниже).
+  const WEATHERCODE_EMOJI_NIGHT = { 0: '🌙', 1: '🌙' };
+  function isNightHour(hour) {
+    return hour < 6 || hour >= 21;
+  }
+  function isNightNow() {
+    return isNightHour(new Date().getHours());
+  }
+  function emojiFor(code, hour) {
+    if (isNightHour(hour) && WEATHERCODE_EMOJI_NIGHT[code]) return WEATHERCODE_EMOJI_NIGHT[code];
+    return WEATHERCODE_EMOJI[code] || '🌤';
+  }
+
+  // ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - "пиши на этой
+  // странице через сколько пойдет дождь чтобы понимать когда будет спрос,
+  // но не позже [чем через] 8 часов прогноз") - строка "через сколько
+  // осадки" под температурой (см. .rain-eta в CSS выше и #rainEta в
+  // HTML). Смотрим ТОЛЬКО в пределах ближайших RAIN_ETA_HORIZON_HOURS
+  // часов от текущего момента устройства - дальше пользователя не
+  // интересует ("не позже 8 часов"). Источник данных - тот же
+  // data.hourly, что уже приходит для почасовой ленты внизу (см. load()
+  // ниже) - нового похода к API не требуется.
+  const RAIN_ETA_HORIZON_HOURS = 8;
+  const PRECIP_CODES = new Set([
+    ...CODE_GROUPS.rain.codes, ...CODE_GROUPS.storm.codes, ...CODE_GROUPS.snow.codes,
+  ]);
+  function renderRainEta(current, hourly) {
+    const el = document.getElementById('rainEta');
+    if (!el) return;
+    const now = new Date();
+    const horizonMs = RAIN_ETA_HORIZON_HOURS * 60 * 60 * 1000;
+    if (current && PRECIP_CODES.has(current.weathercode)) {
+      el.textContent = '🌧 ' + (WEATHERCODE_NAMES[current.weathercode] || 'Осадки') + ' уже идут';
+      el.className = 'rain-eta';
+      el.style.display = 'block';
+      return;
+    }
+    let found = null;
+    (hourly || []).forEach(h => {
+      if (found) return;
+      const t = new Date(h.time);
+      if (t <= now || (t - now) > horizonMs) return;
+      if (PRECIP_CODES.has(h.weathercode)) found = { t, code: h.weathercode };
+    });
+    if (found) {
+      const diffMin = Math.round((found.t - now) / 60000);
+      const hh = Math.floor(diffMin / 60), mm = diffMin % 60;
+      const parts = [];
+      if (hh > 0) parts.push(hh + ' ч');
+      if (mm > 0 || hh === 0) parts.push(mm + ' мин');
+      const atH = String(found.t.getHours()).padStart(2, '0');
+      const atM = String(found.t.getMinutes()).padStart(2, '0');
+      el.textContent = '🌧 ' + (WEATHERCODE_NAMES[found.code] || 'Осадки') + ' через ' + parts.join(' ') + ' (в ' + atH + ':' + atM + ')';
+      el.className = 'rain-eta';
+    } else {
+      el.textContent = 'Осадков в ближайшие ' + RAIN_ETA_HORIZON_HOURS + ' ч не ожидается';
+      el.className = 'rain-eta calm';
+    }
+    el.style.display = 'block';
+  }
 
   // ДОБАВЛЕНО 22.09.2026 (просьба пользователя - "дату и текущее время") -
   // часы/дата под названием города, локальное время устройства, тикают раз
@@ -14732,8 +15030,18 @@ def weather_webapp_html():
   }
   initParticles('clear');
 
+  // ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - "ночью солнца при
+  // ясной погоде быть не может") - для группы "ясно" ночью рисуем тёмное
+  // "ночное" небо (вместо дневного голубого градиента CODE_GROUPS.clear.bg)
+  // и луну вместо крутящегося солнца с лучами - см. draw() ниже. Другие
+  // группы (облачно/дождь/гроза/снег/туман) не трогаем - их градиенты и так
+  // не зависят от времени суток и не создают того же логического
+  // противоречия ("солнце светит ночью").
+  const NIGHT_CLEAR_BG = ['#0b1830', '#1b3a63'];
+
   function draw() {
-    const [c1, c2] = CODE_GROUPS[currentGroup].bg;
+    const night = currentGroup === 'clear' && isNightNow();
+    const [c1, c2] = night ? NIGHT_CLEAR_BG : CODE_GROUPS[currentGroup].bg;
     const grad = ctx.createLinearGradient(0, 0, 0, H);
     grad.addColorStop(0, c1); grad.addColorStop(1, c2);
     ctx.fillStyle = grad;
@@ -14743,23 +15051,36 @@ def weather_webapp_html():
     if (kind === 'sun') {
       const sun = particles[0];
       const t = Date.now() / 1000;
-      ctx.save();
-      ctx.translate(sun.x, sun.y);
-      ctx.rotate(t * 0.05);
-      ctx.strokeStyle = 'rgba(255,255,255,.55)';
-      ctx.lineWidth = 3;
-      for (let i = 0; i < 12; i++) {
-        const a = (i / 12) * Math.PI * 2;
+      if (night) {
+        // Луна: без крутящихся лучей солнца - бледный диск с "вырезанным"
+        // полумесяцем (второй круг залит цветом фона, создаёт фазу луны).
         ctx.beginPath();
-        ctx.moveTo(Math.cos(a) * (sun.r + 14), Math.sin(a) * (sun.r + 14));
-        ctx.lineTo(Math.cos(a) * (sun.r + 30), Math.sin(a) * (sun.r + 30));
-        ctx.stroke();
+        ctx.fillStyle = 'rgba(255,255,255,.9)';
+        ctx.arc(sun.x, sun.y, sun.r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.beginPath();
+        ctx.fillStyle = c1;
+        ctx.arc(sun.x - sun.r * 0.42, sun.y - sun.r * 0.18, sun.r * 0.86, 0, Math.PI * 2);
+        ctx.fill();
+      } else {
+        ctx.save();
+        ctx.translate(sun.x, sun.y);
+        ctx.rotate(t * 0.05);
+        ctx.strokeStyle = 'rgba(255,255,255,.55)';
+        ctx.lineWidth = 3;
+        for (let i = 0; i < 12; i++) {
+          const a = (i / 12) * Math.PI * 2;
+          ctx.beginPath();
+          ctx.moveTo(Math.cos(a) * (sun.r + 14), Math.sin(a) * (sun.r + 14));
+          ctx.lineTo(Math.cos(a) * (sun.r + 30), Math.sin(a) * (sun.r + 30));
+          ctx.stroke();
+        }
+        ctx.restore();
+        ctx.beginPath();
+        ctx.fillStyle = 'rgba(255,255,255,.85)';
+        ctx.arc(sun.x, sun.y, sun.r, 0, Math.PI * 2);
+        ctx.fill();
       }
-      ctx.restore();
-      ctx.beginPath();
-      ctx.fillStyle = 'rgba(255,255,255,.85)';
-      ctx.arc(sun.x, sun.y, sun.r, 0, Math.PI * 2);
-      ctx.fill();
     } else if (kind === 'clouds' || kind === 'fog') {
       ctx.fillStyle = kind === 'fog' ? 'rgba(255,255,255,.25)' : 'rgba(255,255,255,.35)';
       particles.forEach(p => {
@@ -14881,9 +15202,10 @@ def weather_webapp_html():
       const group = groupFor(data.current.weathercode);
       initParticles(group);
       document.getElementById('cityName').textContent = data.district_name ? (data.city_name + ' · р-н ' + data.district_name) : (data.city_name || '');
-      document.getElementById('nowEmoji').textContent = WEATHERCODE_EMOJI[data.current.weathercode] || '🌤';
+      document.getElementById('nowEmoji').textContent = emojiFor(data.current.weathercode, new Date().getHours());
       document.getElementById('nowTemp').textContent = (data.current.temperature_2m != null ? Math.round(data.current.temperature_2m) : '—') + '°';
       document.getElementById('nowCond').textContent = WEATHERCODE_NAMES[data.current.weathercode] || '';
+      renderRainEta(data.current, data.hourly);
 
       // ДОБАВЛЕНО 22.09.2026 - ветер/давление/осадки (см. .details выше).
       const windSpeed = data.current.windspeed_10m;
@@ -14905,7 +15227,7 @@ def weather_webapp_html():
         card.className = 'hcard' + (isNow ? ' now-hour' : '');
         card.innerHTML =
           '<div class="t">' + (isNow ? 'сейчас' : d.toLocaleTimeString('ru-RU', {hour: '2-digit', minute: '2-digit'})) + '</div>' +
-          '<div class="e">' + (WEATHERCODE_EMOJI[h.weathercode] || '🌤') + '</div>' +
+          '<div class="e">' + emojiFor(h.weathercode, d.getHours()) + '</div>' +
           '<div class="v">' + (h.temperature_2m != null ? Math.round(h.temperature_2m) + '°' : '—') + '</div>';
         row.appendChild(card);
       });
@@ -15732,6 +16054,23 @@ async def handle_map_my_profile_api(request):
         shift_active = is_shift_active(user_state.get(user_id) or {})
     except Exception:
         shift_active = False
+    # ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - "текущее время на
+    # линии, текущий тариф выбранный" для плашки внизу карты, см.
+    # tickBottomBar в JS ниже) - время старта ЭТОЙ смены (чтобы клиент сам
+    # считал "сколько времени на линии" тикающим таймером, без нового
+    # запроса каждую секунду) и список тарифов, выбранных ПРИ СТАРТЕ смены
+    # (state['shift']['tariffs'], см. start_shift выше) - это точнее, чем
+    # profile['tariff'] (статичное поле из кабинета), которое может не
+    # совпадать с тем, что реально выбрано на эту смену.
+    shift_started_at = None
+    shift_tariffs = []
+    try:
+        shift = (user_state.get(user_id) or {}).get('shift')
+        if shift_active and shift:
+            shift_started_at = shift.get('started_at')
+            shift_tariffs = shift.get('tariffs') or []
+    except Exception:
+        pass
     # ИЗМЕНЕНО 23.09.2026 (прямое уточнение пользователя - "тумблер свои/все
     # виден только тогда, когда подтверждена схема юрлица в реферальной
     # системе", а НЕ только у владельца кабинета) - раньше проверялось
@@ -15743,7 +16082,10 @@ async def handle_map_my_profile_api(request):
         is_legal_entity_referrer = get_referrer_type(user_id) == 'legal_entity'
     except Exception:
         is_legal_entity_referrer = False
-    return web.json_response({'profile': profile, 'shift_active': shift_active, 'is_legal_entity_referrer': is_legal_entity_referrer})
+    return web.json_response({
+        'profile': profile, 'shift_active': shift_active, 'is_legal_entity_referrer': is_legal_entity_referrer,
+        'shift_started_at': shift_started_at, 'shift_tariffs': shift_tariffs,
+    })
 
 async def handle_map_toggle_shift_api(request):
     """POST-эндпоинт кликабельного индикатора смены на карте (см.
