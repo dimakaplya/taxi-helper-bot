@@ -10453,6 +10453,19 @@ MAP_MY_PROFILE_API_PATH = '/map/my_profile'
 # ОБЯЗАТЕЛЕН - это переключение РЕАЛЬНОЙ смены водителя, а не просто чтение.
 MAP_TOGGLE_SHIFT_API_PATH = '/map/toggle_shift'
 
+# ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - "сделай выбор тарифа с
+# карты прям") - раньше, если для старта смены требовался выбор тарифов
+# (shift_tariff_options(category) непустой), /map/toggle_shift просто слал
+# экран выбора тарифов В ЧАТ БОТА и просил водителя переключиться туда - см.
+# tariff_options в ответе handle_map_toggle_shift_api ниже (список тарифов,
+# по нему клиент рисует свою карточку выбора ПРЯМО НА КАРТЕ, см.
+# tariffPickerOverlay/openTariffPicker в JS ниже, список тех же тарифов уже
+# есть на клиенте в TARIFF_OPTIONS[myCategory].tariffs, отдельный API не
+# нужен). Этот эндпоинт - подтверждение выбора: список тарифов из карточки
+# приходит в теле запроса, initData ОБЯЗАТЕЛЕН по той же причине, что и у
+# /map/toggle_shift (реальный старт смены, не чтение данных).
+MAP_START_SHIFT_API_PATH = '/map/start_shift'
+
 # ==================== ЗАПРАВКИ + ЭЛЕКТРОЗАРЯДКИ НА КАРТЕ ====================
 # ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "вынеси на карту все
 # заправки города и сделай фильтр чтоб можно было отключать/включать,
@@ -11378,9 +11391,13 @@ MAP_CHROME_CSS = """
      крутящийся радар-луч, независимо от реального статуса смены - это
      чисто визуальное изменение, JS-логика клика и статус смены не
      затронуты (.active/.pending классы по-прежнему навешиваются JS как
-     раньше, просто больше не меняют внешний вид, т.к. и то, и другое
-     состояние теперь выглядит одинаково - жёлтым). */
-  .shift-toggle-btn { position: absolute; top: 14px; left: 14px; z-index: 1000; width: 56px; height: 56px; border-radius: 50%; background: #FFB800; border: 3px solid #fff; box-shadow: 0 2px 8px rgba(0,0,0,.45); display: flex; align-items: center; justify-content: center; cursor: pointer; user-select: none; overflow: hidden; transition: background .25s, transform .12s; }
+     раньше). ОТМЕНЕНО 25.09.2026 (прямая новая просьба пользователя -
+     "серый когда не на смене, жёлтый когда на смене") - цвет кружка снова
+     отражает реальный статус смены: серый по умолчанию (.active ещё не
+     навешен, т.е. смена не идёт), жёлтый при .active (смена идёт).
+     Радар-луч по-прежнему крутится всегда (это отдельная, не отменяемая
+     просьба) - меняется только background. */
+  .shift-toggle-btn { position: absolute; top: 14px; left: 14px; z-index: 1000; width: 56px; height: 56px; border-radius: 50%; background: #8a8a8a; border: 3px solid #fff; box-shadow: 0 2px 8px rgba(0,0,0,.45); display: flex; align-items: center; justify-content: center; cursor: pointer; user-select: none; overflow: hidden; transition: background .25s, transform .12s; }
   .shift-toggle-btn:active { transform: scale(.93); }
   .shift-toggle-btn.active { background: #FFB800; }
   .shift-toggle-btn.pending { opacity: .6; pointer-events: none; }
@@ -11396,6 +11413,24 @@ MAP_CHROME_CSS = """
   .shift-toggle-btn.active .radar-sweep { opacity: 1; animation: shift-radar-spin 2.4s linear infinite; }
   @keyframes shift-radar-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
   @media (prefers-reduced-motion: reduce) { .shift-toggle-btn .radar-sweep { animation: none !important; } }
+  /* ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - "сделай выбор
+     тарифа с картой прям") - карточка выбора тарифов ПРЯМО НА КАРТЕ вместо
+     ухода в чат бота (см. openTariffPicker/closeTariffPicker в JS ниже,
+     handle_map_toggle_shift_api/handle_map_start_shift_api на сервере).
+     Полноэкранная тёмная подложка (тап мимо карточки = отмена) + сама
+     карточка снизу, тот же тёмный стиль, что у .bottom-info-bar, но
+     pointer-events:auto (в отличие от неё) - карточка интерактивна. */
+  .tariff-picker-overlay { position: absolute; inset: 0; z-index: 2000; background: rgba(0,0,0,.55); display: flex; align-items: flex-end; justify-content: center; }
+  .tariff-picker-card { width: 100%; max-width: 480px; background: #1c1c1c; color: #fff; border-top-left-radius: 18px; border-top-right-radius: 18px; border: 1px solid rgba(255,196,0,.4); border-bottom: none; padding: 18px 18px calc(18px + env(safe-area-inset-bottom, 0px)); font-family: -apple-system, sans-serif; box-shadow: 0 -4px 20px rgba(0,0,0,.5); box-sizing: border-box; }
+  .tariff-picker-card h3 { margin: 0 0 12px; font-size: 16px; font-weight: 700; }
+  .tariff-picker-list { display: flex; flex-direction: column; gap: 2px; max-height: 42vh; overflow-y: auto; }
+  .tariff-picker-list label { display: flex; align-items: center; gap: 10px; padding: 11px 4px; font-size: 15px; border-bottom: 1px solid rgba(255,255,255,.08); }
+  .tariff-picker-list input { width: 19px; height: 19px; accent-color: #FFB800; }
+  .tariff-picker-actions { display: flex; gap: 10px; margin-top: 16px; }
+  .tariff-picker-actions button { flex: 1; border: none; border-radius: 10px; padding: 13px; font-size: 15px; font-weight: 700; font-family: inherit; cursor: pointer; }
+  .tariff-picker-cancel { background: #333; color: #fff; }
+  .tariff-picker-confirm { background: #FFB800; color: #1c1c1c; }
+  .tariff-picker-confirm:disabled { opacity: .45; cursor: default; }
   /* ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - прислал скриншот
      Яндекс Навигатора с тёмной плашкой снизу экрана, "сделай бар снизу
      такой", уточнено отдельным вопросом - "просто визуальный стиль
@@ -11408,8 +11443,14 @@ MAP_CHROME_CSS = """
      - bottom, с учётом safe-area (низ экрана на телефоне может перекрывать
      системная панель жестов). */
   .bottom-info-bar {
-    position: absolute; left: 50%; bottom: max(14px, env(safe-area-inset-bottom, 0px));
-    transform: translateX(-50%); z-index: 1000; display: flex; align-items: center; gap: 8px;
+    /* ИЗМЕНЕНО 25.09.2026 (прямая просьба пользователя - "растяни нижний
+       бар в ширину") - раньше была узкая плашка-"таблетка" по центру
+       (left:50% + transform + max-width:min(92vw,420px)), теперь растянута
+       на всю ширину экрана с равными отступами по бокам (left/right вместо
+       центрирования transform'ом), сегменты разъезжаются по всей ширине
+       (justify-content: space-around вместо center). */
+    position: absolute; left: 12px; right: 12px; bottom: max(14px, env(safe-area-inset-bottom, 0px));
+    z-index: 1000; display: flex; align-items: center; gap: 8px;
     background: rgba(20,20,20,.82); backdrop-filter: blur(8px); color: #fff;
     border: 1px solid rgba(255,196,0,.35); border-radius: 16px; padding: 10px 16px;
     font-family: -apple-system, sans-serif; box-shadow: 0 4px 16px rgba(0,0,0,.45);
@@ -11419,7 +11460,7 @@ MAP_CHROME_CSS = """
        - было white-space:nowrap на одну строку, но с третьим сегментом
        плашка на узких экранах (~360-400px) уже не помещается в одну
        строку - разрешаем перенос по центру вместо обрезки/наезда на края. */
-    flex-wrap: wrap; justify-content: center; max-width: min(92vw, 420px); text-align: center;
+    flex-wrap: wrap; justify-content: space-around; width: auto; text-align: center;
   }
   .bottom-info-bar .bib-icon { font-size: 16px; }
   .bottom-info-bar .bib-label { font-size: 13.5px; font-weight: 700; }
@@ -11694,7 +11735,7 @@ def map_webapp_html():
 <body>
 <div id="map"></div>
 <div class="bottom-info-bar" id="bottomInfoBar">
-  <span class="bib-icon">⏱</span><span class="bib-time" id="bibShiftTime">не на смене</span>
+  <span class="bib-icon">⏱</span><span class="bib-time" id="bibShiftTime">не на линии</span>
   <span class="bib-sep"></span>
   <span class="bib-icon">🚕</span><span class="bib-label" id="bibTariff">—</span>
   <span class="bib-sep"></span>
@@ -11742,6 +11783,19 @@ def map_webapp_html():
   <svg class="power-icon" viewBox="0 0 24 24" fill="#fff">
     <path d="M13 3h-2v10h2V3zm4.83 2.17-1.42 1.42A6.92 6.92 0 0 1 19 12c0 3.87-3.13 7-7 7s-7-3.13-7-7c0-2.24 1.06-4.32 2.83-5.65L6.41 5.17A8.936 8.936 0 0 0 3 12c0 4.97 4.03 9 9 9s9-4.03 9-9c0-2.78-1.28-5.3-3.17-6.83z"/>
   </svg>
+</div>
+<!-- ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - "сделай выбор
+     тарифа с карты прям") - см. .tariff-picker-overlay в CSS выше и
+     openTariffPicker/closeTariffPicker в JS ниже. -->
+<div class="tariff-picker-overlay" id="tariffPickerOverlay" style="display:none">
+  <div class="tariff-picker-card">
+    <h3>🚕 В каких тарифах работаешь эту смену?</h3>
+    <div class="tariff-picker-list" id="tariffPickerList"></div>
+    <div class="tariff-picker-actions">
+      <button type="button" class="tariff-picker-cancel" id="tariffPickerCancel">Отмена</button>
+      <button type="button" class="tariff-picker-confirm" id="tariffPickerConfirm" disabled>▶️ Начать смену</button>
+    </div>
+  </div>
 </div>
 <script>
   const CATEGORY_STYLE = {style_json};
@@ -11958,7 +12012,7 @@ def map_webapp_html():
       // исключение) прямо на скриншоте с телефона, без консоли браузера.
       timeEl.textContent = (myShiftActive && myShiftStartedAtMs)
         ? 'на линии ' + formatShiftDuration(Date.now() - myShiftStartedAtMs)
-        : 'не на смене [' + myProfileDiagState + ']';
+        : 'не на линии [' + myProfileDiagState + ']';
     }}
     if (tariffEl) {{
       tariffEl.textContent = (myShiftActive && myShiftTariffs.length) ? myShiftTariffs.join(', ') : '—';
@@ -12424,18 +12478,97 @@ def map_webapp_html():
   // данные всё равно не изменятся раньше.
   loadRainEtaForBar();
   setInterval(loadRainEtaForBar, 10 * 60 * 1000);
+  // ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - "сделай выбор
+  // тарифа с карты прям") - карточка выбора тарифов прямо на карте (см.
+  // .tariff-picker-overlay в CSS выше, #tariffPickerOverlay/
+  // #tariffPickerList/#tariffPickerConfirm/#tariffPickerCancel в HTML
+  // выше). Список тарифов уже есть на клиенте в TARIFF_OPTIONS[myCategory]
+  // (тот же источник, что и на сервере - CATEGORIES[cat]['tariffs']),
+  // отдельный запрос за списком не нужен - сервер лишь ПОДТВЕРЖДАЕТ
+  // готовые тарифы через /map/start_shift (handle_map_start_shift_api),
+  // заново фильтруя их по своему собственному списку (белый список,
+  // клиенту не доверяем).
+  const tariffPickerOverlay = document.getElementById('tariffPickerOverlay');
+  const tariffPickerList = document.getElementById('tariffPickerList');
+  const tariffPickerCancel = document.getElementById('tariffPickerCancel');
+  const tariffPickerConfirm = document.getElementById('tariffPickerConfirm');
+  function openTariffPicker(tariffs) {{
+    if (!tariffPickerOverlay || !tariffPickerList || !tariffPickerConfirm) return;
+    tariffPickerList.innerHTML = tariffs.map((label, idx) => (
+      `<label><input type="checkbox" data-tariff-idx="${{idx}}"> ${{label}}</label>`
+    )).join('');
+    tariffPickerConfirm.disabled = true;
+    tariffPickerOverlay.style.display = 'flex';
+    tariffPickerList.querySelectorAll('input[type=checkbox]').forEach(cb => {{
+      cb.addEventListener('change', () => {{
+        tariffPickerConfirm.disabled = !tariffPickerList.querySelector('input[type=checkbox]:checked');
+      }});
+    }});
+  }}
+  function closeTariffPicker() {{
+    if (tariffPickerOverlay) tariffPickerOverlay.style.display = 'none';
+  }}
+  if (tariffPickerCancel) tariffPickerCancel.addEventListener('click', closeTariffPicker);
+  // Тап по тёмной подложке мимо карточки = тоже отмена (тот же приём, что
+  // у панелей "Тарифы"/"Слои" - клик наружи закрывает панель).
+  if (tariffPickerOverlay) {{
+    tariffPickerOverlay.addEventListener('click', (e) => {{
+      if (e.target === tariffPickerOverlay) closeTariffPicker();
+    }});
+  }}
+  if (tariffPickerConfirm) {{
+    tariffPickerConfirm.addEventListener('click', async () => {{
+      if (tariffPickerConfirm.disabled || tariffPickerConfirm.classList.contains('pending')) return;
+      const initData = tg ? tg.initData : '';
+      if (!initData) return;
+      const checked = Array.from(tariffPickerList.querySelectorAll('input[type=checkbox]:checked'))
+        .map(cb => TARIFF_OPTIONS[myCategory].tariffs[parseInt(cb.dataset.tariffIdx, 10)]);
+      tariffPickerConfirm.classList.add('pending');
+      tariffPickerConfirm.disabled = true;
+      try {{
+        const resp = await fetch('/map/start_shift', {{
+          method: 'POST',
+          headers: {{ 'X-Telegram-Init-Data': initData, 'Content-Type': 'application/json' }},
+          body: JSON.stringify({{ tariffs: checked }}),
+        }});
+        const data = await resp.json().catch(() => ({{}}));
+        if (!resp.ok || !data.ok) {{
+          const msg = data.reason === 'tariffs_required' ? 'Отметь хотя бы один тариф' : 'Не удалось начать смену - попробуй ещё раз';
+          if (tg && tg.showAlert) tg.showAlert(msg); else alert(msg);
+          tariffPickerConfirm.disabled = false;
+          return;
+        }}
+        closeTariffPicker();
+        if (data.awaiting_location) {{
+          const msg = 'Включи трансляцию геопозиции в чате бота, чтобы начать смену';
+          if (tg && tg.showAlert) tg.showAlert(msg); else alert(msg);
+          return;
+        }}
+        // ДОБАВЛЕНО 25.09.2026 - обновляем плашку/кнопку сразу же, не дожидаясь
+        // очередного 15-секундного опроса (см. setInterval(loadMyProfile,...)
+        // ниже) - loadMyProfile() уже сама выставляет myShiftActive/
+        // myShiftStartedAtMs/myShiftTariffs и вызывает updateShiftToggleBtnUI.
+        loadMyProfile();
+      }} catch (e) {{
+        /* тихо - карточка просто закрыта, водитель может повторить тап по кружку */
+      }} finally {{
+        tariffPickerConfirm.classList.remove('pending');
+      }}
+    }});
+  }}
   // ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - "кликабельная
   // кнопка", подтверждено в диалоге) - тап переключает реальную смену
   // (POST /map/toggle_shift, initData обязателен на сервере - см.
   // handle_map_toggle_shift_api). .pending на время запроса защищает от
   // повторных тапов, пока предыдущий ещё не завершился (двойной тап мог бы
-  // и начать, и сразу завершить смену, или отправить два запроса на старт
-  // тарифного экрана подряд). Сервер переиспользует ТУ ЖЕ логику, что и
-  // обычная кнопка в чате бота - если для старта нужен выбор тарифов или
-  // ещё не включена трансляция геопозиции, смена НЕ стартует сразу, а в
-  // чат уходит соответствующий экран/просьба - короткое всплывающее
-  // уведомление (tg.showAlert, либо обычный alert как запасной вариант)
-  // говорит водителю проверить чат бота в этом случае.
+  // и начать, и сразу завершить смену, или отправить два запроса подряд).
+  // Сервер переиспользует ТУ ЖЕ логику, что и обычная кнопка в чате бота -
+  // если для старта нужен выбор тарифов, сервер отдаёт tariff_options и
+  // карта сама показывает карточку выбора (см. openTariffPicker выше,
+  // ИЗМЕНЕНО 25.09.2026 - раньше уходило в чат бота); если не хватает
+  // только живой геопозиции - короткое всплывающее уведомление
+  // (tg.showAlert, либо обычный alert как запасной вариант) просит
+  // включить её в чате бота.
   if (shiftToggleBtn) {{
     shiftToggleBtn.addEventListener('click', async () => {{
       if (shiftToggleBtn.classList.contains('pending')) return;
@@ -12455,8 +12588,12 @@ def map_webapp_html():
         }}
         myShiftActive = !!data.shift_active;
         updateShiftToggleBtnUI();
-        if (data.opened_tariff_picker || data.awaiting_location) {{
-          const msg = data.opened_tariff_picker ? 'Выбери тарифы в чате бота, чтобы начать смену' : 'Включи трансляцию геопозиции в чате бота, чтобы начать смену';
+        if (data.tariff_options && data.tariff_options.length) {{
+          openTariffPicker(data.tariff_options);
+          return;
+        }}
+        if (data.awaiting_location) {{
+          const msg = 'Включи трансляцию геопозиции в чате бота, чтобы начать смену';
           if (tg && tg.showAlert) tg.showAlert(msg); else alert(msg);
         }}
       }} catch (e) {{
@@ -16209,12 +16346,18 @@ async def handle_map_toggle_shift_api(request):
             await finish_shift_and_notify(user_id, category, city, send_func)
             return web.json_response({'ok': True, 'shift_active': False})
         if category in MAP_CATEGORY_STYLE and shift_tariff_options(category):
-            state['shift_tariff_pending'] = set()
-            await send_func(
-                "🚕 В каких тарифах работаешь эту смену? Выбери один или несколько, потом нажми «▶️ Начать смену».",
-                reply_markup=shift_tariffs_keyboard(category, set()),
-            )
-            return web.json_response({'ok': True, 'shift_active': False, 'opened_tariff_picker': True})
+            # ИЗМЕНЕНО 25.09.2026 (прямая просьба пользователя - "сделай выбор
+            # тарифа с карты прям") - раньше тут слался экран выбора тарифов
+            # В ЧАТ (shift_tariffs_keyboard) и водителя просили переключиться
+            # туда. Теперь вместо отправки сообщения в чат просто отдаём
+            # список тарифов клиенту - карта рисует свою карточку выбора ПРЯМО
+            # ПОВЕРХ КАРТЫ (см. tariff_options в ответе, openTariffPicker в
+            # JS ниже) и подтверждает выбор отдельным запросом на
+            # MAP_START_SHIFT_API_PATH ниже.
+            return web.json_response({
+                'ok': True, 'shift_active': False,
+                'tariff_options': shift_tariff_options(category),
+            })
         fake_message = _AnswerFuncAsMessage(send_func)
         if await require_live_location_for_shift_start(fake_message, user_id, state, tariffs=[]):
             return web.json_response({'ok': True, 'shift_active': False, 'awaiting_location': True})
@@ -16222,6 +16365,64 @@ async def handle_map_toggle_shift_api(request):
         return web.json_response({'ok': True, 'shift_active': True})
     except Exception:
         logger.exception(f"❌ /map/toggle_shift: ошибка переключения смены user_id={user_id}")
+        return web.json_response({'ok': False, 'reason': 'error'}, status=500)
+
+async def handle_map_start_shift_api(request):
+    """POST-эндпоинт подтверждения выбора тарифов с карты (см.
+    MAP_START_SHIFT_API_PATH выше, tariffPickerOverlay/openTariffPicker в
+    JS map_webapp_html) - вызывается ПОСЛЕ того, как /map/toggle_shift
+    вернул tariff_options (то есть для старта смены этой категории нужен
+    выбор тарифов) и водитель отметил тарифы прямо в карточке на карте.
+    initData ОБЯЗАТЕЛЕН - реальный старт смены, не чтение данных. Список
+    тарифов из тела запроса ОБЯЗАТЕЛЬНО фильтруется по
+    shift_tariff_options(category) (белый список) - тело запроса из
+    браузера, доверять произвольным строкам в нём нельзя.
+
+    Переиспользует ту же require_live_location_for_shift_start/
+    start_shift_and_notify логику, что и обычный старт из чата бота и
+    handle_map_toggle_shift_api выше - см. комментарий там про send_func =
+    bot.send_message(user_id, ...) вместо message.answer."""
+    init_data = request.headers.get('X-Telegram-Init-Data', '')
+    if not BOT_TOKEN or not init_data:
+        return web.json_response({'ok': False, 'reason': 'no_auth'}, status=401)
+    parsed = validate_telegram_webapp_init_data(init_data, BOT_TOKEN)
+    if parsed is None:
+        logger.warning("⚠️ /map/start_shift: не прошла проверка initData")
+        return web.json_response({'ok': False, 'reason': 'no_auth'}, status=401)
+    try:
+        user_json = json.loads(parsed.get('user', '{}'))
+        user_id = user_json.get('id')
+    except Exception:
+        user_id = None
+    if not user_id:
+        return web.json_response({'ok': False, 'reason': 'no_auth'}, status=401)
+    state = user_state.setdefault(user_id, {})
+    category = state.get('category')
+    city = state.get('city')
+    if not city:
+        return web.json_response({'ok': False, 'reason': 'no_city'})
+    if is_shift_active(state):
+        # Смена уже стартовала другим путём (например, второй таб карты
+        # открыт) - идемпотентно считаем это успехом, ничего не ломаем.
+        return web.json_response({'ok': True, 'shift_active': True})
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    requested = body.get('tariffs') if isinstance(body, dict) else None
+    valid_options = shift_tariff_options(category)
+    tariffs = [t for t in requested if t in valid_options] if isinstance(requested, list) else []
+    if valid_options and not tariffs:
+        return web.json_response({'ok': False, 'reason': 'tariffs_required'})
+    send_func = functools.partial(bot.send_message, user_id)
+    try:
+        fake_message = _AnswerFuncAsMessage(send_func)
+        if await require_live_location_for_shift_start(fake_message, user_id, state, tariffs=tariffs):
+            return web.json_response({'ok': True, 'shift_active': False, 'awaiting_location': True})
+        await start_shift_and_notify(send_func, user_id, category, city, tariffs=tariffs)
+        return web.json_response({'ok': True, 'shift_active': True})
+    except Exception:
+        logger.exception(f"❌ /map/start_shift: ошибка старта смены user_id={user_id}")
         return web.json_response({'ok': False, 'reason': 'error'}, status=500)
 
 async def handle_map_airports_api(request):
@@ -26950,6 +27151,7 @@ async def start_subscription_webhook_server():
     app.router.add_get(MAP_POSITIONS_API_PATH, handle_map_positions_api)
     app.router.add_get(MAP_MY_PROFILE_API_PATH, handle_map_my_profile_api)
     app.router.add_post(MAP_TOGGLE_SHIFT_API_PATH, handle_map_toggle_shift_api)
+    app.router.add_post(MAP_START_SHIFT_API_PATH, handle_map_start_shift_api)
     app.router.add_get(MAP_AIRPORTS_API_PATH, handle_map_airports_api)
     app.router.add_get(MAP_STATIONS_API_PATH, handle_map_stations_api)
     app.router.add_get(MAP_WEATHER_API_PATH, handle_map_weather_api)
