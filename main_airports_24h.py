@@ -12156,7 +12156,22 @@ def map_webapp_html():
     shiftToggleBtn.addEventListener('click', async () => {{
       if (shiftToggleBtn.classList.contains('pending')) return;
       const initData = tg ? tg.initData : '';
-      if (!initData) return;
+      // ИЗМЕНЕНО 25.09.2026 (жалоба пользователя - "кнопка не включает и не
+      // выключает смену", раньше тап без initData просто ничего не делал -
+      // silent return, выглядело как будто кнопка не реагирует вообще).
+      // Третья, изолированная попытка этой правки (первые две отменены
+      // вместе с остальными изменениями коммита c75c87c/888209e из-за
+      // поломки карты на проде - причина методом исключения оказалась НЕ в
+      // CSS ряда кнопок и НЕ в удалении бейджа аэропорта, обе те правки уже
+      // переприменены и проверены отдельно, см. 24bdad0/ea96f94). Теперь эта
+      // правка идёт СОВСЕМ одна, без соседей - если после нeё карта снова
+      // сломается, причина будет однозначно здесь.
+      if (!initData) {{
+        const diag = `tg: ${{tg ? 'есть' : 'нет'}}, platform: ${{(tg && tg.platform) || '?'}}, initData: ${{(tg && tg.initData) ? tg.initData.length : 0}} симв.`;
+        const msg = 'Не удалось определить пользователя - закрой мини-приложение полностью и открой карту заново.\n\n' + diag;
+        if (tg && tg.showAlert) tg.showAlert(msg); else alert(msg);
+        return;
+      }}
       shiftToggleBtn.classList.add('pending');
       try {{
         const resp = await fetch('/map/toggle_shift', {{
