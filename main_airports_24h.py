@@ -11322,17 +11322,8 @@ MAP_CHROME_CSS = """
      край карты. flex-wrap: wrap - если места не хватает, лишние кнопки
      сами переносятся на вторую строку (right: 10px ограничивает ряд
      правым краем карты), а не обрезаются/наезжают на другие элементы. */
-  /* ИЗМЕНЕНО 25.09.2026 (прямая просьба пользователя со скриншотом -
-     "верхнюю строку все сделай чтобы было в одну строку все кнопки"): после
-     того, как отступ слева вырос до 80px (место под кнопку-индикатор смены
-     в левом верхнем углу, см. .shift-toggle-btn), 4 кнопки ряда
-     (Тарифы/Слои/Пробки/Спрос) на узких экранах перестали помещаться в одну
-     строку и "Спрос" переносился на вторую. Уменьшены внутренние отступы
-     кнопок (padding) и зазор между ними (gap), чтобы весь ряд гарантированно
-     помещался в одну строку. flex-wrap: wrap оставлен как аварийный вариант
-     на совсем узких экранах, а не убран совсем. */
-  .map-toggles-row { position: absolute; top: 10px; left: 80px; right: 10px; z-index: 1000; display: flex; flex-direction: row; flex-wrap: wrap; align-items: flex-start; gap: 5px; }
-  .layer-toggle-btn { display: inline-block; background: #1c1c1c; color: #fff; border: 1px solid rgba(255,196,0,.4); border-radius: 8px; padding: 5px 7px; font-family: -apple-system, sans-serif; font-size: 11px; font-weight: 600; box-shadow: 0 1px 4px rgba(0,0,0,.35); cursor: pointer; user-select: none; white-space: nowrap; transition: transform .12s; }
+  .map-toggles-row { position: absolute; top: 10px; left: 80px; right: 10px; z-index: 1000; display: flex; flex-direction: row; flex-wrap: wrap; align-items: flex-start; gap: 8px; }
+  .layer-toggle-btn { display: inline-block; background: #1c1c1c; color: #fff; border: 1px solid rgba(255,196,0,.4); border-radius: 8px; padding: 6px 10px; font-family: -apple-system, sans-serif; font-size: 12px; font-weight: 600; box-shadow: 0 1px 4px rgba(0,0,0,.35); cursor: pointer; user-select: none; white-space: nowrap; transition: transform .12s; }
   .layer-toggle-btn:active, .filter-toggle:active { transform: scale(.94); }
   /* ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - редизайн
      распространён на все WebApp'ы бота) - лёгкая тактильная отдача кнопок
@@ -12155,19 +12146,7 @@ def map_webapp_html():
     shiftToggleBtn.addEventListener('click', async () => {{
       if (shiftToggleBtn.classList.contains('pending')) return;
       const initData = tg ? tg.initData : '';
-      // ИЗМЕНЕНО 25.09.2026 (жалоба пользователя - "кнопка не включает и не
-      // выключает смену"): раньше при отсутствии initData тап просто ничего
-      // не делал (silent return) - выглядело так, будто кнопка вообще не
-      // реагирует на нажатия, без единой подсказки почему. Теперь в этом
-      // случае показываем понятное сообщение вместо тишины - это тот же
-      // случай, что уже обрабатывает сервер как "нет авторизации" (см.
-      // handle_map_toggle_shift_api), просто ловим его раньше, до похода на
-      // сервер.
-      if (!initData) {{
-        const msg = 'Не удалось определить пользователя - закрой мини-приложение полностью и открой карту заново';
-        if (tg && tg.showAlert) tg.showAlert(msg); else alert(msg);
-        return;
-      }}
+      if (!initData) return;
       shiftToggleBtn.classList.add('pending');
       try {{
         const resp = await fetch('/map/toggle_shift', {{
@@ -12939,19 +12918,26 @@ def map_webapp_html():
         // с готовым маршрутом.
         popup += goButtonHtml(a.lat, a.lon);
         popup += `</div>`;
-        // УБРАНО 25.09.2026 (прямая просьба пользователя - "оставь тока
-        // самолётик"): раньше (24.09.2026) рядом с меткой висел ещё и
-        // постоянный текстовый бейдж-подпись ✈️🟢/✈️🟡/✈️⛔️
-        // (.bindTooltip(..., {{permanent:true}}), см. AIRPORT_STATUS_BADGE/
-        // label выше в истории) - теперь статус аэропорта и так виден по
-        // цвету самой иконки-бейджа (зелёный/жёлтый/красный, см.
-        // airportBadgeIconHtml/AIRPORT_BADGE_COLOR выше, добавлено позже в
-        // этот же день) - подпись дублировала ту же информацию и визуально
-        // накладывалась на иконку двумя метками на одну точку. Вся
-        // подробная информация (статус текстом/загрузка/очередь) осталась в
-        // попапе по клику - см. popup выше, ничего оттуда не убрано.
+        // ИЗМЕНЕНО 24.09.2026 (прямая просьба пользователя - "Пиши тока рядом
+        // ✈️🟢 или ✈️⛔️", уточнение "✈️🟡 По согласованию"): вместо
+        // многострочной подписи (название/ETA/статус/загрузка/очередь) рядом
+        // с меткой теперь только компактный бейдж - эмодзи самолёта + цветной
+        // кружок по статусу (🟢 открыт / 🟡 по согласованию / ⛔️ закрыт).
+        // Вся подробная информация осталась в попапе (по клику) - см. popup
+        // выше, ничего оттуда не убрано.
+        const AIRPORT_STATUS_BADGE = {{ open: '🟢', coordinated: '🟡', closed: '⛔️' }};
+        const label = `${{a.emoji || '✈️'}}${{AIRPORT_STATUS_BADGE[a.status] || '🟢'}}`;
+        // ДОБАВЛЕНО 24.09.2026 (прямая просьба пользователя - "Скрывай так же
+        // по кнопке нажатия на аэропорт"): бейдж-подпись прячется, пока
+        // открыт попап с подробностями (по клику на метку), и появляется
+        // обратно, когда попап закрыт - тот же принцип "скрыть по нажатию",
+        // что уже был сделан для вокзалов, но здесь бейдж всё равно виден по
+        // умолчанию (не убран совсем), просто не мешает открытому попапу.
         const marker = L.marker([a.lat, a.lon], {{ icon }})
           .bindPopup(popup)
+          .bindTooltip(label, {{ permanent: true, direction: 'right', offset: [10, 0], className: 'airport-label' }})
+          .on('popupopen', () => marker.closeTooltip())
+          .on('popupclose', () => marker.openTooltip())
           .addTo(map);
         airportMarkers.push(marker);
       }});
