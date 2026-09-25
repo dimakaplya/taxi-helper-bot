@@ -13169,12 +13169,29 @@ def map_webapp_html():
     // настоящего градиента. Стоит на порядок дешевле градиента (два flat
     // fill вместо вычисления градиента на каждый кадр), а финальных фигур
     // теперь немного (после склейки), так что 2× слоёв не страшно.
-    function _shrinkRingTowardCentroid(ring, factor) {{
-      let sumLat = 0, sumLon = 0;
-      ring.forEach(p => {{ sumLat += p[0]; sumLon += p[1]; }});
-      const n = ring.length;
-      const cLat = sumLat / n, cLon = sumLon / n;
-      return ring.map(p => [cLat + (p[0] - cLat) * factor, cLon + (p[1] - cLon) * factor]);
+    // ИСПРАВЛЕНО 25.09.2026 (жалоба пользователя со скриншотами - "нет 3д
+    // эффекта как было, нет слияние в одно облако"): первая версия "объёма"
+    // сжимала контур К ОДНОЙ СРЕДНЕЙ ТОЧКЕ (центроиду) - для маленького
+    // круглого облака одного района это ещё худо-бедно работало, но после
+    // склейки турф-юнионом облака часто превращаются в ОГРОМНУЮ вытянутую
+    // невыпуклую фигуру (в кадре у пользователя - половина Москвы одним
+    // пятном) - равномерное сжатие такой фигуры к единственной средней
+    // точке уводит часть вершин за пределы исходного контура и ломает форму
+    // (самопересечения) - именно поэтому "ядро" не было видно, и вся заливка
+    // выглядела плоской. Заменено на turf.buffer(-N км) - геометрический
+    // "отступ внутрь" контура, корректно работающий на ЛЮБОЙ форме (выпуклой,
+    // вытянутой, с несколькими частями) без искажений, т.к. следует за
+    // реальной границей фигуры, а не тянется к одной точке.
+    const CLOUD_VOLUME_INSET_KM = 0.8;
+    function _insetPolygonRings(ring, insetKm) {{
+      try {{
+        const poly = _cloudLatLngsToTurfPolygon(ring);
+        const inset = turf.buffer(poly, -insetKm, {{ units: 'kilometers' }});
+        if (!inset || !inset.geometry) return null;
+        return _turfGeometryToLatLngRings(inset.geometry);
+      }} catch (e) {{
+        return null;
+      }}
     }}
     function _pushVolumeCloudPolygon(ring, color, fillOpacity) {{
       const outer = L.polygon([ring], {{
@@ -13183,12 +13200,20 @@ def map_webapp_html():
         smoothFactor: 3,
       }}).addTo(map);
       districtDemandMarkers.push(outer);
-      const inner = L.polygon([_shrinkRingTowardCentroid(ring, 0.55)], {{
-        color, weight: 0, stroke: false,
-        fillColor: color, fillOpacity,
-        smoothFactor: 3,
-      }}).addTo(map);
-      districtDemandMarkers.push(inner);
+      // Внутренний "отступ" может не получиться (совсем маленькое облако,
+      // вырожденная геометрия) - тогда просто остаётся один внешний слой,
+      // без ядра, а не сломанная фигура.
+      const innerRings = _insetPolygonRings(ring, CLOUD_VOLUME_INSET_KM);
+      if (innerRings) {{
+        innerRings.forEach(innerRing => {{
+          const inner = L.polygon([innerRing], {{
+            color, weight: 0, stroke: false,
+            fillColor: color, fillOpacity,
+            smoothFactor: 3,
+          }}).addTo(map);
+          districtDemandMarkers.push(inner);
+        }});
+      }}
     }}
     // ИСПРАВЛЕНО 25.09.2026 (жалоба пользователя со скриншотами - "надо
     // объединить в одно облако", на карте были видны разрозненные пятна со
