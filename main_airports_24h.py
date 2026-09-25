@@ -11658,6 +11658,16 @@ def map_webapp_html():
   }}
   let markers = [];
   let airportMarkers = [];
+  // ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - кнопка "📊 Спрос"
+  // должна выключать ВЕСЬ спрос на карте разом: дождь, аэропорты и
+  // районную матрицу, "грубо говоря отображение спроса на карте выключали
+  // все одной кнопки") - облако повышенного спроса у аэропорта раньше
+  // складывалось В ТОТ ЖЕ airportMarkers, что и сама метка/бейдж аэропорта
+  // (общий forEach в renderAirports), поэтому их было нельзя погасить
+  // отдельно от пина аэропорта. Теперь облако - в своём массиве, пин
+  // аэропорта остаётся виден всегда (это не "спрос", это сам аэропорт),
+  // гасится только облако - см. demandToggleBtn/clearDemandClouds ниже.
+  let airportDemandClouds = [];
   let airportsLoaded = false;
   // ДОБАВЛЕНО 22.09.2026 (см. .self-icon-wrap/.self-icon-rotate выше -
   // прямая просьба пользователя показывать себя треугольником, остриё
@@ -12377,6 +12387,10 @@ def map_webapp_html():
   function renderAirports(data) {{
       airportMarkers.forEach(m => map.removeLayer(m));
       airportMarkers = [];
+      // ДОБАВЛЕНО 25.09.2026 (см. airportDemandClouds выше) - облака
+      // спроса аэропортов теперь в своём массиве, сносим и их тут же.
+      airportDemandClouds.forEach(m => map.removeLayer(m));
+      airportDemandClouds = [];
       const bounds = map.getBounds().pad(0.25);
       (data.airports || []).filter(a => bounds.contains([a.lat, a.lon])).forEach(a => {{
         // ИЗМЕНЕНО 21.09.2026 (прямая просьба пользователя): при высоком
@@ -12430,7 +12444,16 @@ def map_webapp_html():
         // рисуется вообще, если по МЕСТНОМУ времени этого аэропорта сейчас
         // ночь (00:00-06:00) - сам load (число загрузки на маркере)
         // при этом продолжает показываться как обычно.
-        if (a.load !== null && a.load !== undefined && a.load > HIGH_DEMAND_LOAD_THRESHOLD && a.demand_cloud_allowed !== false) {{
+        // ИЗМЕНЕНО 25.09.2026 (прямая просьба пользователя - "спрос в
+        // аэропорту включается только когда есть зелёный и фиолетовый
+        // триггер загрузки аэропорта и при этом аэропорт должен быть в
+        // статусе зелёный либо жёлтый - то есть либо открыт либо работает
+        // по согласованию") - добавлена проверка статуса (раньше облако не
+        // смотрело на статус вообще, только на load%) + проверка
+        // demandShownState ("📊 Спрос" теперь гасит и это облако тоже, см.
+        // airportDemandClouds выше).
+        if (demandShownState && a.load !== null && a.load !== undefined && a.load > HIGH_DEMAND_LOAD_THRESHOLD &&
+            a.demand_cloud_allowed !== false && (a.status === 'open' || a.status === 'coordinated')) {{
           const cloudSeed = seedFromString(a.icao + '::' + demandCloudTimeBucket());
           const blob = L.polygon(blobLatLngs(a.lat, a.lon, HIGH_DEMAND_RADIUS_METERS, cloudSeed, AIRPORT_CLOUD_POINTS, AIRPORT_CLOUD_SEGMENTS), {{
             color: '#9b30ff',
@@ -12445,7 +12468,7 @@ def map_webapp_html():
           // друг на друга (много районов/зон рядом) их края сливались в
           // одно сплошное пятно без видимых границ - без blur края облака
           // чуть резче, но сами облака не сливаются визуально в кашу.
-          airportMarkers.push(blob);
+          airportDemandClouds.push(blob);
         }}
         // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "полигон для
         // карты отображения"): контуры конкретных парковок зоны (см.
@@ -12737,7 +12760,14 @@ def map_webapp_html():
       const resp = await fetch(`/map/rain_districts?city=${{encodeURIComponent(city)}}`);
       if (!resp.ok) return;
       const data = await resp.json();
-      const districts = data.districts || [];
+      // ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - "если матрица
+      // спроса уже нарисовала в этой области спрос то в этой области
+      // погода не рисует спрос чтобы не нагружать карту") - район, где
+      // районная матрица УЖЕ показывает своё облако (см.
+      // _districtsWithMatrixCloudNames/renderDistrictDemandClouds выше),
+      // не дублируется ещё и дождевым облаком - одно фиолетовое пятно на
+      // район, а не два наложенных друг на друга.
+      const districts = (data.districts || []).filter(d => !_districtsWithMatrixCloudNames.has(d.name));
       const signature = JSON.stringify(districts.map(d => d.name).sort());
       if (signature === _rainDistrictsSignature) return;  // тот же набор дождящих районов - не пересобираем
       _rainDistrictsSignature = signature;
@@ -13198,12 +13228,17 @@ def map_webapp_html():
   // ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - "аэропорты делать
   // спрос только когда появляются зелёная и фиолетовые спросы", уточнено
   // через AskUserQuestion - районное облако рядом с аэропортом должно
-  // показываться, только если У САМОГО АЭРОПОРТА статус зелёный (🟢
-  // открыт) И его собственное фиолетовое облако по загрузке (см.
+  // показываться, только если У САМОГО АЭРОПОРТА статус зелёный/жёлтый И
+  // его собственное фиолетовое облако по загрузке (см.
   // HIGH_DEMAND_LOAD_THRESHOLD/renderAirports выше) тоже сейчас активно -
   // иначе районная матрица могла рисовать спрос прямо у аэропорта, когда
   // живой статус САМОГО аэропорта говорит, что сейчас там на самом деле
-  // не загружено (закрыт/по согласованию/низкий live load%).
+  // не загружено (закрыт/низкий live load%). ИЗМЕНЕНО 25.09.2026 (прямая
+  // просьба пользователя - "аэропорт должен быть в статусе зелёный либо
+  // жёлтый то есть либо он открыт либо работает по согласованию") - было
+  // только status==='open', теперь ещё и 'coordinated' (по согласованию)
+  // считается достаточным - та же граница, что и у собственного облака
+  // аэропорта в renderAirports.
   // AIRPORT_ZONE_GATE_RADIUS_KM - крупнее макс. охвата облака аэропорта
   // (HIGH_DEMAND_RADIUS_METERS=5км) + радиуса районного облака
   // (DISTRICT_CLOUD_RADIUS_METERS=3км), чтобы захватить районы, чьё облако
@@ -13218,7 +13253,7 @@ def map_webapp_html():
       if (a.lat === null || a.lat === undefined || a.lon === null || a.lon === undefined) continue;
       if (haversineKm(lat, lon, a.lat, a.lon) > AIRPORT_ZONE_GATE_RADIUS_KM) continue;
       nearAirport = true;
-      const airportActive = a.status === 'open' && a.load !== null && a.load !== undefined &&
+      const airportActive = (a.status === 'open' || a.status === 'coordinated') && a.load !== null && a.load !== undefined &&
         a.load > HIGH_DEMAND_LOAD_THRESHOLD && a.demand_cloud_allowed !== false;
       if (airportActive) return true;  // хотя бы один рядом активен - достаточно
     }}
@@ -13238,6 +13273,15 @@ def map_webapp_html():
   // прошлым - выходим СРАЗУ, ничего не трогая на карте (полигоны и так уже
   // отражают этот набор), не тратя ресурсы на группировку/union/buffer.
   let _lastCloudRenderSignature = null;
+  // ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - "если матрица
+  // спроса уже нарисовала в этой области спрос то в этой области погода
+  // не рисует спрос чтобы не нагружать карту") - имена районов, где ПРЯМО
+  // СЕЙЧАС реально нарисовано облако районной матрицы спроса (прошли
+  // порог показа И проверку airportZoneCloudAllowed) - заполняется в
+  // renderDistrictDemandClouds ниже, читается в loadRainDistrictClouds
+  // (см. там же), чтобы не рисовать дублирующее дождевое облако поверх
+  // уже нарисованного облака спроса в том же районе.
+  let _districtsWithMatrixCloudNames = new Set();
   function renderDistrictDemandClouds(data) {{
     // ДОБАВЛЕНО 24.09.2026 - отсекаем районы вне видимой области карты (+
     // небольшой запас, чтобы полигон не исчезал резко на самом краю экрана)
@@ -13253,6 +13297,13 @@ def map_webapp_html():
     // комментарий у _groupOverlappingClouds выше).
     const byField = new Map();
     const signatureParts = [];
+    // ДОБАВЛЕНО 25.09.2026 (см. _districtsWithMatrixCloudNames выше) -
+    // копим имена районов, где облако реально проходит все проверки в
+    // ЭТОМ проходе, коммитим в глобальный Set только если дойдём до
+    // реальной перерисовки (после проверки renderSignature ниже) - если
+    // набор облаков не изменился и мы выходим рано, старый Set остаётся
+    // верным (он и так уже отражает то, что сейчас на карте).
+    const matrixCloudNamesThisPass = new Set();
     (data.districts || []).forEach(d => {{
       if (!bounds.contains([d.lat, d.lon])) return;
       layers.forEach(layer => {{
@@ -13278,6 +13329,7 @@ def map_webapp_html():
         // рядом с аэропортом не показывает своё облако, пока у самого
         // аэропорта нет зелёного статуса + активного облака по live load%.
         if (!airportZoneCloudAllowed(d.lat, d.lon)) return;
+        matrixCloudNamesThisPass.add(d.name);
         const seed = demandCloudSeed(d.name + '::' + myCategory + '::' + layer.field + '::' + timeBucket);
         const latlngs = cityCloudLatLngs(d.lat, d.lon, DISTRICT_CLOUD_RADIUS_METERS, seed, DISTRICT_CLOUD_POINTS, DISTRICT_CLOUD_SEGMENTS);
         if (!byField.has(layer.field)) byField.set(layer.field, []);
@@ -13289,6 +13341,7 @@ def map_webapp_html():
     const renderSignature = timeBucket + '|' + signatureParts.join(',');
     if (renderSignature === _lastCloudRenderSignature) return;  // набор видимых облаков не изменился - карту не трогаем
     _lastCloudRenderSignature = renderSignature;
+    _districtsWithMatrixCloudNames = matrixCloudNamesThisPass;
     districtDemandMarkers.forEach(m => map.removeLayer(m));
     districtDemandMarkers = [];
     // ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - "сделай объём") -
@@ -13862,6 +13915,16 @@ def map_webapp_html():
   // районные (renderDistrictDemandClouds/districtDemandMarkers, Москва/СПб
   // такси и Ultima) и единое городское облако-фолбэк (loadDemandCloud/
   // demandCloudMarker, остальные города/категории) - см. clearDemandClouds.
+  // ЕЩЁ РАЗ ИЗМЕНЕНО 25.09.2026 (прямая просьба пользователя - "по кнопке
+  // спрос на карте отключается весь спрос включая дождь аэропорт и
+  // матрицу спроса, все три слоя одной кнопкой, включались тоже все одной
+  // кнопкой") - кнопка теперь гасит/включает ВСЕ источники фиолетовых
+  // облаков спроса разом: районную матрицу, городской фолбэк, облака
+  // аэропортов по live-загрузке (airportDemandClouds - пины аэропортов
+  // при этом остаются видны, гасится только облако) и дождевые облака
+  // (rainCloudMarker/rainDistrictMarkers). Вокзалы (stationMarkers) НЕ
+  // затронуты - пользователь явно перечислил три слоя (дождь/аэропорт/
+  // матрица), вокзалы среди них не назвал.
   const demandToggleBtn = document.getElementById('demandToggleBtn');
   let demandShownState = true;
   function clearDemandClouds() {{
@@ -13877,6 +13940,15 @@ def map_webapp_html():
     // изменился, и пропустить перерисовку - сбрасываем сигнатуру, чтобы
     // повторное включение "📊 Спрос" гарантированно перерисовало карту.
     _lastCloudRenderSignature = null;
+    _districtsWithMatrixCloudNames = new Set();
+    // ДОБАВЛЕНО 25.09.2026 - облака аэропортов по загрузке (пины
+    // аэропортов НЕ трогаем, только их облако) и дождевые облака.
+    airportDemandClouds.forEach(m => map.removeLayer(m));
+    airportDemandClouds = [];
+    if (rainCloudMarker) {{ map.removeLayer(rainCloudMarker); rainCloudMarker = null; }}
+    rainDistrictMarkers.forEach(m => map.removeLayer(m));
+    rainDistrictMarkers = [];
+    _rainDistrictsSignature = null;
   }}
   if (demandToggleBtn) {{
     demandToggleBtn.addEventListener('click', () => {{
@@ -13884,6 +13956,12 @@ def map_webapp_html():
       demandToggleBtn.classList.toggle('active', demandShownState);
       if (demandShownState) {{
         loadDemandCloud();
+        loadRainCloud();
+        // Облако аэропорта рисуется внутри renderAirports (проверяет
+        // demandShownState сама) - раз состояние поменялось, пины уже на
+        // карте, просто перерисовываем из кэша без нового запроса к
+        // серверу, чтобы облако появилось обратно.
+        if (_airportsCache) renderAirports(_airportsCache);
       }} else {{
         clearDemandClouds();
       }}
@@ -13931,7 +14009,10 @@ def map_webapp_html():
   loadPositions();
   loadAirports();
   loadStations();
-  loadRainCloud();
+  // ИЗМЕНЕНО 25.09.2026 (см. demandToggleBtn/clearDemandClouds выше -
+  // "📊 Спрос" гасит и дождевые облака тоже) - гейт demandShownState,
+  // было безусловно.
+  if (demandShownState) loadRainCloud();
   if (demandShownState) loadDemandCloud();
   loadRoadEvents();
   loadCityEvents();
@@ -13954,7 +14035,10 @@ def map_webapp_html():
   }}
   staggerStart(loadAirports, 60000, 15000);
   staggerStart(loadStations, 60000, 30000);
-  staggerStart(loadRainCloud, 60000, 45000);
+  // ИЗМЕНЕНО 25.09.2026 (см. комментарий у demandShownState-гейта выше) -
+  // фоновый опрос дождя тоже не должен рисовать облака, пока "📊 Спрос"
+  // выключен.
+  staggerStart(() => {{ if (demandShownState) loadRainCloud(); }}, 60000, 45000);
   // ИЗМЕНЕНО 24.09.2026 (прямая просьба пользователя - "обновление облаков
   // спроса нет смысла обновлять каждую минуту, если у нас почасовой спрос
   // из матрицы") - сами данные districts (moscow_district_demand.json)
