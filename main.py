@@ -11889,7 +11889,7 @@ def map_webapp_html():
   // selectedTariffs в фильтре маркеров ниже, его это не касается).
   // activeShiftTariffs - ВСЕ тарифы активной смены (без лимита в 2, этот
   // лимит - только для панели "Тарифы"/маркеров водителей).
-  const activeShiftTariffs = (myCategory && shiftTariffs && shiftTariffs.length)
+  let activeShiftTariffs = (myCategory && shiftTariffs && shiftTariffs.length)
     ? shiftTariffs.filter(t => (TARIFF_OPTIONS[myCategory] && TARIFF_OPTIONS[myCategory].tariffs || []).includes(t))
     : null;
   function isDemandTariffSelected(cat, t) {{
@@ -11970,6 +11970,42 @@ def map_webapp_html():
     if (!tariffPanel.classList.contains('collapsed')) layerToggleRowEl.classList.add('collapsed');
   }});
   renderTariffPanel();
+  // ДОБАВЛЕНО 25.09.2026 (жалоба пользователя со скриншотом - "при выборе
+  // тарифа через карту в фильтре неправильный тариф отображается, он
+  // должен относиться к тому что выбирается либо в боте, либо на карте,
+  // неважно - тариф должен сразу подключаться на карте к плашке тарифам")
+  // - selectedTariffs/activeShiftTariffs выше строились ОДИН РАЗ при
+  // открытии страницы из tariffs= в URL (статичный снепшот на момент, когда
+  // была сформирована ссылка на карту - см. map_webapp_tariffs_param в
+  // main.py). Если тариф смены менялся ПОСЛЕ открытия карты (новая карточка
+  // выбора тарифа прямо на карте - см. openTariffPicker/#tariffPickerConfirm
+  // ниже, или переключалка "🚕 ВЫБОР ТАРИФА" в чате бота во время смены), URL
+  // не обновлялся (SPA без перезагрузки страницы) - панель "Тарифы" и облака
+  // спроса молча оставались на СТАРОМ тарифе, из-за чего фильтр показывал не
+  // тот тариф, что реально в плашке снизу (bibTariff). Эта функция
+  // пересинхронизирует их с ЖИВЫМ myShiftTariffs (та же истина, что уже
+  // приходит в /map/my_profile и показывается в плашке) - вызывается из
+  // loadMyProfile() ниже при КАЖДОМ её успешном ответе (раз при открытии и
+  // затем каждые 15с/после смены тарифа), а не только один раз при загрузке.
+  function syncTariffFilterToActiveShift(liveTariffs) {{
+    if (!myCategory || !Array.isArray(liveTariffs) || !liveTariffs.length) return;
+    const matched = liveTariffs.filter(t => (TARIFF_OPTIONS[myCategory] && TARIFF_OPTIONS[myCategory].tariffs || []).includes(t));
+    if (!matched.length) return;
+    if (activeShiftTariffs && activeShiftTariffs.length === matched.length && activeShiftTariffs.every((t, i) => t === matched[i])) {{
+      return;  // не изменилось - не дёргаем карту/облака зря
+    }}
+    activeShiftTariffs = matched;
+    Array.from(selectedTariffs).forEach(key => {{
+      if (key.startsWith(myCategory + '::')) selectedTariffs.delete(key);
+    }});
+    matched.forEach(t => {{
+      if (selectedTariffs.size < TARIFF_SELECTION_MAX) selectedTariffs.add(tariffKey(myCategory, t));
+    }});
+    renderTariffPanel();
+    loadPositions();
+    loadDemandCloud();
+    if (demandShownState) loadRainCloud();
+  }}
   // ИСПРАВЛЕНО 23.09.2026 (прямая просьба пользователя - "чтобы быстрее
   // карта подложка загружалась"): раньше карта ВСЕГДА открывалась
   // центрированной на Москве, независимо от реального города водителя, и
@@ -12438,6 +12474,10 @@ def map_webapp_html():
         myShiftStartedAtMs = data.shift_started_at ? new Date(data.shift_started_at).getTime() : null;
       }} catch (e) {{ myShiftStartedAtMs = null; }}
       myShiftTariffs = Array.isArray(data.shift_tariffs) ? data.shift_tariffs : [];
+      // ДОБАВЛЕНО 25.09.2026 - см. syncTariffFilterToActiveShift выше
+      // (панель "Тарифы"/облака спроса подтягиваются к реальному тарифу
+      // смены, откуда бы он ни был выбран - карта или чат бота).
+      if (myShiftActive) syncTariffFilterToActiveShift(myShiftTariffs);
       // ИЗМЕНЕНО 23.09.2026 (прямое уточнение пользователя - кнопка видна
       // любому с подтверждённой схемой юрлица в реферальной системе, а не
       // только владельцу кабинета - см. is_legal_entity_referrer в
