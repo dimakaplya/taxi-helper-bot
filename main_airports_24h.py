@@ -11322,8 +11322,18 @@ MAP_CHROME_CSS = """
      край карты. flex-wrap: wrap - если места не хватает, лишние кнопки
      сами переносятся на вторую строку (right: 10px ограничивает ряд
      правым краем карты), а не обрезаются/наезжают на другие элементы. */
-  .map-toggles-row { position: absolute; top: 10px; left: 80px; right: 10px; z-index: 1000; display: flex; flex-direction: row; flex-wrap: wrap; align-items: flex-start; gap: 8px; }
-  .layer-toggle-btn { display: inline-block; background: #1c1c1c; color: #fff; border: 1px solid rgba(255,196,0,.4); border-radius: 8px; padding: 6px 10px; font-family: -apple-system, sans-serif; font-size: 12px; font-weight: 600; box-shadow: 0 1px 4px rgba(0,0,0,.35); cursor: pointer; user-select: none; white-space: nowrap; transition: transform .12s; }
+  /* ИЗМЕНЕНО 25.09.2026 (прямая просьба пользователя - "верхнюю строку все
+     сделай чтобы было в одну строку все кнопки"): уменьшены padding/gap/
+     font-size, чтобы 4 кнопки (Тарифы/Слои/Пробки/Спрос) помещались в одну
+     строку при отступе слева 80px (место под кнопку смены). Первая попытка
+     этого изменения (25.09.2026, коммит c75c87c) была отменена вместе с
+     другими правками того же деплоя из-за поломки карты на проде - сама эта
+     CSS-правка (без остальных, бывших в том же коммите) статически не
+     содержит ничего, что могло бы сломать JS/рендер тайлов, поэтому
+     применяется отдельно и осторожно, с проверкой на устройстве перед тем,
+     как переходить к следующей правке. */
+  .map-toggles-row { position: absolute; top: 10px; left: 80px; right: 10px; z-index: 1000; display: flex; flex-direction: row; flex-wrap: wrap; align-items: flex-start; gap: 5px; }
+  .layer-toggle-btn { display: inline-block; background: #1c1c1c; color: #fff; border: 1px solid rgba(255,196,0,.4); border-radius: 8px; padding: 5px 7px; font-family: -apple-system, sans-serif; font-size: 11px; font-weight: 600; box-shadow: 0 1px 4px rgba(0,0,0,.35); cursor: pointer; user-select: none; white-space: nowrap; transition: transform .12s; }
   .layer-toggle-btn:active, .filter-toggle:active { transform: scale(.94); }
   /* ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - редизайн
      распространён на все WebApp'ы бота) - лёгкая тактильная отдача кнопок
