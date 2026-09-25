@@ -11277,6 +11277,20 @@ def map_webapp_html():
         {city_key: get_district_cloud_thresholds(city_key) for city_key in DISTRICT_CLOUD_THRESHOLDS_BY_CITY},
         ensure_ascii=False,
     )
+    # ДОБАВЛЕНО 25.09.2026 (см. district_premium_threshold/
+    # MOSCOW_PREMIUM_ZONE_THRESHOLDS выше, жалоба - "рисует зоны спроса за
+    # городом а внутри нет") - для Москвы Бизнес/Премьер/Элит рисуются
+    # клиентом (renderDistrictDemandClouds), поэтому зональные пороги и
+    # координаты зон нужно передать в JS так же, как обычные пороги выше -
+    # сам JS решает по lat/lon района, в какой он зоне (центр/область/
+    # Рублёвка-Новая Рига).
+    moscow_premium_zone_thresholds_json = json.dumps(MOSCOW_PREMIUM_ZONE_THRESHOLDS, ensure_ascii=False)
+    moscow_premium_zone_geo_json = json.dumps({
+        'center': list(MOSCOW_CENTER_COORD),
+        'centerRadiusKm': MOSCOW_CENTER_RADIUS_KM,
+        'elitePoints': [list(p) for p in MOSCOW_ELITE_ZONE_POINTS],
+        'eliteRadiusKm': MOSCOW_ELITE_ZONE_RADIUS_KM,
+    }, ensure_ascii=False)
     fuel_type_labels_json = json.dumps(FUEL_TYPE_LABELS, ensure_ascii=False)
     charging_status_labels_json = json.dumps(CHARGING_STATUS_LABELS, ensure_ascii=False)
     gas_queue_status_labels_json = json.dumps(GAS_QUEUE_STATUS_LABELS, ensure_ascii=False)
@@ -12350,6 +12364,15 @@ def map_webapp_html():
   const AIRPORT_CLOUD_SEGMENTS = 14;
   let _airportsCache = null;
   let _airportsSignature = null;
+  // ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - "аэропорты делать
+  // спрос только когда появляются зелёная и фиолетовые спросы", уточнение -
+  // "да" на "показывать районное облако у аэропорта только когда бейдж
+  // зелёный (🟢 открыт) и его СОБСТВЕННОЕ фиолетовое облако (по load%) тоже
+  // активно" + "учитывать и %") - вынесено на уровень скрипта (было внутри
+  // renderAirports ниже), чтобы использовать тем же порогом и в
+  // airportZoneCloudAllowed (см. ниже, вызывается из
+  // renderDistrictDemandClouds).
+  const HIGH_DEMAND_LOAD_THRESHOLD = 70;
 
   function renderAirports(data) {{
       airportMarkers.forEach(m => map.removeLayer(m));
@@ -12391,7 +12414,8 @@ def map_webapp_html():
         // результат - "давай сделаем их чуть бледнее чтобы все 5 уровней
         // были как раз разных оттенков этого цвета"): было 4 ступени,
         // добавлена 5-я (100-119% / 120%+), и все значения снижены (бледнее).
-        const HIGH_DEMAND_LOAD_THRESHOLD = 70;
+        // HIGH_DEMAND_LOAD_THRESHOLD вынесен на уровень скрипта 25.09.2026 -
+        // см. комментарий у его объявления выше.
         const HIGH_DEMAND_RADIUS_METERS = 5000;
         // highDemandBlobOpacity/seedFromString/demandCloudTimeBucket/
         // CLOUD_SHAPE_PROFILES/blobLatLngs вынесены на уровень скрипта (см.
@@ -12876,6 +12900,33 @@ def map_webapp_html():
   // Свои пороги показа на каждый город/тариф - см.
   // DISTRICT_CLOUD_THRESHOLDS_BY_CITY в Python.
   const DISTRICT_CLOUD_THRESHOLDS_BY_CITY = {district_cloud_thresholds_json};
+  // ДОБАВЛЕНО 25.09.2026 (жалоба - "рисует зоны спроса за городом а
+  // внутри нет"; см. district_premium_threshold/
+  // MOSCOW_PREMIUM_ZONE_THRESHOLDS в Python) - для Москвы Бизнес/Премьер/
+  // Элит порог теперь зависит от ЗОНЫ района (центр/область/Рублёвка-
+  // Новая Рига), не только от города - moscowDemandZone(lat, lon) ниже
+  // решает, в какой зоне район, moscowPremiumThreshold(city, field, lat,
+  // lon) возвращает нужный порог (с фолбэком на обычный
+  // DISTRICT_CLOUD_THRESHOLDS_BY_CITY для всех остальных случаев).
+  const MOSCOW_PREMIUM_ZONE_THRESHOLDS = {moscow_premium_zone_thresholds_json};
+  const MOSCOW_PREMIUM_ZONE_GEO = {moscow_premium_zone_geo_json};
+  function moscowDemandZone(lat, lon) {{
+    if (lat === null || lat === undefined || lon === null || lon === undefined) return 'oblast';
+    const g = MOSCOW_PREMIUM_ZONE_GEO;
+    if (haversineKm(lat, lon, g.center[0], g.center[1]) <= g.centerRadiusKm) return 'center';
+    for (const p of g.elitePoints) {{
+      if (haversineKm(lat, lon, p[0], p[1]) <= g.eliteRadiusKm) return 'elite';
+    }}
+    return 'oblast';
+  }}
+  function moscowPremiumThreshold(cityKey, field, lat, lon) {{
+    if (cityKey === 'moscow' && MOSCOW_PREMIUM_ZONE_THRESHOLDS.center[field]) {{
+      const zone = moscowDemandZone(lat, lon);
+      return MOSCOW_PREMIUM_ZONE_THRESHOLDS[zone][field];
+    }}
+    const cityThresholds = DISTRICT_CLOUD_THRESHOLDS_BY_CITY[cityKey] || {{}};
+    return cityThresholds[field] || [DEMAND_CLOUD_SHOW_THRESHOLD_PERCENT];
+  }}
   function demandCloudColorByLevel(_demand) {{
     return DEMAND_CLOUD_COLOR;
   }}
@@ -13144,6 +13195,36 @@ def map_webapp_html():
     return {{ geometry: merged ? (merged.geometry || merged) : null, failed }};
   }}
 
+  // ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - "аэропорты делать
+  // спрос только когда появляются зелёная и фиолетовые спросы", уточнено
+  // через AskUserQuestion - районное облако рядом с аэропортом должно
+  // показываться, только если У САМОГО АЭРОПОРТА статус зелёный (🟢
+  // открыт) И его собственное фиолетовое облако по загрузке (см.
+  // HIGH_DEMAND_LOAD_THRESHOLD/renderAirports выше) тоже сейчас активно -
+  // иначе районная матрица могла рисовать спрос прямо у аэропорта, когда
+  // живой статус САМОГО аэропорта говорит, что сейчас там на самом деле
+  // не загружено (закрыт/по согласованию/низкий live load%).
+  // AIRPORT_ZONE_GATE_RADIUS_KM - крупнее макс. охвата облака аэропорта
+  // (HIGH_DEMAND_RADIUS_METERS=5км) + радиуса районного облака
+  // (DISTRICT_CLOUD_RADIUS_METERS=3км), чтобы захватить районы, чьё облако
+  // визуально пересекается с зоной аэропорта. Район, который НЕ рядом ни с
+  // одним аэропортом, эту проверку просто не проходит (не аэропортовая
+  // зона - ограничение не применяется).
+  const AIRPORT_ZONE_GATE_RADIUS_KM = 8;
+  function airportZoneCloudAllowed(lat, lon) {{
+    const airports = (_airportsCache && _airportsCache.airports) || [];
+    let nearAirport = false;
+    for (const a of airports) {{
+      if (a.lat === null || a.lat === undefined || a.lon === null || a.lon === undefined) continue;
+      if (haversineKm(lat, lon, a.lat, a.lon) > AIRPORT_ZONE_GATE_RADIUS_KM) continue;
+      nearAirport = true;
+      const airportActive = a.status === 'open' && a.load !== null && a.load !== undefined &&
+        a.load > HIGH_DEMAND_LOAD_THRESHOLD && a.demand_cloud_allowed !== false;
+      if (airportActive) return true;  // хотя бы один рядом активен - достаточно
+    }}
+    return !nearAirport;  // не рядом ни с одним аэропортом - обычная логика (не блокируем)
+  }}
+
   // ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - "давай сделаем ещё
   // производительнее") - раньше renderDistrictDemandClouds на КАЖДЫЙ вызов
   // (а вызывается она на каждый пан/зум, см. map.on('moveend zoomend', ...)
@@ -13185,10 +13266,18 @@ def map_webapp_html():
         // переменная, что уже читает params.get('city') выше). "Ярко"-порог
         // убран (см. demandCloudOpacityByLevel выше) - thresholds это просто
         // [show, show], нужен только thresholds[0].
-        const cityThresholds = DISTRICT_CLOUD_THRESHOLDS_BY_CITY[city] || {{}};
-        const thresholds = cityThresholds[layer.field] || [DEMAND_CLOUD_SHOW_THRESHOLD_PERCENT];
+        // ЕЩЁ РАЗ ИЗМЕНЕНО 25.09.2026 (см. moscowPremiumThreshold/
+        // MOSCOW_PREMIUM_ZONE_THRESHOLDS выше, жалоба - "рисует зоны спроса
+        // за городом а внутри нет") - для Москвы Бизнес/Премьер/Элит порог
+        // теперь ещё и зависит от зоны района (d.lat/d.lon), не только от
+        // города целиком.
+        const thresholds = moscowPremiumThreshold(city, layer.field, d.lat, d.lon);
         const showThreshold = thresholds[0];
         if (demand === null || demand === undefined || demand < showThreshold) return;
+        // ДОБАВЛЕНО 25.09.2026 (см. airportZoneCloudAllowed выше) - район
+        // рядом с аэропортом не показывает своё облако, пока у самого
+        // аэропорта нет зелёного статуса + активного облака по live load%.
+        if (!airportZoneCloudAllowed(d.lat, d.lon)) return;
         const seed = demandCloudSeed(d.name + '::' + myCategory + '::' + layer.field + '::' + timeBucket);
         const latlngs = cityCloudLatLngs(d.lat, d.lon, DISTRICT_CLOUD_RADIUS_METERS, seed, DISTRICT_CLOUD_POINTS, DISTRICT_CLOUD_SEGMENTS);
         if (!byField.has(layer.field)) byField.set(layer.field, []);
@@ -15705,6 +15794,99 @@ def get_district_cloud_thresholds(city):
         for field, pair in base.items()
     }
 
+# ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя, скриншот - "рисует
+# зоны спроса за городом а внутри нет") - разбор реальных данных показал:
+# общегородской Московский p88 для Бизнес/Премьер/Элит
+# (DISTRICT_CLOUD_THRESHOLDS_BY_CITY['moscow']) считался по ВСЕМ 543
+# районам сразу, а премиальный спрос за городом (у аэропортов SVO/VKO,
+# в области) системно ВЫШЕ, чем в центре (пиковые всплески против ровного
+# среднего в центре) - поэтому общий порог почти никогда не проходился в
+# центре, хотя за городом срабатывал постоянно. Пользователь подтвердил,
+# что по данным это ожидаемо ("похоже на корректное поведение"), но
+# попросил перекосить показ в пользу центра: "понизь порог для ультима
+# в области кроме рублёвки/новой риги" → уточнение "только Подмосковье,
+# за МКАД" → "наоборот сделай порог больше чем в центре" (то есть
+# область - ВЫШЕ порог, не ниже) → "в центре чуть завысь" (не занижать
+# порог центра слишком агрессивно). Рублёвка/Новая Рига - как было,
+# общий Московский p88 без изменений. Работает ТОЛЬКО для Москвы и
+# ТОЛЬКО для Бизнес/Премьер/Элит (Эконом/Комфорт/Комфорт+ и остальные
+# города не трогаем - жалобы по ним не было).
+MOSCOW_CENTER_COORD = (55.7558, 37.6176)  # Кремль
+# ИСПРАВЛЕНО 25.09.2026 (перепроверка перед деплоем) - было 18км, но на
+# таком радиусе в "центр" реально попадали ближние города Подмосковья
+# (Люберцы, Химки, Красногорск, Реутов, Мытищи - там свои огромные пики
+# спроса у вокзалов/пересадок), что задирало p88 "центра" гораздо выше
+# реальных значений в настоящих районах Москвы (Арбат/Тверской и т.п. -
+# максимум там всего ~34%, но перцентиль считался по смеси с городами-
+# спутниками). На 15км список районов - уже честные московские районы
+# без примесей (Арбат, Тверской, Академический, ...), см. проверку
+# вручную перед деплоем.
+MOSCOW_CENTER_RADIUS_KM = 15
+
+# Рублёвка (Рублёво-Успенское шоссе) и Новая Рига (Новорижское шоссе) -
+# элитные направления, где премиальный спрос и так реально высокий -
+# несколько опорных точек вдоль обоих шоссе + радиус вместо точного
+# полигона (явного признака "элитный район" в данных нет).
+MOSCOW_ELITE_ZONE_POINTS = (
+    (55.7455, 37.2450),
+    (55.7150, 37.1500),
+    (55.7700, 37.0700),
+    (55.8100, 37.0200),
+    (55.8300, 36.9300),
+    (55.8700, 36.8000),
+)
+MOSCOW_ELITE_ZONE_RADIUS_KM = 10
+
+# Пороги для Бизнес/Премьер/Элит по ЗОНАМ - 'center' и 'oblast' каждый
+# свой p88, но по СВОЕЙ подвыборке районов (тот же принцип "top ~12%
+# своего распределения", что и у DISTRICT_CLOUD_THRESHOLDS_BY_CITY, но
+# подвыборка не весь город, а конкретная зона) - посчитано из реальных
+# данных 25.09.2026. 'elite' НЕ пересчитан - это буквально исходный
+# общегородской Московский p88 (DISTRICT_CLOUD_THRESHOLDS_BY_CITY
+# ['moscow']), оставлен как есть по прямой просьбе пользователя.
+MOSCOW_PREMIUM_ZONE_THRESHOLDS = {
+    'center': {
+        'demand_business': (27, 27),
+        'demand_premier': (15, 15),
+        'demand_elite': (8, 8),
+    },
+    'oblast': {
+        'demand_business': (74, 74),
+        'demand_premier': (79, 79),
+        'demand_elite': (84, 84),
+    },
+    'elite': {
+        'demand_business': (71, 71),
+        'demand_premier': (76, 76),
+        'demand_elite': (81, 81),
+    },
+}
+
+def _moscow_demand_zone(lat, lon):
+    """center/oblast/elite - см. MOSCOW_PREMIUM_ZONE_THRESHOLDS выше.
+    lat/lon отсутствуют (не должно происходить у районных данных, но на
+    всякий случай) - считаем обычным Подмосковьем, не центром и не
+    элитной зоной."""
+    if lat is None or lon is None:
+        return 'oblast'
+    if haversine_km(lat, lon, *MOSCOW_CENTER_COORD) <= MOSCOW_CENTER_RADIUS_KM:
+        return 'center'
+    for plat, plon in MOSCOW_ELITE_ZONE_POINTS:
+        if haversine_km(lat, lon, plat, plon) <= MOSCOW_ELITE_ZONE_RADIUS_KM:
+            return 'elite'
+    return 'oblast'
+
+def district_premium_threshold(city, field, lat, lon):
+    """Порог показа/дождевого пола для ОДНОГО района с учётом Московских
+    зон (см. MOSCOW_PREMIUM_ZONE_THRESHOLDS выше) - для Бизнес/Премьер/
+    Элит в Москве считается по зоне района (центр/область/элитная зона).
+    Для всего остального (другие тарифы, другие города) - как раньше,
+    единый по городу get_district_cloud_thresholds(city)[field]."""
+    if city == 'moscow' and field in MOSCOW_PREMIUM_ZONE_THRESHOLDS['center']:
+        zone = _moscow_demand_zone(lat, lon)
+        return MOSCOW_PREMIUM_ZONE_THRESHOLDS[zone][field]
+    return get_district_cloud_thresholds(city).get(field)
+
 MAP_DISTRICT_DEMAND_API_PATH = '/map/district_demand'
 
 def _district_slot_value(slots, hour, indices):
@@ -15753,7 +15935,11 @@ def district_has_real_demand_at_hour(city, district_name, category, tariffs, wee
         if value is None:
             continue
         field = _DISTRICT_DEMAND_INDEX_TO_FIELD.get(idx)
-        thresholds = get_district_cloud_thresholds(city).get(field)
+        # ИЗМЕНЕНО 25.09.2026 (см. district_premium_threshold выше) - для
+        # Москвы/Бизнес-Премьер-Элит порог теперь свой по зоне района
+        # (центр/область/Рублёвка-Новая Рига), чтобы пуш "час пик" не
+        # молчал в центре по той же причине, по которой молчала карта.
+        thresholds = district_premium_threshold(city, field, entry.get('lat'), entry.get('lon'))
         if thresholds and value >= thresholds[0]:
             return True
     return False
@@ -15874,8 +16060,14 @@ async def handle_map_district_demand_api(request):
                 if district_raining:
                     # См. комментарий у "дождевого пола" для такси выше -
                     # та же правка: свой floor на тариф вместо общего 85%.
-                    business = max(business or 0, city_thresholds['demand_business'][1])
-                    premium = max(premium or 0, city_thresholds['demand_premier'][1])
+                    # ИЗМЕНЕНО 25.09.2026 (см. district_premium_threshold/
+                    # MOSCOW_PREMIUM_ZONE_THRESHOLDS выше) - для Москвы
+                    # floor тоже теперь свой по зоне района (центр/область/
+                    # Рублёвка-Новая Рига), а не единый city_thresholds -
+                    # иначе дождь в центре поднимал бы спрос до заведомо
+                    # завышенного "областного" порога.
+                    business = max(business or 0, district_premium_threshold(city, 'demand_business', entry.get('lat'), entry.get('lon'))[1])
+                    premium = max(premium or 0, district_premium_threshold(city, 'demand_premier', entry.get('lat'), entry.get('lon'))[1])
                     # ДОБАВЛЕНО 24.09.2026 (загружены данные Краснодара/Сочи -
                     # в их таблицах вообще НЕТ колонки Элит, demand_elite
                     # всегда None) - дождевой пол НЕ должен поднимать элит
@@ -15884,7 +16076,7 @@ async def handle_map_district_demand_api(request):
                     # городах без этого тарифа вовсе. См.
                     # CITIES_WITHOUT_ELITE_DEMAND_DATA ниже.
                     if city not in CITIES_WITHOUT_ELITE_DEMAND_DATA:
-                        elite = max(elite or 0, city_thresholds['demand_elite'][1])
+                        elite = max(elite or 0, district_premium_threshold(city, 'demand_elite', entry.get('lat'), entry.get('lon'))[1])
                 item['demand_business'] = business
                 item['demand_premier'] = premium
                 item['demand_elite'] = elite
@@ -28563,18 +28755,23 @@ def _district_tariff_demand_value(city, district_name, category, tariff, weekday
     slots = entry.get('weekday', {}).get(str(weekday), [])
     return _district_slot_value(slots, hour, (idx,))
 
-def _district_tariff_demand_threshold(city, category, tariff):
+def _district_tariff_demand_threshold(city, category, tariff, lat=None, lon=None):
     """Порог показа облака (см. get_district_cloud_thresholds/
     DISTRICT_CLOUD_THRESHOLDS_BY_CITY) для конкретного города и тарифа -
     или None, если тариф/индекс не сматчились. ИЗМЕНЕНО 25.09.2026 -
     добавлен параметр city (пороги теперь свои на каждый город, с поправкой
     на курортную сезонность у Краснодара/Сочи), раньше был один общий
-    словарь на все города."""
+    словарь на все города. ЕЩЁ РАЗ ИЗМЕНЕНО 25.09.2026 (см.
+    district_premium_threshold выше) - добавлены необязательные lat/lon:
+    когда они переданы, для Москвы/Бизнес-Премьер-Элит порог берётся по
+    зоне района водителя (центр/область/Рублёвка-Новая Рига), а не единый
+    по городу - чтобы подсказка "переключись на тариф с бОльшим спросом"
+    не противоречила тому, что реально нарисовано на карте у водителя."""
     idx = SHIFT_TARIFF_TO_DEMAND_INDEX.get(category, {}).get(tariff)
     if idx is None:
         return None
     field = _DISTRICT_DEMAND_INDEX_TO_FIELD.get(idx)
-    return get_district_cloud_thresholds(city).get(field)
+    return district_premium_threshold(city, field, lat, lon)
 
 async def push_low_tariff_demand_alert(user_id, state, city, category, district_name, current_tariff, lower_tariff):
     if not bot:
@@ -28624,7 +28821,7 @@ async def check_low_tariff_demand_alerts():
         weekday = now.weekday()
         try:
             current_value = _district_tariff_demand_value(city, district_name, category, current_tariff, weekday, now.hour)
-            current_threshold = _district_tariff_demand_threshold(city, category, current_tariff)
+            current_threshold = _district_tariff_demand_threshold(city, category, current_tariff, user_lat, user_lon)
         except Exception as e:
             logger.error(f"❌ Не удалось проверить спрос по тарифам для {user_id} ({city}/{category}): {e}")
             continue
@@ -28637,7 +28834,7 @@ async def check_low_tariff_demand_alerts():
         try:
             for candidate in candidates:
                 candidate_value = _district_tariff_demand_value(city, district_name, category, candidate, weekday, now.hour)
-                candidate_threshold = _district_tariff_demand_threshold(city, category, candidate)
+                candidate_threshold = _district_tariff_demand_threshold(city, category, candidate, user_lat, user_lon)
                 if candidate_value is not None and candidate_threshold and candidate_value >= candidate_threshold[0]:
                     lower_tariff = candidate
                     break
