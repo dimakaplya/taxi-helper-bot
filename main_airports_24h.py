@@ -11426,15 +11426,21 @@ MAP_CHROME_CSS = """
      приглушённый белый - когда в ближайшие 8ч ничего не ожидается. */
   .bottom-info-bar .bib-rain { font-size: 13px; font-weight: 700; color: #FFC400; }
   .bottom-info-bar .bib-rain.calm { color: rgba(255,255,255,.75); font-weight: 500; }
-  /* ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - "и баллы пробок")
-     - 4-й сегмент плашки, баллы пробок 0-10 от официального Яндекс-виджета
-     (ymaps.traffic.provider.Actual - тот же провайдер, что уже используется
-     кнопкой "🚦 Пробки", см. updateTrafficScoreBadge в JS ниже). Скрыт по
-     умолчанию (display:none и в HTML, и здесь через модификаторы) - если
-     подложка не Яндекс (OSM-фолбэк) или провайдер ещё не прислал данные,
-     сегмент просто не появляется, без "прочерка" на пустом месте. Цвет по
-     уровню - зелёный (0-3, спокойно), жёлтый (4-6, тот же акцент, что у
-     остальной плашки), красный (7-10, серьёзные пробки). */
+  /* ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - "и баллы пробок"),
+     ИСПРАВЛЕНО 25.09.2026 (жалоба пользователя - "так данных нет") - 4-й
+     сегмент плашки, баллы пробок 0-10 от официального Яндекс-провайдера
+     (ymaps.traffic.provider.Actual - тот же, что уже используется кнопкой
+     "🚦 Пробки", см. updateTrafficScoreBadge/trafficStateMonitor в JS
+     ниже). По документации Яндекса провайдер отдаёт баллы ТОЛЬКО пока
+     вызван .setMap() (то есть слой пробок реально показан) - без
+     встроенного способа получить их без показа слоя. Поэтому сегмент
+     скрыт по умолчанию (display:none) и появляется/прячется синхронно с
+     кнопкой "🚦 Пробки" (см. trafficToggleBtn в JS ниже), а не просто "если
+     провайдер пришлёт данные", как было в первой версии. На OSM-фолбэке
+     (нет ключа Яндекс.Карт) кнопка "Пробки" вообще скрыта - сегмент тоже
+     никогда не появится. Цвет по уровню - зелёный (0-3, спокойно), жёлтый
+     (4-6, тот же акцент, что у остальной плашки), красный (7-10, серьёзные
+     пробки). */
   .bottom-info-bar .bib-traffic { font-size: 13px; font-weight: 700; color: #FFC400; }
   .bottom-info-bar .bib-traffic.low { color: #4CD964; }
   .bottom-info-bar .bib-traffic.high { color: #FF3B30; }
@@ -12003,13 +12009,20 @@ def map_webapp_html():
   }}
   // ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - "и баллы пробок")
   // - обновляет 4-й сегмент плашки (см. #bibTrafficScore в HTML выше и
-  // .bib-traffic в CSS выше). Вызывается из подписки на событие 'update'
-  // провайдера ymaps.traffic.provider.Actual (см. её создание ниже, там же,
-  // где уже существующая кнопка "🚦 Пробки" - НЕ трогаем саму кнопку/её
-  // клик, только слушаем данные пассивно). Полностью необязательное
-  // улучшение - если подложка не Яндекс, событие 'update' не пришло или
-  // формат ответа неожиданный, сегмент просто остаётся скрытым (display:
-  // none по умолчанию и в HTML), карта при этом не страдает.
+  // .bib-traffic в CSS выше). ИСПРАВЛЕНО 25.09.2026 (жалоба пользователя -
+  // "так данных нет" / "а должны быть", проверил по официальной песочнице
+  // Яндекса - blog/mapsapi/33244): провайдер traffic.provider.Actual НЕ
+  // отдаёт данные, пока не вызван .setMap() - событие 'update' на самом
+  // провайдере при этом НЕ существует (это была ошибка в первой версии),
+  // уровень пробок нужно читать через ymaps.Monitor(provider.state) и
+  // подписку .add('level', callback) - см. её создание ниже, там же, где
+  // .setMap() уже вызывается кнопкой "🚦 Пробки". Официального способа
+  // получить баллы БЕЗ показа слоя пробок на карте нет (подтверждено по
+  // документации) - поэтому сегмент показывается ТОЛЬКО пока слой пробок
+  // реально включён кнопкой (иначе баллы были бы либо всегда пустыми, либо
+  // пришлось бы включать видимый слой пробок по умолчанию - а пользователь
+  // явно просил "выключено по умолчанию", это уже не трогаем), и прячется
+  // обратно, когда кнопку выключают - см. trafficToggleBtn ниже.
   function updateTrafficScoreBadge(level) {{
     if (typeof level !== 'number' || isNaN(level)) return;
     const sepEl = document.getElementById('bibTrafficSep');
@@ -12021,6 +12034,14 @@ def map_webapp_html():
     if (sepEl) sepEl.style.display = '';
     if (iconEl) iconEl.style.display = '';
     scoreEl.style.display = '';
+  }}
+  function hideTrafficScoreBadge() {{
+    const sepEl = document.getElementById('bibTrafficSep');
+    const iconEl = document.getElementById('bibTrafficIcon');
+    const scoreEl = document.getElementById('bibTrafficScore');
+    if (sepEl) sepEl.style.display = 'none';
+    if (iconEl) iconEl.style.display = 'none';
+    if (scoreEl) scoreEl.style.display = 'none';
   }}
   // ИЗМЕНЕНО 25.09.2026 (прямая жалоба пользователя - "карта сильно
   // виснет") - preferCanvas: true переключает ВСЕ полигоны Leaflet (облака
@@ -12070,17 +12091,21 @@ def map_webapp_html():
       try {{
         if (window.ymaps && ymaps.traffic && ymaps.traffic.provider && yandexLayer._yandex) {{
           yandexTrafficProvider = new ymaps.traffic.provider.Actual({{}}, {{ infoLayerShown: false }});
-          // ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - "и баллы
-          // пробок") - пассивная подписка на официальное событие 'update'
-          // провайдера (см. updateTrafficScoreBadge выше) - НЕ вызывает
-          // .setMap() сама по себе, слой пробок остаётся выключен по
-          // умолчанию (как и раньше), просто читаем баллы для плашки, если
-          // провайдер их присылает независимо от видимости слоя.
+          // ИСПРАВЛЕНО 25.09.2026 (жалоба пользователя - "так данных нет") -
+          // см. подробный комментарий у updateTrafficScoreBadge выше: баллы
+          // читаются через ymaps.Monitor(provider.state)/.add('level', ...),
+          // а не через events.add('update', ...) (ошибка в первой версии -
+          // такого события на провайдере нет). Monitor создаём здесь сразу
+          // (безопасно - подписка сама по себе ничего не показывает и не
+          // запрашивает данные), но реальные значения появятся только после
+          // .setMap() - его по-прежнему вызывает ТОЛЬКО кнопка "🚦 Пробки"
+          // (см. trafficToggleBtn ниже, которая уже показывает/прячет
+          // сегмент bibTrafficScore в паре с самим слоем).
           try {{
-            yandexTrafficProvider.events.add('update', function(e) {{
+            const trafficStateMonitor = new ymaps.Monitor(yandexTrafficProvider.state);
+            trafficStateMonitor.add('level', function(newValue) {{
               try {{
-                const state = e.get('state');
-                if (state && typeof state.level === 'number') updateTrafficScoreBadge(state.level);
+                if (typeof newValue === 'number') updateTrafficScoreBadge(newValue);
               }} catch (e2) {{ /* тихо */ }}
             }});
           }} catch (e3) {{ /* тихо */ }}
@@ -14536,6 +14561,13 @@ def map_webapp_html():
           yandexTrafficProvider.setMap(yandexLayer._yandex);
         }} else {{
           yandexTrafficProvider.setMap(null);
+          // ДОБАВЛЕНО 25.09.2026 (жалоба пользователя - "так данных нет",
+          // см. подробный комментарий у updateTrafficScoreBadge выше) -
+          // баллы пробок в плашке снизу актуальны только пока слой реально
+          // показан (setMap(null) останавливает обновления), поэтому при
+          // выключении прячем сегмент обратно, а не оставляем устаревшее
+          // число.
+          hideTrafficScoreBadge();
         }}
       }} catch (e) {{ /* тихо */ }}
       trafficToggleBtn.classList.toggle('active', trafficShownState);
