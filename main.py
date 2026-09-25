@@ -11234,11 +11234,25 @@ MAP_CHROME_CSS = """
      зум-контрол (+/- ) редизайн: вместо штатных белых прямоугольных кнопок
      в левом верхнем углу - тёмные круглые кнопки (тот же визуальный язык,
      что у .layer-toggle-btn/.shift-toggle-btn), расположены по вертикали
-     по центру у левого края карты (top:50% + translateY(-50%), а не
-     фиксированный угол). !important - у Leaflet собственные инлайновые/
-     базовые стили на .leaflet-control-zoom и вложенных <a>, иначе не
-     перебить. */
-  .leaflet-control-zoom { position: absolute !important; top: 50% !important; left: 14px !important; transform: translateY(-50%) !important; margin: 0 !important; border: none !important; box-shadow: none !important; background: transparent !important; display: flex !important; flex-direction: column !important; gap: 8px !important; }
+     по центру у левого края карты.
+     ИСПРАВЛЕНО 25.09.2026 (жалоба пользователя со скриншотом - "наложилось
+     кнопка смены на плюс минус... кнопку нажать нельзя"): первая версия
+     центрировала зум-контрол через top:50%+translateY на САМОМ
+     .leaflet-control-zoom, но у Leaflet он лежит в обёртке
+     .leaflet-top.leaflet-left, которая сама position:absolute и НЕ растянута
+     на всю высоту карты (сжата по контенту) - top:50% считался от высоты
+     этой маленькой обёртки, а не от карты, и контрол оставался у самого
+     верха, прямо под новой кнопкой-индикатором смены (см. .shift-toggle-btn
+     ниже) - блоки накладывались, а зум-контрол (pointer-events:auto)
+     перехватывал клики по кнопке смены под ним. Теперь центрируем правильно:
+     сама обёртка .leaflet-top.leaflet-left растянута на всю высоту карты
+     (height:100%) и через flex центрирует зум-контрол по вертикали;
+     .leaflet-control-zoom - обычный элемент потока (не absolute) с отступом
+     от края через margin-left, что гарантирует центр относительно ВСЕЙ
+     карты, а не своей обёртки. !important - у Leaflet собственные
+     инлайновые/базовые стили на этих классах, иначе не перебить. */
+  .leaflet-top.leaflet-left { top: 0 !important; left: 0 !important; bottom: 0 !important; height: 100% !important; display: flex !important; align-items: center !important; pointer-events: none !important; }
+  .leaflet-control-zoom { position: relative !important; top: auto !important; left: auto !important; transform: none !important; margin: 0 0 0 14px !important; pointer-events: auto !important; border: none !important; box-shadow: none !important; background: transparent !important; display: flex !important; flex-direction: column !important; gap: 8px !important; }
   .leaflet-control-zoom a, .leaflet-control-zoom a:link, .leaflet-control-zoom a:visited {
     display: flex !important; align-items: center !important; justify-content: center !important;
     width: 40px !important; height: 40px !important; line-height: normal !important;
