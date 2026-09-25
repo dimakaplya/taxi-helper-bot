@@ -550,6 +550,17 @@ NOTIFICATION_TYPES = {
     # матрице переключись на пониженный тариф") - см. блок "ПУШ НИЗКИЙ
     # СПРОС НА ТАРИФЕ" ближе к концу файла (check_low_tariff_demand_alerts).
     'low_tariff_demand': {'label': 'НИЗКИЙ СПРОС НА ТАРИФЕ', 'emoji': '📉'},
+    # ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - "надо сделать
+    # отдельно пуш без осадков просто что текущий район... тот же текст
+    # прям только убрать оттуда [дождь] и оставить совет о тарифе, та же
+    # логика") - до этого совет по тарифу приходил ТОЛЬКО приклеенным к
+    # пушу о дожде (см. push_district_rain_alert/recommended_district_tariffs
+    # выше), то есть только когда в районе шли/ожидались осадки. Теперь
+    # отдельный, независимый от погоды пуш - "в этом районе сейчас лучше
+    # быть в тарифе X" (см. push_district_tariff_tip/
+    # check_district_tariff_tips ниже), с собственным переключателем, чтобы
+    # можно было включить/выключить его отдельно от пуша про дождь.
+    'district_tariff_tip': {'label': 'СОВЕТ ПО ТАРИФУ РАЙОНА', 'emoji': '🚕'},
 }
 
 def notifications_enabled(state, notif_key):
@@ -1342,14 +1353,25 @@ def compute_zone_capacity_shares(icao):
 # Ультиме... бизнес премьер Elite и круиз" - используется как источник
 # правды для выбора тарифов перед стартом смены (см. shift_tariffs_keyboard
 # ниже), свой список под каждую категорию, а не один общий на всех.
+# ИЗМЕНЕНО 25.09.2026 (прямая просьба пользователя, приложил таблицу спроса
+# курьеров/грузовых "moscow_delivery_demand_moscow_and_region_wide.xlsx" -
+# "это тоже самое как эконом комфорт комфорт плюс... готовь кнопки") -
+# generic "Курьер"/"Грузовое такси" заменены на конкретные тарифы из
+# методики этой таблицы (лист "Методика": "Яндекс Еда — Курьер; Курьер —
+# Экспресс; Грузовой кузов S; M; L; XL; XXL", вес кузова см. там же -
+# S до 300кг, M до 700кг, L до 1400кг, XL до 2000кг, XXL до 4000кг). У
+# cargo оба курьерских тарифа оставлены ПОСЛЕ кузовов (по прежней просьбе
+# от 22.09.2026 - "грузовое такси может отметить и грузовое, и курьер
+# сразу, грузовой водитель может брать и курьерские заказы тоже" - этот
+# принцип не отменялся, просто generic "Курьер" стал двумя конкретными).
 CATEGORIES = {
     'taxi': {'name': '🚕 ТАКСИ', 'tariffs': ['Эконом', 'Комфорт', 'Комфорт+', 'Минивэн', 'Детский']},
     'ultima': {'name': '💎 ТАКСИ ULTIMA', 'tariffs': ['Business', 'Premier', 'Elite', 'Cruise']},
-    # По просьбе пользователя (22.09.2026): курьер отмечает только "Курьер",
-    # а грузовое такси может отметить и "Грузовое такси", и "Курьер" сразу
-    # (грузовой водитель может брать и курьерские заказы тоже).
-    'courier': {'name': '📦 КУРЬЕР', 'tariffs': ['Курьер']},
-    'cargo': {'name': '🚚 ГРУЗОВОЕ ТАКСИ', 'tariffs': ['Грузовое такси', 'Курьер']}
+    'courier': {'name': '📦 КУРЬЕР', 'tariffs': ['Яндекс Еда — Курьер', 'Курьер — Экспресс']},
+    'cargo': {'name': '🚚 ГРУЗОВОЕ ТАКСИ', 'tariffs': [
+        'Грузовой кузов S', 'Грузовой кузов M', 'Грузовой кузов L', 'Грузовой кузов XL', 'Грузовой кузов XXL',
+        'Яндекс Еда — Курьер', 'Курьер — Экспресс',
+    ]},
 }
 
 # ==================== ЗАПАСНЫЕ ДАННЫЕ SVO (fallback, если flights_data.json ещё не сгенерирован) ====================
@@ -30223,6 +30245,80 @@ def recommended_district_tariffs(city, district_name, category, weekday, hour, l
     scored.sort(key=lambda pair: -pair[1])
     return [tariff for tariff, _value in scored[:2]]
 
+# ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - "надо сделать отдельно
+# пуш без осадков... текст такой же, только убрать [дождь] и оставить совет
+# о тарифе, та же логика") - повторно напоминаем про тот же район/набор
+# тарифов не чаще, чем раз в DISTRICT_TARIFF_TIP_RECHECK_MINUTES (тот же
+# принцип и то же значение, что у LOW_TARIFF_DEMAND_RECHECK_MINUTES выше).
+DISTRICT_TARIFF_TIP_RECHECK_MINUTES = 60
+
+def _district_advice_keyboard(state, city):
+    """Та же клавиатура ("Посмотреть погоду"/"Карта водителей"), что и у
+    push_district_rain_alert (см. _rain_push_keyboard там) - вынесена сюда
+    отдельной функцией, чтобы не дублировать код между двумя похожими
+    пушами (погода и голый совет по тарифу)."""
+    rows = []
+    if PUBLIC_URL:
+        weather_url = f"{PUBLIC_URL}{WEATHER_WEBAPP_PATH}?city={urllib.parse.quote(city)}"
+        rows.append([InlineKeyboardButton(text="🌤 Посмотреть погоду", web_app=WebAppInfo(url=weather_url))])
+        category = state.get('category')
+        if category:
+            map_url = f"{PUBLIC_URL}{MAP_WEBAPP_PATH}?city={urllib.parse.quote(city)}&category={urllib.parse.quote(category)}" + map_webapp_tariffs_param(state)
+            rows.append([InlineKeyboardButton(text="🗺 Карта водителей", web_app=WebAppInfo(url=map_url))])
+    return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
+
+async def push_district_tariff_tip(user_id, state, city, district_name, tariffs):
+    """Пуш "в этом районе сейчас лучше быть в тарифе X" БЕЗ упоминания
+    дождя/осадков - ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя):
+    раньше такой совет приходил ТОЛЬКО приклеенным к пушу о дожде (см.
+    push_district_rain_alert/recommended_district_tariffs выше), то есть
+    только когда в районе шли/ожидались осадки. Этот пуш - тот же текст и
+    та же клавиатура, что у районного пуша погоды, но БЕЗ строк про
+    осадки - чисто рекомендация по тарифу, независимо от погоды, см.
+    check_district_tariff_tips ниже (вызывается из того же прохода, что и
+    check_low_tariff_demand_alerts, тем же 20-минутным циклом)."""
+    if not bot:
+        return False
+    city_display = CITY_DISPLAY_NAMES.get(city, city)
+    text = (
+        f"🚕 *Район {district_name} ({city_display})*\n\n"
+        f"Сейчас в этом районе лучше быть в тарифе{'' if len(tariffs) == 1 else 'ах'}: "
+        f"*{', '.join(tariffs)}* - здесь повышенный спрос."
+    )
+    return await send_push_with_retry(
+        user_id, text, state=state, parse_mode='Markdown',
+        reply_markup=_district_advice_keyboard(state, city),
+    )
+
+async def maybe_send_district_tariff_tip(user_id, state, city, category, district_name, weekday, hour, lat, lon):
+    """Проверяет и, если нужно, шлёт push_district_tariff_tip выше - вызов
+    ВСТРОЕН в check_low_tariff_demand_alerts (см. её тело ниже), чтобы
+    переиспользовать уже посчитанные там district_name/weekday/hour/lat/lon
+    вместо отдельного прохода по всем водителям. Отдельный, независимый от
+    'low_tariff_demand' переключатель уведомлений ('district_tariff_tip') -
+    пользователь должен уметь включить/выключить этот совет отдельно от
+    пуша "переключись на пониженный тариф"."""
+    if not notifications_enabled(state, 'district_tariff_tip'):
+        return
+    tariffs = recommended_district_tariffs(city, district_name, category, weekday, hour, lat, lon)
+    if not tariffs:
+        return
+    now_utc = datetime.now(timezone.utc)
+    tip_state = state.get('district_tariff_tip_alert') or {}
+    if tip_state.get('district') == district_name and tip_state.get('tariffs') == tariffs:
+        try:
+            last_sent = datetime.fromisoformat(tip_state['last_sent'])
+        except Exception:
+            last_sent = None
+        if last_sent and (now_utc - last_sent).total_seconds() < DISTRICT_TARIFF_TIP_RECHECK_MINUTES * 60:
+            return
+    ok = await push_district_tariff_tip(user_id, state, city, district_name, tariffs)
+    if ok:
+        state['district_tariff_tip_alert'] = {
+            'district': district_name, 'tariffs': tariffs, 'last_sent': now_utc.isoformat(),
+        }
+    await asyncio.sleep(0.05)
+
 def _live_shift_tariff_toggle_button(text, category, tariff):
     """Кнопка "➕/➖ <тариф>" под пушем про низкий/повышенный спрос - тап
     сразу дёргает ТОТ ЖЕ обработчик, что и ручной тоггл в "🚕 ВЫБОР ТАРИФА"
@@ -30292,13 +30388,30 @@ async def check_low_tariff_demand_alerts():
         category = state.get('category')
         if city not in DISTRICT_DEMAND_FILES or category not in ('taxi', 'ultima'):
             continue
-        if not notifications_enabled(state, 'low_tariff_demand'):
-            continue
         shift = state.get('shift')
         if not shift:
             continue
         user_lat, user_lon = shift.get('last_lat'), shift.get('last_lon')
         if user_lat is None or user_lon is None:
+            continue
+        nearest = find_nearest_district(city, user_lat, user_lon)
+        if not nearest:
+            continue
+        district_name = nearest[0]
+        now = get_city_now(city)
+        weekday = now.weekday()
+        # ДОБАВЛЕНО 25.09.2026 - см. maybe_send_district_tariff_tip выше.
+        # Вызывается ЗДЕСЬ (а не только под notifications_enabled(...,
+        # 'low_tariff_demand') ниже), т.к. это ОТДЕЛЬНЫЙ, независимый от
+        # "переключись на пониженный тариф" пуш ('district_tariff_tip' -
+        # свой собственный переключатель, проверяется внутри самой
+        # функции) - переиспользует уже посчитанные тут district_name/
+        # weekday/hour/lat/lon вместо отдельного прохода по водителям.
+        try:
+            await maybe_send_district_tariff_tip(user_id, state, city, category, district_name, weekday, now.hour, user_lat, user_lon)
+        except Exception as e:
+            logger.error(f"❌ Не удалось отправить совет по тарифу района для {user_id}: {e}")
+        if not notifications_enabled(state, 'low_tariff_demand'):
             continue
         current_tariff = _lowest_selected_tariff(category, shift.get('tariffs'))
         if not current_tariff:
@@ -30312,12 +30425,6 @@ async def check_low_tariff_demand_alerts():
         # после is_current_low) - решение по candidates откладываем до
         # after проверки is_current_low.
         candidates = _lower_tariff_candidates(category, current_tariff)
-        nearest = find_nearest_district(city, user_lat, user_lon)
-        if not nearest:
-            continue
-        district_name = nearest[0]
-        now = get_city_now(city)
-        weekday = now.weekday()
         try:
             current_value = _district_tariff_demand_value(city, district_name, category, current_tariff, weekday, now.hour)
             current_threshold = _district_tariff_demand_threshold(city, category, current_tariff, user_lat, user_lon)
