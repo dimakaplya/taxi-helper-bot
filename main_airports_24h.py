@@ -11944,9 +11944,14 @@ def map_webapp_html():
     const timeEl = document.getElementById('bibShiftTime');
     const tariffEl = document.getElementById('bibTariff');
     if (timeEl) {{
+      // ДОБАВЛЕНО 25.09.2026 (жалоба пользователя - "пишут не на смене а по
+      // факту на смене") - пока причина не найдена, временно подмешиваем
+      // myProfileDiagState в текст, чтобы увидеть НА КАКОМ шаге
+      // loadMyProfile остановилась (нет initData / код ошибки HTTP /
+      // исключение) прямо на скриншоте с телефона, без консоли браузера.
       timeEl.textContent = (myShiftActive && myShiftStartedAtMs)
         ? 'на линии ' + formatShiftDuration(Date.now() - myShiftStartedAtMs)
-        : 'не на смене';
+        : 'не на смене [' + myProfileDiagState + ']';
     }}
     if (tariffEl) {{
       tariffEl.textContent = (myShiftActive && myShiftTariffs.length) ? myShiftTariffs.join(', ') : '—';
@@ -12095,12 +12100,8 @@ def map_webapp_html():
           // см. подробный комментарий у updateTrafficScoreBadge выше: баллы
           // читаются через ymaps.Monitor(provider.state)/.add('level', ...),
           // а не через events.add('update', ...) (ошибка в первой версии -
-          // такого события на провайдере нет). Monitor создаём здесь сразу
-          // (безопасно - подписка сама по себе ничего не показывает и не
-          // запрашивает данные), но реальные значения появятся только после
-          // .setMap() - его по-прежнему вызывает ТОЛЬКО кнопка "🚦 Пробки"
-          // (см. trafficToggleBtn ниже, которая уже показывает/прячет
-          // сегмент bibTrafficScore в паре с самим слоем).
+          // такого события на провайдере нет). Реальные значения появляются
+          // только после .setMap().
           try {{
             const trafficStateMonitor = new ymaps.Monitor(yandexTrafficProvider.state);
             trafficStateMonitor.add('level', function(newValue) {{
@@ -12109,6 +12110,17 @@ def map_webapp_html():
               }} catch (e2) {{ /* тихо */ }}
             }});
           }} catch (e3) {{ /* тихо */ }}
+          // ИЗМЕНЕНО 25.09.2026 (прямая просьба пользователя - "пробки
+          // можешь просто сделать на карте отображение по умолчанию что они
+          // включены когда карту открываешь") - раньше слой пробок был
+          // выключен по умолчанию (более раннее пожелание пользователя от
+          // 23.09.2026), теперь пользователь явно попросил обратное - слой
+          // включается сразу, как только провайдер готов (сразу после
+          // .setMap() баллы начинают приходить в Monitor выше). Кнопка
+          // "🚦 Пробки" по-прежнему работает как тумблер - просто теперь
+          // стартует в состоянии "включено" (см. trafficShownState = true
+          // и trafficToggleBtn.classList.add('active') ниже).
+          try {{ yandexTrafficProvider.setMap(yandexLayer._yandex); }} catch (e4) {{ /* тихо */ }}
         }}
       }} catch (e) {{ /* тихо */ }}
     }});
@@ -12329,6 +12341,17 @@ def map_webapp_html():
   // handle_map_my_profile_api), читаются в tickBottomBar() ниже.
   let myShiftStartedAtMs = null;
   let myShiftTariffs = [];
+  // ДОБАВЛЕНО 25.09.2026 (жалоба пользователя - "данные не подтягивает,
+  // пишут не на смене а по факту на смене") - безопасный, ненавязчивый
+  // диагностический флаг (см. loadMyProfile ниже) - НЕ alert(), НЕ меняет
+  // ничьё поведение, просто запоминает, на каком именно шаге loadMyProfile
+  // остановилась в последний раз (нет initData / ошибка HTTP / успех), и
+  // tickBottomBar ниже подмешивает это в текст "не на смене", чтобы понять
+  // причину БЕЗ рискованных правок вроде alert() в клике по кнопке смены
+  // (два предыдущих раза такой способ ронял всю карту - см. историю
+  // коммитов 19d7761/cba0350 - этот способ по конструкции не может её
+  // уронить, т.к. ничего не меняет в исполнении, только пишет в строку).
+  let myProfileDiagState = 'pending';
   // ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - жёлтый/серый
   // кликабельный индикатор смены с радар-анимацией, см. .shift-toggle-btn
   // в CSS и div#shiftToggleBtn в HTML выше) - .active вешает жёлтый цвет +
@@ -12340,10 +12363,11 @@ def map_webapp_html():
   async function loadMyProfile() {{
     try {{
       const initData = tg ? tg.initData : '';
-      if (!initData) return;
+      if (!initData) {{ myProfileDiagState = 'no_init_data(tg=' + (tg ? '1' : '0') + ')'; return; }}
       const resp = await fetch('/map/my_profile', {{ headers: {{ 'X-Telegram-Init-Data': initData }} }});
-      if (!resp.ok) return;
+      if (!resp.ok) {{ myProfileDiagState = 'http_' + resp.status; return; }}
       const data = await resp.json();
+      myProfileDiagState = 'ok';
       myShiftActive = !!data.shift_active;
       updateShiftToggleBtnUI();
       // ДОБАВЛЕНО 25.09.2026 - см. myShiftStartedAtMs/myShiftTariffs выше.
@@ -12372,7 +12396,10 @@ def map_webapp_html():
         if (selfMarker.getPopup()) selfMarker.setPopupContent(myProfilePopupHtml);
         else selfMarker.bindPopup(myProfilePopupHtml);
       }}
-    }} catch (e) {{ /* тихо - карта просто останется без попапа у своей стрелки */ }}
+    }} catch (e) {{
+      myProfileDiagState = 'exception:' + (e && e.message ? String(e.message).slice(0, 40) : 'unknown');
+      /* карта просто останется без попапа у своей стрелки */
+    }}
   }}
   loadMyProfile();
   // ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - "текущее время на
@@ -14548,11 +14575,17 @@ def map_webapp_html():
   // yandexTrafficProvider.setMap(nativeMap)/.setMap(null). Если провайдер
   // ещё не создан (страница ещё не успела получить событие 'load' от
   // Yandex JS API - обычно доли секунды после загрузки подложки), клик
-  // просто игнорируется вместо ошибки. Выключено по умолчанию при
-  // открытии карты.
+  // просто игнорируется вместо ошибки. ИЗМЕНЕНО 25.09.2026 (прямая просьба
+  // пользователя - "пробки можешь просто сделать на карте отображение по
+  // умолчанию что они включены когда карту открываешь") - было выключено
+  // по умолчанию, теперь включено: trafficShownState стартует как true, а
+  // сам .setMap() при готовности провайдера вызывается ВЫШЕ (см.
+  // инициализацию yandexTrafficProvider) - здесь просто синхронизируем
+  // визуальное состояние кнопки, чтобы она сразу показывала "нажата".
   const trafficToggleBtn = document.getElementById('trafficToggleBtn');
-  let trafficShownState = false;
+  let trafficShownState = true;
   if (trafficToggleBtn) {{
+    trafficToggleBtn.classList.add('active');
     trafficToggleBtn.addEventListener('click', () => {{
       if (!yandexTrafficProvider || !yandexLayer || !yandexLayer._yandex) return;
       trafficShownState = !trafficShownState;
