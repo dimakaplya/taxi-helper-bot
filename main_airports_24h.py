@@ -11263,9 +11263,20 @@ def map_webapp_html():
     demand_threshold_by_category_json = json.dumps(MAP_DEMAND_CLOUD_THRESHOLD_BY_CATEGORY, ensure_ascii=False)
     # ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "отображение
     # спроса облаков от матрицы давай настроим по тарифам") - свои пороги
-    # показа/"ярко" на каждый тариф вместо единой пары на все, см.
-    # DISTRICT_CLOUD_THRESHOLDS_BY_FIELD выше.
-    district_cloud_thresholds_json = json.dumps(DISTRICT_CLOUD_THRESHOLDS_BY_FIELD, ensure_ascii=False)
+    # показа на каждый тариф вместо единой пары на все.
+    # ИЗМЕНЕНО 25.09.2026 (прямая просьба пользователя - "разбей на каждый
+    # город отдельно" + сезонность Краснодара/Сочи) - пороги теперь СВОИ на
+    # каждый город (см. DISTRICT_CLOUD_THRESHOLDS_BY_CITY/
+    # get_district_cloud_thresholds ниже), а сама WebApp-страница общая на
+    # все города сразу (какой конкретно город открыт, JS узнаёт из
+    # ?city= в URL только в браузере) - поэтому сюда кладём пороги СРАЗУ ПО
+    # ВСЕМ городам, а JS в map_webapp_html сам выбирает нужный по своей
+    # переменной city. get_district_cloud_thresholds уже учитывает курортную
+    # сезонность на момент открытия карты (Краснодар/Сочи).
+    district_cloud_thresholds_json = json.dumps(
+        {city_key: get_district_cloud_thresholds(city_key) for city_key in DISTRICT_CLOUD_THRESHOLDS_BY_CITY},
+        ensure_ascii=False,
+    )
     fuel_type_labels_json = json.dumps(FUEL_TYPE_LABELS, ensure_ascii=False)
     charging_status_labels_json = json.dumps(CHARGING_STATUS_LABELS, ensure_ascii=False)
     gas_queue_status_labels_json = json.dumps(GAS_QUEUE_STATUS_LABELS, ensure_ascii=False)
@@ -12847,22 +12858,29 @@ def map_webapp_html():
   //    для ОБЩЕГОРОДСКОГО облака (города без районных данных, где нет
   //    отдельного тарифа-от-тарифа сигнала - там прежняя единая пара).
   // 2) Зелёный цвет убран полностью - и районные, и общегородские облака
-  //    теперь всегда фиолетовые, разница "слабо"/"сильно" передаётся ТОЛЬКО
-  //    прозрачностью (DEMAND_CLOUD_OPACITY_WEAK/_STRONG), не цветом.
+  //    теперь всегда фиолетовые.
+  // ЕЩЁ РАЗ ИЗМЕНЕНО 25.09.2026 (прямая просьба пользователя - "давай
+  // вообще уберем яркие облака только один вариант отображения", по итогам
+  // разбора реальных данных в чате - у части тарифов "ярко" на практике
+  // совпадало с "показано" почти всегда, т.е. деление на 2 уровня яркости
+  // просто не работало): убрана степень "ярко"/DEMAND_CLOUD_OPACITY_STRONG
+  // целиком - остался ОДИН вариант отображения, одна фиксированная
+  // прозрачность для любого облака, прошедшего порог показа. Заодно пороги
+  // стали СВОИМИ на каждый город (см. DISTRICT_CLOUD_THRESHOLDS_BY_CITY в
+  // Python, посчитаны по реальным перцентилям каждого города отдельно, а не
+  // одна таблица на всех) - DISTRICT_CLOUD_THRESHOLDS ниже теперь объект
+  // {{city: {{field: [show, show]}}}}, выбираем свой город по переменной city.
   const DEMAND_CLOUD_SHOW_THRESHOLD_PERCENT = 50;
-  const DEMAND_CLOUD_STRONG_THRESHOLD_PERCENT = 65;
   const DEMAND_CLOUD_COLOR = '#9b30ff'; // фиолетовый - единственный цвет облака спроса
-  const DEMAND_CLOUD_OPACITY_WEAK = 0.14;
-  const DEMAND_CLOUD_OPACITY_STRONG = 0.30;
-  // Свои (показ, ярко) пороги на каждое поле ответа /map/district_demand -
-  // см. DISTRICT_CLOUD_THRESHOLDS_BY_FIELD в Python.
-  const DISTRICT_CLOUD_THRESHOLDS = {district_cloud_thresholds_json};
+  const DEMAND_CLOUD_OPACITY = 0.20;
+  // Свои пороги показа на каждый город/тариф - см.
+  // DISTRICT_CLOUD_THRESHOLDS_BY_CITY в Python.
+  const DISTRICT_CLOUD_THRESHOLDS_BY_CITY = {district_cloud_thresholds_json};
   function demandCloudColorByLevel(_demand) {{
     return DEMAND_CLOUD_COLOR;
   }}
-  function demandCloudOpacityByLevel(demand, strongThreshold) {{
-    const strong = strongThreshold !== undefined ? strongThreshold : DEMAND_CLOUD_STRONG_THRESHOLD_PERCENT;
-    return demand >= strong ? DEMAND_CLOUD_OPACITY_STRONG : DEMAND_CLOUD_OPACITY_WEAK;
+  function demandCloudOpacityByLevel(_demand) {{
+    return DEMAND_CLOUD_OPACITY;
   }}
   // ВЫНЕСЕНО 22.09.2026 из тела loadDemandCloud - генерация формы облака по
   // центру/радиусу/seed теперь отдельная функция, переиспользуется главным
@@ -13160,14 +13178,21 @@ def map_webapp_html():
         const demand = d[layer.field];
         // ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя - "отображение
         // спроса облаков от матрицы давай настроим по тарифам") - свой
-        // порог показа/"ярко" НА ЭТОТ тариф вместо общего для всех.
-        const thresholds = DISTRICT_CLOUD_THRESHOLDS[layer.field] || [DEMAND_CLOUD_SHOW_THRESHOLD_PERCENT, DEMAND_CLOUD_STRONG_THRESHOLD_PERCENT];
-        const showThreshold = thresholds[0], strongThreshold = thresholds[1];
+        // порог показа НА ЭТОТ тариф вместо общего для всех.
+        // ИЗМЕНЕНО 25.09.2026 (прямая просьба пользователя - "разбей на
+        // каждый город отдельно") - DISTRICT_CLOUD_THRESHOLDS_BY_CITY теперь
+        // объект по городам, берём свой поддобъект по city (та же
+        // переменная, что уже читает params.get('city') выше). "Ярко"-порог
+        // убран (см. demandCloudOpacityByLevel выше) - thresholds это просто
+        // [show, show], нужен только thresholds[0].
+        const cityThresholds = DISTRICT_CLOUD_THRESHOLDS_BY_CITY[city] || {{}};
+        const thresholds = cityThresholds[layer.field] || [DEMAND_CLOUD_SHOW_THRESHOLD_PERCENT];
+        const showThreshold = thresholds[0];
         if (demand === null || demand === undefined || demand < showThreshold) return;
         const seed = demandCloudSeed(d.name + '::' + myCategory + '::' + layer.field + '::' + timeBucket);
         const latlngs = cityCloudLatLngs(d.lat, d.lon, DISTRICT_CLOUD_RADIUS_METERS, seed, DISTRICT_CLOUD_POINTS, DISTRICT_CLOUD_SEGMENTS);
         if (!byField.has(layer.field)) byField.set(layer.field, []);
-        byField.get(layer.field).push({{ latlngs, demand, strongThreshold, _bbox: _cloudLatLngsBBox(latlngs) }});
+        byField.get(layer.field).push({{ latlngs, demand, _bbox: _cloudLatLngsBBox(latlngs) }});
         signatureParts.push(d.name + ':' + layer.field + ':' + demand);
       }});
     }});
@@ -13252,9 +13277,8 @@ def map_webapp_html():
         // Цвет/яркость объединённого облака - по САМОМУ высокому спросу в
         // группе (сильнейший район "тянет" всю склеенную зону на себя).
         const maxDemand = Math.max(...group.map(c => c.demand));
-        const strongThreshold = group[0].strongThreshold;
         const color = demandCloudColorByLevel(maxDemand);
-        const fillOpacity = demandCloudOpacityByLevel(maxDemand, strongThreshold);
+        const fillOpacity = demandCloudOpacityByLevel(maxDemand);
         if (group.length === 1) {{
           _pushVolumeCloudPolygon(group[0].latlngs, color, fillOpacity);
           return;
@@ -13854,12 +13878,17 @@ def map_webapp_html():
   // ЕЩЁ РАЗ ИЗМЕНЕНО 25.09.2026 (прямая просьба пользователя - "карта
   // сильно виснет", очередной заход на оптимизацию облаков спроса вдобавок
   // к Canvas-рендерингу/пространственной сетке из предыдущей правки) -
-  // 300000 (5 минут) увеличено до 600000 (10 минут). Данные всё равно
-  // почасовые (по слотам DISTRICT_DEMAND_FILES), десятиминутный опрос не
-  // теряет никакой реальной точности, а полная пересборка сотен полигонов
-  // (Москва 543 района, СПб 264 и т.д. - см. renderDistrictDemandClouds)
-  // происходит в фоне в 2 раза реже.
-  staggerStart(() => {{ if (demandShownState) loadDemandCloud(); }}, 600000, 60000);
+  // 300000 (5 минут) увеличено до 600000 (10 минут).
+  // ЕЩЁ РАЗ ИЗМЕНЕНО 25.09.2026 (прямая просьба пользователя - "давай
+  // вообще обновление каждые 1 час, раз это история про то, что данные с
+  // матрицы только за час данные") - данные districts (moscow/spb/
+  // krasnodar/sochi_district_demand.json) меняются по ЧАСОВЫМ слотам
+  // (см. схему 'weekday': {{'0'..'6': [[start_h, end_h, ...]]}}), опрашивать
+  // их чаще часа не имеет смысла вообще - 3600000 (1 час) вместо 600000
+  // (10 минут). Кэш по подписи (см. loadDistrictDemandClouds/
+  // _districtDemandSignature) всё равно пропустит пересборку, если за этот
+  // час по факту ничего не поменялось.
+  staggerStart(() => {{ if (demandShownState) loadDemandCloud(); }}, 3600000, 60000);
   setInterval(loadCityEvents, 300000);
 </script>
 </body>
@@ -15565,24 +15594,116 @@ SHIFT_TARIFF_TO_DEMAND_INDEX = {
 # Business/остальных тарифов порог показа не трогали) - более заметный
 # относительный шаг (×~1.4), чем прошлые +10%, т.к. прошлого шага водителю
 # показалось мало именно для этой пары. Порог "ярко" по-прежнему не трогали.
-MOSCOW_DISTRICT_CLOUD_THRESHOLDS_ECONOM = (82, 100)
-MOSCOW_DISTRICT_CLOUD_THRESHOLDS_COMFORT = (53, 76)
-MOSCOW_DISTRICT_CLOUD_THRESHOLDS_COMFORT_PLUS = (33, 52)
-MOSCOW_DISTRICT_CLOUD_THRESHOLDS_BUSINESS = (17, 29)
-MOSCOW_DISTRICT_CLOUD_THRESHOLDS_PREMIER = (10, 15)
-MOSCOW_DISTRICT_CLOUD_THRESHOLDS_ELITE = (6, 8)
-
-# Тот же набор порогов, но ключами по JSON-полю ответа /map/district_demand
-# (см. handle_map_district_demand_api) - удобно передавать прямо в JS одним
-# json.dumps, без ручного дублирования цифр в map_webapp_html.
-DISTRICT_CLOUD_THRESHOLDS_BY_FIELD = {
-    'demand_econom': MOSCOW_DISTRICT_CLOUD_THRESHOLDS_ECONOM,
-    'demand_comfort': MOSCOW_DISTRICT_CLOUD_THRESHOLDS_COMFORT,
-    'demand_comfort_plus': MOSCOW_DISTRICT_CLOUD_THRESHOLDS_COMFORT_PLUS,
-    'demand_business': MOSCOW_DISTRICT_CLOUD_THRESHOLDS_BUSINESS,
-    'demand_premier': MOSCOW_DISTRICT_CLOUD_THRESHOLDS_PREMIER,
-    'demand_elite': MOSCOW_DISTRICT_CLOUD_THRESHOLDS_ELITE,
+# ЕЩЁ РАЗ ПЕРЕДЕЛАНО 25.09.2026 (прямая просьба пользователя, по итогам
+# разбора реальных данных прямо в чате - "давай вообще уберем яркие облака
+# только один вариант отображения" + "давай разобьем на каждый город
+# отдельно"): ОДНА общая таблица порогов на ВСЕ города (Москва/СПб/
+# Краснодар/Сочи) оказалась в корне неверной идеей - после того как в этот
+# же день были загружены новые матрицы (543 района Москвы, 264 зоны СПб,
+# Краснодар, Сочи), выяснилось, что у городов СИЛЬНО разный базовый уровень
+# спроса (медиана Бизнес в Москве 38%, в СПб 67%) - одни и те же пороги
+# либо держали СПб залитым облаками почти постоянно (Бизнес/Премьер/Элит
+# там светились "ярко" в 97-100% слотов - порог фактически не работал), либо
+# оставляли Москву полупустой. Посчитаны РЕАЛЬНЫЕ 88-е процентили спроса по
+# каждому городу и тарифу отдельно (по всем районам/часам/дням недели уже
+# загруженных матриц) - облако теперь показывается примерно в ~12% самых
+# горячих слотов в КАЖДОМ городе одинаково честно, а не по одной цифре на
+# всех. Заодно убрана степень "ярко" (второе число раньше отвечало за более
+# насыщенную прозрачность, см. demandCloudOpacityByLevel в JS) - остался
+# только один вариант отображения "показано / не показано", оба числа пары
+# теперь равны (тот же формат (show, show) сохранён ради всех мест в коде,
+# которые ждут именно пару из двух чисел, см. thresholds[1] у дождевого
+# "пола" ниже). Элит у Краснодара/Сочи в данных нет (CITIES_WITHOUT_ELITE_
+# DEMAND_DATA) - для этих городов взято значение Премьера, реально никогда
+# не используется, но так тип данных остаётся одинаковым для всех городов.
+DISTRICT_CLOUD_THRESHOLDS_BY_CITY = {
+    'moscow': {
+        'demand_econom': (77, 77),
+        'demand_comfort': (66, 66),
+        'demand_comfort_plus': (67, 67),
+        'demand_business': (71, 71),
+        'demand_premier': (76, 76),
+        'demand_elite': (81, 81),
+    },
+    'spb': {
+        'demand_econom': (82, 82),
+        'demand_comfort': (85, 85),
+        'demand_comfort_plus': (91, 91),
+        'demand_business': (98, 98),
+        'demand_premier': (100, 100),
+        'demand_elite': (100, 100),
+    },
+    'krasnodar': {
+        'demand_econom': (100, 100),
+        'demand_comfort': (69, 69),
+        'demand_comfort_plus': (48, 48),
+        'demand_business': (24, 24),
+        'demand_premier': (10, 10),
+        'demand_elite': (10, 10),  # нет своих данных - не используется, см. CITIES_WITHOUT_ELITE_DEMAND_DATA
+    },
+    'sochi': {
+        'demand_econom': (84, 84),
+        'demand_comfort': (88, 88),
+        'demand_comfort_plus': (96, 96),
+        'demand_business': (100, 100),
+        'demand_premier': (100, 100),
+        'demand_elite': (100, 100),  # нет своих данных - не используется, см. CITIES_WITHOUT_ELITE_DEMAND_DATA
+    },
 }
+
+# ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - "посчитай мне реальный
+# порог для каждого города из 4 в зависимости от сезонности и матрицы
+# спроса") - у загруженных матриц спроса НЕТ месячного/сезонного измерения
+# (только день недели × час, одна и та же неделя весь год), поэтому
+# сезонность добавлена НЕ из данных, а отдельным ручным коэффициентом -
+# только для курортных городов (Краснодар/Сочи), по уточнению пользователя:
+# высокий сезон (май-сентябрь целиком + новогодние праздники 16 декабря -
+# 15 января) - порог +25% (спрос в целом выше, поднимаем планку, чтобы
+# облако не горело постоянно); низкий сезон - порог -25% (спрос ниже,
+# опускаем планку, чтобы облако вообще появлялось). Москва/СПб сезонность
+# не имеют (коэффициент 1.0, порог как в DISTRICT_CLOUD_THRESHOLDS_BY_CITY
+# без изменений).
+RESORT_SEASON_CITIES = {'krasnodar', 'sochi'}
+RESORT_HIGH_SEASON_THRESHOLD_MULTIPLIER = 1.25
+RESORT_LOW_SEASON_THRESHOLD_MULTIPLIER = 0.75
+
+def _is_resort_high_season(dt):
+    """Курортный высокий сезон - см. RESORT_SEASON_CITIES выше. Правило по
+    прямой формулировке пользователя: "май июнь июль август сентябрь
+    декабрь половина месяца вторая и первая половина января"."""
+    month, day = dt.month, dt.day
+    if month in (5, 6, 7, 8, 9):
+        return True
+    if month == 12 and day >= 16:
+        return True
+    if month == 1 and day <= 15:
+        return True
+    return False
+
+def _resort_season_threshold_multiplier(city):
+    if city not in RESORT_SEASON_CITIES:
+        return 1.0
+    try:
+        now = get_city_now(city)
+    except Exception:
+        return 1.0
+    return RESORT_HIGH_SEASON_THRESHOLD_MULTIPLIER if _is_resort_high_season(now) else RESORT_LOW_SEASON_THRESHOLD_MULTIPLIER
+
+def get_district_cloud_thresholds(city):
+    """Таблица порогов показа облака спроса для КОНКРЕТНОГО города, с учётом
+    курортной сезонности (см. _resort_season_threshold_multiplier выше) -
+    см. DISTRICT_CLOUD_THRESHOLDS_BY_CITY для базовых (внесезонных) чисел.
+    Откат на Москву, если город не из DISTRICT_DEMAND_FILES (не должно
+    происходить у вызывающего кода, но лучше разумный дефолт, чем
+    KeyError)."""
+    base = DISTRICT_CLOUD_THRESHOLDS_BY_CITY.get(city) or DISTRICT_CLOUD_THRESHOLDS_BY_CITY['moscow']
+    multiplier = _resort_season_threshold_multiplier(city)
+    if multiplier == 1.0:
+        return base
+    return {
+        field: tuple(max(1, min(100, round(v * multiplier))) for v in pair)
+        for field, pair in base.items()
+    }
 
 MAP_DISTRICT_DEMAND_API_PATH = '/map/district_demand'
 
@@ -15632,7 +15753,7 @@ def district_has_real_demand_at_hour(city, district_name, category, tariffs, wee
         if value is None:
             continue
         field = _DISTRICT_DEMAND_INDEX_TO_FIELD.get(idx)
-        thresholds = DISTRICT_CLOUD_THRESHOLDS_BY_FIELD.get(field)
+        thresholds = get_district_cloud_thresholds(city).get(field)
         if thresholds and value >= thresholds[0]:
             return True
     return False
@@ -15672,6 +15793,13 @@ async def handle_map_district_demand_api(request):
     try:
         now = get_city_now(city)
         weekday = str(now.weekday())
+        # ДОБАВЛЕНО 25.09.2026 (см. get_district_cloud_thresholds/
+        # DISTRICT_CLOUD_THRESHOLDS_BY_CITY выше) - пороги теперь СВОИ на
+        # каждый город (и с поправкой на курортную сезонность для
+        # Краснодара/Сочи), а не общий DISTRICT_CLOUD_THRESHOLDS_BY_FIELD на
+        # всех - считаем один раз на весь запрос, используем ниже везде,
+        # где раньше стоял общий словарь.
+        city_thresholds = get_district_cloud_thresholds(city)
         # Общегородской rain_now - только как fallback для районов, у
         # которых ещё нет собственного снепшота погоды (см. district_rain_now
         # и комментарий в score_district_candidates выше).
@@ -15724,9 +15852,9 @@ async def handle_map_district_demand_api(request):
                     # DISTRICT_CLOUD_THRESHOLDS_BY_FIELD (тот порог, после
                     # которого облако и так уже считается "ярким" для этого
                     # тарифа), а не общий 85% для всех.
-                    econom = max(econom or 0, DISTRICT_CLOUD_THRESHOLDS_BY_FIELD['demand_econom'][1])
-                    comfort = max(comfort or 0, DISTRICT_CLOUD_THRESHOLDS_BY_FIELD['demand_comfort'][1])
-                    comfort_plus = max(comfort_plus or 0, DISTRICT_CLOUD_THRESHOLDS_BY_FIELD['demand_comfort_plus'][1])
+                    econom = max(econom or 0, city_thresholds['demand_econom'][1])
+                    comfort = max(comfort or 0, city_thresholds['demand_comfort'][1])
+                    comfort_plus = max(comfort_plus or 0, city_thresholds['demand_comfort_plus'][1])
                 item['demand_econom'] = econom
                 item['demand_comfort'] = comfort
                 item['demand_comfort_plus'] = comfort_plus
@@ -15746,8 +15874,8 @@ async def handle_map_district_demand_api(request):
                 if district_raining:
                     # См. комментарий у "дождевого пола" для такси выше -
                     # та же правка: свой floor на тариф вместо общего 85%.
-                    business = max(business or 0, DISTRICT_CLOUD_THRESHOLDS_BY_FIELD['demand_business'][1])
-                    premium = max(premium or 0, DISTRICT_CLOUD_THRESHOLDS_BY_FIELD['demand_premier'][1])
+                    business = max(business or 0, city_thresholds['demand_business'][1])
+                    premium = max(premium or 0, city_thresholds['demand_premier'][1])
                     # ДОБАВЛЕНО 24.09.2026 (загружены данные Краснодара/Сочи -
                     # в их таблицах вообще НЕТ колонки Элит, demand_elite
                     # всегда None) - дождевой пол НЕ должен поднимать элит
@@ -15756,7 +15884,7 @@ async def handle_map_district_demand_api(request):
                     # городах без этого тарифа вовсе. См.
                     # CITIES_WITHOUT_ELITE_DEMAND_DATA ниже.
                     if city not in CITIES_WITHOUT_ELITE_DEMAND_DATA:
-                        elite = max(elite or 0, DISTRICT_CLOUD_THRESHOLDS_BY_FIELD['demand_elite'][1])
+                        elite = max(elite or 0, city_thresholds['demand_elite'][1])
                 item['demand_business'] = business
                 item['demand_premier'] = premium
                 item['demand_elite'] = elite
@@ -28435,14 +28563,18 @@ def _district_tariff_demand_value(city, district_name, category, tariff, weekday
     slots = entry.get('weekday', {}).get(str(weekday), [])
     return _district_slot_value(slots, hour, (idx,))
 
-def _district_tariff_demand_threshold(category, tariff):
-    """Порог показа облака (см. DISTRICT_CLOUD_THRESHOLDS_BY_FIELD) для
-    конкретного тарифа - или None, если тариф/индекс не сматчились."""
+def _district_tariff_demand_threshold(city, category, tariff):
+    """Порог показа облака (см. get_district_cloud_thresholds/
+    DISTRICT_CLOUD_THRESHOLDS_BY_CITY) для конкретного города и тарифа -
+    или None, если тариф/индекс не сматчились. ИЗМЕНЕНО 25.09.2026 -
+    добавлен параметр city (пороги теперь свои на каждый город, с поправкой
+    на курортную сезонность у Краснодара/Сочи), раньше был один общий
+    словарь на все города."""
     idx = SHIFT_TARIFF_TO_DEMAND_INDEX.get(category, {}).get(tariff)
     if idx is None:
         return None
     field = _DISTRICT_DEMAND_INDEX_TO_FIELD.get(idx)
-    return DISTRICT_CLOUD_THRESHOLDS_BY_FIELD.get(field)
+    return get_district_cloud_thresholds(city).get(field)
 
 async def push_low_tariff_demand_alert(user_id, state, city, category, district_name, current_tariff, lower_tariff):
     if not bot:
@@ -28492,7 +28624,7 @@ async def check_low_tariff_demand_alerts():
         weekday = now.weekday()
         try:
             current_value = _district_tariff_demand_value(city, district_name, category, current_tariff, weekday, now.hour)
-            current_threshold = _district_tariff_demand_threshold(category, current_tariff)
+            current_threshold = _district_tariff_demand_threshold(city, category, current_tariff)
         except Exception as e:
             logger.error(f"❌ Не удалось проверить спрос по тарифам для {user_id} ({city}/{category}): {e}")
             continue
@@ -28505,7 +28637,7 @@ async def check_low_tariff_demand_alerts():
         try:
             for candidate in candidates:
                 candidate_value = _district_tariff_demand_value(city, district_name, category, candidate, weekday, now.hour)
-                candidate_threshold = _district_tariff_demand_threshold(category, candidate)
+                candidate_threshold = _district_tariff_demand_threshold(city, category, candidate)
                 if candidate_value is not None and candidate_threshold and candidate_value >= candidate_threshold[0]:
                     lower_tariff = candidate
                     break
