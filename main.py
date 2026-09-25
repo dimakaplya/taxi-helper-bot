@@ -8082,7 +8082,19 @@ async def score_district_candidates(city, category, user_lat=None, user_lon=None
         # DISTRICT_DEMAND_FILES, не только Москвы.
         district_raining = district_rain_now(city, name, fallback_rain_now=rain_now)
         if district_raining:
-            demand = max(demand, MAP_DEMAND_RAIN_FLOOR_PERCENT)
+            # ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - "спрос
+            # дождя не влияет вообще ни на какие тарифы кроме эконом и
+            # комфорт за пределами городов", уточнение - "речь идёт и кнопка
+            # куда поехать и карта спроса") - за чертой города дождевой пол
+            # в "Куда поехать" поднимает балл района, только если сейчас
+            # считаем ИСКЛЮЧИТЕЛЬНО Эконом и/или Комфорт (indices ⊆ {0, 1},
+            # см. MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_ECONOM/COMFORT выше)
+            # - Ultima (Бизнес/Премьер/Элит) и Комфорт+ за городом от дождя
+            # больше не подсвечиваются. В черте города поведение не меняется
+            # (см. _district_in_city_limits выше).
+            in_city = _district_in_city_limits(city, entry.get('lat'), entry.get('lon'))
+            if in_city or set(indices).issubset({0, 1}):
+                demand = max(demand, MAP_DEMAND_RAIN_FLOOR_PERCENT)
         dist_km = None
         if origin_lat is not None and origin_lon is not None:
             dist_km = haversine_km(origin_lat, origin_lon, entry['lat'], entry['lon'])
@@ -11291,6 +11303,26 @@ def map_webapp_html():
         'elitePoints': [list(p) for p in MOSCOW_ELITE_ZONE_POINTS],
         'eliteRadiusKm': MOSCOW_ELITE_ZONE_RADIUS_KM,
     }, ensure_ascii=False)
+    # В ТРЕТИЙ РАЗ ИЗМЕНЕНО 25.09.2026 (см. "показывать тогда, когда он есть
+    # реально"/DEMAND_CLOUD_UNIFIED_THRESHOLDS/district_premium_threshold
+    # выше) - зона центр/область убрана, один порог на (город, тариф) -
+    # 85-й процентиль собственных данных тарифа (верхние ~15% реально самых
+    # загруженных моментов) для ВСЕХ городов/тарифов, кроме Бизнес/Премьер/
+    # Элит Москвы (у них своя уже проверенная таблица выше). Сезонность Краснодара/Сочи
+    # применена на сервере ЗАРАНЕЕ (сама district_premium_threshold её
+    # применить в JSON-дампе не может - сезонность завязана на текущее
+    # время сервера, а не на lat/lon, поэтому проще передать уже готовые,
+    # скорректированные числа).
+    demand_cloud_unified_thresholds_json = json.dumps({
+        city_key: {
+            field: tuple(
+                max(1, min(100, round(v * _resort_season_threshold_multiplier(city_key))))
+                for v in pair
+            )
+            for field, pair in city_table.items()
+        }
+        for city_key, city_table in DEMAND_CLOUD_UNIFIED_THRESHOLDS.items()
+    }, ensure_ascii=False)
     fuel_type_labels_json = json.dumps(FUEL_TYPE_LABELS, ensure_ascii=False)
     charging_status_labels_json = json.dumps(CHARGING_STATUS_LABELS, ensure_ascii=False)
     gas_queue_status_labels_json = json.dumps(GAS_QUEUE_STATUS_LABELS, ensure_ascii=False)
@@ -11564,6 +11596,12 @@ def map_webapp_html():
           // тарифов должны скрывать/показывать и облака спроса, не только
           // маркеры водителей, см. DISTRICT_CLOUD_LAYERS/selectedTariffs выше).
           loadDemandCloud();
+          // ДОБАВЛЕНО 25.09.2026 (см. _rainCloudAllowedForDistrict выше) -
+          // за городом дождевое облако зависит от того, какой тариф сейчас
+          // выбран (эконом/комфорт или нет) - переключение тарифа должно
+          // сразу пересчитать видимость дождевых облаков за городом, а не
+          // ждать следующего периодического опроса погоды.
+          if (demandShownState) loadRainCloud();
         }});
         tariffPanel.appendChild(row);
       }});
@@ -12755,6 +12793,24 @@ def map_webapp_html():
     return h;
   }}
   const RAIN_DISTRICT_CLOUD_RADIUS_METERS = 3500;
+  // ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя, скриншот с
+  // фиолетовыми пятнами по Тверской/Калужской/Смоленской областям далеко
+  // за Москвой - "спрос дождя не влияет вообще ни на какие тарифы кроме
+  // эконом и комфорт за пределами городов") - за чертой города дождевое
+  // облако теперь рисуется, только если сейчас выбран Эконом или Комфорт
+  // (Комфорт+/Бизнес/Премьер/Элит за городом дождь визуально вообще не
+  // показывает - синхронизировано с _district_in_city_limits в Python,
+  // тот же радиус RAIN_TARIFF_CITY_RADIUS_KM = PARKING_CITY_RADIUS_KM).
+  // В черте города поведение не меняется - дождь по-прежнему рисуется для
+  // любого выбранного тарифа, как и раньше.
+  const RAIN_TARIFF_CITY_RADIUS_KM = 30;
+  function _rainCloudAllowedForDistrict(d) {{
+    const center = CITY_CENTERS[city];
+    if (!center) return true;
+    const inCity = haversineKm(d.lat, d.lon, center[0], center[1]) <= RAIN_TARIFF_CITY_RADIUS_KM;
+    if (inCity) return true;
+    return myCategory === 'taxi' && (isDemandTariffSelected('taxi', 'Эконом') || isDemandTariffSelected('taxi', 'Комфорт'));
+  }}
   async function loadRainDistrictClouds() {{
     try {{
       const resp = await fetch(`/map/rain_districts?city=${{encodeURIComponent(city)}}`);
@@ -12767,7 +12823,9 @@ def map_webapp_html():
       // _districtsWithMatrixCloudNames/renderDistrictDemandClouds выше),
       // не дублируется ещё и дождевым облаком - одно фиолетовое пятно на
       // район, а не два наложенных друг на друга.
-      const districts = (data.districts || []).filter(d => !_districtsWithMatrixCloudNames.has(d.name));
+      const districts = (data.districts || [])
+        .filter(d => !_districtsWithMatrixCloudNames.has(d.name))
+        .filter(d => _rainCloudAllowedForDistrict(d));
       const signature = JSON.stringify(districts.map(d => d.name).sort());
       if (signature === _rainDistrictsSignature) return;  // тот же набор дождящих районов - не пересобираем
       _rainDistrictsSignature = signature;
@@ -12940,6 +12998,15 @@ def map_webapp_html():
   // DISTRICT_CLOUD_THRESHOLDS_BY_CITY для всех остальных случаев).
   const MOSCOW_PREMIUM_ZONE_THRESHOLDS = {moscow_premium_zone_thresholds_json};
   const MOSCOW_PREMIUM_ZONE_GEO = {moscow_premium_zone_geo_json};
+  // В ТРЕТИЙ РАЗ ИЗМЕНЕНО 25.09.2026 (прямая просьба пользователя -
+  // "показывать тогда, когда он есть реально"; см. DEMAND_CLOUD_UNIFIED_
+  // THRESHOLDS/district_premium_threshold в Python) - порог = 85-й
+  // процентиль собственных данных тарифа (верхние ~15% реально самых
+  // загруженных моментов), один на (город, тариф) для ВСЕХ городов и
+  // тарифов, кроме Бизнес/Премьер/Элит Москвы (у них своя, уже проверенная
+  // таблица выше, эта сюда не заходит). Сезонность Краснодара/Сочи уже
+  // учтена на сервере при формировании JSON.
+  const DEMAND_CLOUD_UNIFIED_THRESHOLDS = {demand_cloud_unified_thresholds_json};
   function moscowDemandZone(lat, lon) {{
     if (lat === null || lat === undefined || lon === null || lon === undefined) return 'oblast';
     const g = MOSCOW_PREMIUM_ZONE_GEO;
@@ -12954,6 +13021,14 @@ def map_webapp_html():
       const zone = moscowDemandZone(lat, lon);
       return MOSCOW_PREMIUM_ZONE_THRESHOLDS[zone][field];
     }}
+    // ИЗМЕНЕНО 25.09.2026 (см. DEMAND_CLOUD_UNIFIED_THRESHOLDS выше) -
+    // раньше тут был плоский DISTRICT_CLOUD_THRESHOLDS_BY_CITY один на
+    // весь город; теперь единый порог (85-й процентиль своих данных) на
+    // (город, тариф), тоже один на весь город (зона убрана), синхронизировано с
+    // district_premium_threshold в Python (клиент и сервер должны решать
+    // "показывать/не показывать" одинаково).
+    const cityTable = DEMAND_CLOUD_UNIFIED_THRESHOLDS[cityKey];
+    if (cityTable && cityTable[field]) return cityTable[field];
     const cityThresholds = DISTRICT_CLOUD_THRESHOLDS_BY_CITY[cityKey] || {{}};
     return cityThresholds[field] || [DEMAND_CLOUD_SHOW_THRESHOLD_PERCENT];
   }}
@@ -15983,16 +16058,87 @@ def _moscow_demand_zone(lat, lon):
             return 'elite'
     return 'oblast'
 
+# В ТРЕТИЙ РАЗ ИЗМЕНЕНО 25.09.2026 (прямая просьба пользователя - "надо
+# сделать более реалистичный вариант, пусть показывает тогда когда он есть
+# реально") - формула "min + 75% от размаха" на проверке реальными данными
+# оказалась НЕЧЕСТНОЙ: частота показа облака скакала от <1% времени
+# (Краснодар Бизнес/Премьер) до 44% времени (Питер Элит - облако "элитного"
+# спроса висело бы почти половину всего времени, что противоречит самой
+# идее премиум-сигнала). Причина - порог зависел не от того, как часто
+# встречается реально высокий спрос, а от формы распределения между двумя
+# крайними точками (min и max), которая у разных тарифов/городов очень
+# разная. Вернулись к процентилю по частоте встречаемости, но с единым,
+# одинаковым для ВСЕХ городов и тарифов ориентиром - 85-й процентиль
+# СОБСТВЕННЫХ данных тарифа (верхние ~15% реально самых загруженных
+# моментов по всем районам/часам/дням недели) - проверено на данных:
+# частота показа стабильно 15-19% везде, а не разброс в десятки раз.
+DEMAND_CLOUD_UNIFIED_THRESHOLDS = {
+    'moscow': {
+        'demand_econom': (73, 73), 'demand_comfort': (63, 63), 'demand_comfort_plus': (63, 63),
+    },
+    'spb': {
+        'demand_econom': (79, 79), 'demand_comfort': (81, 81), 'demand_comfort_plus': (87, 87),
+        'demand_business': (93, 93), 'demand_premier': (99, 99), 'demand_elite': (100, 100),
+    },
+    'krasnodar': {
+        'demand_econom': (100, 100), 'demand_comfort': (67, 67), 'demand_comfort_plus': (45, 45),
+        'demand_business': (22, 22), 'demand_premier': (10, 10),
+        'demand_elite': (10, 10),  # нет своих данных - взято значение Премьера, см. CITIES_WITHOUT_ELITE_DEMAND_DATA
+    },
+    'sochi': {
+        'demand_econom': (77, 77), 'demand_comfort': (81, 81), 'demand_comfort_plus': (89, 89),
+        'demand_business': (95, 95), 'demand_premier': (99, 99),
+        'demand_elite': (99, 99),  # нет своих данных - взято значение Премьера
+    },
+}
+
 def district_premium_threshold(city, field, lat, lon):
-    """Порог показа/дождевого пола для ОДНОГО района с учётом Московских
-    зон (см. MOSCOW_PREMIUM_ZONE_THRESHOLDS выше) - для Бизнес/Премьер/
-    Элит в Москве считается по зоне района (центр/область/элитная зона).
-    Для всего остального (другие тарифы, другие города) - как раньше,
-    единый по городу get_district_cloud_thresholds(city)[field]."""
+    """Порог показа/дождевого пола для ОДНОГО района. Для Москвы Бизнес/
+    Премьер/Элит - по её собственной, уже проверенной зоне (центр/область/
+    элитная зона Рублёвка-Новая Рига, см. MOSCOW_PREMIUM_ZONE_THRESHOLDS
+    выше). Для ВСЕГО остального (Эконом/Комфорт/Комфорт+ Москвы + все
+    тарифы Питера/Краснодара/Сочи) - единый порог по городу целиком, 85-й
+    процентиль СОБСТВЕННЫХ данных тарифа (см. DEMAND_CLOUD_UNIFIED_
+    THRESHOLDS выше - верхние ~15% реально самых загруженных моментов), с
+    поправкой на курортную сезонность (как и раньше у get_district_cloud_
+    thresholds). lat/lon здесь больше не влияют на порог для этих полей
+    (зона убрана по просьбе пользователя) - параметры оставлены ради общей
+    сигнатуры функции (вызывающий код везде передаёт lat/lon, менять все
+    вызовы незачем). Откат на старый плоский get_district_cloud_thresholds(city)[field],
+    если города нет ни в одной из двух таблиц (не должно происходить у
+    городов из DISTRICT_DEMAND_CITIES, но лучше разумный дефолт, чем
+    KeyError)."""
     if city == 'moscow' and field in MOSCOW_PREMIUM_ZONE_THRESHOLDS['center']:
         zone = _moscow_demand_zone(lat, lon)
         return MOSCOW_PREMIUM_ZONE_THRESHOLDS[zone][field]
+    pair = (DEMAND_CLOUD_UNIFIED_THRESHOLDS.get(city) or {}).get(field)
+    if pair:
+        multiplier = _resort_season_threshold_multiplier(city)
+        if multiplier == 1.0:
+            return pair
+        return tuple(max(1, min(100, round(v * multiplier))) for v in pair)
     return get_district_cloud_thresholds(city).get(field)
+
+# ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя, скриншот с
+# фиолетовыми пятнами разбросанными по Тверской/Калужской/Смоленской
+# областям далеко за Москвой - "спрос дождя не влияет вообще ни на какие
+# тарифы кроме эконом и комфорт за пределами городов") - дождевой "пол"
+# (district_raining в handle_map_district_demand_api ниже) должен поднимать
+# Комфорт+/Бизнес/Премьер/Элит ТОЛЬКО внутри черты города; за городом (в
+# области) от дождя поднимаются исключительно Эконом и Комфорт - реального
+# дождевого спроса на дорогие тарифы в дальнем Подмосковье/соседних областях
+# по факту не бывает, а массовые фиолетовые облака там читались как явный
+# баг. Граница "в черте города" - тот же условный центр и тот же радиус
+# (PARKING_CITY_RADIUS_KM от RAIN_CITY_COORDS), что уже используется для
+# фичи платных городских парковок - работает для ЛЮБОГО города с районными
+# данными (Москва/Питер/Краснодар/Сочи), не только для Москвы.
+def _district_in_city_limits(city, lat, lon):
+    if lat is None or lon is None:
+        return True  # нет координат - не ограничиваем, прежнее поведение
+    coords = RAIN_CITY_COORDS.get(city)
+    if not coords:
+        return True
+    return haversine_km(lat, lon, coords[0], coords[1]) <= PARKING_CITY_RADIUS_KM
 
 MAP_DISTRICT_DEMAND_API_PATH = '/map/district_demand'
 
@@ -16086,13 +16232,12 @@ async def handle_map_district_demand_api(request):
     try:
         now = get_city_now(city)
         weekday = str(now.weekday())
-        # ДОБАВЛЕНО 25.09.2026 (см. get_district_cloud_thresholds/
-        # DISTRICT_CLOUD_THRESHOLDS_BY_CITY выше) - пороги теперь СВОИ на
-        # каждый город (и с поправкой на курортную сезонность для
-        # Краснодара/Сочи), а не общий DISTRICT_CLOUD_THRESHOLDS_BY_FIELD на
-        # всех - считаем один раз на весь запрос, используем ниже везде,
-        # где раньше стоял общий словарь.
-        city_thresholds = get_district_cloud_thresholds(city)
+        # ИЗМЕНЕНО 25.09.2026 (см. "единую формулу"/district_premium_threshold
+        # выше) - раньше здесь считался один общий city_thresholds на весь
+        # город (get_district_cloud_thresholds), теперь дождевой пол ниже
+        # берёт порог через district_premium_threshold(city, field, lat, lon)
+        # отдельно на каждый район (порог свой по зоне центр/область) - общий
+        # словарь на весь запрос больше не нужен.
         # Общегородской rain_now - только как fallback для районов, у
         # которых ещё нет собственного снепшота погоды (см. district_rain_now
         # и комментарий в score_district_candidates выше).
@@ -16145,9 +16290,21 @@ async def handle_map_district_demand_api(request):
                     # DISTRICT_CLOUD_THRESHOLDS_BY_FIELD (тот порог, после
                     # которого облако и так уже считается "ярким" для этого
                     # тарифа), а не общий 85% для всех.
-                    econom = max(econom or 0, city_thresholds['demand_econom'][1])
-                    comfort = max(comfort or 0, city_thresholds['demand_comfort'][1])
-                    comfort_plus = max(comfort_plus or 0, city_thresholds['demand_comfort_plus'][1])
+                    # ИЗМЕНЕНО 25.09.2026 (см. "единую формулу"/
+                    # DEMAND_CLOUD_UNIFIED_THRESHOLDS у district_premium_
+                    # threshold выше) - порог теперь свой по зоне района
+                    # (центр/область) для ЛЮБОГО города, а не единый
+                    # city_thresholds на весь город - раньше дождь в центре
+                    # поднимал бы Эконом/Комфорт до заведомо заниженного
+                    # общегородского порога.
+                    econom = max(econom or 0, district_premium_threshold(city, 'demand_econom', entry.get('lat'), entry.get('lon'))[1])
+                    comfort = max(comfort or 0, district_premium_threshold(city, 'demand_comfort', entry.get('lat'), entry.get('lon'))[1])
+                    # ДОБАВЛЕНО 25.09.2026 (см. _district_in_city_limits выше) -
+                    # Комфорт+ дождевым полом поднимается только В ЧЕРТЕ
+                    # города; за городом дождь по прямой просьбе пользователя
+                    # не должен трогать ничего, кроме Эконома и Комфорта.
+                    if _district_in_city_limits(city, entry.get('lat'), entry.get('lon')):
+                        comfort_plus = max(comfort_plus or 0, district_premium_threshold(city, 'demand_comfort_plus', entry.get('lat'), entry.get('lon'))[1])
                 item['demand_econom'] = econom
                 item['demand_comfort'] = comfort
                 item['demand_comfort_plus'] = comfort_plus
@@ -16164,7 +16321,13 @@ async def handle_map_district_demand_api(request):
                 elite = _district_slot_value(slots, now.hour, MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_ELITE)
                 if business is None and premium is None and elite is None and not district_raining:
                     continue
-                if district_raining:
+                # ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - "спрос
+                # дождя не влияет вообще ни на какие тарифы кроме эконом и
+                # комфорт за пределами городов") - Бизнес/Премьер/Элит
+                # дождевым полом поднимаются ТОЛЬКО в черте города; за
+                # городом дождь на Ultima-тарифы вообще не влияет (см.
+                # _district_in_city_limits выше).
+                if district_raining and _district_in_city_limits(city, entry.get('lat'), entry.get('lon')):
                     # См. комментарий у "дождевого пола" для такси выше -
                     # та же правка: свой floor на тариф вместо общего 85%.
                     # ИЗМЕНЕНО 25.09.2026 (см. district_premium_threshold/
@@ -28880,17 +29043,60 @@ def _district_tariff_demand_threshold(city, category, tariff, lat=None, lon=None
     field = _DISTRICT_DEMAND_INDEX_TO_FIELD.get(idx)
     return district_premium_threshold(city, field, lat, lon)
 
+def _live_shift_tariff_toggle_button(text, category, tariff):
+    """Кнопка "➕/➖ <тариф>" под пушем про низкий/повышенный спрос - тап
+    сразу дёргает ТОТ ЖЕ обработчик, что и ручной тоггл в "🚕 ВЫБОР ТАРИФА"
+    (см. live_shift_tariff_toggle выше) - callback_data строится по индексу
+    тарифа в shift_tariff_options(category), никакой новой логики
+    переключения не нужно, только текст/кнопка пуша другие."""
+    tariffs = shift_tariff_options(category)
+    if tariff not in tariffs:
+        return None
+    idx = tariffs.index(tariff)
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=text, callback_data=f"live_shift_tariff_toggle_{idx}")],
+    ])
+
 async def push_low_tariff_demand_alert(user_id, state, city, category, district_name, current_tariff, lower_tariff):
+    """ИЗМЕНЕНО 25.09.2026 (прямая просьба пользователя - "не переключиться
+    с премьера на бизнес, а подключить дополнительный тариф бизнес") - пуш
+    больше не предлагает УЙТИ с current_tariff, а предлагает ДОБАВИТЬ
+    lower_tariff к уже выбранным (водитель продолжает получать заказы и на
+    current_tariff тоже) - кнопка снизу сразу включает lower_tariff в
+    shift['tariffs'] (см. _live_shift_tariff_toggle_button выше), без похода
+    в отдельное меню "🚕 ВЫБОР ТАРИФА"."""
     if not bot:
         return False
     text = (
         f"📉 *{CITY_DISPLAY_NAMES.get(city, city)} · {district_name}*\n\n"
         f"На тарифе *{current_tariff}* сейчас мало заказов в твоём районе.\n"
-        f"А вот на *{lower_tariff}* спрос сейчас повышенный - есть смысл переключиться, чтобы не терять время в простое."
+        f"А вот на *{lower_tariff}* спрос сейчас повышенный - есть смысл подключить его дополнительно, чтобы не терять время в простое."
     )
     return await send_push_with_retry(
         user_id, text, state=state, parse_mode='Markdown',
-        reply_markup=services_keyboard(category, city, user_id),
+        reply_markup=_live_shift_tariff_toggle_button(f"➕ Подключить {lower_tariff}", category, lower_tariff)
+        or services_keyboard(category, city, user_id),
+    )
+
+async def push_disable_extra_tariff_alert(user_id, state, city, category, district_name, main_tariff, extra_tariff):
+    """ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - "обратная сторона
+    - отключить тариф бизнеса, оставить только премьер") - зеркальный пуш к
+    push_low_tariff_demand_alert: когда у водителя уже включён ДОПОЛНИТЕЛЬНЫЙ
+    (более дешёвый) тариф, а спрос на него снова упал, пока на основном
+    тарифе всё в порядке - предлагаем выключить именно дополнительный,
+    оставив только основной. Кнопка дёргает тот же live_shift_tariff_toggle -
+    тариф уже выбран, поэтому тап его СНИМЕТ."""
+    if not bot:
+        return False
+    text = (
+        f"📈 *{CITY_DISPLAY_NAMES.get(city, city)} · {district_name}*\n\n"
+        f"Спрос на *{extra_tariff}* в твоём районе снова упал, а на *{main_tariff}* всё в порядке.\n"
+        f"Есть смысл отключить *{extra_tariff}*, чтобы заказы приходили только по основному тарифу."
+    )
+    return await send_push_with_retry(
+        user_id, text, state=state, parse_mode='Markdown',
+        reply_markup=_live_shift_tariff_toggle_button(f"➖ Отключить {extra_tariff}", category, extra_tariff)
+        or services_keyboard(category, city, user_id),
     )
 
 async def check_low_tariff_demand_alerts():
@@ -28917,9 +29123,15 @@ async def check_low_tariff_demand_alerts():
         current_tariff = _lowest_selected_tariff(category, shift.get('tariffs'))
         if not current_tariff:
             continue
+        # ИЗМЕНЕНО 25.09.2026 (см. push_disable_extra_tariff_alert/
+        # "обратную сторону" ниже) - раньше отсутствие candidates (тариф уже
+        # самый дешёвый в иерархии) сразу обрывало проверку этого водителя.
+        # Теперь пустой candidates - НЕ повод выходить сразу: если этот
+        # самый дешёвый тариф выбран ДОПОЛНИТЕЛЬНО поверх более дорогого и
+        # его спрос упал, нужно предложить его выключить (см. блок ниже,
+        # после is_current_low) - решение по candidates откладываем до
+        # after проверки is_current_low.
         candidates = _lower_tariff_candidates(category, current_tariff)
-        if not candidates:
-            continue  # уже самый дешёвый тариф в категории - переключаться некуда
         nearest = find_nearest_district(city, user_lat, user_lon)
         if not nearest:
             continue
@@ -28935,6 +29147,47 @@ async def check_low_tariff_demand_alerts():
         is_current_low = (current_value is not None and current_threshold and current_value < current_threshold[0])
         if not is_current_low:
             continue
+        selected_now = shift.get('tariffs') or []
+        if not candidates:
+            # ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - "обратная
+            # сторона - отключить тариф бизнеса, оставить только премьер",
+            # см. push_disable_extra_tariff_alert выше) - current_tariff тут
+            # уже САМЫЙ ДЕШЁВЫЙ из иерархии, переключаться вниз некуда. Но
+            # если он был выбран КАК ДОПОЛНИТЕЛЬНЫЙ (в дополнение к более
+            # дорогому тарифу, который тоже сейчас выбран) и спрос на него
+            # упал - предлагаем не "переключиться" (некуда), а просто
+            # выключить именно этот дополнительный тариф, раз он больше не
+            # оправдывает себя, пока более дорогой тариф работает нормально.
+            hierarchy = TARIFF_HIERARCHY.get(category) or []
+            selected_in_hierarchy = [t for t in hierarchy if t in selected_now]
+            if len(selected_in_hierarchy) >= 2 and selected_in_hierarchy[-1] == current_tariff:
+                main_tariff = selected_in_hierarchy[-2]
+                try:
+                    main_value = _district_tariff_demand_value(city, district_name, category, main_tariff, weekday, now.hour)
+                    main_threshold = _district_tariff_demand_threshold(city, category, main_tariff, user_lat, user_lon)
+                except Exception as e:
+                    logger.error(f"❌ Не удалось проверить спрос по тарифам для {user_id} ({city}/{category}): {e}")
+                    continue
+                main_ok = (main_value is not None and main_threshold and main_value >= main_threshold[0])
+                if main_ok:
+                    disable_state = state.get('disable_extra_tariff_alert') or {}
+                    if (disable_state.get('district') == district_name
+                            and disable_state.get('extra') == current_tariff
+                            and disable_state.get('main') == main_tariff):
+                        try:
+                            last_sent = datetime.fromisoformat(disable_state['last_sent'])
+                        except Exception:
+                            last_sent = None
+                        if last_sent and (now_utc - last_sent).total_seconds() < LOW_TARIFF_DEMAND_RECHECK_MINUTES * 60:
+                            continue
+                    ok = await push_disable_extra_tariff_alert(user_id, state, city, category, district_name, main_tariff, current_tariff)
+                    if ok:
+                        state['disable_extra_tariff_alert'] = {
+                            'district': district_name, 'extra': current_tariff, 'main': main_tariff,
+                            'last_sent': now_utc.isoformat(),
+                        }
+                    await asyncio.sleep(0.05)
+            continue  # уже самый дешёвый тариф в категории - переключаться "вниз" некуда
         # Перебираем кандидатов на понижение по приоритету (ближайший
         # сначала) и берём первый, у которого реально есть спрос сейчас.
         lower_tariff = None
