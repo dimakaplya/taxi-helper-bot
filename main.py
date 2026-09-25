@@ -9455,17 +9455,22 @@ async def start_shift_and_notify(target, user_id, category, city, tariffs):
     # одним тапом и сама закрывается за долю секунды (не отдельный "экран").
     # Как только платформа узнана (отсюда или из любого другого WebApp),
     # кнопка на следующих сменах уже не появляется.
+    # ИЗМЕНЕНО 25.09.2026 (прямая просьба пользователя - "сделай её место
+    # кнопки") - убран поясняющий абзац текста, оставлена ТОЛЬКО сама кнопка
+    # (тот же приём, что у continue_to_bot_keyboard/"🚕✨ TAXI HELPER GOOOO" -
+    # короткая строка-заголовок вместо сообщения-лекции). ЕЩЁ РАЗ ИЗМЕНЕНО
+    # 25.09.2026 (прямая просьба пользователя - текст кнопки "📍ОПРЕДЕЛИТЬ
+    # ЛОКАЦИЮ" вместо "Быстрая настройка") - водителю понятнее и привычнее
+    # формулировка про геолокацию, чем абстрактная "настройка"; техническая
+    # суть не меняется - тап всё так же открывает platform_probe_webapp_html
+    # и мгновенно закрывается сам.
     if PUBLIC_URL and driver_platform_hint(user_id) is None:
         probe_url = f"{PUBLIC_URL}{PLATFORM_PROBE_WEBAPP_PATH}"
         probe_keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📲 Быстрая настройка (1 тап)", web_app=WebAppInfo(url=probe_url))]
+            [InlineKeyboardButton(text="📍ОПРЕДЕЛИТЬ ЛОКАЦИЮ", web_app=WebAppInfo(url=probe_url))]
         ])
         try:
-            await target(
-                "📲 Один тап - и бот запомнит, с какого ты телефона (дальше не будет "
-                "спрашивать), чтобы в пушах сразу показывать нужную кнопку, а не обе сразу.",
-                reply_markup=probe_keyboard,
-            )
+            await target("📲", reply_markup=probe_keyboard)
         except Exception:
             logger.exception(f"❌ Не удалось отправить кнопку захвата платформы user_id={user_id}")
     # ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя) - раньше сразу же
