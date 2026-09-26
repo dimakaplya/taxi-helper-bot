@@ -11543,24 +11543,65 @@ MAP_CHROME_CSS = """
      #shiftSliderHandle ниже и JS doShiftToggle/updateShiftToggleBtnUI).
      Уточнено в диалоге: завершение смены - тем же свайпом (в обе стороны
      одним и тем же жестом), плашка времени/тарифа (.bottom-info-bar)
-     сдвинута выше, чтобы освободить место снизу для этой полосы. */
+     сдвинута выше, чтобы освободить место снизу для этой полосы.
+
+     ИЗМЕНЕНО 26.09.2026 (прямая просьба пользователя по скриншоту живого
+     бота):
+     1) Ручка (.shift-slider-handle) стояла НЕ по центру полосы по вертикали
+        - top:3px при высоте полосы 56px и ручки 44px даёт 3px сверху и
+          9px снизу (56-3-44=9), визуально "съехавшая" вверх ручка ("смотри
+          как она смещена"). Теперь top:50% + transform: translateY(-50%) -
+          ручка centered независимо от точных цифр высоты.
+     2) Полоса теперь ВСЕГДА жёлтая (#FFB800), а не серая-до-смены/жёлтая-
+        на-смене - ".active" для цвета фона больше не нужен.
+     3) ГЛАВНОЕ - свайп теперь ТОЛЬКО чтобы ВЫЙТИ на линию ("она была
+        только на ВЫЙТИ НА ЛИНИЮ"). Как только смена активна, вся полоса
+        уезжает вниз за экран и пропадает (.shift-slider.on-shift ниже) -
+        завершать смену свайпом больше нельзя (для этого у бота есть кнопка
+        "⏹ ЗАВЕРШИТЬ СМЕНУ"/"Уйти с линии" в чате, см. toggle_shift выше по
+        файлу - карта эту возможность не отбирает, а просто больше не
+        дублирует её этой полосой). Плашка времени/тарифа (.bottom-info-bar)
+        одновременно опускается обратно вниз (класс .slider-hidden ниже),
+        освобождённое место больше не нужно резервировать под полосу. */
   .shift-slider {
     position: absolute; left: 12px; right: 12px; bottom: max(14px, env(safe-area-inset-bottom, 0px));
-    z-index: 1000; height: 56px; border-radius: 28px; background: #8a8a8a;
+    z-index: 1000; height: 56px; border-radius: 28px; background: #FFB800;
     border: 3px solid #fff; box-shadow: 0 2px 8px rgba(0,0,0,.45);
     display: flex; align-items: center; justify-content: center;
-    overflow: hidden; user-select: none; transition: background .25s;
+    overflow: hidden; user-select: none; transition: transform .3s ease, opacity .3s ease;
   }
-  .shift-slider.active { background: #FFB800; }
   .shift-slider.pending { opacity: .6; }
+  /* on-shift - смена уже активна, полосе для завершения смены (это теперь
+     делается из чата бота) больше нечего показывать - уезжает за нижний
+     край экрана и полностью исчезает (opacity + pointer-events:none, чтобы
+     не оставался кликабельным невидимый элемент). 140% высоты с запасом
+     перекрывает и саму полосу (56px), и border, и нижний safe-area отступ. */
+  .shift-slider.on-shift { transform: translateY(140%); opacity: 0; pointer-events: none; }
   .shift-slider-label { position: relative; z-index: 1; font-family: -apple-system, sans-serif; font-weight: 700; font-size: 15px; color: #1c1c1c; pointer-events: none; }
   .shift-slider-handle {
-    position: absolute; left: 3px; top: 3px; width: 44px; height: 44px; border-radius: 50%;
+    position: absolute; left: 3px; top: 50%; transform: translateY(-50%); width: 44px; height: 44px; border-radius: 50%;
     background: #fff; box-shadow: 0 2px 6px rgba(0,0,0,.4); display: flex; align-items: center;
     justify-content: center; cursor: grab; touch-action: none; z-index: 2; transition: left .25s ease;
   }
   .shift-slider-handle.dragging { transition: none; cursor: grabbing; }
   .shift-slider-handle svg { width: 22px; height: 22px; }
+  /* ВОЗВРАЩЕНО 26.09.2026 (прямая просьба пользователя - "верни обратно
+     индикатор радара в верхнем левом углу карты") - это ТОТ ЖЕ визуальный
+     индикатор, что был раньше на месте круглой кнопки-переключателя
+     (.shift-toggle-btn, см. историю коммитов выше) ДО замены её на
+     .shift-slider - серый кружок в углу экрана, жёлтый + анимация
+     "радара" (вращающийся конус) пока водитель на линии. Раньше по нему
+     ещё и кликали, чтобы переключить смену - теперь это делает исключительно
+     .shift-slider внизу, поэтому кружок НЕ кликабельный (без cursor:pointer
+     и обработчиков в JS) - чисто статус-индикатор "я на линии", как и было
+     задумано пользователем изначально по референсу. */
+  .shift-radar-indicator { position: absolute; top: 14px; left: 14px; z-index: 1000; width: 56px; height: 56px; border-radius: 50%; background: #8a8a8a; border: 3px solid #fff; box-shadow: 0 2px 8px rgba(0,0,0,.45); display: flex; align-items: center; justify-content: center; user-select: none; overflow: hidden; transition: background .25s; }
+  .shift-radar-indicator.active { background: #FFB800; }
+  .shift-radar-indicator .power-icon { position: relative; z-index: 2; width: 26px; height: 26px; filter: drop-shadow(0 1px 1px rgba(0,0,0,.35)); }
+  .shift-radar-indicator .radar-sweep { position: absolute; inset: 0; border-radius: 50%; background: conic-gradient(from 0deg, rgba(255,255,255,.6), rgba(255,255,255,0) 40%); opacity: 0; }
+  .shift-radar-indicator.active .radar-sweep { opacity: 1; animation: shift-radar-spin 2.4s linear infinite; }
+  @keyframes shift-radar-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .shift-radar-indicator .radar-sweep { animation: none !important; } }
   /* ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - "сделай выбор
      тарифа с картой прям") - карточка выбора тарифов ПРЯМО НА КАРТЕ вместо
      ухода в чат бота (см. openTariffPicker/closeTariffPicker в JS ниже,
@@ -11599,13 +11640,18 @@ MAP_CHROME_CSS = """
        (justify-content: space-around вместо center). */
     /* ИЗМЕНЕНО 26.09.2026 (прямая просьба пользователя - см. .shift-slider
        выше) - плашка сдвинута выше на высоту свайпера смены + зазор
-       (56px + 10px = 66px), чтобы не перекрываться с ним внизу экрана. */
+       (56px + 10px = 66px), чтобы не перекрываться с ним внизу экрана.
+       ЕЩЁ РАЗ ИЗМЕНЕНО 26.09.2026 (та же просьба - "чтобы бар опускался
+       вниз", см. .shift-slider.on-shift выше) - пока смена активна и полоса
+       свайпа уехала за экран, место снизу освобождается - плашка опускается
+       обратно на прежнее место (.slider-hidden ниже), а не висит в воздухе
+       над пустотой. */
     position: absolute; left: 12px; right: 12px; bottom: calc(max(14px, env(safe-area-inset-bottom, 0px)) + 66px);
     z-index: 1000; display: flex; align-items: center; gap: 8px;
     background: rgba(20,20,20,.82); backdrop-filter: blur(8px); color: #fff;
     border: 1px solid rgba(255,196,0,.35); border-radius: 16px; padding: 10px 16px;
     font-family: -apple-system, sans-serif; box-shadow: 0 4px 16px rgba(0,0,0,.45);
-    pointer-events: none;
+    pointer-events: none; transition: bottom .3s ease;
     /* ИЗМЕНЕНО 25.09.2026 (прямая просьба пользователя - "добавь через
        сколько дождь или дождь не ожидается", третий сегмент bib-rain ниже)
        - было white-space:nowrap на одну строку, но с третьим сегментом
@@ -11613,6 +11659,7 @@ MAP_CHROME_CSS = """
        строку - разрешаем перенос по центру вместо обрезки/наезда на края. */
     flex-wrap: wrap; justify-content: space-around; width: auto; text-align: center;
   }
+  .bottom-info-bar.slider-hidden { bottom: max(14px, env(safe-area-inset-bottom, 0px)); }
   .bottom-info-bar .bib-icon { font-size: 16px; }
   .bottom-info-bar .bib-label { font-size: 13.5px; font-weight: 700; }
   .bottom-info-bar .bib-sep { width: 1px; height: 14px; background: rgba(255,255,255,.25); }
@@ -11930,12 +11977,28 @@ def map_webapp_html():
      см. .shift-slider в CSS выше и doShiftToggle/updateShiftToggleBtnUI в
      JS ниже. Ручка (#shiftSliderHandle) - перетаскиваемый белый кружок,
      свайп до ~70% ширины полосы = переключить смену (та же логика POST
-     /map/toggle_shift, что была у клика по старой круглой кнопке). -->
-<div class="shift-slider" id="shiftSlider" title="Свайпни, чтобы начать/завершить смену">
+     /map/toggle_shift, что была у клика по старой круглой кнопке).
+     ИЗМЕНЕНО 26.09.2026 (прямая просьба пользователя - см. .shift-slider.
+     on-shift в CSS выше) - свайп теперь только чтобы ВЫЙТИ на линию, пока
+     смена активна вся полоса скрыта за экраном (завершение смены - из
+     чата бота), поэтому title/подпись больше не упоминают "завершить". -->
+<div class="shift-slider" id="shiftSlider" title="Свайпни, чтобы выйти на линию">
   <div class="shift-slider-label" id="shiftSliderLabel">Выйти на линию</div>
   <div class="shift-slider-handle" id="shiftSliderHandle">
     <svg viewBox="0 0 24 24" fill="#1c1c1c"><path d="M8 5v14l11-7z"/></svg>
   </div>
+</div>
+<!-- ВОЗВРАЩЕНО 26.09.2026 (прямая просьба пользователя - "верни обратно
+     индикатор радара в верхнем левом углу карты") - см. .shift-radar-
+     indicator в CSS выше и updateShiftToggleBtnUI в JS ниже. Чисто статус-
+     индикатор (не кликабельный - переключение смены теперь только через
+     .shift-slider внизу), поэтому без обработчиков кликов, в отличие от
+     прежней версии этого элемента. -->
+<div class="shift-radar-indicator" id="shiftRadarIndicator" title="Статус смены">
+  <div class="radar-sweep"></div>
+  <svg class="power-icon" viewBox="0 0 24 24" fill="#fff">
+    <path d="M13 3h-2v10h2V3zm4.83 2.17-1.42 1.42A6.92 6.92 0 0 1 19 12c0 3.87-3.13 7-7 7s-7-3.13-7-7c0-2.24 1.06-4.32 2.83-5.65L6.41 5.17A8.936 8.936 0 0 0 3 12c0 4.97 4.03 9 9 9s9-4.03 9-9c0-2.78-1.28-5.3-3.17-6.83z"/>
+  </svg>
 </div>
 <!-- ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - "сделай выбор
      тарифа с карты прям") - см. .tariff-picker-overlay в CSS выше и
@@ -12623,12 +12686,28 @@ def map_webapp_html():
   const shiftSlider = document.getElementById('shiftSlider');
   const shiftSliderLabel = document.getElementById('shiftSliderLabel');
   const shiftSliderHandle = document.getElementById('shiftSliderHandle');
+  // ВОЗВРАЩЕНО 26.09.2026 (прямая просьба пользователя - см. .shift-radar-
+  // indicator в CSS и div#shiftRadarIndicator в HTML выше) - статус-
+  // индикатор в углу карты, без кликов, только отражает myShiftActive.
+  const shiftRadarIndicator = document.getElementById('shiftRadarIndicator');
+  // ДОБАВЛЕНО 26.09.2026 (та же просьба - "бар опускался вниз") -
+  // .bottom-info-bar опускается на прежнее (нижнее) место, пока полоса
+  // свайпа скрыта (см. .bottom-info-bar.slider-hidden в CSS выше).
+  const bottomInfoBarEl = document.getElementById('bottomInfoBar');
   function shiftSliderSetOffset(px) {{
     if (shiftSliderHandle) shiftSliderHandle.style.left = px + 'px';
   }}
   function updateShiftToggleBtnUI() {{
-    if (shiftSlider) shiftSlider.classList.toggle('active', myShiftActive);
-    if (shiftSliderLabel) shiftSliderLabel.textContent = myShiftActive ? 'Уйти с линии' : 'Выйти на линию';
+    // ИЗМЕНЕНО 26.09.2026 (прямая просьба пользователя - см. .shift-slider.
+    // on-shift в CSS выше): полоса свайпа теперь ТОЛЬКО чтобы выйти на
+    // линию - на смене она уезжает за экран (on-shift), а не красится
+    // жёлтым (полоса и так всегда жёлтая теперь, .active для цвета не
+    // нужен). Подпись тоже больше не переключается на "Уйти с линии" -
+    // пока смена активна полоса всё равно не видна.
+    if (shiftSlider) shiftSlider.classList.toggle('on-shift', myShiftActive);
+    if (shiftSliderLabel) shiftSliderLabel.textContent = 'Выйти на линию';
+    if (bottomInfoBarEl) bottomInfoBarEl.classList.toggle('slider-hidden', myShiftActive);
+    if (shiftRadarIndicator) shiftRadarIndicator.classList.toggle('active', myShiftActive);
     shiftSliderSetOffset(3);
     // ДОБАВЛЕНО 26.09.2026 - см. SELF_MARKER_OFFLINE_FILL/selfIconHtml выше:
     // перекрашиваем свою стрелку на карте сразу же по смене статуса, не
