@@ -6702,7 +6702,18 @@ def share_order_webapp_html(category=None):
 <script>
   const tg = window.Telegram && window.Telegram.WebApp;
   if (tg) { tg.ready(); tg.expand(); }
-  if (tg && tg.platform) { fetch('/platform/report', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': tg.initData || '' }, body: JSON.stringify({ platform: tg.platform }) }).catch(function(){}); }
+  // ДОБАВЛЕНО 26.09.2026 (перенос "Отдать заказ" в единое приложение, см.
+  // unified_app_html() - раздел "Ещё" вкладки "Сервисы") - тот же откат на
+  // URL-параметр tgInitData, что и в map_webapp_html/_mapInitData: initData
+  // здесь передаётся явно единым приложением, потому что submit требует
+  // подписи, а это уже не самое первое открытие WebApp Telegram'ом. При
+  // обычном прямом открытии (как раньше) tgInitData просто отсутствует, и
+  // ничего не меняется.
+  function _shareOrderInitData() {
+    if (tg && tg.initData) return tg.initData;
+    try { return new URLSearchParams(window.location.search).get('tgInitData') || ''; } catch (e) { return ''; }
+  }
+  if (tg && tg.platform) { fetch('/platform/report', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': _shareOrderInitData() }, body: JSON.stringify({ platform: tg.platform }) }).catch(function(){}); }
   const carClasses = """ + car_classes_json + """;
   let carClass = (carClasses[0] || {}).name || '';
   let pax = 1;
@@ -6782,7 +6793,7 @@ def share_order_webapp_html(category=None):
     try {
       const resp = await fetch('""" + SHARE_ORDER_SUBMIT_API_PATH + """', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': (tg ? tg.initData : '') },
+        headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': _shareOrderInitData() },
         body: JSON.stringify({
           pickup, dropoff, price_from: priceFrom || null, price_to: priceTo || null,
           commission_from: commissionFrom || null, commission_to: commissionTo || null,
@@ -16869,6 +16880,50 @@ def unified_app_html():
   .switch input:checked + .track { background: #FFC400; }
   .switch input:checked + .track + .knob { transform: translateX(18px); }
   #cab-state { text-align: center; padding: 40px 16px; opacity: .7; font-size: 13.5px; }
+
+  /* ---------- Сервисы: детальный вид (Реферальная/Подписка/Поддержка/Город) ---------- */
+  .svc-back {
+    background: none; border: none; color: #FFC400; font-family: 'Golos Text', sans-serif;
+    font-size: 13.5px; font-weight: 600; padding: 8px 0 16px; cursor: pointer;
+  }
+  .svc-h { font-family: 'Unbounded', sans-serif; font-size: 16px; font-weight: 700; margin: 0 0 12px; }
+  .svc-row {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    background: #131313; border: 1px solid rgba(255,255,255,.08); border-radius: 12px;
+    padding: 13px 14px; margin-bottom: 8px; font-size: 13.5px;
+  }
+  .svc-row .v { font-weight: 700; color: #FFC400; }
+  .svc-card { background: #131313; border: 1px solid rgba(255,255,255,.08); border-radius: 12px; padding: 14px; margin-bottom: 10px; }
+  .svc-link-text {
+    font-size: 12.5px; color: #ccc; background: #0a0a0a; border: 1px solid rgba(255,255,255,.1);
+    border-radius: 8px; padding: 9px 11px; word-break: break-all; margin-bottom: 8px;
+  }
+  .svc-btn {
+    display: block; width: 100%; text-align: center; text-decoration: none; box-sizing: border-box;
+    background: #FFC400; color: #000; font-weight: 700; font-size: 13.5px; border: none;
+    border-radius: 10px; padding: 12px; cursor: pointer; font-family: 'Golos Text', sans-serif;
+  }
+  .svc-btn.ghost { background: #1c1c1c; color: #FFC400; border: 1px solid rgba(255,196,0,.4); }
+  .svc-btn + .svc-btn { margin-top: 8px; }
+  .svc-input {
+    width: 100%; box-sizing: border-box; background: #0a0a0a; border: 1px solid rgba(255,255,255,.15);
+    border-radius: 10px; padding: 11px 12px; color: #fff; font-size: 13.5px; margin-bottom: 8px;
+    font-family: 'Golos Text', sans-serif;
+  }
+  .svc-select {
+    width: 100%; box-sizing: border-box; background: #131313; border: 1px solid rgba(255,255,255,.15);
+    border-radius: 10px; padding: 11px 12px; color: #fff; font-size: 13.5px; margin-bottom: 10px;
+    font-family: 'Golos Text', sans-serif;
+  }
+  .svc-note { font-size: 12px; color: #9a9a9a; line-height: 1.4; margin-top: 6px; }
+  #svcDetailContent details {
+    background: #131313; border: 1px solid rgba(255,255,255,.08); border-radius: 12px;
+    padding: 4px 14px; margin-bottom: 8px;
+  }
+  #svcDetailContent details summary { padding: 10px 0; font-size: 13.5px; font-weight: 600; cursor: pointer; }
+  #svcDetailContent details details { background: none; border: none; border-top: 1px solid rgba(255,255,255,.08); border-radius: 0; margin: 0 0 0 4px; padding: 0 0 0 10px; }
+  #svcDetailContent details details summary { font-weight: 500; font-size: 13px; color: #ddd; }
+  #svcDetailContent details p { font-size: 13px; color: #ccc; line-height: 1.5; padding-bottom: 12px; margin: 0; }
 </style>
 </head>
 <body>
@@ -16897,12 +16952,16 @@ def unified_app_html():
       </div>
     </div>
     <div class="panel" id="panel-services" hidden>
-      <div class="svc-grid" id="svcGrid"></div>
+      <div id="svc-grid-view">
+        <div class="svc-grid" id="svcGrid"></div>
+      </div>
+      <div id="svc-detail-view" hidden>
+        <button type="button" class="svc-back" id="svcBack">← Назад</button>
+        <div id="svcDetailContent"></div>
+      </div>
     </div>
-    <div class="panel" id="panel-cabinet" hidden>
-      <div class="cab-title">Уведомления</div>
-      <div id="cab-state">Загружаю…</div>
-      <div id="cab-list" hidden></div>
+    <div class="panel full" id="panel-cabinet" hidden>
+      <iframe id="cabinetFrame" allow="geolocation" style="width:100%;height:100%;border:0;display:block;background:#000;"></iframe>
     </div>
   </main>
   <nav class="tabbar">
@@ -16942,6 +17001,25 @@ def unified_app_html():
   // Python для текстов рассылки заказов (см. CITY_DISPLAY_NAMES в main.py).
   const CITY_DISPLAY_NAMES = """ + json.dumps(CITY_DISPLAY_NAMES, ensure_ascii=False) + """;
   function cityLabel() { return CITY_DISPLAY_NAMES[city] || city || '—'; }
+
+  // ДОБАВЛЕНО 26.09.2026 (перенос всего оставшегося меню услуг - "Отдать
+  // заказ", "Где бензин", "Чаты/Чаевые", "Реферальная программа",
+  // "Бесплатный VPN", "Оплатить подписку", "Поддержка", "Выбор города" - в
+  // вкладку "Сервисы", прямая просьба пользователя "прям все бери и
+  // переноси в тг апс"). Три словаря ниже - те же данные, что уже строит
+  // Python для старого меню (CATEGORIES/DRIVER_CHAT_LINKS), просто отданы
+  // на клиент как JSON, чтобы строить те же ссылки/подписи, что и раньше -
+  // никакие значения не придуманы заново.
+  const CATEGORY_NAMES = """ + json.dumps({k: v['name'] for k, v in CATEGORIES.items()}, ensure_ascii=False) + """;
+  const CATEGORY_TARIFFS = """ + json.dumps({k: ','.join(v.get('tariffs', [])) for k, v in CATEGORIES.items()}, ensure_ascii=False) + """;
+  const DRIVER_CHAT_LINKS = """ + json.dumps(DRIVER_CHAT_LINKS, ensure_ascii=False) + """;
+  const TIPS_APP_URL_IOS = """ + TIPS_APP_URL_IOS + """;
+  const TIPS_APP_URL_ANDROID = """ + TIPS_APP_URL_ANDROID + """;
+  const CATEGORIES_WITHOUT_EVENTS_OR_AIRPORTS = ['courier', 'cargo']; // см. CATEGORIES_WITHOUT_EVENTS/CATEGORIES_WITHOUT_AIRPORTS в main.py - в Python это одно и то же множество
+  function tgInitDataParam() {
+    const v = (tg && tg.initData) || '';
+    return v ? ('&tgInitData=' + encodeURIComponent(v)) : '';
+  }
 
   document.getElementById('cityBadge').textContent = cityLabel();
 
@@ -17023,7 +17101,7 @@ def unified_app_html():
     });
     if (name === 'whereto' && !loaded.whereto) { loaded.whereto = true; loadWhereToGo(); }
     if (name === 'services' && !loaded.services) { loaded.services = true; renderServices(); }
-    if (name === 'cabinet' && !loaded.cabinet) { loaded.cabinet = true; loadCabinet(); }
+    if (name === 'cabinet' && !loaded.cabinet) { loaded.cabinet = true; loadCabinetFrame(); }
   }
 
   const RANK_EMOJI = ['🥈', '🥉'];
@@ -17155,87 +17233,239 @@ def unified_app_html():
     }
   }
 
+  // ДОБАВЛЕНО 26.09.2026 (перенос "👤 ЛИЧНЫЙ КАБИНЕТ" целиком в единое
+  // приложение) - раньше вкладка "Кабинет" рисовала СВОИ тумблеры
+  // уведомлений через /cabinet/settings. Теперь вместо частичной копии -
+  // <iframe> на ТУ ЖЕ страницу /cabinet, что открывалась раньше через Menu
+  // Button (Профиль/Финансы/Спрос сейчас/Часы пика/Рядом/ТО/Аренда/
+  // Настройки - ВСЕ разделы личного кабинета сразу, без переписывания).
+  // ?tariffs= - тот же параметр, что строил set_cabinet_menu_button
+  // (CATEGORY_TARIFFS - тот же список тарифов категории, что и в Python).
+  // initData - тот же приём, что и у карты (см. loadMapFrame/_mapInitData/
+  // cabinet_webapp_html) - откат на URL-параметр tgInitData внутри iframe.
+  function loadCabinetFrame() {
+    const tariffs = CATEGORY_TARIFFS[category] || '';
+    let src = '""" + CABINET_WEBAPP_PATH + """?tariffs=' + encodeURIComponent(tariffs) + tgInitDataParam();
+    document.getElementById('cabinetFrame').src = src;
+  }
+
+  // ====== Сервисы: сетка плиток + детальный вид ======
+  function svcShowDetail() {
+    document.getElementById('svc-grid-view').hidden = true;
+    document.getElementById('svc-detail-view').hidden = false;
+  }
+  function svcShowGrid() {
+    document.getElementById('svc-detail-view').hidden = true;
+    document.getElementById('svc-grid-view').hidden = false;
+  }
+  document.getElementById('svcBack').addEventListener('click', svcShowGrid);
+
   function renderServices() {
     const grid = document.getElementById('svcGrid');
     grid.innerHTML = '';
     const cityQ = encodeURIComponent(city);
     const catQ = encodeURIComponent(category);
-    const tiles = [];
-    tiles.push({ href: '""" + WEATHER_WEBAPP_PATH + """?city=' + cityQ, ic: '🌤', lbl: 'Погода', real: true });
-    tiles.push({ href: '""" + EVENTS_WEBAPP_PATH + """?city=' + cityQ + '&category=' + catQ, ic: '🚨', lbl: 'События города', real: true });
-    tiles.push({ href: '""" + TRANSPORT_WEBAPP_PATH + """?city=' + cityQ + '&category=' + catQ, ic: '✈️🚆', lbl: 'Авиа/ЖД', real: true });
-    tiles.push({ ic: '📍', lbl: 'Рядом', real: false });
-    tiles.push({ ic: '🔄', lbl: 'Отдать заказ / Ещё', real: false });
+    const withoutEventsOrAirports = CATEGORIES_WITHOUT_EVENTS_OR_AIRPORTS.indexOf(category) !== -1;
+    let eventsUrl = '""" + EVENTS_WEBAPP_PATH + """?city=' + cityQ + '&category=' + catQ;
+    if (withoutEventsOrAirports) { eventsUrl += '&tab=roads'; }
+    const fuelMapUrl = '""" + MAP_WEBAPP_PATH + """?city=' + cityQ + '&category=' + catQ + '&layer=fuel' + tgInitDataParam();
+    const shareOrderUrl = '""" + SHARE_ORDER_WEBAPP_PATH + """?category=' + catQ + tgInitDataParam();
+    const chatUrl = DRIVER_CHAT_LINKS[city] || '';
+
+    const tiles = [
+      { href: '""" + WEATHER_WEBAPP_PATH + """?city=' + cityQ, ic: '🌤', lbl: 'Погода' },
+      { href: eventsUrl, ic: withoutEventsOrAirports ? '⛔' : '🚨', lbl: withoutEventsOrAirports ? 'Дорожные события' : 'События города' },
+      { href: shareOrderUrl, ic: '🔄', lbl: 'Отдать заказ' },
+      { href: fuelMapUrl, ic: '⛽', lbl: 'Где бензин' },
+      { href: chatUrl, ic: '💬', lbl: 'Чаты водителей' },
+      { detail: 'tips', ic: '💳', lbl: 'Чаевые' },
+      { detail: 'referral', ic: '🤝', lbl: 'Реферальная программа' },
+      { detail: 'subscription', ic: '💳', lbl: 'Подписка' },
+      { href: '""" + VPN_BOT_URL + """', ic: '🔓', lbl: 'Бесплатный VPN' },
+      { detail: 'support', ic: '❓', lbl: 'Поддержка' },
+      { detail: 'city', ic: '🏙', lbl: 'Город и категория' },
+    ];
+    if (!withoutEventsOrAirports) {
+      tiles.splice(2, 0, { href: '""" + TRANSPORT_WEBAPP_PATH + """?city=' + cityQ + '&category=' + catQ, ic: '✈️🚆', lbl: 'Авиа/ЖД' });
+    }
+
     tiles.forEach(function (t) {
-      if (t.real) {
-        const a = document.createElement('a'); a.className = 'tile'; a.href = t.href; a.target = '_blank'; a.rel = 'noopener';
+      if (t.detail) {
+        const b = document.createElement('button'); b.type = 'button'; b.className = 'tile'; b.style.width = '100%'; b.style.font = 'inherit';
+        b.innerHTML = '<div class="ic">' + t.ic + '</div><div class="lbl">' + t.lbl + '</div>';
+        b.addEventListener('click', function () { openServiceDetail(t.detail); });
+        grid.appendChild(b);
+      } else if (t.href) {
+        const a = document.createElement('a'); a.className = 'tile'; a.href = t.href; a.rel = 'noopener';
         a.innerHTML = '<div class="ic">' + t.ic + '</div><div class="lbl">' + t.lbl + '</div>';
         grid.appendChild(a);
-      } else {
-        const d = document.createElement('div'); d.className = 'tile placeholder';
-        d.innerHTML = '<div class="ic">' + t.ic + '</div><div class="lbl">' + t.lbl + '</div><div class="soon-badge">СКОРО</div>';
-        grid.appendChild(d);
       }
     });
   }
 
-  function switchRowHtml(item) {
-    return (
-      '<div class="cab-row" data-key="' + item.key + '">' +
-        '<div class="lbl">' + item.emoji + ' ' + item.label + '</div>' +
-        '<label class="switch">' +
-          '<input type="checkbox" ' + (item.enabled ? 'checked' : '') + '>' +
-          '<div class="track"></div><div class="knob"></div>' +
-        '</label>' +
-      '</div>'
-    );
+  function openServiceDetail(kind) {
+    const box = document.getElementById('svcDetailContent');
+    box.innerHTML = '<div style="text-align:center;padding:40px 16px;opacity:.7;font-size:13.5px;">Загружаю…</div>';
+    svcShowDetail();
+    if (kind === 'tips') return renderTipsDetail(box);
+    if (kind === 'referral') return loadReferralDetail(box);
+    if (kind === 'subscription') return loadSubscriptionDetail(box);
+    if (kind === 'support') return loadSupportDetail(box);
+    if (kind === 'city') return renderCityDetail(box);
   }
 
-  function renderCabinetList(data) {
-    const list = document.getElementById('cab-list');
-    let html = (data.notif_types || []).map(switchRowHtml).join('');
-    if (data.show_airport_queue) {
-      html += switchRowHtml({ key: 'airport_queue', emoji: '🚕', label: 'Очередь у аэропорта', enabled: !!data.airport_queue_active });
+  function renderTipsDetail(box) {
+    box.innerHTML =
+      '<div class="svc-h">💳 Получить чаевые</div>' +
+      '<div class="svc-card">Приложение «Яндекс Чаевые: на карту по QR» - покажи QR-код пассажиру, он сканирует и переводит чаевые тебе на карту.</div>' +
+      '<a class="svc-btn" href="' + TIPS_APP_URL_IOS + '" target="_blank" rel="noopener">🍎 Получить чаевые на iPhone</a>' +
+      '<a class="svc-btn ghost" href="' + TIPS_APP_URL_ANDROID + '" target="_blank" rel="noopener">🤖 Получить чаевые на Android</a>';
+  }
+
+  async function loadReferralDetail(box) {
+    try {
+      const resp = await fetch('""" + REFERRAL_DATA_API_PATH + """', { headers: { 'X-Telegram-Init-Data': (tg && tg.initData) || '' } });
+      if (!resp.ok) throw new Error('http_' + resp.status);
+      const data = await resp.json();
+      if (!data.live) {
+        box.innerHTML = '<div class="svc-h">🤝 Реферальная программа</div><div class="svc-card">Скоро здесь можно будет приглашать друзей по своей ссылке и получать процент с их подписки. Раздел в разработке 🚀</div>';
+        return;
+      }
+      box.innerHTML =
+        '<div class="svc-h">🤝 Реферальная программа</div>' +
+        '<div class="svc-link-text" id="refLink">' + data.link + '</div>' +
+        '<button type="button" class="svc-btn ghost" id="refCopyBtn">📋 Скопировать ссылку</button>' +
+        '<div class="svc-row"><span>Уровень 1</span><span class="v">' + data.level1_count + '</span></div>' +
+        '<div class="svc-row"><span>Уровень 2</span><span class="v">' + data.level2_count + '</span></div>' +
+        '<div class="svc-row"><span>Уровень 3</span><span class="v">' + data.level3_count + '</span></div>' +
+        '<div class="svc-row"><span>Всего приглашено</span><span class="v">' + data.downline_total + '</span></div>' +
+        '<div class="svc-row"><span>Баланс</span><span class="v">' + data.balance_rub + ' ₽</span></div>' +
+        '<div class="svc-row"><span>Заработано всего</span><span class="v">' + data.total_earned_rub + ' ₽</span></div>' +
+        '<div class="svc-row"><span>Выведено всего</span><span class="v">' + data.total_withdrawn_rub + ' ₽</span></div>' +
+        '<div class="svc-note">Комиссия за вывод: ' + data.withdrawal_fee_percent + '%. Минимальная сумма вывода: ' + data.min_withdrawal_rub + ' ₽. Вывод средств - как и раньше, через бота в чате.</div>';
+      const copyBtn = document.getElementById('refCopyBtn');
+      if (copyBtn) {
+        copyBtn.addEventListener('click', function () {
+          try {
+            navigator.clipboard.writeText(data.link);
+            copyBtn.textContent = '✅ Скопировано';
+          } catch (e) { /* буфер обмена недоступен - ссылка всё равно видна текстом выше */ }
+        });
+      }
+    } catch (e) {
+      box.innerHTML = '<div class="svc-h">🤝 Реферальная программа</div><div class="svc-card">Не удалось загрузить данные. Попробуй ещё раз.</div>';
     }
-    list.innerHTML = html;
-    list.querySelectorAll('.cab-row input').forEach(function (input) {
-      input.addEventListener('change', function () {
-        const row = input.closest('.cab-row');
-        const key = row.getAttribute('data-key');
-        toggleCabinetSetting(key, input);
+  }
+
+  async function loadSubscriptionDetail(box) {
+    try {
+      const resp = await fetch('""" + SUBSCRIPTION_STATUS_API_PATH + """', { headers: { 'X-Telegram-Init-Data': (tg && tg.initData) || '' } });
+      if (!resp.ok) throw new Error('http_' + resp.status);
+      const data = await resp.json();
+      renderSubscriptionDetail(box, data);
+    } catch (e) {
+      box.innerHTML = '<div class="svc-h">💳 Подписка</div><div class="svc-card">Не удалось загрузить статус подписки.</div>';
+    }
+  }
+
+  function renderSubscriptionDetail(box, data) {
+    const statusLabel = data.status === 'paid' ? '✅ Оплачена' : (data.status === 'trial' ? '🎁 Пробный период' : '—');
+    let html =
+      '<div class="svc-h">💳 Подписка</div>' +
+      '<div class="svc-row"><span>Статус</span><span class="v">' + statusLabel + '</span></div>' +
+      '<div class="svc-row"><span>Осталось дней</span><span class="v">' + data.days_left + '</span></div>' +
+      '<div class="svc-row"><span>Стоимость</span><span class="v">' + data.price_rub + ' ₽ / ' + data.period_days + ' дн.</span></div>';
+    if (!data.has_email) {
+      html +=
+        '<div class="svc-card">Для оплаты нужен email (для чека) - тот же email, что и в чате бота.</div>' +
+        '<input type="email" class="svc-input" id="subEmail" placeholder="email@example.com">' +
+        '<button type="button" class="svc-btn" id="subEmailBtn">Продолжить</button>';
+    } else if (data.pay_url) {
+      html += '<a class="svc-btn" href="' + data.pay_url + '" target="_blank" rel="noopener">Оплатить ' + data.price_rub + ' ₽</a>';
+    } else {
+      html += '<div class="svc-note">Не получилось создать ссылку на оплату - попробуй ещё раз чуть позже.</div>';
+    }
+    box.innerHTML = html;
+    const emailBtn = document.getElementById('subEmailBtn');
+    if (emailBtn) {
+      emailBtn.addEventListener('click', async function () {
+        const email = (document.getElementById('subEmail').value || '').trim();
+        if (!email) return;
+        emailBtn.disabled = true;
+        try {
+          const resp = await fetch('""" + SUBSCRIPTION_STATUS_API_PATH + """', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': (tg && tg.initData) || '' },
+            body: JSON.stringify({ email: email })
+          });
+          const data2 = await resp.json();
+          if (!resp.ok) { box.querySelector('.svc-note') || box.insertAdjacentHTML('beforeend', '<div class="svc-note">Некорректный email - проверь и попробуй снова.</div>'); emailBtn.disabled = false; return; }
+          renderSubscriptionDetail(box, data2);
+        } catch (e) { emailBtn.disabled = false; }
       });
+    }
+  }
+
+  let _supportFaqCache = null;
+  async function loadSupportDetail(box) {
+    try {
+      if (!_supportFaqCache) {
+        const resp = await fetch('""" + SUPPORT_FAQ_API_PATH + """');
+        if (!resp.ok) throw new Error('http_' + resp.status);
+        _supportFaqCache = await resp.json();
+      }
+      const data = _supportFaqCache;
+      let html = '<div class="svc-h">❓ Поддержка</div><div class="svc-card">' + (data.menu_text || '').replace(/\\n/g, '<br>') + '</div>';
+      (data.categories || []).forEach(function (cat) {
+        html += '<details><summary>' + cat.label + '</summary>';
+        (cat.items || []).forEach(function (item) {
+          html += '<details><summary>' + item.question + '</summary><p>' + item.answer + '</p></details>';
+        });
+        html += '</details>';
+      });
+      html += '<a class="svc-btn ghost" href="' + data.contact_url + '" target="_blank" rel="noopener" style="margin-top:10px;">📞 Написать в поддержку</a>';
+      box.innerHTML = html;
+    } catch (e) {
+      box.innerHTML = '<div class="svc-h">❓ Поддержка</div><div class="svc-card">Не удалось загрузить раздел поддержки.</div>';
+    }
+  }
+
+  function renderCityDetail(box) {
+    let cityOptions = '';
+    Object.keys(CITY_DISPLAY_NAMES).forEach(function (k) {
+      cityOptions += '<option value="' + k + '"' + (k === city ? ' selected' : '') + '>' + CITY_DISPLAY_NAMES[k] + '</option>';
     });
-  }
-
-  async function loadCabinet() {
-    const stateEl = document.getElementById('cab-state');
-    const list = document.getElementById('cab-list');
-    try {
-      const resp = await fetch('""" + CABINET_SETTINGS_API_PATH + """', { headers: { 'X-Telegram-Init-Data': (tg && tg.initData) || '' } });
-      if (!resp.ok) throw new Error('http_' + resp.status);
-      const data = await resp.json();
-      renderCabinetList(data);
-      stateEl.hidden = true;
-      list.hidden = false;
-    } catch (e) {
-      stateEl.textContent = 'Не удалось загрузить настройки уведомлений.';
-    }
-  }
-
-  async function toggleCabinetSetting(key, input) {
-    input.disabled = true;
-    try {
-      const resp = await fetch('""" + CABINET_SETTINGS_API_PATH + """', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': (tg && tg.initData) || '' },
-        body: JSON.stringify({ key: key })
-      });
-      if (!resp.ok) throw new Error('http_' + resp.status);
-      const data = await resp.json();
-      renderCabinetList(data);
-    } catch (e) {
-      input.checked = !input.checked;
-    }
+    let catOptions = '';
+    Object.keys(CATEGORY_NAMES).forEach(function (k) {
+      catOptions += '<option value="' + k + '"' + (k === category ? ' selected' : '') + '>' + CATEGORY_NAMES[k] + '</option>';
+    });
+    box.innerHTML =
+      '<div class="svc-h">🏙 Город и категория</div>' +
+      '<select class="svc-select" id="citySelect">' + cityOptions + '</select>' +
+      '<select class="svc-select" id="catSelect">' + catOptions + '</select>' +
+      '<button type="button" class="svc-btn" id="citySaveBtn">Сохранить</button>' +
+      '<div class="svc-note" id="cityNote"></div>';
+    document.getElementById('citySaveBtn').addEventListener('click', async function () {
+      const newCity = document.getElementById('citySelect').value;
+      const newCategory = document.getElementById('catSelect').value;
+      const btn = document.getElementById('citySaveBtn');
+      btn.disabled = true;
+      try {
+        const resp = await fetch('""" + CABINET_CITY_API_PATH + """', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': (tg && tg.initData) || '' },
+          body: JSON.stringify({ city: newCity, category: newCategory })
+        });
+        if (!resp.ok) throw new Error('http_' + resp.status);
+        const url = new URL(window.location.href);
+        url.searchParams.set('city', newCity);
+        url.searchParams.set('category', newCategory);
+        window.location.href = url.toString();
+      } catch (e) {
+        document.getElementById('cityNote').textContent = 'Не удалось сохранить - попробуй ещё раз.';
+        btn.disabled = false;
+      }
+    });
   }
 </script>
 </body>
@@ -20936,6 +21166,32 @@ async def handle_cabinet_settings_api(request):
         result['airport_queue_active'] = bool(state.get('airport_queue_active'))
     return web.json_response(result)
 
+# ДОБАВЛЕНО 26.09.2026 (перенос "🏙 ВЫБОР ГОРОДА" в единое приложение, см.
+# unified_app_html() - раздел "Ещё" вкладки "Сервисы") - та же самая пара
+# записей в user_state, что и select_city/select_category выше (city_map/
+# CATEGORIES), просто вызванная из WebApp вместо двух текстовых кнопок
+# подряд - никакая другая логика выбора города/категории не дублируется.
+CABINET_CITY_API_PATH = '/cabinet/city'
+
+async def handle_cabinet_city_api(request):
+    user_id = _cabinet_require_user(request)
+    if not user_id:
+        return web.json_response({'error': 'invalid_init_data'}, status=401)
+    try:
+        body = await request.json()
+        city = body.get('city')
+        category = body.get('category')
+    except Exception:
+        return web.json_response({'error': 'invalid_body'}, status=400)
+    if city not in CITY_DISPLAY_NAMES:
+        return web.json_response({'error': 'invalid_city'}, status=400)
+    if category not in CATEGORIES:
+        return web.json_response({'error': 'invalid_category'}, status=400)
+    state = user_state.setdefault(user_id, {})
+    state['city'] = city
+    state['category'] = category
+    return web.json_response({'ok': True, 'city': city, 'category': category})
+
 CABINET_MAINTENANCE_API_PATH = '/cabinet/maintenance'
 CABINET_MAINTENANCE_CAR_MAKE_MAX_LEN = 40
 
@@ -22276,7 +22532,15 @@ def cabinet_webapp_html():
   // Вкладка "Чаевые" убрана из кабинета целиком (по прямой просьбе
   // пользователя, 22.09.2026) - раньше здесь была логика показа нужной
   // (iOS/Android) ссылки на приложение "Яндекс Чаевые", теперь не нужна.
-  const initData = tg ? tg.initData : '';
+  // ИЗМЕНЕНО 26.09.2026 (перенос "Рядом" в единое приложение, см.
+  // unified_app_html() - вкладка "Кабинет" открывается там ссылкой на ЭТУ
+  // же страницу /cabinet) - тот же откат на URL-параметр tgInitData, что и
+  // в map_webapp_html/_mapInitData: там initData валиден (кабинет
+  // открывается штатной инлайн-кнопкой/переходом внутри уже открытого
+  // приложения), а сюда просто передаётся явно, раз это уже НЕ самое первое
+  // открытие WebApp Telegram'ом (при обычном прямом открытии кабинета tg.initData
+  // как и раньше, tgInitData в URL просто отсутствует).
+  const initData = (tg && tg.initData) || new URLSearchParams(window.location.search).get('tgInitData') || '';
   // Временная диагностика (21.09.2026) - у пользователя initData приходит
   // пустой уже после переноса telegram-web-app.js на свой домен, непонятно,
   // грузится ли вообще SDK на телефоне. Собираем что видно ИЗ БРАУЗЕРА (без
@@ -22535,12 +22799,24 @@ def cabinet_webapp_html():
     }
   });
 
+  // ДОБАВЛЕНО 26.09.2026 (перенос "Рядом" в единое приложение, см.
+  // unified_app_html() - раздел "Ещё" вкладки "Сервисы") - позволяет
+  // открыть кабинет ПРЯМО на нужной вкладке через ?tab=nearby в URL
+  // (тот же приём, что уже есть у events_webapp_html/initialTab с
+  // ?tab=roads) - просто эмулируем клик по нужной nav-pill, вся остальная
+  // логика (подсветка активной вкладки, ленивая загрузка) не дублируется.
+  const initialTab = params.get('tab');
+  if (initialTab) {
+    const initialBtn = document.querySelector('.nav-pill[data-tab="' + initialTab + '"]');
+    if (initialBtn) initialBtn.click();
+  }
+
   // ---- АРЕНДА (ДОБАВЛЕНО 23.09.2026, только просмотр - см. комментарий
   // у tab-rent выше) ----
   async function loadRentTab() {
     const body = document.getElementById('rentTabBody');
     try {
-      const initData = tg ? tg.initData : '';
+      const initData = (tg && tg.initData) || new URLSearchParams(window.location.search).get('tgInitData') || '';
       const resp = await fetch('""" + CABINET_RENT_API_PATH + """', { headers: { 'X-Telegram-Init-Data': initData } });
       const data = await resp.json();
       const payments = data.rent_payments || [];
@@ -23743,8 +24019,38 @@ async def select_category(message: types.Message):
             selected_category = cat_key
             break
     cat_label = CATEGORIES.get(selected_category, {}).get('name', '')
-    text = f"✅ *{cat_label}*\n{WHERE_TO_GO_DIVIDER}\n\n🧰 Выбери, что нужно 👇"
-    await message.answer(text, reply_markup=services_keyboard(selected_category, user_state[user_id].get('city'), user_id), parse_mode='Markdown')
+    city = user_state[user_id].get('city')
+    # ИЗМЕНЕНО 26.09.2026 (прямая просьба пользователя - "давай запускаем
+    # уже основное приложение убираем этого бота эти кнопки") - раньше
+    # сразу после выбора категории показывалось старое меню услуг
+    # (services_keyboard, десятки текстовых кнопок). Теперь вместо него -
+    # приветствие с ОДНОЙ кнопкой, открывающей единое приложение (см. блок
+    # "ЕДИНОЕ ПРИЛОЖЕНИЕ (WebApp) - ЭТАП 1" и unified_app_html() выше) -
+    # тот же целевой флоу, который описывал сам пользователь ("запуск...
+    # выскакивает приветственное сообщение... Такси Хелпер... по этой
+    # кнопке открывается меню"). Часть разделов внутри приложения (Рядом/
+    # Отдать заказ/Ещё внутри "Сервисов") ещё доделывается - по прямому
+    # решению пользователя старое меню всё равно снимается уже сейчас, не
+    # дожидаясь их доработки. services_keyboard() и все её кнопки-
+    # обработчики НЕ удалены (остаются как внутренний фолбэк в ~39 других
+    # местах файла) - если что-то в новом приложении не заработает, старая
+    # рабочая логика цела и ничего не потеряно навсегда.
+    if PUBLIC_URL:
+        app_url = f"{PUBLIC_URL}{UNIFIED_APP_WEBAPP_PATH}?city={urllib.parse.quote(city or '')}&category={urllib.parse.quote(selected_category or '')}"
+        text = f"✅ *{cat_label}*\n{WHERE_TO_GO_DIVIDER}\n\n🚕 *ТАКСИ ХЕЛПЕР*\nВсё в одном приложении 👇"
+        await message.answer(
+            text,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="🚕 ОТКРЫТЬ TAXI HELPER", web_app=WebAppInfo(url=app_url)),
+            ]]),
+            parse_mode='Markdown',
+        )
+    else:
+        # Локальный/дев-запуск без HTTPS (PUBLIC_URL не задан) - Telegram не
+        # даёт открыть WebApp без HTTPS, как и у всех остальных WebApp-кнопок
+        # бота - остаётся старое меню, чтобы бот не сломался совсем.
+        text = f"✅ *{cat_label}*\n{WHERE_TO_GO_DIVIDER}\n\n🧰 Выбери, что нужно 👇"
+        await message.answer(text, reply_markup=services_keyboard(selected_category, city, user_id), parse_mode='Markdown')
 
     # По просьбе пользователя - сразу после выбора категории предлагаем
     # включить "Очередь у аэропорта" (для тех категорий, кому она вообще
@@ -27720,6 +28026,30 @@ SUPPORT_MENU_TEXT = (
 async def show_support_menu(message: types.Message):
     await message.answer(SUPPORT_MENU_TEXT, reply_markup=support_faq_top_keyboard(), parse_mode='Markdown')
 
+# ДОБАВЛЕНО 26.09.2026 (перенос "❓ ПОДДЕРЖКА" в единое приложение, см.
+# unified_app_html() - раздел "Ещё" вкладки "Сервисы") - тот же самый FAQ
+# (SUPPORT_FAQ_CATEGORIES, те же тексты вопросов/ответов, что и у
+# support_faq_top_keyboard/faq_category_show/faq_answer_show выше), просто
+# отданный целиком одним JSON-запросом для рендера внутри WebApp, вместо
+# постраничной навигации инлайн-кнопками. Данные не персональные (статичный
+# FAQ) - initData не нужен, категории/вопросы/ответы одинаковы для всех.
+SUPPORT_FAQ_API_PATH = '/support/faq'
+
+async def handle_support_faq_api(request):
+    categories = [
+        {
+            'key': cat_key,
+            'label': label,
+            'items': [{'short': short_text, 'question': question, 'answer': answer} for short_text, question, answer in items],
+        }
+        for cat_key, (label, items) in SUPPORT_FAQ_CATEGORIES.items()
+    ]
+    return web.json_response({
+        'menu_text': SUPPORT_MENU_TEXT,
+        'contact_url': SUPPORT_CONTACT_URL,
+        'categories': categories,
+    })
+
 @router.callback_query(lambda c: c.data.startswith("faqcat_"))
 async def faq_category_show(callback_query: types.CallbackQuery):
     try:
@@ -28272,6 +28602,60 @@ async def subscription_email_flow(message: types.Message):
         await show_subscription_status(message)
 
 
+# ДОБАВЛЕНО 26.09.2026 (перенос "💳 ОПЛАТИТЬ ПОДПИСКУ" в единое приложение,
+# см. unified_app_html() - раздел "Ещё" вкладки "Сервисы") - ТА ЖЕ логика,
+# что у show_subscription_status/request_subscription_email/
+# create_tinkoff_payment выше, просто как небольшой JSON API вместо
+# текстового сообщения + ожидания email в чате: GET отдаёт текущий статус
+# (и ссылку на оплату Тинькофф, если email уже сохранён - create_tinkoff_
+# payment та же самая функция, что и в чат-флоу, ссылка ведёт на тот же
+# внешний Тинькофф-чекаут), POST {email} сохраняет email (set_receipt_email
+# - та же функция, что и subscription_email_flow) и сразу возвращает то же,
+# что и GET, уже со ссылкой на оплату.
+SUBSCRIPTION_STATUS_API_PATH = '/subscription/status'
+
+async def _subscription_status_payload(user_id):
+    has_email = bool(get_receipt_email(user_id))
+    active_until = subscription_active_until(user_id)
+    sub = get_subscription(user_id)
+    if active_until and sub and sub['paid_until'] and _sub_parse(sub['paid_until']) >= active_until:
+        status = 'paid'
+        days_left = max(0, (active_until - _sub_now()).days)
+    elif active_until:
+        status = 'trial'
+        days_left = max(0, (active_until - _sub_now()).days)
+    else:
+        status = 'unknown'
+        days_left = 0
+    payload = {
+        'has_email': has_email,
+        'status': status,
+        'days_left': days_left,
+        'active_until': active_until.strftime('%d.%m.%Y') if active_until else None,
+        'price_rub': get_subscription_price_rub(user_id),
+        'period_days': SUBSCRIPTION_PERIOD_DAYS,
+        'pay_url': None,
+    }
+    if has_email:
+        payload['pay_url'] = await create_tinkoff_payment(user_id)
+    return payload
+
+async def handle_subscription_status_api(request):
+    user_id = _cabinet_require_user(request)
+    if not user_id:
+        return web.json_response({'error': 'invalid_init_data'}, status=401)
+    if request.method == 'POST':
+        try:
+            body = await request.json()
+            email = (body.get('email') or '').strip()
+        except Exception:
+            return web.json_response({'error': 'invalid_body'}, status=400)
+        if not SUBSCRIPTION_EMAIL_REGEX.match(email):
+            return web.json_response({'error': 'invalid_email'}, status=400)
+        set_receipt_email(user_id, email)
+    return web.json_response(await _subscription_status_payload(user_id))
+
+
 async def send_subscription_paywall(event):
     """event - types.Message или types.CallbackQuery. Показывает экран
     оплаты вместо обычного ответа бота (см. SubscriptionMiddleware)."""
@@ -28808,6 +29192,10 @@ async def start_subscription_webhook_server():
     # Единое приложение (WebApp) - ЭТАП 1, тестовая кнопка (см. блок "ЕДИНОЕ
     # ПРИЛОЖЕНИЕ (WebApp) - ЭТАП 1" выше, ДОБАВЛЕНО 26.09.2026).
     app.router.add_get(UNIFIED_APP_WEBAPP_PATH, handle_unified_app_webapp)
+    app.router.add_get(SUPPORT_FAQ_API_PATH, handle_support_faq_api)
+    app.router.add_get(REFERRAL_DATA_API_PATH, handle_referral_data_api)
+    app.router.add_get(SUBSCRIPTION_STATUS_API_PATH, handle_subscription_status_api)
+    app.router.add_post(SUBSCRIPTION_STATUS_API_PATH, handle_subscription_status_api)
     app.router.add_get(MAP_WEBAPP_PATH, handle_map_webapp)
     app.router.add_get(MAP_POSITIONS_API_PATH, handle_map_positions_api)
     app.router.add_get(MAP_MY_PROFILE_API_PATH, handle_map_my_profile_api)
@@ -28861,6 +29249,7 @@ async def start_subscription_webhook_server():
     app.router.add_post(CABINET_NEARBY_API_PATH, handle_cabinet_nearby_api)
     app.router.add_get(CABINET_SETTINGS_API_PATH, handle_cabinet_settings_api)
     app.router.add_post(CABINET_SETTINGS_API_PATH, handle_cabinet_settings_api)
+    app.router.add_post(CABINET_CITY_API_PATH, handle_cabinet_city_api)
     app.router.add_get(CABINET_MAINTENANCE_API_PATH, handle_cabinet_maintenance_api)
     app.router.add_post(CABINET_MAINTENANCE_API_PATH, handle_cabinet_maintenance_api)
     # Кабинет юр.лица + вкладка "Аренда" в обычном кабинете водителя (см.
@@ -30083,6 +30472,40 @@ def referral_menu_keyboard(referral_link, current_type=REFERRAL_DEFAULT_TYPE, us
 
 def get_referral_link(bot_username, user_id):
     return f"https://t.me/{bot_username}?start=ref_{user_id}"
+
+# ДОБАВЛЕНО 26.09.2026 (перенос "🤝 РЕФЕРАЛЬНАЯ ПРОГРАММА" в единое
+# приложение, см. unified_app_html() - раздел "Ещё" вкладки "Сервисы") -
+# ТА ЖЕ логика, что у show_referral_program ниже (ensure_referral_row/
+# get_referral_stats/get_referral_link/get_referrer_type/
+# REFERRAL_RATES_PERCENT), просто отдана как JSON вместо готового текста
+# сообщения - числа/ссылка настоящие, ничего не пересчитано заново.
+REFERRAL_DATA_API_PATH = '/referral/data'
+
+async def handle_referral_data_api(request):
+    user_id = _cabinet_require_user(request)
+    if not user_id:
+        return web.json_response({'error': 'invalid_init_data'}, status=401)
+    ensure_referral_row(user_id)
+    if not REFERRAL_PROGRAM_LIVE:
+        return web.json_response({'live': False})
+    stats = get_referral_stats(user_id)
+    me = await bot.get_me()
+    link = get_referral_link(me.username, user_id)
+    rates = REFERRAL_RATES_PERCENT[get_referrer_type(user_id)]
+    return web.json_response({
+        'live': True,
+        'link': link,
+        'level1_count': stats['level1_count'],
+        'level2_count': stats['level2_count'],
+        'level3_count': stats['level3_count'],
+        'downline_total': stats['downline_total'],
+        'balance_rub': round(stats['balance'] / 100),
+        'total_earned_rub': round(stats['total_earned'] / 100),
+        'total_withdrawn_rub': round(stats['total_withdrawn'] / 100),
+        'rates_percent': rates,
+        'withdrawal_fee_percent': REFERRAL_WITHDRAWAL_FEE_PERCENT,
+        'min_withdrawal_rub': REFERRAL_MIN_WITHDRAWAL_RUB,
+    })
 
 
 def referral_withdraw_cancel_keyboard():
