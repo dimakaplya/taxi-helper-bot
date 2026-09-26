@@ -16858,7 +16858,8 @@ def unified_app_html():
     padding: 16px 12px; text-decoration: none; color: #fff; display: flex; flex-direction: column;
     gap: 8px; min-height: 84px; position: relative;
   }
-  .tile .ic { font-size: 24px; }
+  .tile .ic { height: 23px; display: flex; align-items: center; color: #FFC400; }
+  .tile .ic svg { display: block; flex-shrink: 0; }
   .tile .lbl { font-size: 13px; font-weight: 600; line-height: 1.3; }
   .tile.placeholder { opacity: .45; }
   .tile .soon-badge {
@@ -17016,6 +17017,31 @@ def unified_app_html():
   const TIPS_APP_URL_IOS = """ + json.dumps(TIPS_APP_URL_IOS) + """;
   const TIPS_APP_URL_ANDROID = """ + json.dumps(TIPS_APP_URL_ANDROID) + """;
   const CATEGORIES_WITHOUT_EVENTS_OR_AIRPORTS = ['courier', 'cargo']; // см. CATEGORIES_WITHOUT_EVENTS/CATEGORIES_WITHOUT_AIRPORTS в main.py - в Python это одно и то же множество
+
+  // ДОБАВЛЕНО 26.09.2026 (прямая просьба пользователя - "выровняй и иконки
+  // в стиле как снизу") - раньше плитки "Сервисов" рисовали иконку сырым
+  // эмодзи (разная ширина/высота глифа у разных эмодзи - отсюда "кривая"
+  // сетка на скриншоте). Теперь тот же линейный стиль, что и у нижнего
+  // меню (nav.tabbar): stroke="currentColor" stroke-width="1.8", viewBox
+  // 0 0 24 24, ничего не залито - только обводка. Каждая иконка - чистый
+  // JS-текст (без Python-сплайсинга), поэтому тройных кавычек здесь нет и
+  // они ничем не рискуют.
+  const TILE_ICONS = {
+    weather: '<svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M7 17.5a4 4 0 0 1-.5-7.97 5 5 0 0 1 9.62-2.1A4.5 4.5 0 0 1 17.5 17.5H7Z" stroke-linejoin="round"/><path d="M8 4v1.4M4.6 6.6l1 1M2 11h1.4" stroke-linecap="round"/></svg>',
+    events: '<svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="8.5"/><path d="M12 8v5" stroke-linecap="round"/><circle cx="12" cy="16.3" r=".9" fill="currentColor" stroke="none"/></svg>',
+    roadEvents: '<svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 4 2.5 20h19L12 4Z" stroke-linejoin="round"/><path d="M12 10v4" stroke-linecap="round"/><circle cx="12" cy="17" r=".9" fill="currentColor" stroke="none"/></svg>',
+    transport: '<svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"><path d="M21 3 3 10.5l7 2.5M21 3l-2.5 15-7-4.5M21 3 10.5 13"/></svg>',
+    exchange: '<svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8.5A7 7 0 0 1 19 7.3M20 3v4.3h-4.3"/><path d="M20 15.5A7 7 0 0 1 5 16.7M4 21v-4.3h4.3"/></svg>',
+    fuel: '<svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 20V6a1.5 1.5 0 0 1 1.5-1.5h5A1.5 1.5 0 0 1 12 6v14" stroke-linejoin="round"/><path d="M4 20h8M6.5 9h3" stroke-linecap="round"/><path d="M15 8h1.6c1 0 1.9.6 2.3 1.6l1.4 3.5c.2.4.2.9.2 1.3V18a1.5 1.5 0 0 1-3 0v-3.5" stroke-linejoin="round" stroke-linecap="round"/></svg>',
+    chat: '<svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 4c5 0 8.5 3 8.5 7s-3.5 7-8.5 7c-.9 0-1.8-.1-2.6-.3L4 20l1.4-3.6C4.3 15 3.5 13.1 3.5 11c0-4 3.5-7 8.5-7Z" stroke-linejoin="round"/><path d="M8.3 11h.02M12 11h.02M15.7 11h.02" stroke-linecap="round" stroke-width="2.4"/></svg>',
+    tips: '<svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="2.5" y="6.5" width="19" height="11" rx="2"/><circle cx="12" cy="12" r="2.6"/><path d="M5.5 6.5v11M18.5 6.5v11" stroke-linecap="round"/></svg>',
+    referral: '<svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="9.5" cy="8" r="3.5"/><path d="M3 20c0-3.6 2.9-6.2 6.5-6.2S16 16.4 16 20" stroke-linecap="round"/><path d="M18.5 7v6M15.5 10h6" stroke-linecap="round"/></svg>',
+    subscription: '<svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="2.5" y="5.5" width="19" height="13" rx="2.2"/><path d="M2.5 9.5h19" stroke-linecap="round"/><path d="M5.5 14.5h4" stroke-linecap="round"/></svg>',
+    vpn: '<svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3.2 19.5 6v6c0 5-3.2 8-7.5 9-4.3-1-7.5-4-7.5-9V6L12 3.2Z" stroke-linejoin="round"/><path d="m9 12 2 2 4-4.3" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+    support: '<svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="8.5"/><path d="M9.3 9.6a2.7 2.7 0 1 1 3.9 2.4c-.8.4-1.2.9-1.2 1.7v.3" stroke-linecap="round" stroke-linejoin="round"/><circle cx="12" cy="16.7" r=".9" fill="currentColor" stroke="none"/></svg>',
+    city: '<svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><rect x="4" y="10.5" width="6" height="9.5"/><rect x="13" y="4.5" width="7" height="15.5"/><path d="M2 20h20" stroke-linecap="round"/></svg>',
+    car: '<svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"><path d="M4.5 16h15M4.5 16l1.3-4.3A2 2 0 0 1 7.7 10.3h8.6a2 2 0 0 1 1.9 1.4L19.5 16"/><path d="M4.5 16v3M19.5 16v3"/><circle cx="7.5" cy="16.3" r="1.5" stroke-linecap="butt" stroke-linejoin="miter"/><circle cx="16.5" cy="16.3" r="1.5" stroke-linecap="butt" stroke-linejoin="miter"/></svg>',
+  };
   // ДОБАВЛЕНО 26.09.2026 ("делаем рефералку делай по нашей структуре") -
   // "Мои рефералы"/QR-код ссылки/презентация/вход в кабинет автопарка -
   // те же самые данные и файлы, что уже отдаёт чат-версия реферальной
@@ -17336,20 +17362,20 @@ def unified_app_html():
     const chatUrl = DRIVER_CHAT_LINKS[city] || '';
 
     const tiles = [
-      { href: '""" + WEATHER_WEBAPP_PATH + """?city=' + cityQ, ic: '🌤', lbl: 'Погода' },
-      { href: eventsUrl, ic: withoutEventsOrAirports ? '⛔' : '🚨', lbl: withoutEventsOrAirports ? 'Дорожные события' : 'События города' },
-      { href: shareOrderUrl, ic: '🔄', lbl: 'Отдать заказ' },
-      { href: fuelMapUrl, ic: '⛽', lbl: 'Где бензин' },
-      { href: chatUrl, ic: '💬', lbl: 'Чаты водителей' },
-      { detail: 'tips', ic: '💳', lbl: 'Чаевые' },
-      { detail: 'referral', ic: '🤝', lbl: 'Реферальная программа' },
-      { detail: 'subscription', ic: '💳', lbl: 'Подписка' },
-      { href: '""" + VPN_BOT_URL + """', ic: '🔓', lbl: 'Бесплатный VPN' },
-      { detail: 'support', ic: '❓', lbl: 'Поддержка' },
-      { detail: 'city', ic: '🏙', lbl: 'Город и категория' },
+      { href: '""" + WEATHER_WEBAPP_PATH + """?city=' + cityQ, ic: TILE_ICONS.weather, lbl: 'Погода' },
+      { href: eventsUrl, ic: withoutEventsOrAirports ? TILE_ICONS.roadEvents : TILE_ICONS.events, lbl: withoutEventsOrAirports ? 'Дорожные события' : 'События города' },
+      { href: shareOrderUrl, ic: TILE_ICONS.exchange, lbl: 'Отдать заказ' },
+      { href: fuelMapUrl, ic: TILE_ICONS.fuel, lbl: 'Где бензин' },
+      { href: chatUrl, ic: TILE_ICONS.chat, lbl: 'Чаты водителей' },
+      { detail: 'tips', ic: TILE_ICONS.tips, lbl: 'Чаевые' },
+      { detail: 'referral', ic: TILE_ICONS.referral, lbl: 'Реферальная программа' },
+      { detail: 'subscription', ic: TILE_ICONS.subscription, lbl: 'Подписка' },
+      { href: '""" + VPN_BOT_URL + """', ic: TILE_ICONS.vpn, lbl: 'Бесплатный VPN' },
+      { detail: 'support', ic: TILE_ICONS.support, lbl: 'Поддержка' },
+      { detail: 'city', ic: TILE_ICONS.city, lbl: 'Город и категория' },
     ];
     if (!withoutEventsOrAirports) {
-      tiles.splice(2, 0, { href: '""" + TRANSPORT_WEBAPP_PATH + """?city=' + cityQ + '&category=' + catQ, ic: '✈️🚆', lbl: 'Авиа/ЖД' });
+      tiles.splice(2, 0, { href: '""" + TRANSPORT_WEBAPP_PATH + """?city=' + cityQ + '&category=' + catQ, ic: TILE_ICONS.transport, lbl: 'Авиа/ЖД' });
     }
 
     tiles.forEach(function (t) {
@@ -17528,7 +17554,7 @@ def unified_app_html():
       a.className = 'tile tile-legal-cabinet';
       a.href = url;
       a.rel = 'noopener';
-      a.innerHTML = '<div class="ic">🚘</div><div class="lbl">Кабинет автопарка</div>';
+      a.innerHTML = '<div class="ic">' + TILE_ICONS.car + '</div><div class="lbl">Кабинет автопарка</div>';
       grid.appendChild(a);
     } catch (e) { /* тихо: плитка появляется только если реально есть доступ */ }
   }
