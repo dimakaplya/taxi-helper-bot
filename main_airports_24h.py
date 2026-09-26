@@ -12300,8 +12300,25 @@ def map_webapp_html():
   const GAS_QUEUE_STATUS_LABELS = {gas_queue_status_labels_json};
   const STATUS_ICON = {{ open: '🟢', coordinated: '🟡', closed: '🔴' }};
   const tg = window.Telegram && window.Telegram.WebApp;
+  // ДОБАВЛЕНО 26.09.2026 (перенос карты внутрь единого приложения /app, см.
+  // unified_app_html() - карта теперь встраивается туда через <iframe>) -
+  // Telegram-мост telegram-web-app.js внутри ВЛОЖЕННОГО iframe не
+  // гарантированно получает initData от настоящего Telegram-клиента (он
+  // "разговаривает" с прямым родителем окна, а не с окном верхнего уровня,
+  // так что вложенный iframe оказывается "ещё одним уровнем дальше"). Чтобы
+  // ничего в самой карте не переписывать, initData теперь берётся через
+  // общую функцию _mapInitData() - как раньше, tg.initData, а если его нет
+  // (именно случай встраивания) - откат на URL-параметр tgInitData, который
+  // unified_app_html() передаёт явно (там initData валиден - её iframe
+  // открывается штатной инлайн-кнопкой). При обычном прямом открытии карты
+  // (как раньше, отдельной страницей) tgInitData просто отсутствует в URL и
+  // ничего не меняется - откат не срабатывает, tg.initData как и был.
+  function _mapInitData() {{
+    if (tg && tg.initData) return tg.initData;
+    try {{ return new URLSearchParams(window.location.search).get('tgInitData') || ''; }} catch (e) {{ return ''; }}
+  }}
   if (tg) {{ tg.ready(); tg.expand(); }}
-  if (tg && tg.platform) {{ fetch('/platform/report', {{ method: 'POST', headers: {{ 'Content-Type': 'application/json', 'X-Telegram-Init-Data': tg.initData || '' }}, body: JSON.stringify({{ platform: tg.platform }}) }}).catch(function(){{}}); }}
+  if (tg && tg.platform) {{ fetch('/platform/report', {{ method: 'POST', headers: {{ 'Content-Type': 'application/json', 'X-Telegram-Init-Data': _mapInitData() }}, body: JSON.stringify({{ platform: tg.platform }}) }}).catch(function(){{}}); }}
   const params = new URLSearchParams(window.location.search);
   const city = params.get('city') || '';
   const myCategory = params.get('category') || '';
@@ -13034,7 +13051,7 @@ def map_webapp_html():
   }}
   async function loadMyProfile() {{
     try {{
-      const initData = tg ? tg.initData : '';
+      const initData = _mapInitData();
       if (!initData) {{ myProfileDiagState = 'no_init_data(tg=' + (tg ? '1' : '0') + ')'; return; }}
       const resp = await fetch('/map/my_profile', {{ headers: {{ 'X-Telegram-Init-Data': initData }} }});
       if (!resp.ok) {{ myProfileDiagState = 'http_' + resp.status; return; }}
@@ -13134,7 +13151,7 @@ def map_webapp_html():
   if (tariffPickerConfirm) {{
     tariffPickerConfirm.addEventListener('click', async () => {{
       if (tariffPickerConfirm.disabled || tariffPickerConfirm.classList.contains('pending')) return;
-      const initData = tg ? tg.initData : '';
+      const initData = _mapInitData();
       if (!initData) return;
       const checked = Array.from(tariffPickerList.querySelectorAll('input[type=checkbox]:checked'))
         .map(cb => TARIFF_OPTIONS[myCategory].tariffs[parseInt(cb.dataset.tariffIdx, 10)]);
@@ -13190,7 +13207,7 @@ def map_webapp_html():
   let sliderMaxOffset = 0;
   async function doShiftToggle() {{
     if (!shiftSlider || shiftSlider.classList.contains('pending')) {{ shiftSliderSetOffset(3); return; }}
-    const initData = tg ? tg.initData : '';
+    const initData = _mapInitData();
     if (!initData) {{ shiftSliderSetOffset(3); return; }}
     shiftSlider.classList.add('pending');
     try {{
@@ -13377,7 +13394,7 @@ def map_webapp_html():
   }}
   async function loadPositions() {{
     try {{
-      const initData = tg ? tg.initData : '';
+      const initData = _mapInitData();
       // Категорию у сервера больше не фильтруем (всегда запрашиваем все) -
       // отбор ПО ТАРИФАМ теперь делаем на клиенте (isPositionVisible), т.к.
       // выбор может охватывать несколько категорий сразу в любой комбинации.
@@ -15283,7 +15300,7 @@ def map_webapp_html():
 
   window.reportFuel = async function(stationId, fuelType, available) {{
     try {{
-      const initData = tg ? tg.initData : '';
+      const initData = _mapInitData();
       await fetch('{MAP_FUEL_REPORT_API_PATH}', {{
         method: 'POST',
         headers: {{ 'Content-Type': 'application/json', 'X-Telegram-Init-Data': initData }},
@@ -15301,7 +15318,7 @@ def map_webapp_html():
 
   window.reportGasQueue = async function(stationId, status) {{
     try {{
-      const initData = tg ? tg.initData : '';
+      const initData = _mapInitData();
       await fetch('{MAP_GAS_QUEUE_REPORT_API_PATH}', {{
         method: 'POST',
         headers: {{ 'Content-Type': 'application/json', 'X-Telegram-Init-Data': initData }},
@@ -15366,7 +15383,7 @@ def map_webapp_html():
 
   window.reportCharging = async function(stationId, status) {{
     try {{
-      const initData = tg ? tg.initData : '';
+      const initData = _mapInitData();
       await fetch('{MAP_CHARGING_REPORT_API_PATH}', {{
         method: 'POST',
         headers: {{ 'Content-Type': 'application/json', 'X-Telegram-Init-Data': initData }},
@@ -16778,11 +16795,11 @@ def unified_app_html():
     padding-bottom: env(safe-area-inset-bottom, 0px);
   }
   nav.tabbar button {
-    flex: 1; background: none; border: none; color: #777; font-family: 'Golos Text', sans-serif;
+    flex: 1; background: none; border: none; color: #6E685D; font-family: 'Golos Text', sans-serif;
     display: flex; flex-direction: column; align-items: center; gap: 3px; padding: 9px 4px 8px;
     font-size: 11px; cursor: pointer;
   }
-  nav.tabbar button .ic { font-size: 19px; line-height: 1; }
+  nav.tabbar button svg { display: block; }
   nav.tabbar button.active { color: #FFC400; }
 
   .soon-box {
@@ -16869,11 +16886,7 @@ def unified_app_html():
   </header>
   <main>
     <div class="panel full" id="panel-map">
-      <div class="soon-box">
-        <div class="ic">🚧</div>
-        <h2>Карта скоро будет здесь</h2>
-        <p>Полная карта водителей/курьеров с живым спросом и слоями переносится отдельным шагом - пока открывай её как обычно, из меню бота.</p>
-      </div>
+      <iframe id="mapFrame" allow="geolocation" style="width:100%;height:100%;border:0;display:block;background:#000;"></iframe>
     </div>
     <div class="panel" id="panel-whereto" hidden>
       <div id="wtg-state">📍 Определяю твою локацию…</div>
@@ -16892,10 +16905,22 @@ def unified_app_html():
     </div>
   </main>
   <nav class="tabbar">
-    <button data-tab="map" class="active"><span class="ic">🗺</span>Карта</button>
-    <button data-tab="whereto"><span class="ic">💰</span>Куда ехать</button>
-    <button data-tab="services"><span class="ic">🧰</span>Сервисы</button>
-    <button data-tab="cabinet"><span class="ic">👤</span>Кабинет</button>
+    <button data-tab="map" class="active">
+      <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M9 4 3 6.5v14L9 18l6 2.5 6-2.5v-14L15 6.5 9 4Z" stroke-linejoin="round"/><path d="M9 4v14M15 6.5v14"/></svg>
+      Карта
+    </button>
+    <button data-tab="whereto">
+      <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 21s7-6.1 7-11.5A7 7 0 0 0 5 9.5C5 14.9 12 21 12 21Z" stroke-linejoin="round"/><circle cx="12" cy="9.5" r="2.4"/></svg>
+      Куда ехать
+    </button>
+    <button data-tab="services">
+      <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="3.5" y="13.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="13.5" width="7" height="7" rx="1.5"/></svg>
+      Сервисы
+    </button>
+    <button data-tab="cabinet">
+      <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="8" r="3.2"/><path d="M5 20c0-3.5 3.1-6 7-6s7 2.5 7 6" stroke-linecap="round"/></svg>
+      Кабинет
+    </button>
   </nav>
 </div>
 <script>
@@ -16949,6 +16974,24 @@ def unified_app_html():
   function startApp() {
     document.getElementById('gate').hidden = true;
     document.getElementById('shell').hidden = false;
+    loadMapFrame();
+  }
+
+  // ДОБАВЛЕНО 26.09.2026 (перенос настоящей карты в вкладку "Карта" -
+  // главная просьба этого этапа: "главное карту перенеси... как было") -
+  // карта встраивается через <iframe> на ТУ ЖЕ страницу /map, что и раньше
+  // (никакой JS карты не копировался и не переписывался - буквально та же
+  // страница). initData передаётся явно параметром tgInitData (см. подробный
+  // комментарий у _mapInitData() в map_webapp_html()) - у ЭТОЙ, внешней
+  // страницы initData валиден, т.к. единое приложение само открывается
+  // проверенным паттерном инлайн-кнопки (initData тут есть). Загружается
+  // один раз при входе (не по клику на вкладку) - панель "Карта" видна
+  // сразу же, первой, как и в согласованном макете.
+  function loadMapFrame() {
+    let src = '""" + MAP_WEBAPP_PATH + """?city=' + encodeURIComponent(city) + '&category=' + encodeURIComponent(category);
+    const initData = (tg && tg.initData) || '';
+    if (initData) { src += '&tgInitData=' + encodeURIComponent(initData); }
+    document.getElementById('mapFrame').src = src;
   }
 
   requestGeo();
