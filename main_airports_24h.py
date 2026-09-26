@@ -13962,6 +13962,27 @@ def map_webapp_html():
       {{ field: 'demand_premier', label: 'Премьер', tariff: 'Premier' }},
       {{ field: 'demand_elite', label: 'Элит', tariff: 'Elite' }},
     ],
+    // ДОБАВЛЕНО 26.09.2026 (прямая просьба пользователя - "чтобы матрица
+    // спроса курьера/грузового такси работала на карте так же, как у
+    // такси/Ultima") - тот же приём (field/label/tariff), данные с сервера
+    // приходят той же формы (см. handle_map_district_demand_api, ветка
+    // category in courier/cargo, DELIVERY_TARIFF_FIELD в Python) - вся
+    // остальная отрисовка (renderDistrictDemandClouds, кэш/сигнатура,
+    // viewport culling, слияние с облаками дождя/аэропортов) переиспользуется
+    // без изменений, ей всё равно, такси это поле или доставка.
+    courier: [
+      {{ field: 'demand_yandex_courier', label: 'Яндекс Еда - Курьер', tariff: 'Яндекс Еда — Курьер' }},
+      {{ field: 'demand_courier_express', label: 'Курьер - Экспресс', tariff: 'Курьер — Экспресс' }},
+    ],
+    cargo: [
+      {{ field: 'demand_cargo_s', label: 'Кузов S', tariff: 'Грузовой кузов S' }},
+      {{ field: 'demand_cargo_m', label: 'Кузов M', tariff: 'Грузовой кузов M' }},
+      {{ field: 'demand_cargo_l', label: 'Кузов L', tariff: 'Грузовой кузов L' }},
+      {{ field: 'demand_cargo_xl', label: 'Кузов XL', tariff: 'Грузовой кузов XL' }},
+      {{ field: 'demand_cargo_xxl', label: 'Кузов XXL', tariff: 'Грузовой кузов XXL' }},
+      {{ field: 'demand_yandex_courier', label: 'Яндекс Еда - Курьер', tariff: 'Яндекс Еда — Курьер' }},
+      {{ field: 'demand_courier_express', label: 'Курьер - Экспресс', tariff: 'Курьер — Экспресс' }},
+    ],
   }};
   // ИЗМЕНЕНО 24.09.2026 (прямая просьба пользователя - оптимизация тормозов
   // карты из-за слоёв облаков спроса) - три независимых изменения:
@@ -14372,7 +14393,7 @@ def map_webapp_html():
     if (!_districtDemandCache || !demandShownState) return;
     clearTimeout(_districtRedrawTimer);
     _districtRedrawTimer = setTimeout(() => {{
-      if (DISTRICT_DEMAND_CITIES.includes(city) && (myCategory === 'taxi' || myCategory === 'ultima')) {{
+      if (hasDistrictMatrixData(myCategory, city)) {{
         renderDistrictDemandClouds(_districtDemandCache);
       }}
     }}, 250);
@@ -14389,13 +14410,24 @@ def map_webapp_html():
   // MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_ELITE в Python, для этих городов
   // соответствующее поле всегда null и просто не рисует свой слой).
   const DISTRICT_DEMAND_CITIES = ['moscow', 'spb', 'krasnodar', 'sochi'];
+  // ДОБАВЛЕНО 26.09.2026 (см. DISTRICT_CLOUD_LAYERS.courier/.cargo выше) -
+  // своя, более короткая сетка городов для доставки (пока только Москва -
+  // ровно там, откуда загружена таблица спроса, см. DELIVERY_DEMAND_FILES
+  // в Python) - города таксомоторной сетки (DISTRICT_DEMAND_CITIES) сюда
+  // НЕ переносятся автоматически, это разные, несвязанные наборы данных.
+  const DELIVERY_DEMAND_CITIES = ['moscow'];
+  function hasDistrictMatrixData(cat, cty) {{
+    if (cat === 'taxi' || cat === 'ultima') return DISTRICT_DEMAND_CITIES.includes(cty);
+    if (cat === 'courier' || cat === 'cargo') return DELIVERY_DEMAND_CITIES.includes(cty);
+    return false;
+  }}
 
   async function loadDemandCloud() {{
     try {{
-      // Города с реальными районными облаками (DISTRICT_DEMAND_CITIES) +
-      // такси/Ultima -> реальные районные облака (см. выше), а не
-      // единое городское облако ниже.
-      if (DISTRICT_DEMAND_CITIES.includes(city) && (myCategory === 'taxi' || myCategory === 'ultima')) {{
+      // Города с реальными районными облаками (DISTRICT_DEMAND_CITIES/
+      // DELIVERY_DEMAND_CITIES, см. hasDistrictMatrixData выше) -> реальные
+      // районные облака, а не единое городское облако ниже.
+      if (hasDistrictMatrixData(myCategory, city)) {{
         if (demandCloudMarker) {{ map.removeLayer(demandCloudMarker); demandCloudMarker = null; }}
         await loadDistrictDemandClouds();
         return;
@@ -16859,6 +16891,114 @@ def get_district_demand(city):
         _district_demand_cache[city] = False  # False, не None - чтобы не пытаться перечитать на каждый запрос
         return None
 
+# ==================== СПРОС ДОСТАВКИ (КУРЬЕР/ГРУЗОВОЕ ТАКСИ) - РАЙОННАЯ МАТРИЦА ====================
+# ДОБАВЛЕНО 26.09.2026 (прямая просьба пользователя, приложил таблицу
+# "moscow_delivery_demand_moscow_and_region_wide.xlsx" - "чтобы матрица
+# спроса курьера/грузового такси работала на карте так же, как у такси/
+# Ultima") - отдельный от DISTRICT_DEMAND_FILES словарь: своя, ПОЛНОСТЬЮ
+# ДРУГАЯ сетка "рабочих зон" (536 зон, geoкодированных по названию через
+# OpenStreetMap/Nominatim - тем же способом, что раньше применялся для
+# Московской области/Краснодара/Сочи у таксомоторной матрицы, координат в
+# исходной таблице не было) и свои 7 тарифов вместо 6 таксомоторных - см.
+# CATEGORIES['courier']/['cargo'] выше. Схема JSON файла ИДЕНТИЧНА
+# DISTRICT_DEMAND_FILES ({{'tariff_order': [...], 'districts': {{name:
+# {{'lat','lon','weekday': {{0..6: [[start,end,v0..v6]]}}}}}}}}), поэтому
+# get_delivery_demand/find_nearest_delivery_zone - буквальные копии
+# get_district_demand/find_nearest_district, а не переиспользование тех же
+# функций - города/категории тут пересекаться с таксомоторной сеткой не
+# должны (разные зоны с теми же именами были бы коллизией).
+DELIVERY_DEMAND_FILES = {
+    'moscow': 'moscow_delivery_demand.json',
+}
+_delivery_demand_cache = {}  # city -> data (или False, если загрузка не удалась)
+
+def get_delivery_demand(city):
+    """Аналог get_district_demand, но для DELIVERY_DEMAND_FILES (курьер/
+    грузовое такси) - см. комментарий у блока выше."""
+    filename = DELIVERY_DEMAND_FILES.get(city)
+    if not filename:
+        return None
+    cached = _delivery_demand_cache.get(city)
+    if cached is not None:
+        return cached or None
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        _delivery_demand_cache[city] = data
+        return data
+    except Exception:
+        logger.exception(f"❌ Не удалось загрузить {path} - районная матрица спроса доставки для {city} недоступна")
+        _delivery_demand_cache[city] = False
+        return None
+
+# Тариф -> индекс в tariff_order moscow_delivery_demand.json (см. Методику
+# исходной таблицы: Яндекс Еда - Курьер; Курьер - Экспресс; Грузовой кузов
+# S/M/L/XL/XXL, в этом самом порядке) и -> имя поля в JSON-ответе
+# /map/district_demand (тот же field-based приём, что у
+# MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_*/DISTRICT_CLOUD_LAYERS ниже -
+# фронт рисует облако по полю, не заботясь, такси это или доставка).
+DELIVERY_TARIFF_INDEX = {
+    'Яндекс Еда — Курьер': 0, 'Курьер — Экспресс': 1,
+    'Грузовой кузов S': 2, 'Грузовой кузов M': 3, 'Грузовой кузов L': 4,
+    'Грузовой кузов XL': 5, 'Грузовой кузов XXL': 6,
+}
+DELIVERY_TARIFF_FIELD = {
+    'Яндекс Еда — Курьер': 'demand_yandex_courier', 'Курьер — Экспресс': 'demand_courier_express',
+    'Грузовой кузов S': 'demand_cargo_s', 'Грузовой кузов M': 'demand_cargo_m', 'Грузовой кузов L': 'demand_cargo_l',
+    'Грузовой кузов XL': 'demand_cargo_xl', 'Грузовой кузов XXL': 'demand_cargo_xxl',
+}
+
+def find_nearest_delivery_zone(city, lat, lon):
+    """Аналог find_nearest_district, но по сетке DELIVERY_DEMAND_FILES."""
+    table = get_delivery_demand(city)
+    if not table:
+        return None
+    districts = table.get('districts') or {}
+    if not districts:
+        return None
+    best_name, best_dist = None, None
+    for name, entry in districts.items():
+        dist_km = haversine_km(lat, lon, entry['lat'], entry['lon'])
+        if best_dist is None or dist_km < best_dist:
+            best_name, best_dist = name, dist_km
+    if best_name is None:
+        return None
+    entry = districts[best_name]
+    return (best_name, best_dist, entry['lat'], entry['lon'])
+
+def _delivery_tariff_demand_value(city, zone_name, tariff, weekday, hour):
+    """Аналог _district_tariff_demand_value, но по сетке доставки."""
+    table = get_delivery_demand(city)
+    if not table:
+        return None
+    entry = (table.get('districts') or {}).get(zone_name)
+    if not entry:
+        return None
+    idx = DELIVERY_TARIFF_INDEX.get(tariff)
+    if idx is None:
+        return None
+    slots = entry.get('weekday', {}).get(str(weekday), [])
+    return _district_slot_value(slots, hour, (idx,))
+
+def recommended_delivery_tariffs(city, zone_name, category, weekday, hour):
+    """Аналог recommended_district_tariffs (см. её докстринг выше), но для
+    курьера/грузового такси - какие 1-2 тарифа этой категории СЕЙЧАС
+    показывают спрос выше своего порога (DISTRICT_CLOUD_THRESHOLDS_BY_CITY,
+    те же поля DELIVERY_TARIFF_FIELD, что рисует и облако на карте - "то,
+    что рекомендует пуш" и "то, что рисует карта" не расходятся)."""
+    scored = []
+    for tariff in shift_tariff_options(category):
+        field = DELIVERY_TARIFF_FIELD.get(tariff)
+        if not field:
+            continue
+        value = _delivery_tariff_demand_value(city, zone_name, tariff, weekday, hour)
+        threshold = (DISTRICT_CLOUD_THRESHOLDS_BY_CITY.get(city) or {}).get(field)
+        if value is not None and threshold and value >= threshold[0]:
+            scored.append((tariff, value))
+    scored.sort(key=lambda pair: -pair[1])
+    return [tariff for tariff, _value in scored[:2]]
+
 # Индексы колонок tariff_order (['Эконом','Комфорт','Комфорт+','Бизнес','Премьер','Элит']).
 # ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя - "два независимых слоя
 # облаков одновременно - эконом отдельно, комфорт+комфорт+ отдельно, у них
@@ -16988,6 +17128,20 @@ DISTRICT_CLOUD_THRESHOLDS_BY_CITY = {
         'demand_business': (71, 71),
         'demand_premier': (76, 76),
         'demand_elite': (81, 81),
+        # ДОБАВЛЕНО 26.09.2026 (та же методика калибровки, что и у такси/
+        # Ultima выше - "показ" взят по 90-му процентилю РЕАЛЬНОГО
+        # распределения значений этого тарифа по всем 536 зонам/дням/часам
+        # загруженной таблицы спроса доставки, см. DELIVERY_TARIFF_FIELD/
+        # moscow_delivery_demand.json выше) - первая калибровка, как и у
+        # таксомоторных порогов, при необходимости можно позже подвинуть
+        # по прямой просьбе пользователя, тем же приёмом.
+        'demand_yandex_courier': (58, 58),
+        'demand_courier_express': (56, 56),
+        'demand_cargo_s': (56, 56),
+        'demand_cargo_m': (57, 57),
+        'demand_cargo_l': (58, 58),
+        'demand_cargo_xl': (57, 57),
+        'demand_cargo_xxl': (57, 57),
     },
     'spb': {
         'demand_econom': (82, 82),
@@ -17340,6 +17494,38 @@ async def handle_map_district_demand_api(request):
     city = request.query.get('city', '')
     category = request.query.get('category', '') or None
     result = {'districts': []}
+    # ДОБАВЛЕНО 26.09.2026 (прямая просьба пользователя - "чтобы матрица
+    # спроса курьера/грузового такси работала на карте так же, как у
+    # такси/Ultima") - отдельная, более простая ветка для курьера/грузового
+    # такси: своя сетка зон (DELIVERY_DEMAND_FILES/get_delivery_demand, см.
+    # выше), БЕЗ дождевого "пола" таксомоторной ветки ниже (там он завязан
+    # на конкретно откалиброванную под такси психологию "дождь = больше
+    # заказов такси" - для доставки такой калибровки нет, лучше показывать
+    # только то, что реально есть в загруженной таблице, чем угадывать).
+    if category in ('courier', 'cargo'):
+        if city not in DELIVERY_DEMAND_FILES:
+            return web.json_response(result)
+        table = get_delivery_demand(city)
+        if not table:
+            return web.json_response(result)
+        try:
+            now = get_city_now(city)
+            weekday = str(now.weekday())
+            for name, entry in table.get('districts', {}).items():
+                slots = entry.get('weekday', {}).get(weekday, [])
+                item = {'name': name, 'lat': entry['lat'], 'lon': entry['lon']}
+                has_any = False
+                for tariff, field in DELIVERY_TARIFF_FIELD.items():
+                    idx = DELIVERY_TARIFF_INDEX[tariff]
+                    value = _district_slot_value(slots, now.hour, (idx,))
+                    item[field] = value
+                    if value is not None:
+                        has_any = True
+                if has_any:
+                    result['districts'].append(item)
+        except Exception:
+            logger.exception(f"❌ Ошибка при получении районного спроса доставки ({city}/{category})")
+        return web.json_response(result)
     if city not in DISTRICT_DEMAND_FILES or category not in ('taxi', 'ultima'):
         return web.json_response(result)
     table = get_district_demand(city)
@@ -30154,11 +30340,20 @@ LOW_TARIFF_DEMAND_CHECK_INTERVAL_MINUTES = 20
 LOW_TARIFF_DEMAND_RECHECK_MINUTES = 60
 
 # Порядок тарифов ОТ ДОРОГОГО К ДЕШЁВОМУ - "пониженный" тариф это следующий
-# по списку. Курьер/грузовое такси сюда не входят (своей колонки в районной
-# матрице у них нет, см. SHIFT_TARIFF_TO_DEMAND_INDEX).
+# по списку.
+# ДОБАВЛЕНО 26.09.2026 (прямая просьба пользователя - "для грузовых и
+# курьеров на понижающий тариф тоже присылать уведомления... если XL то на
+# L, если L то на M и так далее, курьер переключаться на Яндекс еду") -
+# cargo/courier тоже получили свою колонку в районной матрице (см.
+# DELIVERY_TARIFF_FIELD/moscow_delivery_demand.json выше), поэтому теперь
+# входят сюда наравне с taxi/ultima. Порядок кузовов - от самого крупного к
+# самому маленькому (XXL - самый дорогой/вместительный, S - самый дешёвый);
+# у courier - Экспресс дороже, чем обычный Еда-курьер.
 TARIFF_HIERARCHY = {
     'taxi': ['Комфорт+', 'Комфорт', 'Эконом'],
     'ultima': ['Elite', 'Premier', 'Business'],
+    'cargo': ['Грузовой кузов XXL', 'Грузовой кузов XL', 'Грузовой кузов L', 'Грузовой кузов M', 'Грузовой кузов S'],
+    'courier': ['Курьер — Экспресс', 'Яндекс Еда — Курьер'],
 }
 
 def _lowest_selected_tariff(category, tariffs):
@@ -30245,6 +30440,51 @@ def recommended_district_tariffs(city, district_name, category, weekday, hour, l
     scored.sort(key=lambda pair: -pair[1])
     return [tariff for tariff, _value in scored[:2]]
 
+# ДОБАВЛЕНО 26.09.2026 (прямая просьба пользователя - "также для грузовых и
+# курьеров на понижающий тариф тоже присылать уведомления при осадках и без
+# осадках при смене района") - диспетчеры, которые выбирают ТАКСОМОТОРНУЮ
+# (DISTRICT_DEMAND_FILES/_district_tariff_demand_value) или ДОСТАВОЧНУЮ
+# (DELIVERY_DEMAND_FILES/_delivery_tariff_demand_value) матрицу по категории -
+# check_low_tariff_demand_alerts/maybe_send_district_tariff_tip ниже теперь
+# читают демографию спроса ЧЕРЕЗ них, а не напрямую через таксомоторные
+# функции, поэтому одна и та же проверка работает для всех 4 категорий.
+def _nearest_demand_zone(city, category, lat, lon):
+    if category in ('taxi', 'ultima'):
+        return find_nearest_district(city, lat, lon)
+    if category in ('courier', 'cargo'):
+        return find_nearest_delivery_zone(city, lat, lon)
+    return None
+
+def _tariff_demand_and_threshold(city, category, zone_name, tariff, weekday, hour, lat=None, lon=None):
+    if category in ('taxi', 'ultima'):
+        value = _district_tariff_demand_value(city, zone_name, category, tariff, weekday, hour)
+        threshold = _district_tariff_demand_threshold(city, category, tariff, lat, lon)
+        return value, threshold
+    if category in ('courier', 'cargo'):
+        value = _delivery_tariff_demand_value(city, zone_name, tariff, weekday, hour)
+        field = DELIVERY_TARIFF_FIELD.get(tariff)
+        threshold = (DISTRICT_CLOUD_THRESHOLDS_BY_CITY.get(city) or {}).get(field)
+        return value, threshold
+    return None, None
+
+def recommended_tariffs_for_category(city, category, zone_name, weekday, hour, lat=None, lon=None):
+    """Диспетчер recommended_district_tariffs/recommended_delivery_tariffs -
+    см. комментарий у _nearest_demand_zone выше. Используется
+    maybe_send_district_tariff_tip ниже, чтобы совет по тарифу работал
+    одинаково для такси/Ultima и курьера/грузового такси."""
+    if category in ('taxi', 'ultima'):
+        return recommended_district_tariffs(city, zone_name, category, weekday, hour, lat, lon)
+    if category in ('courier', 'cargo'):
+        return recommended_delivery_tariffs(city, zone_name, category, weekday, hour)
+    return []
+
+def _city_has_demand_data(city, category):
+    if category in ('taxi', 'ultima'):
+        return city in DISTRICT_DEMAND_FILES
+    if category in ('courier', 'cargo'):
+        return city in DELIVERY_DEMAND_FILES
+    return False
+
 # ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - "надо сделать отдельно
 # пуш без осадков... текст такой же, только убрать [дождь] и оставить совет
 # о тарифе, та же логика") - повторно напоминаем про тот же район/набор
@@ -30300,7 +30540,7 @@ async def maybe_send_district_tariff_tip(user_id, state, city, category, distric
     пуша "переключись на пониженный тариф"."""
     if not notifications_enabled(state, 'district_tariff_tip'):
         return
-    tariffs = recommended_district_tariffs(city, district_name, category, weekday, hour, lat, lon)
+    tariffs = recommended_tariffs_for_category(city, category, district_name, weekday, hour, lat, lon)
     if not tariffs:
         return
     now_utc = datetime.now(timezone.utc)
@@ -30386,7 +30626,7 @@ async def check_low_tariff_demand_alerts():
             continue
         city = state.get('city')
         category = state.get('category')
-        if city not in DISTRICT_DEMAND_FILES or category not in ('taxi', 'ultima'):
+        if category not in ('taxi', 'ultima', 'courier', 'cargo') or not _city_has_demand_data(city, category):
             continue
         shift = state.get('shift')
         if not shift:
@@ -30394,7 +30634,7 @@ async def check_low_tariff_demand_alerts():
         user_lat, user_lon = shift.get('last_lat'), shift.get('last_lon')
         if user_lat is None or user_lon is None:
             continue
-        nearest = find_nearest_district(city, user_lat, user_lon)
+        nearest = _nearest_demand_zone(city, category, user_lat, user_lon)
         if not nearest:
             continue
         district_name = nearest[0]
@@ -30426,8 +30666,7 @@ async def check_low_tariff_demand_alerts():
         # after проверки is_current_low.
         candidates = _lower_tariff_candidates(category, current_tariff)
         try:
-            current_value = _district_tariff_demand_value(city, district_name, category, current_tariff, weekday, now.hour)
-            current_threshold = _district_tariff_demand_threshold(city, category, current_tariff, user_lat, user_lon)
+            current_value, current_threshold = _tariff_demand_and_threshold(city, category, district_name, current_tariff, weekday, now.hour, user_lat, user_lon)
         except Exception as e:
             logger.error(f"❌ Не удалось проверить спрос по тарифам для {user_id} ({city}/{category}): {e}")
             continue
@@ -30450,8 +30689,7 @@ async def check_low_tariff_demand_alerts():
             if len(selected_in_hierarchy) >= 2 and selected_in_hierarchy[-1] == current_tariff:
                 main_tariff = selected_in_hierarchy[-2]
                 try:
-                    main_value = _district_tariff_demand_value(city, district_name, category, main_tariff, weekday, now.hour)
-                    main_threshold = _district_tariff_demand_threshold(city, category, main_tariff, user_lat, user_lon)
+                    main_value, main_threshold = _tariff_demand_and_threshold(city, category, district_name, main_tariff, weekday, now.hour, user_lat, user_lon)
                 except Exception as e:
                     logger.error(f"❌ Не удалось проверить спрос по тарифам для {user_id} ({city}/{category}): {e}")
                     continue
@@ -30480,8 +30718,7 @@ async def check_low_tariff_demand_alerts():
         lower_tariff = None
         try:
             for candidate in candidates:
-                candidate_value = _district_tariff_demand_value(city, district_name, category, candidate, weekday, now.hour)
-                candidate_threshold = _district_tariff_demand_threshold(city, category, candidate, user_lat, user_lon)
+                candidate_value, candidate_threshold = _tariff_demand_and_threshold(city, category, district_name, candidate, weekday, now.hour, user_lat, user_lon)
                 if candidate_value is not None and candidate_threshold and candidate_value >= candidate_threshold[0]:
                     lower_tariff = candidate
                     break
