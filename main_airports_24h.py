@@ -253,14 +253,6 @@ TIMEPAD_DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'ti
 RAIN_CITY_COORDS = {
     'moscow': (55.725, 37.645),
     'spb': (59.925, 30.300),
-    'novosibirsk': (55.000, 82.975),
-    'ekb': (56.825, 60.600),
-    'kazan': (55.775, 49.150),
-    'chelyabinsk': (55.175, 61.425),
-    'omsk': (54.975, 73.325),
-    'samara': (53.200, 50.150),
-    'rostov': (47.225, 39.700),
-    'nnovgorod': (56.300, 43.950),
     'krasnodar': (45.025, 38.975),
     'sochi': (43.540, 39.800),
 }
@@ -274,14 +266,6 @@ RAIN_CITY_COORDS = {
 RAIN_CITY_TIMEZONE = {
     'moscow': 'Europe/Moscow',
     'spb': 'Europe/Moscow',
-    'novosibirsk': 'Asia/Novosibirsk',
-    'ekb': 'Asia/Yekaterinburg',
-    'kazan': 'Europe/Moscow',
-    'chelyabinsk': 'Asia/Yekaterinburg',
-    'omsk': 'Asia/Omsk',
-    'samara': 'Europe/Samara',
-    'rostov': 'Europe/Moscow',
-    'nnovgorod': 'Europe/Moscow',
     'krasnodar': 'Europe/Moscow',
     'sochi': 'Europe/Moscow',
 }
@@ -801,22 +785,11 @@ HOLIDAYS = [
     {'date': (2027, 12, 31), 'name': 'Новый год', 'emoji': '🎄', 'is_national': True},
     # --- Дни городов (2026) ---
     {'date': (2026, 9, 5), 'name': 'День города', 'emoji': '🎉', 'city': 'moscow'},
-    {'date': (2026, 9, 7), 'name': 'День города', 'emoji': '🎉', 'city': 'chelyabinsk'},
-    {'date': (2026, 9, 13), 'name': 'День города', 'emoji': '🎉', 'city': 'samara'},
-    {'date': (2026, 9, 20), 'name': 'День города', 'emoji': '🎉', 'city': 'rostov'},
     {'date': (2026, 9, 26), 'name': 'День города', 'emoji': '🎉', 'city': 'krasnodar'},
     # --- Дни городов (2027) - фиксированные законом (надёжно) ---
     {'date': (2027, 5, 27), 'name': 'День города', 'emoji': '🎉', 'city': 'spb'},
-    {'date': (2027, 8, 30), 'name': 'День города (День Татарстана)', 'emoji': '🎉', 'city': 'kazan'},
     # --- Дни городов (2027) - оценка по традиции, TODO сверить ближе к дате ---
-    {'date': (2027, 6, 27), 'name': 'День города', 'emoji': '🎉', 'city': 'novosibirsk'},  # TODO: последнее воскресенье июня, уточнить
-    {'date': (2027, 8, 7), 'name': 'День города', 'emoji': '🎉', 'city': 'ekb'},  # TODO: первая суббота августа (правило менялось в 2026), уточнить
-    {'date': (2027, 8, 7), 'name': 'День города', 'emoji': '🎉', 'city': 'omsk'},  # TODO: первая суббота августа, уточнить
-    {'date': (2027, 8, 21), 'name': 'День города', 'emoji': '🎉', 'city': 'nnovgorod'},  # TODO: третья суббота августа, уточнить
     {'date': (2027, 9, 4), 'name': 'День города', 'emoji': '🎉', 'city': 'moscow'},  # TODO: первые/вторые выходные сентября, уточнить
-    {'date': (2027, 9, 12), 'name': 'День города', 'emoji': '🎉', 'city': 'chelyabinsk'},  # TODO: обычно ближе к 13 сентября, уточнить
-    {'date': (2027, 9, 12), 'name': 'День города', 'emoji': '🎉', 'city': 'samara'},  # TODO: вторая суббота/воскресенье сентября, уточнить
-    {'date': (2027, 9, 19), 'name': 'День города', 'emoji': '🎉', 'city': 'rostov'},  # TODO: третье воскресенье сентября, уточнить
     {'date': (2027, 9, 25), 'name': 'День города', 'emoji': '🎉', 'city': 'krasnodar'},  # TODO: последняя суббота сентября, уточнить
     {'date': (2027, 5, 29), 'name': 'День города', 'emoji': '🎉', 'city': 'sochi'},  # TODO: дата плавает год от года без правила, уточнить
 ]
@@ -1549,7 +1522,13 @@ def compute_zone_capacity_shares(icao):
 # остальном коде.
 CATEGORIES = {
     'taxi': {'name': '🚕 ТАКСИ', 'tariffs': ['Эконом', 'Комфорт', 'Комфорт+']},
-    'ultima': {'name': '💎 ТАКСИ ULTIMA', 'tariffs': ['Business', 'Premier', 'Elite', 'Cruise']},
+    # ИЗМЕНЕНО 26.09.2026 (прямая просьба пользователя со скриншотом бейджа
+    # "Москва · 💎 ТАКСИ ULTIMA" - "убери смайлик алмаз") - было
+    # '💎 ТАКСИ ULTIMA'. CATEGORIES - единственный источник правды для этого
+    # названия везде в боте (бейдж unified_app_html, дропдаун renderCityDetail,
+    # старая клавиатура category_keyboard, select_category и т.д.), поэтому
+    # эмодзи достаточно убрать один раз здесь.
+    'ultima': {'name': 'ТАКСИ ULTIMA', 'tariffs': ['Business', 'Premier', 'Elite', 'Cruise']},
     'courier': {'name': '📦 КУРЬЕР', 'tariffs': ['Яндекс Еда — Курьер', 'Курьер — Экспресс']},
     'cargo': {'name': '🚚 ГРУЗОВОЕ ТАКСИ', 'tariffs': [
         'Грузовой кузов S', 'Грузовой кузов M', 'Грузовой кузов L', 'Грузовой кузов XL', 'Грузовой кузов XXL',
@@ -1704,10 +1683,8 @@ SHARE_ORDER_CARGO_CLASS_NAME = 'Грузовая машина'  # единств
 # Человекочитаемые названия городов (ключ city - тот же, что в city_map ниже
 # и в AIRPORTS_INFO) - нужны для текста рассылки заказов и подтверждений.
 CITY_DISPLAY_NAMES = {
-    'moscow': 'Москва', 'spb': 'Санкт-Петербург', 'novosibirsk': 'Новосибирск',
-    'ekb': 'Екатеринбург', 'kazan': 'Казань', 'chelyabinsk': 'Челябинск',
-    'omsk': 'Омск', 'samara': 'Самара', 'rostov': 'Ростов-на-Дону',
-    'nnovgorod': 'Нижний Новгород', 'krasnodar': 'Краснодар', 'sochi': 'Сочи',
+    'moscow': 'Москва', 'spb': 'Санкт-Петербург',
+    'krasnodar': 'Краснодар', 'sochi': 'Сочи',
 }
 
 # user_state раньше жил только в памяти процесса - при каждом рестарте/редеплое
@@ -4890,13 +4867,17 @@ async def initialize_bot():
         return False
 
 def city_keyboard():
+    # ИЗМЕНЕНО 26.09.2026 (прямая просьба пользователя со скриншотом - "все
+    # города с большой буквы, оставь тока москва спб краснодар и сочи,
+    # остальные города удали вообще") - раньше здесь были 12 городов КАПСОМ
+    # (ещё с тех времён, когда бот не был ограничен 4 городами с погодой/
+    # аэропортами/вокзалами - см. RAIN_CITY_COORDS/CITY_DISPLAY_NAMES/
+    # config.json, которые уже давно сузились до этих 4). Список городов
+    # здесь и в CITY_MAP ниже теперь 1:1 совпадает с CITY_DISPLAY_NAMES -
+    # текст с обычной, а не капслочной капитализацией.
     return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[
-        [KeyboardButton(text="🏛️ МОСКВА"), KeyboardButton(text="🕯️ СПБ")],
-        [KeyboardButton(text="🌲 НОВОСИБИРСК"), KeyboardButton(text="🏔️ ЕКАТЕРИНБУРГ")],
-        [KeyboardButton(text="🎓 КАЗАНЬ"), KeyboardButton(text="❄️ ЧЕЛЯБИНСК")],
-        [KeyboardButton(text="🌾 ОМСК"), KeyboardButton(text="🏭 САМАРА")],
-        [KeyboardButton(text="🌊 РОСТОВ-НА-ДОНУ"), KeyboardButton(text="🏰 НИЖНИЙ НОВГОРОД")],
-        [KeyboardButton(text="🌴 КРАСНОДАР"), KeyboardButton(text="🏖️ СОЧИ")]
+        [KeyboardButton(text="🏛️ Москва"), KeyboardButton(text="🕯️ Санкт-Петербург")],
+        [KeyboardButton(text="🌴 Краснодар"), KeyboardButton(text="🏖️ Сочи")]
     ])
 
 def category_keyboard():
@@ -17225,7 +17206,7 @@ def unified_app_html():
   // автоопределения при первом запуске.
   function updateCityBadge(cityNameOverride) {
     const label = cityNameOverride || cityLabel();
-    const catLabel = CATEGORY_NAMES[category] || '';
+    const catLabel = stripLeadingEmoji(CATEGORY_NAMES[category] || '');
     document.getElementById('cityBadge').textContent = label + (catLabel ? ' · ' + catLabel : '') + ' ▾';
   }
   function persistCityCategory(newCity, newCategory) {
@@ -17983,6 +17964,14 @@ def unified_app_html():
     Object.keys(CITY_DISPLAY_NAMES).forEach(function (k) {
       cityOptions += '<option value="' + k + '"' + (k === city ? ' selected' : '') + '>' + stripLeadingEmoji(CITY_DISPLAY_NAMES[k]) + '</option>';
     });
+    // ДОБАВЛЕНО 26.09.2026 (прямая просьба пользователя - "добавь ещё кнопку
+    // город, пятый город, добавь другие города, чтобы не кликабельны были,
+    // там было написано скоро") - пятый пункт в списке городов, НЕкликабельный
+    // (нативный disabled option браузер сам не даёт выбрать и красит серым),
+    // просто анонс "остальные города - скоро". value специально вне
+    // CITY_DISPLAY_NAMES/RAIN_CITY_COORDS, чтобы даже гипотетический выбор
+    // (invalid) не долетел ни до persistCityCategory, ни до бэкенда.
+    cityOptions += '<option value="__coming_soon__" disabled>🔒 Другие города — скоро</option>';
     let catOptions = '';
     Object.keys(CATEGORY_NAMES).forEach(function (k) {
       catOptions += '<option value="' + k + '"' + (k === category ? ' selected' : '') + '>' + stripLeadingEmoji(CATEGORY_NAMES[k]) + '</option>';
@@ -24539,10 +24528,8 @@ async def send_courier_finance_result(message: types.Message, user_id, data):
     save_finance_result(user_id, income, net_profit, trips_count)
 
 CITY_MAP = {
-    "🏛️ МОСКВА": "moscow", "🕯️ СПБ": "spb", "🌲 НОВОСИБИРСК": "novosibirsk",
-    "🏔️ ЕКАТЕРИНБУРГ": "ekb", "🎓 КАЗАНЬ": "kazan", "❄️ ЧЕЛЯБИНСК": "chelyabinsk",
-    "🌾 ОМСК": "omsk", "🏭 САМАРА": "samara", "🌊 РОСТОВ-НА-ДОНУ": "rostov",
-    "🏰 НИЖНИЙ НОВГОРОД": "nnovgorod", "🌴 КРАСНОДАР": "krasnodar", "🏖️ СОЧИ": "sochi"
+    "🏛️ Москва": "moscow", "🕯️ Санкт-Петербург": "spb",
+    "🌴 Краснодар": "krasnodar", "🏖️ Сочи": "sochi"
 }
 
 @router.message(lambda message: message.text in CITY_MAP)
