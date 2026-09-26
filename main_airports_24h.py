@@ -6287,13 +6287,58 @@ async def send_welcome_pitch(message: types.Message):
         _skip_message_trim.reset(token)
     await message.answer(WELCOME_GEO_TEXT, parse_mode='Markdown')
 
+# ДОБАВЛЕНО 26.09.2026 (прямая просьба пользователя - "вообще удаляй все
+# кнопки оставляй только после старта ... кнопка сразу в приложении, все
+# других кнопок больше нет и их и не будет более так") - раньше /start вёл
+# на ReplyKeyboardMarkup выбора города (city_keyboard), затем категории
+# (category_keyboard) - это была последняя оставшаяся часть старой
+# кнопочной навигации (сам показ приложения ПОСЛЕ выбора категории уже
+# переехал на инлайн-кнопку ещё на прошлом этапе, см. select_category).
+# Теперь единственное, что видит пользователь сразу после /start - это
+# один красиво оформленный текст и ОДНА инлайн-кнопка, открывающая единое
+# приложение. Город/категория (если ещё не выбраны хотя бы раз) теперь
+# определяются ВНУТРИ приложения - см. правку "АВТООПРЕДЕЛЕНИЕ ГОРОДА ПО
+# ГЕОЛОКАЦИИ" и интерактивную плашку cityBadge/renderCityDetail в
+# unified_app_html(). city_keyboard()/category_keyboard()/select_city()/
+# select_category() НЕ удалены (остаются нетронутым внутренним фолбэком на
+# случай PUBLIC_URL не задан - см. ниже - тот же принцип, что уже
+# применялся 26.09.2026 к services_keyboard: если что-то в новом флоу не
+# заработает, старая рабочая логика цела и ничего не потеряно навсегда).
+def open_app_text_and_keyboard(user_id):
+    state = user_state.get(user_id) or {}
+    city = state.get('city') or ''
+    category = state.get('category') or ''
+    if PUBLIC_URL:
+        app_url = f"{PUBLIC_URL}{UNIFIED_APP_WEBAPP_PATH}?city={urllib.parse.quote(city)}&category={urllib.parse.quote(category)}"
+        text = (
+            "🚕✨ *TAXI HELPER*\n"
+            "_Помощник водителя такси и курьера_\n"
+            f"{WHERE_TO_GO_DIVIDER}\n\n"
+            "Карта спроса, куда ехать, все сервисы и личный кабинет - теперь в одном приложении.\n\n"
+            "👇 Жми и поехали"
+        )
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="🚕 ОТКРЫТЬ TAXI HELPER", web_app=WebAppInfo(url=app_url)),
+        ]])
+        return text, keyboard
+    # Локальный/дев-запуск без HTTPS (PUBLIC_URL не задан) - Telegram не даёт
+    # открыть WebApp без HTTPS (как и у всех остальных WebApp-кнопок бота) -
+    # остаётся старый выбор города, чтобы бот не сломался совсем в деве.
+    text = (
+        "🚕✨ *TAXI HELPER*\n"
+        "_Помощник водителя такси и курьера_\n"
+        f"{WHERE_TO_GO_DIVIDER}\n\n"
+        "🏙 Выбери свой город 👇"
+    )
+    return text, city_keyboard()
+
 async def send_start_screen(message: types.Message):
     """Общий код /start и кнопки "🏙 ВЫБОР ГОРОДА" - сбрасывает весь user_state
-    (включая любой незавершённый черновик заказа/расчёта) и возвращает на
-    экран выбора города. Кнопка добавлена, чтобы не заставлять пользователя
-    искать команду /start в интерфейсе Telegram - она есть на всех
-    клавиатурах ниже корневого экрана (см. category_keyboard,
-    services_keyboard, courier_module_keyboard)."""
+    (включая любой незавершённый черновик заказа/расчёта, флаги активной
+    смены и т.п.), но СОХРАНЯЕТ уже выбранные город/категорию (если они уже
+    были определены раньше - см. open_app_text_and_keyboard) и сразу
+    показывает кнопку входа в приложение - больше никакого выбора города
+    текстовыми кнопками (см. правку 26.09.2026 выше)."""
     init_db()
     # ИСПРАВЛЕНО 22.09.2026 (жалоба пользователя со скриншотом - метка на
     # карте есть, а смена ещё не начата) - сброс user_state здесь стирает и
@@ -6310,23 +6355,27 @@ async def send_start_screen(message: types.Message):
         delete_map_position(message.from_user.id)
     except Exception:
         logger.exception(f"❌ Не удалось убрать с карты водителей user_id={message.from_user.id} при сбросе через /start")
-    user_state.pop(message.from_user.id, None)
-    # Обновлённый визуал стартового экрана (по просьбе пользователя,
-    # 22.09.2026 - "поработать над визуалом бота на всех страницах", начиная с
-    # главного меню) - тот же стиль оформления, что уже прижился в "Куда
-    # ехать": крупный заголовок, разделитель, короткая подпись назначения.
-    # ИЗМЕНЕНО 22.09.2026 (продолжение той же правки, "пробегись по боту
-    # поработай над визуальной частью ... в наших цветах стилистике") -
-    # разделитель "━━━" заменён на общий WHERE_TO_GO_DIVIDER ("┄┄┄"), чтобы
-    # по всему боту был ОДИН стиль разделителя, а не три разных (были ещё
-    # "▓▓▓" и голый "━━━" в разных экранах - см. остальные правки этого дня).
-    text = (
-        "🚕✨ *TAXI HELPER*\n"
-        "_Помощник водителя такси и курьера_\n"
-        f"{WHERE_TO_GO_DIVIDER}\n\n"
-        "🏙 Выбери свой город 👇"
-    )
-    await message.answer(text, reply_markup=city_keyboard(), parse_mode='Markdown')
+    user_id = message.from_user.id
+    # ДОБАВЛЕНО 26.09.2026 (см. правку "УБРАНЫ ВСЕ КНОПКИ" выше) - раньше
+    # сброс user_state ниже был безопасен, потому что /start сразу заново
+    # спрашивал город текстовыми кнопками (city_keyboard). Теперь /start
+    # больше НЕ переспрашивает город - если стирать его вместе с остальным
+    # state, город (а с ним и категория) сбрасывался бы при каждом повторном
+    # /start, даже если водитель уже выбрал их раньше. Поэтому запоминаем их
+    # ДО сброса и переносим в свежий state - остальной user_state (черновики
+    # заказов, in-memory флаги смены и т.п.) по-прежнему полностью чистится.
+    prev_state = user_state.get(user_id) or {}
+    prev_city = prev_state.get('city')
+    prev_category = prev_state.get('category')
+    user_state.pop(user_id, None)
+    if prev_city or prev_category:
+        user_state[user_id] = {}
+        if prev_city:
+            user_state[user_id]['city'] = prev_city
+        if prev_category:
+            user_state[user_id]['category'] = prev_category
+    text, keyboard = open_app_text_and_keyboard(user_id)
+    await message.answer(text, reply_markup=keyboard, parse_mode='Markdown')
 
 @router.message(Command("start"))
 async def start(message: types.Message):
@@ -6341,8 +6390,9 @@ async def start(message: types.Message):
     # уже потерян).
     is_new_user = message.from_user.id not in user_state
     parts = (message.text or '').split(maxsplit=1)
-    if len(parts) == 2 and parts[1].startswith('ref_'):
-        ref_code = parts[1][len('ref_'):]
+    start_param = parts[1] if len(parts) == 2 else None
+    if start_param and start_param.startswith('ref_'):
+        ref_code = start_param[len('ref_'):]
         if ref_code.isdigit():
             referrer_id = int(ref_code)
             if referrer_id != message.from_user.id:
@@ -6350,6 +6400,36 @@ async def start(message: types.Message):
     if is_new_user:
         await send_welcome_pitch(message)
     await send_start_screen(message)
+    # ДОБАВЛЕНО 26.09.2026 (плитки "Юр. лицо"/"Фантом" в реферальном разделе
+    # мини-приложения - "по кнопкам по паролям всё как бы тоже самое
+    # переноси делай") - у этих двух пунктов пароль по-прежнему вводится
+    # ТОЛЬКО текстом прямо в чате (та же механика, ничего в самой логике
+    # паролей не переписано - см. referral_legal_password_flow/
+    # phantom_password_flow ниже): мини-приложение не может ни показать поле
+    # ввода пароля внутри WebView-панели, ни поймать текстовый ответ.
+    # Поэтому плитка в приложении - обычная ссылка t.me/<бот>?start=reflegal
+    # /refphantom (открывается через Telegram.WebApp.openTelegramLink в JS,
+    # см. renderReferralLegalDetail/renderReferralPhantomDetail в
+    # unified_app_html()), а здесь она просто запускает ТОТ ЖЕ самый первый
+    # шаг, что и кнопка в чате (referral_category_legal_start/phantom_start)
+    # - только вызванный из /start (Message), а не из callback_query.
+    user_id = message.from_user.id
+    if start_param == 'refphantom':
+        state = user_state.setdefault(user_id, {})
+        state['awaiting_phantom_password'] = True
+        await message.answer("👻 Введи пароль:")
+    elif start_param == 'reflegal':
+        if get_referrer_type(user_id) != 'admin' and not is_legal_entity_referral_subscription_active(user_id):
+            await send_legal_entity_referral_paywall(message)
+        elif get_referrer_type(user_id) == 'legal_entity' and get_legal_entity_owned_by(user_id):
+            await message.answer("Уже выбрана схема юр.лица")
+        else:
+            state = user_state.setdefault(user_id, {})
+            state['awaiting_referral_legal_password'] = True
+            await message.answer(
+                "🔒 Введи пароль компании (юр.лица) - он же откроет «Кабинет автопарка»:",
+                reply_markup=referral_withdraw_cancel_keyboard()
+            )
 
 # ДОБАВЛЕНО 23.09.2026 (см. MAIN_MENU_INLINE_BUTTON_TEXT/_with_main_menu_button
 # выше) - хендлер инлайн-кнопки "🚕 МЕНЮ TAXI HELPER", которая теперь висит
@@ -6435,14 +6515,22 @@ async def continue_to_bot(callback_query: types.CallbackQuery):
         delete_map_position(callback_query.from_user.id)
     except Exception:
         logger.exception(f"❌ Не удалось убрать с карты водителей user_id={callback_query.from_user.id} при continue_to_bot")
-    user_state.pop(callback_query.from_user.id, None)
-    text = (
-        "🚕✨ *TAXI HELPER*\n"
-        "_Помощник водителя такси и курьера_\n"
-        f"{WHERE_TO_GO_DIVIDER}\n\n"
-        "🏙 Выбери свой город 👇"
-    )
-    await callback_query.message.answer(text, reply_markup=city_keyboard(), parse_mode='Markdown')
+    user_id = callback_query.from_user.id
+    # ДОБАВЛЕНО 26.09.2026 - см. тот же комментарий у send_start_screen выше:
+    # сохраняем город/категорию через сброс user_state, раз этот экран
+    # больше не переспрашивает их текстовыми кнопками.
+    prev_state = user_state.get(user_id) or {}
+    prev_city = prev_state.get('city')
+    prev_category = prev_state.get('category')
+    user_state.pop(user_id, None)
+    if prev_city or prev_category:
+        user_state[user_id] = {}
+        if prev_city:
+            user_state[user_id]['city'] = prev_city
+        if prev_category:
+            user_state[user_id]['category'] = prev_category
+    text, keyboard = open_app_text_and_keyboard(user_id)
+    await callback_query.message.answer(text, reply_markup=keyboard, parse_mode='Markdown')
 
 @router.message(lambda message: message.text == "← НАЗАД")
 async def go_back(message: types.Message):
@@ -16798,6 +16886,17 @@ def unified_app_html():
     font-family: 'Golos Text', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     font-weight: 600; font-size: 12px; color: #FFC400; border: 1px solid rgba(255,196,0,.4); border-radius: 999px;
     padding: 5px 11px; white-space: nowrap; max-width: 55%; overflow: hidden; text-overflow: ellipsis;
+    cursor: pointer; background: none; font-family: inherit;
+  }
+  /* ДОБАВЛЕНО 26.09.2026 (прямая просьба пользователя - "два поля выбор
+     города и выбор тарифа раскрывающимся меню") - плашка cityBadge в шапке
+     теперь кликабельна и открывает эту панель с теми же двумя select'ами
+     (город/категория), что уже были в разделе "Сервисы" (см. renderCityDetail
+     ниже - переиспользуется как есть, без дублирования логики). */
+  .city-panel {
+    position: absolute; top: calc(52px + env(safe-area-inset-top, 0px)); left: 12px; right: 12px; z-index: 45;
+    background: #131313; border: 1px solid rgba(255,196,0,.3); border-radius: 14px; padding: 14px;
+    box-shadow: 0 12px 32px rgba(0,0,0,.55);
   }
   main { flex: 1 1 auto; min-height: 0; position: relative; }
   .panel { position: absolute; inset: 0; overflow-y: auto; padding: 16px; padding-bottom: 24px; }
@@ -16906,6 +17005,21 @@ def unified_app_html():
   }
   .svc-btn.ghost { background: #1c1c1c; color: #FFC400; border: 1px solid rgba(255,196,0,.4); }
   .svc-btn + .svc-btn { margin-top: 8px; }
+  /* ДОБАВЛЕНО 26.09.2026 (прямая просьба пользователя - "четыре больших
+     квадратных кнопки чтобы они на экране поместились... как бы Аля
+     личного кабинета реферального") - вход в раздел "Реферальная
+     программа" теперь сетка 2x2 из крупных квадратных плиток вместо одного
+     длинного списка. */
+  .ref-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px; }
+  .ref-tile {
+    aspect-ratio: 1 / 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 8px; background: #131313; border: 1px solid rgba(255,196,0,.25); border-radius: 16px; color: #fff;
+    font-family: 'Golos Text', sans-serif; font-size: 12.5px; font-weight: 700; text-align: center; padding: 10px;
+    cursor: pointer; line-height: 1.25;
+  }
+  .ref-tile:active { transform: scale(.96); }
+  .ref-tile .ref-ic { font-size: 30px; line-height: 1; }
+  .ref-back { background: none; border: none; color: #FFC400; font-size: 13px; font-weight: 600; padding: 0 0 10px; cursor: pointer; font-family: 'Golos Text', sans-serif; }
   .svc-input {
     width: 100%; box-sizing: border-box; background: #0a0a0a; border: 1px solid rgba(255,255,255,.15);
     border-radius: 10px; padding: 11px 12px; color: #fff; font-size: 13.5px; margin-bottom: 8px;
@@ -16939,8 +17053,11 @@ def unified_app_html():
 <div id="shell" hidden>
   <header>
     <div class="logo wordmark">TAXI <b>HELPER</b></div>
-    <div class="badge" id="cityBadge">…</div>
+    <button type="button" class="badge" id="cityBadge">…</button>
   </header>
+  <div class="city-panel" id="cityPanel" hidden>
+    <div id="cityPanelContent"></div>
+  </div>
   <main>
     <div class="panel full" id="panel-map">
       <iframe id="mapFrame" allow="geolocation" style="width:100%;height:100%;border:0;display:block;background:#000;"></iframe>
@@ -16989,8 +17106,12 @@ def unified_app_html():
   if (tg) { tg.ready(); tg.expand(); }
   if (tg && tg.platform) { fetch('/platform/report', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': tg.initData || '' }, body: JSON.stringify({ platform: tg.platform }) }).catch(function(){}); }
   const params = new URLSearchParams(window.location.search);
-  const city = params.get('city') || '';
-  const category = params.get('category') || '';
+  // ИЗМЕНЕНО 26.09.2026 (прямая просьба пользователя - "по умолчанию город
+  // выбирается исходя из локации") - были const, теперь let: город/категория
+  // могут быть пустыми при первом запуске (см. правку "УБРАНЫ ВСЕ КНОПКИ" в
+  // main.py) и подставляются позже, в startApp(), по геопозиции.
+  let city = params.get('city') || '';
+  let category = params.get('category') || '';
   let driverPos = null;
 
   // ДОБАВЛЕНО 26.09.2026 (прямая просьба пользователя - "где ты Moscow
@@ -17002,6 +17123,32 @@ def unified_app_html():
   // Python для текстов рассылки заказов (см. CITY_DISPLAY_NAMES в main.py).
   const CITY_DISPLAY_NAMES = """ + json.dumps(CITY_DISPLAY_NAMES, ensure_ascii=False) + """;
   function cityLabel() { return CITY_DISPLAY_NAMES[city] || city || '—'; }
+
+  // ДОБАВЛЕНО 26.09.2026 (прямая просьба пользователя - "по умолчанию город
+  // выбирается исходя из локации") - те же координаты центра каждого из 12
+  // городов, что уже используются в map_webapp_html (CITY_CENTERS там же,
+  // источник - RAIN_CITY_COORDS в main.py), нужны здесь, чтобы вычислить
+  // ближайший к водителю город по его геопозиции (см. nearestCityFromCoords
+  // и блок автоопределения в startApp() ниже) - если город ещё не выбран ни
+  // разу (первый запуск /start без старой кнопочной навигации выбора
+  // города).
+  const CITY_CENTERS = """ + json.dumps(RAIN_CITY_COORDS, ensure_ascii=False) + """;
+  // Категория по умолчанию, если она ещё не выбрана - первая категория из
+  // CATEGORIES в Python (сейчас "🚕 ТАКСИ"), тот же порядок, что и везде в
+  // боте. Водитель в любой момент может сменить её через ту же плашку.
+  const DEFAULT_CATEGORY_KEY = """ + json.dumps(next(iter(CATEGORIES))) + """;
+  function nearestCityFromCoords(lat, lon) {
+    let best = null, bestDist = Infinity;
+    Object.keys(CITY_CENTERS).forEach(function (k) {
+      const c = CITY_CENTERS[k];
+      const dLat = (c[0] - lat) * Math.PI / 180;
+      const dLon = (c[1] - lon) * Math.PI / 180;
+      const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat * Math.PI / 180) * Math.cos(c[0] * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
+      const dist = 6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+      if (dist < bestDist) { bestDist = dist; best = k; }
+    });
+    return best;
+  }
 
   // ДОБАВЛЕНО 26.09.2026 (перенос всего оставшегося меню услуг - "Отдать
   // заказ", "Где бензин", "Чаты/Чаевые", "Реферальная программа",
@@ -17058,7 +17205,33 @@ def unified_app_html():
     return v ? ('&tgInitData=' + encodeURIComponent(v)) : '';
   }
 
-  document.getElementById('cityBadge').textContent = cityLabel();
+  // ДОБАВЛЕНО 26.09.2026 (прямая просьба пользователя - "два поля выбор
+  // города и выбор тарифа раскрывающимся меню... но по умолчанию город
+  // выбирается исходя из локации") - плашка cityBadge теперь кликабельна:
+  // открывает панель с теми же select'ами города/категории, что и в
+  // разделе "Сервисы" (renderCityDetail переиспользуется как есть - см.
+  // ниже). persistCityCategory - тот же POST на CABINET_CITY_API_PATH, что
+  // и в renderCityDetail, только "тихий" (без перезагрузки страницы) - для
+  // автоопределения при первом запуске.
+  function updateCityBadge(cityNameOverride) {
+    const label = cityNameOverride || cityLabel();
+    const catLabel = CATEGORY_NAMES[category] || '';
+    document.getElementById('cityBadge').textContent = label + (catLabel ? ' · ' + catLabel : '') + ' ▾';
+  }
+  function persistCityCategory(newCity, newCategory) {
+    fetch('""" + CABINET_CITY_API_PATH + """', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': (tg && tg.initData) || '' },
+      body: JSON.stringify({ city: newCity, category: newCategory })
+    }).catch(function () {});
+  }
+  updateCityBadge();
+  document.getElementById('cityBadge').addEventListener('click', function () {
+    const panel = document.getElementById('cityPanel');
+    const wasHidden = panel.hidden;
+    panel.hidden = !wasHidden;
+    if (wasHidden) { renderCityDetail(document.getElementById('cityPanelContent')); }
+  });
 
   // ИСПРАВЛЕНО 26.09.2026 (жалоба пользователя - "крутит постоянно, а
   // локация включена") - было: голый navigator.geolocation.getCurrentPosition
@@ -17152,6 +17325,29 @@ def unified_app_html():
   function startApp() {
     document.getElementById('gate').hidden = true;
     document.getElementById('shell').hidden = false;
+    // ДОБАВЛЕНО 26.09.2026 (прямая просьба пользователя - "по умолчанию
+    // город выбирается исходя из локации") - раньше город/категория ВСЕГДА
+    // приходили уже готовыми из чат-флоу (city_keyboard/category_keyboard).
+    // Теперь этого чат-флоу больше нет (см. правку "УБРАНЫ ВСЕ КНОПКИ" в
+    // main.py), поэтому при самом первом запуске город/категория могут
+    // быть пустыми - определяем их прямо здесь, по уже полученной геопозиции
+    // (driverPos, см. requestGeo выше), без лишней перезагрузки страницы:
+    // просто продолжаем работу с уже известными city/category, а на сервере
+    // тихо сохраняем то же самое через persistCityCategory (см. выше), чтобы
+    // при следующем открытии приложения выбор не потерялся.
+    let changed = false;
+    if (!city && driverPos) {
+      city = nearestCityFromCoords(driverPos.lat, driverPos.lon);
+      changed = true;
+    }
+    if (city && !category) {
+      category = DEFAULT_CATEGORY_KEY;
+      changed = true;
+    }
+    if (changed && city && category) {
+      persistCityCategory(city, category);
+    }
+    updateCityBadge();
     loadMapFrame();
   }
 
@@ -17227,7 +17423,7 @@ def unified_app_html():
       if (!resp.ok) throw new Error('http_' + resp.status);
       const data = await resp.json();
 
-      document.getElementById('cityBadge').textContent = (data.city_name || cityLabel()) + (category ? ' · ' + category : '');
+      updateCityBadge(data.city_name);
       document.getElementById('wtgTimeSub').textContent = [data.time_label, data.weather_label].filter(Boolean).join(' · ');
 
       const content = document.getElementById('wtg-content');
@@ -17428,60 +17624,176 @@ def unified_app_html():
   // только в чате - те же самые причины/защита, что и раньше, здесь не
   // трогались.
   async function loadReferralDetail(box) {
+    box.innerHTML = '<div class="svc-h">🤝 Реферальная программа</div><div class="svc-note">Загружаю…</div>';
+    let data;
     try {
       const resp = await fetch('""" + REFERRAL_DATA_API_PATH + """', { headers: { 'X-Telegram-Init-Data': (tg && tg.initData) || '' } });
       if (!resp.ok) throw new Error('http_' + resp.status);
-      const data = await resp.json();
-      if (!data.live) {
-        box.innerHTML = '<div class="svc-h">🤝 Реферальная программа</div><div class="svc-card">Скоро здесь можно будет приглашать друзей по своей ссылке и получать процент с их подписки. Раздел в разработке 🚀</div>';
-        return;
-      }
-      const rates = data.rates_percent || [];
-      const ratesNote = rates.length === 3
-        ? ('<div class="svc-card">Как это работает: ' + rates[0] + '% с каждого ежемесячного платежа приглашённого тобой напрямую (1 уровень), ' +
-           rates[1] + '% с платежей его рефералов (2 уровень) и ' + rates[2] + '% с платежей рефералов 2 уровня (3 уровень) - прямой процент от ' +
-           'суммы платежа на каждом уровне. Начисляется каждый месяц, пока реферал платит подписку. Дальше 3 уровня деньги не идут, но всю ветку ' +
-           'целиком видно в «Мои рефералы» ниже.</div>')
-        : '';
-      const presentationUrl = PRESENTATION_PDF_WEBAPP_PATH;
-      box.innerHTML =
-        '<div class="svc-h">🤝 Реферальная программа</div>' +
-        '<div class="svc-link-text" id="refLink">' + data.link + '</div>' +
-        '<button type="button" class="svc-btn ghost" id="refCopyBtn">📋 Скопировать ссылку</button>' +
-        '<div class="svc-row"><span>Уровень 1</span><span class="v">' + data.level1_count + '</span></div>' +
-        '<div class="svc-row"><span>Уровень 2</span><span class="v">' + data.level2_count + '</span></div>' +
-        '<div class="svc-row"><span>Уровень 3</span><span class="v">' + data.level3_count + '</span></div>' +
-        '<div class="svc-row"><span>Всего приглашено</span><span class="v">' + data.downline_total + '</span></div>' +
-        '<div class="svc-row"><span>Баланс</span><span class="v">' + data.balance_rub + ' ₽</span></div>' +
-        '<div class="svc-row"><span>Заработано всего</span><span class="v">' + data.total_earned_rub + ' ₽</span></div>' +
-        '<div class="svc-row"><span>Выведено всего</span><span class="v">' + data.total_withdrawn_rub + ' ₽</span></div>' +
-        ratesNote +
-        '<button type="button" class="svc-btn ghost" id="refListBtn">📋 Мои рефералы</button>' +
-        '<div id="refListBox"></div>' +
-        '<button type="button" class="svc-btn ghost" id="refQrBtn">📱 QR-код ссылки</button>' +
-        '<div id="refQrBox"></div>' +
-        '<a class="svc-btn ghost" href="' + presentationUrl + '" target="_blank" rel="noopener">📥 Скачать презентацию</a>' +
-        '<div class="svc-note">Комиссия за вывод: ' + data.withdrawal_fee_percent + '%. Минимальная сумма вывода: ' + data.min_withdrawal_rub + ' ₽. Вывод средств - как и раньше, через бота в чате.</div>';
-      const copyBtn = document.getElementById('refCopyBtn');
-      if (copyBtn) {
-        copyBtn.addEventListener('click', function () {
-          try {
-            navigator.clipboard.writeText(data.link);
-            copyBtn.textContent = '✅ Скопировано';
-          } catch (e) { /* буфер обмена недоступен - ссылка всё равно видна текстом выше */ }
-        });
-      }
-      const listBtn = document.getElementById('refListBtn');
-      if (listBtn) {
-        listBtn.addEventListener('click', function () { loadReferralList(listBtn, document.getElementById('refListBox')); });
-      }
-      const qrBtn = document.getElementById('refQrBtn');
-      if (qrBtn) {
-        qrBtn.addEventListener('click', function () { loadReferralQr(qrBtn, document.getElementById('refQrBox')); });
-      }
+      data = await resp.json();
     } catch (e) {
       box.innerHTML = '<div class="svc-h">🤝 Реферальная программа</div><div class="svc-card">Не удалось загрузить данные. Попробуй ещё раз.</div>';
+      return;
     }
+    if (!data.live) {
+      box.innerHTML = '<div class="svc-h">🤝 Реферальная программа</div><div class="svc-card">Скоро здесь можно будет приглашать друзей по своей ссылке и получать процент с их подписки. Раздел в разработке 🚀</div>';
+      return;
+    }
+    renderReferralMenu(box, data);
+  }
+
+  function botUsernameFromLink(link) {
+    const m = /t\.me\/([^/?]+)/.exec(link || '');
+    return m ? m[1] : '';
+  }
+  function openBotDeepLink(botUsername, startParam) {
+    const url = 'https://t.me/' + botUsername + '?start=' + startParam;
+    if (tg && typeof tg.openTelegramLink === 'function') { tg.openTelegramLink(url); } else { window.open(url, '_blank'); }
+  }
+  function refBackButton() {
+    return '<button type="button" class="ref-back" id="refBackBtn">← Назад</button>';
+  }
+  function wireRefBack(box, data) {
+    const back = document.getElementById('refBackBtn');
+    if (back) back.addEventListener('click', function () { renderReferralMenu(box, data); });
+  }
+
+  // ДОБАВЛЕНО 26.09.2026 (прямая просьба пользователя - "четыре больших
+  // квадратных кнопки... как бы Аля личного кабинета реферального со
+  // статистикой") - вход в раздел теперь сетка 2x2: Водитель/Курьер (та же
+  // карточка ссылка+статистика+рефералы+QR+презентация, что раньше была тут
+  // единственным содержимым), Юридическое лицо, Материалы, Фантом. По
+  // кнопкам/паролям всё, что уже работало в чате, перенесено как есть - см.
+  // renderReferralLegalDetail/renderReferralPhantomDetail ниже.
+  function renderReferralMenu(box, data) {
+    box.innerHTML =
+      '<div class="svc-h">🤝 Реферальная программа</div>' +
+      '<div class="ref-grid">' +
+        '<button type="button" class="ref-tile" id="refTileDriver"><span class="ref-ic">' + TILE_ICONS.referral + '</span>Водитель / Курьер</button>' +
+        '<button type="button" class="ref-tile" id="refTileLegal"><span class="ref-ic">' + TILE_ICONS.car + '</span>Юридическое лицо</button>' +
+        '<button type="button" class="ref-tile" id="refTileMaterials"><span class="ref-ic">' + TILE_ICONS.subscription + '</span>Материалы</button>' +
+        '<button type="button" class="ref-tile" id="refTilePhantom"><span class="ref-ic">👻</span>Фантом</button>' +
+      '</div>';
+    document.getElementById('refTileDriver').addEventListener('click', function () { renderReferralDriverDetail(box, data); });
+    document.getElementById('refTileLegal').addEventListener('click', function () { renderReferralLegalDetail(box, data); });
+    document.getElementById('refTileMaterials').addEventListener('click', function () { renderReferralMaterialsDetail(box, data); });
+    document.getElementById('refTilePhantom').addEventListener('click', function () { renderReferralPhantomDetail(box, data); });
+  }
+
+  // "Водитель/Курьер" - та же карточка (ссылка/статистика/мои рефералы/QR/
+  // презентация), что раньше была единственным содержимым этого раздела -
+  // теперь спрятана за первой из 4 плиток, данные те же (data уже загружены
+  // один раз в loadReferralDetail, повторный запрос не нужен).
+  function renderReferralDriverDetail(box, data) {
+    const rates = data.rates_percent || [];
+    const ratesNote = rates.length === 3
+      ? ('<div class="svc-card">Как это работает: ' + rates[0] + '% с каждого ежемесячного платежа приглашённого тобой напрямую (1 уровень), ' +
+         rates[1] + '% с платежей его рефералов (2 уровень) и ' + rates[2] + '% с платежей рефералов 2 уровня (3 уровень) - прямой процент от ' +
+         'суммы платежа на каждом уровне. Начисляется каждый месяц, пока реферал платит подписку. Дальше 3 уровня деньги не идут, но всю ветку ' +
+         'целиком видно в «Мои рефералы» ниже.</div>')
+      : '';
+    box.innerHTML =
+      refBackButton() +
+      '<div class="svc-h">🚕 Водитель / Курьер</div>' +
+      '<div class="svc-link-text" id="refLink">' + data.link + '</div>' +
+      '<button type="button" class="svc-btn ghost" id="refCopyBtn">📋 Скопировать ссылку</button>' +
+      '<div class="svc-row"><span>Уровень 1</span><span class="v">' + data.level1_count + '</span></div>' +
+      '<div class="svc-row"><span>Уровень 2</span><span class="v">' + data.level2_count + '</span></div>' +
+      '<div class="svc-row"><span>Уровень 3</span><span class="v">' + data.level3_count + '</span></div>' +
+      '<div class="svc-row"><span>Всего приглашено</span><span class="v">' + data.downline_total + '</span></div>' +
+      '<div class="svc-row"><span>Баланс</span><span class="v">' + data.balance_rub + ' ₽</span></div>' +
+      '<div class="svc-row"><span>Заработано всего</span><span class="v">' + data.total_earned_rub + ' ₽</span></div>' +
+      '<div class="svc-row"><span>Выведено всего</span><span class="v">' + data.total_withdrawn_rub + ' ₽</span></div>' +
+      ratesNote +
+      '<button type="button" class="svc-btn ghost" id="refListBtn">📋 Мои рефералы</button>' +
+      '<div id="refListBox"></div>' +
+      '<button type="button" class="svc-btn ghost" id="refQrBtn">📱 QR-код ссылки</button>' +
+      '<div id="refQrBox"></div>' +
+      '<div class="svc-note">Комиссия за вывод: ' + data.withdrawal_fee_percent + '%. Минимальная сумма вывода: ' + data.min_withdrawal_rub + ' ₽. Вывод средств - как и раньше, через бота в чате.</div>';
+    wireRefBack(box, data);
+    const copyBtn = document.getElementById('refCopyBtn');
+    if (copyBtn) {
+      copyBtn.addEventListener('click', function () {
+        try {
+          navigator.clipboard.writeText(data.link);
+          copyBtn.textContent = '✅ Скопировано';
+        } catch (e) { /* буфер обмена недоступен - ссылка всё равно видна текстом выше */ }
+      });
+    }
+    const listBtn = document.getElementById('refListBtn');
+    if (listBtn) {
+      listBtn.addEventListener('click', function () { loadReferralList(listBtn, document.getElementById('refListBox')); });
+    }
+    const qrBtn = document.getElementById('refQrBtn');
+    if (qrBtn) {
+      qrBtn.addEventListener('click', function () { loadReferralQr(qrBtn, document.getElementById('refQrBox')); });
+    }
+  }
+
+  // "Юридическое лицо" - вход в схему начислений юр.лица/кабинет автопарка.
+  // Пароль компании (как и раньше) вводится ТОЛЬКО текстом в чате - логика
+  // пароля/оплаты не переписана (см. referral_category_legal_start/
+  // referral_legal_password_flow в main.py) - плитка лишь открывает диалог
+  // с ботом со start-параметром "reflegal", который запускает тот же самый
+  // первый шаг (см. /start в main.py). Тем, у кого уже есть купленный/
+  // админский кабинет, вместо этого сразу показываем прямую ссылку в
+  // "Кабинет автопарка" - та же проверка, что и у плитки в "Сервисах" (см.
+  // maybeAddLegalCabinetTile/LEGAL_CABINET_ACCESS_API_PATH).
+  async function renderReferralLegalDetail(box, data) {
+    box.innerHTML = refBackButton() + '<div class="svc-h">🏢 Юридическое лицо</div><div class="svc-note">Загружаю…</div>';
+    wireRefBack(box, data);
+    let hasAccess = false;
+    try {
+      const resp = await fetch(LEGAL_CABINET_ACCESS_API_PATH, { headers: { 'X-Telegram-Init-Data': (tg && tg.initData) || '' } });
+      if (resp.ok) { const d = await resp.json(); hasAccess = !!d.has_access; }
+    } catch (e) { /* тихо считаем, что доступа нет - ниже покажем обычный вход по паролю */ }
+    const botUsername = botUsernameFromLink(data.link);
+    let html = refBackButton() + '<div class="svc-h">🏢 Юридическое лицо</div>';
+    if (hasAccess) {
+      html += '<div class="svc-card">У тебя уже есть доступ к кабинету автопарка.</div>' +
+        '<a class="svc-btn" href="' + LEGAL_CABINET_WEBAPP_PATH + '?tgInitData=' + encodeURIComponent((tg && tg.initData) || '') + '">🏛 Открыть кабинет автопарка</a>';
+    } else {
+      html += '<div class="svc-card">Доступ к схеме начислений юр.лица и кабинету автопарка - по паролю компании (платная подписка). Пароль вводится в чате с ботом.</div>' +
+        '<button type="button" class="svc-btn" id="refLegalOpenChat">🔒 Ввести пароль в чате</button>';
+    }
+    box.innerHTML = html;
+    wireRefBack(box, data);
+    const openChatBtn = document.getElementById('refLegalOpenChat');
+    if (openChatBtn) {
+      openChatBtn.addEventListener('click', function () { openBotDeepLink(botUsername, 'reflegal'); });
+    }
+  }
+
+  // "Материалы реферальной системы" - презентация + объяснение процентов,
+  // те же данные/файл, что уже были частью карточки "Водитель/Курьер" выше,
+  // просто вынесены в отдельную плитку.
+  function renderReferralMaterialsDetail(box, data) {
+    const rates = data.rates_percent || [];
+    const ratesNote = rates.length === 3
+      ? ('<div class="svc-card">Как это работает: ' + rates[0] + '% с каждого ежемесячного платежа приглашённого тобой напрямую (1 уровень), ' +
+         rates[1] + '% с платежей его рефералов (2 уровень) и ' + rates[2] + '% с платежей рефералов 2 уровня (3 уровень) - прямой процент от суммы ' +
+         'платежа на каждом уровне, каждый месяц, пока реферал платит подписку.</div>')
+      : '';
+    box.innerHTML =
+      refBackButton() +
+      '<div class="svc-h">📚 Материалы реферальной системы</div>' +
+      ratesNote +
+      '<a class="svc-btn ghost" href="' + PRESENTATION_PDF_WEBAPP_PATH + '" target="_blank" rel="noopener">📥 Скачать презентацию</a>';
+    wireRefBack(box, data);
+  }
+
+  // "Фантом" - скрытый вход, работает ТОЧНО так же, как раньше в чате (тот
+  // же пароль, та же логика гранта - см. phantom_start/phantom_password_flow
+  // в main.py), плитка лишь открывает диалог с ботом со start-параметром
+  // "refphantom" (см. /start в main.py).
+  function renderReferralPhantomDetail(box, data) {
+    const botUsername = botUsernameFromLink(data.link);
+    box.innerHTML =
+      refBackButton() +
+      '<div class="svc-h">👻 Фантом</div>' +
+      '<div class="svc-card">Пароль вводится в чате с ботом.</div>' +
+      '<button type="button" class="svc-btn" id="refPhantomOpenChat">👻 Ввести пароль в чате</button>';
+    wireRefBack(box, data);
+    document.getElementById('refPhantomOpenChat').addEventListener('click', function () { openBotDeepLink(botUsername, 'refphantom'); });
   }
 
   // "Мои рефералы" - ТЕ ЖЕ данные, что и у кнопки "📋 МОИ РЕФЕРАЛЫ" в чате
