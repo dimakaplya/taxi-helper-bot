@@ -16784,7 +16784,8 @@ def unified_app_html():
   header .logo { font-size: 14.5px; font-weight: 700; letter-spacing: .04em; }
   header .logo b { color: #FFC400; }
   header .badge {
-    font-size: 12px; color: #FFC400; border: 1px solid rgba(255,196,0,.4); border-radius: 999px;
+    font-family: 'Golos Text', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-weight: 600; font-size: 12px; color: #FFC400; border: 1px solid rgba(255,196,0,.4); border-radius: 999px;
     padding: 5px 11px; white-space: nowrap; max-width: 55%; overflow: hidden; text-overflow: ellipsis;
   }
   main { flex: 1 1 auto; min-height: 0; position: relative; }
@@ -16932,7 +16933,17 @@ def unified_app_html():
   const category = params.get('category') || '';
   let driverPos = null;
 
-  document.getElementById('cityBadge').textContent = city ? city : '—';
+  // ДОБАВЛЕНО 26.09.2026 (прямая просьба пользователя - "где ты Moscow
+  // написал там убери там сделай Москва") - в URL город передаётся тем же
+  // английским служебным ключом, что и везде в боте (city_map/user_state,
+  // например "moscow"), поэтому раньше плашка в шапке до первой загрузки
+  // "Куда ехать" показывала этот ключ как есть. CITY_DISPLAY_NAMES - тот же
+  // словарь человекочитаемых русских названий, что уже используется в
+  // Python для текстов рассылки заказов (см. CITY_DISPLAY_NAMES в main.py).
+  const CITY_DISPLAY_NAMES = """ + json.dumps(CITY_DISPLAY_NAMES, ensure_ascii=False) + """;
+  function cityLabel() { return CITY_DISPLAY_NAMES[city] || city || '—'; }
+
+  document.getElementById('cityBadge').textContent = cityLabel();
 
   function requestGeo() {
     document.getElementById('gateSpin').hidden = false;
@@ -17049,7 +17060,7 @@ def unified_app_html():
       if (!resp.ok) throw new Error('http_' + resp.status);
       const data = await resp.json();
 
-      document.getElementById('cityBadge').textContent = (data.city_name || city) + (category ? ' · ' + category : '');
+      document.getElementById('cityBadge').textContent = (data.city_name || cityLabel()) + (category ? ' · ' + category : '');
       document.getElementById('wtgTimeSub').textContent = [data.time_label, data.weather_label].filter(Boolean).join(' · ');
 
       const content = document.getElementById('wtg-content');
