@@ -830,7 +830,182 @@ HOLIDAYS = [
 # is_city_holiday_today даёт простой True/False, который score_district_
 # candidates (см. ниже) использует как множитель ко ВСЕМ кандидатам города
 # сразу (праздник поднимает спрос по всему городу, а не в одном районе).
-HOLIDAY_DEMAND_BOOST = 1.15
+# ИЗМЕНЕНО 26.09.2026 (прямая просьба пользователя - "в праздники
+# календарные... накидывай 25% спроса") - было 1.15 (+15%), теперь +25%.
+# ЕЩЁ РАЗ ИЗМЕНЕНО 26.09.2026 (прямая просьба пользователя - "все
+# остальные данные спустим на 2.5% все без исключения кроме уже дождя") -
+# итоговый буст (+25%) смягчён на 2.5% от самого буста: 0.25 * 0.975 =
+# 0.24375 -> 1.244 (было бы 1.25 без смягчения). См. calibration_reference.md
+# для полной сводки всех коэффициентов после этой правки.
+HOLIDAY_DEMAND_BOOST = 1.244
+
+# ДОБАВЛЕНО 26.09.2026 (прямая просьба пользователя - "осадки тоже 25%") -
+# дождь/осадки теперь дают ТОТ ЖЕ множитель к спросу, что праздник, а не
+# "пол" (спрос не ниже фиксированного %, см. MAP_DEMAND_RAIN_FLOOR_PERCENT
+# выше/ниже) - единообразнее и для карты, и для "Куда ехать" (см.
+# adjusted_district_demand ниже). Условие применения не изменилось - см.
+# adjusted_district_demand: такси/Ultima только, за городом - исключительно
+# Эконом/Комфорт. ИЗМЕНЕНО 26.09.2026 (прямая просьба пользователя -
+# "осадки спустим на 15%") - буст смягчён СИЛЬНЕЕ, чем остальные (15%, не
+# 2.5%): 0.25 * 0.85 = 0.2125 -> 1.213.
+RAIN_DEMAND_BOOST = 1.213
+
+# ДОБАВЛЕНО 26.09.2026 (прямая просьба пользователя - подробная калибровка
+# по дням недели и времени суток, единая для карты и "Куда ехать" - см.
+# adjusted_district_demand/weekday_time_demand_multiplier ниже). Числа ниже
+# уже смягчены на 2.5% от буста/штрафа (см. HOLIDAY_DEMAND_BOOST выше,
+# "все остальные данные спустим на 2.5%") - до смягчения было бы: Пт/Сб
+# ×1.25, Вс ×1.10, будни 10-17 ×0.90, час пик ×1.10.
+# - Пт/Сб весь день ×1.244, Вс весь день ×1.098
+# - Пн-Чт 10:00-17:00 (дневное затишье) ×0.902
+# - Пн-Пт 06:30-09:30 и 17:30-19:30 (утренний/вечерний час пик) - доп. ×1.098
+# - ночь с пятницы на субботу (Пт 21:00-24:00 и Сб 00:00-06:00) - доп. ×1.098
+def weekday_time_demand_multiplier(weekday, hour, minute=0):
+    t = hour * 60 + minute
+    day_mult = {4: 1.244, 5: 1.244, 6: 1.098}.get(weekday, 1.0)
+    time_mult = 1.0
+    if weekday in (0, 1, 2, 3, 4) and 6 * 60 + 30 <= t < 9 * 60 + 30:
+        time_mult = 1.098
+    elif weekday in (0, 1, 2, 3, 4) and 17 * 60 + 30 <= t < 19 * 60 + 30:
+        time_mult = 1.098
+    elif weekday in (0, 1, 2, 3) and 10 * 60 <= t < 17 * 60:
+        time_mult = 0.902
+    elif (weekday == 4 and t >= 21 * 60) or (weekday == 5 and t < 6 * 60):
+        time_mult = 1.098
+    return day_mult * time_mult
+
+# ДОБАВЛЕНО 26.09.2026 (прямая просьба пользователя - "за городом кроме
+# города москвы и направлений новорижское шоссе и рублевское шоссе везде
+# минус 20%... новая рига и рублевка плюс 15%") - за пределами черты
+# города (см. _district_in_city_limits ниже) для Москвы спрос по умолчанию
+# снижен на 20%, а по направлениям Рублёвского/Новорижского шоссе -
+# наоборот повышен на 15%. Список зон - по названиям из загруженной
+# районной матрицы Москвы (moscow_district_demand.json/
+# moscow_delivery_demand.json), где точных отдельных точек Жуковка/Раздоры/
+# Николина Гора/Знаменское нет - только перечисленные ниже. ИЗМЕНЕНО
+# 26.09.2026 (см. "спустим на 2.5%" выше) - было бы 0.8/1.15 без смягчения.
+MOSCOW_OUTER_REGION_PENALTY_MULTIPLIER = 0.805
+MOSCOW_RUBLEVKA_NOVORIGA_MULTIPLIER = 1.146
+MOSCOW_RUBLEVKA_NOVORIGA_ZONES = {
+    # Рублёвское шоссе
+    'Барвиха', 'Усово', 'Немчиновка', 'Архангельское', 'Ильинское', 'Супонево (Одинцовский)',
+    # Новорижское шоссе
+    'Красногорск-Центр', 'Красногорск-Южный', 'Отрадное (Красногорск)', 'Нахабино',
+    'Нахабино-смежная зона', 'Дедовск', 'Павловская Слобода', 'Опалиха',
+}
+
+# ДОБАВЛЕНО 26.09.2026 (прямая просьба пользователя - "декабарь январь
+# красная поляна роза хутор эстосадок +25% только в дневные часы и ночные
+# плюс 5%") - горный кластер Сочи (в отличие от прибрежной зоны) имеет
+# ПРОТИВОФАЗНЫЙ сезонный пик - горнолыжный сезон в декабре-январе, а не
+# летом. Действует ДОПОЛНИТЕЛЬНО к общей курортной сезонности порога
+# (RESORT_SEASON_THRESHOLD_MULTIPLIERS ниже), которая считается по городу
+# целиком. День - 06:00-22:00 (×1.25), ночь - 22:00-06:00 (×1.05).
+# ИЗМЕНЕНО 26.09.2026 (см. "спустим на 2.5%" выше) - было бы 1.25/1.05.
+SOCHI_MOUNTAIN_ZONE_KEYWORDS = ('Красная Поляна', 'Роза Хутор', 'Эсто-Садок', 'Эстосадок')
+SOCHI_MOUNTAIN_WINTER_DAY_MULTIPLIER = 1.244
+SOCHI_MOUNTAIN_WINTER_NIGHT_MULTIPLIER = 1.049
+
+def _is_sochi_mountain_zone(name):
+    return any(k in name for k in SOCHI_MOUNTAIN_ZONE_KEYWORDS)
+
+# ДОБАВЛЕНО 26.09.2026 (прямая просьба пользователя - "во первых ключевое
+# запомни что отображаем на карте то и в куда поехать это должна быть одна
+# привязка") - ЕДИНАЯ функция корректировки сырого % спроса района из
+# матрицы, используется И для облака на карте (handle_map_district_demand_api,
+# сравнение со порогом), И для ранжирования "Куда ехать"
+# (score_district_candidates) - чтобы одна и та же цифра лежала в основе
+# обеих фич. Порядок корректировок:
+# 1) день недели + время суток (weekday_time_demand_multiplier)
+# 2) праздник (HOLIDAY_DEMAND_BOOST)
+# 3) осадки (RAIN_DEMAND_BOOST) - только такси/Ultima, за городом только
+#    Эконом/Комфорт (indices ⊆ {0,1})
+# 4) Москва за городом - направление Рублёвка/Новая Рига (+15%) либо
+#    прочая область (-20%); в черте города не трогаем
+# 5) Сочи горный кластер в декабре-январе - день/ночь (см. выше)
+# Штраф за расстояние (district_distance_penalty) СЮДА НЕ входит - он
+# зависит от позиции ВОДИТЕЛЯ, актуален только для "Куда ехать"; у карты
+# нет понятия "точка водителя", поэтому этот множитель остаётся отдельным
+# шагом только в score_district_candidates.
+def adjusted_district_demand(city, name, lat, lon, raw_demand, dt, is_delivery, indices, is_raining):
+    if raw_demand is None:
+        return None
+    demand = raw_demand * weekday_time_demand_multiplier(dt.weekday(), dt.hour, dt.minute)
+    if is_city_holiday_today(city):
+        demand *= HOLIDAY_DEMAND_BOOST
+    in_city = _district_in_city_limits(city, lat, lon)
+    if is_raining and not is_delivery:
+        if in_city or set(indices).issubset({0, 1}):
+            demand *= RAIN_DEMAND_BOOST
+    if city == 'moscow' and not in_city:
+        demand *= (MOSCOW_RUBLEVKA_NOVORIGA_MULTIPLIER if name in MOSCOW_RUBLEVKA_NOVORIGA_ZONES
+                   else MOSCOW_OUTER_REGION_PENALTY_MULTIPLIER)
+    if city == 'sochi' and dt.month in (12, 1) and _is_sochi_mountain_zone(name):
+        demand *= (SOCHI_MOUNTAIN_WINTER_DAY_MULTIPLIER if 6 <= dt.hour < 22
+                   else SOCHI_MOUNTAIN_WINTER_NIGHT_MULTIPLIER)
+    return demand
+
+# ДОБАВЛЕНО 26.09.2026 (прямая просьба пользователя - "давай сделаем учет
+# пробок в расчет куда ехать и обязательным информированием водителя") -
+# уровень пробок Яндекса (0-10, шкала как в приложении Яндекс/Навигатор) -
+# ОДНА цифра на весь город, известная только в браузере водителя (карта,
+# ymaps.traffic.provider.Actual - см. JS в map_webapp_html). Карта шлёт
+# последний известный уровень на /map/traffic_level (см.
+# handle_map_traffic_level_api ниже), сохраняем в простой city->level кэш
+# в памяти (не персональные данные, общий уровень по городу) - "Куда
+# ехать" (handle_where_to_go_data_api) читает оттуда, если свежее
+# TRAFFIC_LEVEL_MAX_AGE_SEC, иначе считаем, что данных о пробках нет
+# (штраф не применяется, уведомление не показываем).
+TRAFFIC_LEVEL_LABELS = {
+    1: "Дороги свободны", 2: "Дороги почти свободны",
+    3: "Местами затруднения", 4: "Местами затруднения",
+    5: "Движение плотное", 6: "Движение затруднено",
+    7: "Серьёзные пробки", 8: "Многокилометровые пробки",
+    9: "Город стоит", 10: "Пешком быстрее",
+}
+# ИЗМЕНЕНО 26.09.2026 (прямая просьба пользователя - "штраф есть только за
+# что пробки есть а что пробок нет ничего не добавляем") - 1-2 без штрафа
+# (без буста тоже), дальше штраф нарастает; применяется ТОЛЬКО к уже
+# отдалённым районам (см. district_distance_penalty ниже) - на "бесплатный"
+# радиус до 5км штраф пробок не действует.
+TRAFFIC_LEVEL_DISTANCE_PENALTY_MULT = {
+    1: 1.0, 2: 1.0, 3: 0.95, 4: 0.95, 5: 0.90,
+    6: 0.85, 7: 0.75, 8: 0.65, 9: 0.55, 10: 0.45,
+}
+TRAFFIC_LEVEL_MAX_AGE_SEC = 30 * 60
+_city_traffic_level_cache = {}  # city -> {'level': int, 'ts': float}
+
+def traffic_distance_penalty_multiplier(traffic_level):
+    if traffic_level is None:
+        return 1.0
+    try:
+        lvl = max(1, min(10, int(traffic_level)))
+    except (TypeError, ValueError):
+        return 1.0
+    return TRAFFIC_LEVEL_DISTANCE_PENALTY_MULT.get(lvl, 1.0)
+
+def set_city_traffic_level(city, level):
+    try:
+        lvl = max(1, min(10, int(level)))
+    except (TypeError, ValueError):
+        return
+    _city_traffic_level_cache[city] = {'level': lvl, 'ts': time.time()}
+
+def get_city_traffic_level(city):
+    entry = _city_traffic_level_cache.get(city)
+    if not entry:
+        return None
+    if time.time() - entry['ts'] > TRAFFIC_LEVEL_MAX_AGE_SEC:
+        return None
+    return entry['level']
+
+def traffic_level_notice(traffic_level):
+    if traffic_level is None:
+        return None
+    label = TRAFFIC_LEVEL_LABELS.get(traffic_level)
+    if not label:
+        return None
+    return f"🚦 Пробки сейчас: {label} ({traffic_level}/10)"
 
 def is_city_holiday_today(city):
     """True, если СЕГОДНЯ (по местному времени города) идёт праздник -
@@ -7801,14 +7976,20 @@ def get_nearby_road_closures(city, lat, lon, radius_km=CANDIDATE_CLOSURE_RADIUS_
 # заказов, но Шереметьево всё равно приоритетнее"; для обычного такси
 # (эконом/комфорт/комфорт+ и прочие пассажирские тарифы, категория 'taxi')
 # аэропорты примерно равны, но Шереметьево всё равно немного впереди.
+# ИЗМЕНЕНО 26.09.2026 (прямая просьба пользователя - "штраф за домодедово
+# 15% внуково 10% шереметьево без штрафа") - плоский штраф по аэропорту,
+# ОДИНАКОВЫЙ для всех категорий (было раздельно по такси/Ultima с разными
+# цифрами приоритета) - Шереметьево без штрафа, Внуково -10%, Домодедово
+# -15%.
+# ИЗМЕНЕНО 26.09.2026 (см. "спустим на 2.5%" выше) - было бы 0.9/0.85
+# (Шереметьево без штрафа - деviации нет, смягчать нечего).
 AIRPORT_PRIORITY_MULTIPLIERS = {
-    'ultima': {'UUEE': 1.35, 'UUWW': 1.15, 'UUDD': 1.0},
-    'taxi': {'UUEE': 1.1},
+    'UUEE': 1.0, 'UUWW': 0.902, 'UUDD': 0.854,
 }
 AIRPORT_PRIORITY_MULTIPLIER_DEFAULT = 1.0
 
 def airport_priority_multiplier(icao, category):
-    return AIRPORT_PRIORITY_MULTIPLIERS.get(category, {}).get(icao, AIRPORT_PRIORITY_MULTIPLIER_DEFAULT)
+    return AIRPORT_PRIORITY_MULTIPLIERS.get(icao, AIRPORT_PRIORITY_MULTIPLIER_DEFAULT)
 
 async def score_airport_candidate(city, airport, category, user_lat=None, user_lon=None):
     """Считает балл и обоснование для одного аэропорта города. Возвращает
@@ -7897,15 +8078,14 @@ async def score_airport_candidate(city, airport, category, user_lat=None, user_l
     if penalty < 1.0:
         score *= penalty
 
-    # ИЗМЕНЕНО 22.09.2026 (см. AIRPORT_PRIORITY_MULTIPLIERS выше) - фиксированный
-    # приоритет аэропортов Москвы по icao+категории (Ultima: SVO>VKO>DME;
-    # такси: примерно равны, SVO чуть впереди), не привязанный к голой
-    # загрузке прилётов текущего часа.
+    # ИЗМЕНЕНО 26.09.2026 (прямая просьба пользователя - "штраф за
+    # домодедово 15% внуково 10% шереметьево без штрафа") - плоский штраф
+    # по аэропорту, одинаковый для всех категорий (см.
+    # AIRPORT_PRIORITY_MULTIPLIERS выше).
     priority_mult = airport_priority_multiplier(icao, category)
     if priority_mult != 1.0:
         score *= priority_mult
-        if icao == 'UUEE':
-            reasons.append("⭐ обычно больше заказов")
+        reasons.append("⭐ обычно больше заказов" if priority_mult > 1.0 else "⚠️ обычно меньше заказов, чем у других аэропортов города")
 
     # ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "будни день -
     # аэропорты, воскресенье днём - аэропорты/районы") - дневная/ночная
@@ -8165,21 +8345,28 @@ def where_to_go_banner(city, category):
     level = get_current_peak_level(city, category=category)
     return f"🧭 {PEAK_LEVEL_LABEL.get(level, 'Сейчас обычный спрос')} - вот что выгоднее всего прямо сейчас."
 
-# Радиус "бесплатной" близости для районного кандидата "Куда ехать" -
-# заметно меньше, чем у аэропортов (AIRPORT_DISTANCE_PENALTY_FREE_KM=30),
-# т.к. районы внутри одного города и разница даже в 10-15 км уже заметно
-# сказывается на времени подачи. За пределами этого радиуса штраф линейно
-# режет скорректированный балл района - см. score_district_candidates.
-DISTRICT_DEMAND_PENALTY_FREE_KM = 8
-
-def district_distance_penalty(dist_km):
+# ИЗМЕНЕНО 26.09.2026 (прямая просьба пользователя - "штрафы за расстояние
+# учитывать обязательно тоесть 5км 10км более 15") - раньше был плавный
+# штраф 8/dist_km после 8км без штрафа; теперь порогово по диапазонам:
+# до 5км - без штрафа, 5-10км - ×0.85, 10-15км - ×0.65, дальше - ×0.4.
+def district_distance_penalty(dist_km, traffic_level=None):
+    # ИЗМЕНЕНО 26.09.2026 (см. "спустим на 2.5%" выше) - было бы 0.85/0.65/0.4.
     if dist_km is None:
         return 1.0
-    if dist_km <= DISTRICT_DEMAND_PENALTY_FREE_KM:
+    if dist_km <= 5:
+        # ДОБАВЛЕНО 26.09.2026 (прямая просьба пользователя - "учёт пробок
+        # в куда ехать через штраф на расстояние") - "бесплатный" радиус
+        # (≤5км) пробками не штрафуется вообще - водитель и так уже рядом.
         return 1.0
-    return DISTRICT_DEMAND_PENALTY_FREE_KM / dist_km
+    if dist_km <= 10:
+        base = 0.854
+    elif dist_km <= 15:
+        base = 0.659
+    else:
+        base = 0.415
+    return base * traffic_distance_penalty_multiplier(traffic_level)
 
-async def score_district_candidates(city, category, user_lat=None, user_lon=None, limit=3, selected_tariffs=None):
+async def score_district_candidates(city, category, user_lat=None, user_lon=None, limit=3, selected_tariffs=None, traffic_level=None):
     """Кандидаты "Город/центр" для Москвы такси/Ultima - ДОБАВЛЕНО
     22.09.2026, прямая просьба пользователя: вместо общей эвристики по часу
     пика (score_city_candidate) и вместо ОДНОГО лучшего района (первая
@@ -8255,7 +8442,12 @@ async def score_district_candidates(city, category, user_lat=None, user_lon=None
     # (nearby_event_demand_multiplier) - за пределами цикла её посчитать
     # нельзя, она зависит от координат каждого конкретного района, поэтому
     # вызывается внутри цикла ниже.
-    holiday_mult = HOLIDAY_DEMAND_BOOST if is_city_holiday_today(city) else 1.0
+    # ИЗМЕНЕНО 26.09.2026 (см. adjusted_district_demand выше, "одна
+    # привязка" для карты и "Куда ехать") - holiday_today считается один
+    # раз здесь только для флага reasons ('holiday'), сам множитель теперь
+    # применяется ВНУТРИ adjusted_district_demand (вместе с днём недели/
+    # временем суток/дождём/областными корректировками), не отдельно.
+    holiday_today = is_city_holiday_today(city)
     temp_mult = temperature_demand_multiplier(city)
 
     if user_lat is not None and user_lon is not None:
@@ -8290,28 +8482,21 @@ async def score_district_candidates(city, category, user_lat=None, user_lon=None
         # городами больше не проблема - работает для любого города из
         # DISTRICT_DEMAND_FILES, не только Москвы.
         district_raining = district_rain_now(city, name, fallback_rain_now=rain_now)
-        # ИСПРАВЛЕНО 26.09.2026 (прямая просьба пользователя, см. is_delivery
-        # выше) - этот дождевой "пол" настроен и откалиброван ИСКЛЮЧИТЕЛЬНО
-        # под таксомоторные индексы (0/1 = Эконом/Комфорт у ТАКСИ). У курьера
-        # индексы 0/1 - это "Яндекс Еда — Курьер"/"Курьер — Экспресс" (см.
-        # DELIVERY_TARIFF_INDEX) - совсем другие тарифы, которые случайно
-        # совпадают числом с таксомоторными, поэтому set(indices).issubset(
-        # {0, 1}) для courier был бы ложным срабатыванием. Блок целиком
-        # пропускаем для доставки - своего дождевого порога для доставки нет.
-        if district_raining and not is_delivery:
-            # ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - "спрос
-            # дождя не влияет вообще ни на какие тарифы кроме эконом и
-            # комфорт за пределами городов", уточнение - "речь идёт и кнопка
-            # куда поехать и карта спроса") - за чертой города дождевой пол
-            # в "Куда поехать" поднимает балл района, только если сейчас
-            # считаем ИСКЛЮЧИТЕЛЬНО Эконом и/или Комфорт (indices ⊆ {0, 1},
-            # см. MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_ECONOM/COMFORT выше)
-            # - Ultima (Бизнес/Премьер/Элит) и Комфорт+ за городом от дождя
-            # больше не подсвечиваются. В черте города поведение не меняется
-            # (см. _district_in_city_limits выше).
-            in_city = _district_in_city_limits(city, entry.get('lat'), entry.get('lon'))
-            if in_city or set(indices).issubset({0, 1}):
-                demand = max(demand, MAP_DEMAND_RAIN_FLOOR_PERCENT)
+        # ИЗМЕНЕНО 26.09.2026 (прямая просьба пользователя - "одна
+        # привязка" для карты и "Куда ехать") - вся корректировка сырого %
+        # спроса (день недели/время суток, праздник, дождь, Москва за
+        # городом/Рублёвка-Новая Рига, Сочи горный кластер зимой) теперь в
+        # ОДНОЙ функции adjusted_district_demand (см. выше) - той же самой,
+        # что использует handle_map_district_demand_api для облака на
+        # карте.
+        demand_adjusted = adjusted_district_demand(
+            city, name, entry.get('lat'), entry.get('lon'), demand, now, is_delivery, indices, district_raining
+        )
+        # demand - округлённый и зажатый в 0-100% для текста водителю ("N%
+        # спроса в районе" не должно показывать 187%); demand_adjusted -
+        # полное, НЕ зажатое значение идёт в ранжирование ниже (adjusted),
+        # чтобы бусты по времени/погоде/направлению реально влияли на счёт.
+        demand = min(100, round(demand_adjusted))
         dist_km = None
         if origin_lat is not None and origin_lon is not None:
             dist_km = haversine_km(origin_lat, origin_lon, entry['lat'], entry['lon'])
@@ -8327,13 +8512,13 @@ async def score_district_candidates(city, category, user_lat=None, user_lon=None
         nearby_event = nearest_event_near(city, entry['lat'], entry['lon'])
         event_mult = EVENT_DEMAND_BOOST if nearby_event else 1.0
         adjusted = (
-            demand * district_distance_penalty(dist_km)
-            * holiday_mult * temp_mult * event_mult
+            demand * district_distance_penalty(dist_km, traffic_level=traffic_level)
+            * temp_mult * event_mult
         )
         scored.append({
             'name': name, 'demand': demand, 'lat': entry['lat'], 'lon': entry['lon'],
             'adjusted': adjusted, 'raining': district_raining,
-            'holiday': holiday_mult != 1.0, 'temp_extreme': temp_mult != 1.0, 'event_nearby': event_mult != 1.0,
+            'holiday': holiday_today, 'temp_extreme': temp_mult != 1.0, 'event_nearby': event_mult != 1.0,
             'slot_start_h': slot_start_h, 'slot_end_h': slot_end_h, 'nearby_event': nearby_event,
         })
 
@@ -8608,7 +8793,7 @@ def score_concert_event_candidates(city, category, limit=3):
     candidates.sort(key=lambda c: c['score'], reverse=True)
     return candidates[:limit]
 
-async def compute_where_to_go(city, category, user_lat=None, user_lon=None, selected_tariffs=None):
+async def compute_where_to_go(city, category, user_lat=None, user_lon=None, selected_tariffs=None, traffic_level=None):
     """Считает и сортирует всех кандидатов (аэропорты + вокзалы + актуальные
     события афиши + "Город/центр") по баллу - возвращает список dict от
     score_airport_candidate/score_station_candidate/score_concert_event_candidates/
@@ -8736,7 +8921,7 @@ async def compute_where_to_go(city, category, user_lat=None, user_lon=None, sele
         # уже используется для пушей/карты - сам выбирает нужный файл
         # (таксомоторный или доставочный) по category.
         if _city_has_demand_data(city, category) and category in ('taxi', 'ultima', 'courier', 'cargo'):
-            candidates.extend(await score_district_candidates(city, category, user_lat=user_lat, user_lon=user_lon, limit=3, selected_tariffs=selected_tariffs))
+            candidates.extend(await score_district_candidates(city, category, user_lat=user_lat, user_lon=user_lon, limit=3, selected_tariffs=selected_tariffs, traffic_level=traffic_level))
             candidates.append(await score_city_center_candidate(city, category))
         else:
             candidates.append(await score_city_candidate(city, category=category))
@@ -9039,8 +9224,13 @@ async def send_where_to_go(message: types.Message, user_id, city, category, extr
         # (это обычный хендлер бота, не публичный API) - просто читаем
         # тарифы активной смены из user_state, без всякой initData.
         selected_tariffs = shift.get('tariffs') if shift else None
+        # ДОБАВЛЕНО 26.09.2026 (прямая просьба пользователя - "учёт пробок в
+        # куда ехать") - последний известный городской уровень пробок (см.
+        # get_city_traffic_level/handle_map_traffic_level_api выше) - штрафует
+        # только уже отдалённые районы (district_distance_penalty).
+        traffic_level = get_city_traffic_level(city)
         try:
-            candidates = await compute_where_to_go(city, category, user_lat=user_lat, user_lon=user_lon, selected_tariffs=selected_tariffs)
+            candidates = await compute_where_to_go(city, category, user_lat=user_lat, user_lon=user_lon, selected_tariffs=selected_tariffs, traffic_level=traffic_level)
         except Exception:
             anim_task.cancel()
             # logger.exception (не просто logger.error с str(e)) - пишет
@@ -9060,6 +9250,13 @@ async def send_where_to_go(message: types.Message, user_id, city, category, extr
             return
         anim_task.cancel()
         text = format_where_to_go_text(city, category, candidates, extra_header=extra_header)
+        # ДОБАВЛЕНО 26.09.2026 (прямая просьба пользователя - "обязательным
+        # информированием водителя что сейчас [с пробками]") - показываем
+        # текущий уровень пробок ВСЕГДА, когда он известен (даже без штрафа,
+        # т.е. уровень 1-2) - отдельной строкой в конце сводки.
+        traffic_notice = traffic_level_notice(traffic_level)
+        if traffic_notice:
+            text = f"{text}\n\n{traffic_notice}"
         # ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя) - кнопки "🚗
         # ПОЕХАЛИ" на маршрут в Яндекс Навигаторе/Картах под каждым открытым
         # кандидатом с известными координатами (см. where_to_go_keyboard).
@@ -12413,13 +12610,48 @@ def map_webapp_html():
   // пришлось бы включать видимый слой пробок по умолчанию - а пользователь
   // явно просил "выключено по умолчанию", это уже не трогаем), и прячется
   // обратно, когда кнопку выключают - см. trafficToggleBtn ниже.
+  // ДОБАВЛЕНО 26.09.2026 (прямая просьба пользователя - "учёт пробок в
+  // куда ехать") - шлём последний известный уровень пробок на сервер
+  // (/map/traffic_level), чтобы "Куда ехать" мог штрафовать отдалённые
+  // районы при заторах (см. handle_map_traffic_level_api/
+  // get_city_traffic_level в Python). Троттлинг - не чаще раза в 3 минуты
+  // ИЛИ при заметном изменении уровня (≥1), чтобы не спамить сервер на
+  // каждое мелкое колебание балла Яндекса.
+  let _lastTrafficReportTs = 0;
+  let _lastTrafficReportLevel = null;
+  function reportTrafficLevel(level) {{
+    try {{
+      const now = Date.now();
+      const changed = _lastTrafficReportLevel === null || Math.abs(level - _lastTrafficReportLevel) >= 1;
+      if (!changed && (now - _lastTrafficReportTs) < 180000) return;
+      _lastTrafficReportTs = now;
+      _lastTrafficReportLevel = level;
+      fetch('/map/traffic_level', {{
+        method: 'POST', headers: {{ 'Content-Type': 'application/json' }},
+        body: JSON.stringify({{ city: city, level: Math.round(level) }})
+      }}).catch(() => {{ /* тихо - не критично для карты */ }});
+    }} catch (e) {{ /* тихо */ }}
+  }}
+  // ДОБАВЛЕНО 26.09.2026 (прямая просьба пользователя, скриншот - "снизу в
+  // баре где пробки добавь аббревиатуры пробок с баллами") - короткая
+  // подпись рядом с баллом в нижнем баре, та же шкала, что и
+  // TRAFFIC_LEVEL_LABELS в Python (handle_where_to_go_data_api), но
+  // сокращённая, чтобы уместиться в узкий бар.
+  const TRAFFIC_LEVEL_ABBR = {{
+    1: 'своб.', 2: 'почти своб.', 3: 'местами', 4: 'местами',
+    5: 'плотно', 6: 'затрудн.', 7: 'пробки', 8: 'пробки км',
+    9: 'стоит', 10: 'пешком',
+  }};
   function updateTrafficScoreBadge(level) {{
     if (typeof level !== 'number' || isNaN(level)) return;
     const sepEl = document.getElementById('bibTrafficSep');
     const iconEl = document.getElementById('bibTrafficIcon');
     const scoreEl = document.getElementById('bibTrafficScore');
+    reportTrafficLevel(level);
     if (!scoreEl) return;
-    scoreEl.textContent = Math.round(level) + '/10';
+    const lvl = Math.max(1, Math.min(10, Math.round(level)));
+    const abbr = TRAFFIC_LEVEL_ABBR[lvl] || '';
+    scoreEl.textContent = (abbr ? abbr + ' ' : '') + lvl + '/10';
     scoreEl.className = 'bib-traffic' + (level <= 3 ? ' low' : level >= 7 ? ' high' : '');
     if (sepEl) sepEl.style.display = '';
     if (iconEl) iconEl.style.display = '';
@@ -16235,6 +16467,17 @@ def where_to_go_webapp_html():
         content.appendChild(closuresBox);
       }
 
+      // ДОБАВЛЕНО 26.09.2026 (прямая просьба пользователя - "обязательным
+      // информированием водителя" о пробках) - уровень пробок ВСЕГДА
+      // показываем отдельной строкой, если он известен (data.traffic_notice
+      // из handle_where_to_go_data_api/get_city_traffic_level).
+      if (data.traffic_notice) {
+        const trafficBox = document.createElement('div');
+        trafficBox.className = 'closures-notice';
+        trafficBox.textContent = data.traffic_notice;
+        content.appendChild(trafficBox);
+      }
+
       // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "по другому
       // аэропорту тоже нужна краткая информация") - чипы со статусом/
       // числом прилётов КАЖДОГО аэропорта города (data.airports_summary),
@@ -16469,7 +16712,8 @@ async def handle_where_to_go_data_api(request):
         logger.exception(f"❌ Не удалось определить тарифы активной смены для 'Куда ехать' ({city}/{category}) - откат на подбор по всей категории")
         selected_tariffs = None
     try:
-        candidates = await compute_where_to_go(city, category, user_lat=user_lat, user_lon=user_lon, selected_tariffs=selected_tariffs)
+        traffic_level = get_city_traffic_level(city)
+        candidates = await compute_where_to_go(city, category, user_lat=user_lat, user_lon=user_lon, selected_tariffs=selected_tariffs, traffic_level=traffic_level)
     except Exception:
         logger.exception(f"❌ Не удалось посчитать варианты 'Куда ехать' (WebApp) для {city}/{category}")
         return web.json_response({'error': 'compute_failed'}, status=500)
@@ -16607,6 +16851,7 @@ async def handle_where_to_go_data_api(request):
         'time_label': time_label,
         'weather_label': weather_label,
         'closures_notice': closures_notice,
+        'traffic_notice': traffic_level_notice(traffic_level),
         'airports_summary': airports_summary,
         'banner': banner,
         'podium': [_pack(c) for c in podium],
@@ -17644,9 +17889,16 @@ DISTRICT_CLOUD_THRESHOLDS_BY_CITY = {
 # опускаем планку, чтобы облако вообще появлялось). Москва/СПб сезонность
 # не имеют (коэффициент 1.0, порог как в DISTRICT_CLOUD_THRESHOLDS_BY_CITY
 # без изменений).
-RESORT_SEASON_CITIES = {'krasnodar', 'sochi'}
-RESORT_HIGH_SEASON_THRESHOLD_MULTIPLIER = 1.25
-RESORT_LOW_SEASON_THRESHOLD_MULTIPLIER = 0.75
+# ИЗМЕНЕНО 26.09.2026 (прямая просьба пользователя - "сочи порог сезонный
+# плюс 40% и минус 40%") - раньше Краснодар и Сочи делили один множитель
+# (±25%), теперь у каждого города своя амплитуда: Краснодар остаётся
+# ±25%, Сочи - ±40% (курортный эффект в Сочи выражен сильнее).
+# ИЗМЕНЕНО 26.09.2026 (см. "спустим на 2.5%" выше) - было бы (1.25,0.75)/
+# (1.40,0.60) без смягчения.
+RESORT_SEASON_THRESHOLD_MULTIPLIERS = {
+    'krasnodar': (1.244, 0.756),
+    'sochi': (1.390, 0.610),
+}
 
 def _is_resort_high_season(dt):
     """Курортный высокий сезон - см. RESORT_SEASON_CITIES выше. Правило по
@@ -17662,13 +17914,14 @@ def _is_resort_high_season(dt):
     return False
 
 def _resort_season_threshold_multiplier(city):
-    if city not in RESORT_SEASON_CITIES:
+    pair = RESORT_SEASON_THRESHOLD_MULTIPLIERS.get(city)
+    if not pair:
         return 1.0
     try:
         now = get_city_now(city)
     except Exception:
         return 1.0
-    return RESORT_HIGH_SEASON_THRESHOLD_MULTIPLIER if _is_resort_high_season(now) else RESORT_LOW_SEASON_THRESHOLD_MULTIPLIER
+    return pair[0] if _is_resort_high_season(now) else pair[1]
 
 def get_district_cloud_thresholds(city):
     """Таблица порогов показа облака спроса для КОНКРЕТНОГО города, с учётом
@@ -17981,7 +18234,13 @@ async def handle_map_district_demand_api(request):
                 for tariff, field in DELIVERY_TARIFF_FIELD.items():
                     idx = DELIVERY_TARIFF_INDEX[tariff]
                     value = _district_slot_value(slots, now.hour, (idx,))
-                    item[field] = value
+                    # ИЗМЕНЕНО 26.09.2026 (см. "одна привязка" выше) - день/
+                    # время/праздник/Москва-за-городом/Сочи-горы теперь
+                    # применяются и к доставке (is_delivery=True - дождь
+                    # внутри adjusted_district_demand для доставки
+                    # автоматически пропускается, своей калибровки нет).
+                    value = adjusted_district_demand(city, name, entry.get('lat'), entry.get('lon'), value, now, True, (idx,), False)
+                    item[field] = min(100, round(value)) if value is not None else None
                     if value is not None:
                         has_any = True
                 if has_any:
@@ -18024,12 +18283,33 @@ async def handle_map_district_demand_api(request):
             # проверяется по СВОЕМУ снепшоту КАЖДОГО района (district_rain_now),
             # а не по одной городской точке; 2) если в районе идут осадки
             # ПРЯМО СЕЙЧАС, но базового значения на этот слот нет - облако
-            # всё равно показываем на уровне MAP_DEMAND_RAIN_FLOOR_PERCENT,
-            # а не пропускаем район вовсе.
+            # всё равно показываем (см. _rain_adjust/district_premium_threshold
+            # ниже), а не пропускаем район вовсе.
             # ОБОБЩЕНО 23.09.2026 (прямая просьба пользователя - "погода
             # так же тяни в Питере") - district_rain_now теперь сам
             # принимает city composite-ключом, работает для любого города.
             district_raining = district_rain_now(city, name, fallback_rain_now=rain_now)
+            lat, lon = entry.get('lat'), entry.get('lon')
+            # ИЗМЕНЕНО 26.09.2026 (прямая просьба пользователя - "то что
+            # отображаем на карте и в куда поехать - одна привязка") - дождь
+            # теперь даёт множитель RAIN_DEMAND_BOOST к уже существующему %
+            # (тот же принцип, что и в "Куда ехать" - см.
+            # adjusted_district_demand выше), а не жёсткий "пол". Для часов,
+            # где базового значения СОВСЕМ нет (демонстрация облака всё
+            # равно нужна, если дождь идёт) - оставляем свой порог на тариф
+            # (district_premium_threshold) как аварийный минимум, только
+            # когда реальных данных на этот час/день нет вовсе. Остальные
+            # корректировки (день/время, праздник, Москва за городом/
+            # Рублёвка-Новая Рига, Сочи горный кластер) применяются ПОСЛЕ,
+            # через adjusted_district_demand с is_raining=False (дождь уже
+            # учтён здесь).
+            def _rain_adjust(value, field, gate_ok):
+                if not district_raining or not gate_ok:
+                    return value
+                if value is not None:
+                    return value * RAIN_DEMAND_BOOST
+                return district_premium_threshold(city, field, lat, lon)[1]
+
             if category == 'taxi':
                 # ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя - "эконом
                 # 60-70-80-90-100, комфорт 70-80-90-100, комфорт плюс
@@ -18041,38 +18321,20 @@ async def handle_map_district_demand_api(request):
                 comfort_plus = _district_slot_value(slots, now.hour, MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_COMFORT_PLUS)
                 if econom is None and comfort is None and comfort_plus is None and not district_raining:
                     continue
-                if district_raining:
-                    # ИСПРАВЛЕНО 23.09.2026 (прямая просьба пользователя,
-                    # реальный баг со скриншотом - "1 ночи и реально нет
-                    # такого спроса", облако Элит светило 85%): раньше
-                    # ОДИН И ТОТ ЖЕ дождевой пол MAP_DEMAND_RAIN_FLOOR_PERCENT
-                    # (85%) применялся ко ВСЕМ тарифам без разбора - для
-                    # Эконома (реальный диапазон до 100%) это нормально, но
-                    # для Элит (реальный максимум по таблице всего 16-19%,
-                    # см. подсчёт percentile выше в сессии) 85% - абсурдное,
-                    # никогда не встречающееся в реальных данных значение.
-                    # Теперь пол свой на тариф - "strong"-порог ИЗ ЕГО ЖЕ
-                    # DISTRICT_CLOUD_THRESHOLDS_BY_FIELD (тот порог, после
-                    # которого облако и так уже считается "ярким" для этого
-                    # тарифа), а не общий 85% для всех.
-                    # ИЗМЕНЕНО 25.09.2026 (см. "единую формулу"/
-                    # DEMAND_CLOUD_UNIFIED_THRESHOLDS у district_premium_
-                    # threshold выше) - порог теперь свой по зоне района
-                    # (центр/область) для ЛЮБОГО города, а не единый
-                    # city_thresholds на весь город - раньше дождь в центре
-                    # поднимал бы Эконом/Комфорт до заведомо заниженного
-                    # общегородского порога.
-                    econom = max(econom or 0, district_premium_threshold(city, 'demand_econom', entry.get('lat'), entry.get('lon'))[1])
-                    comfort = max(comfort or 0, district_premium_threshold(city, 'demand_comfort', entry.get('lat'), entry.get('lon'))[1])
-                    # ДОБАВЛЕНО 25.09.2026 (см. _district_in_city_limits выше) -
-                    # Комфорт+ дождевым полом поднимается только В ЧЕРТЕ
-                    # города; за городом дождь по прямой просьбе пользователя
-                    # не должен трогать ничего, кроме Эконома и Комфорта.
-                    if _district_in_city_limits(city, entry.get('lat'), entry.get('lon')):
-                        comfort_plus = max(comfort_plus or 0, district_premium_threshold(city, 'demand_comfort_plus', entry.get('lat'), entry.get('lon'))[1])
-                item['demand_econom'] = econom
-                item['demand_comfort'] = comfort
-                item['demand_comfort_plus'] = comfort_plus
+                in_city = _district_in_city_limits(city, lat, lon)
+                econom = _rain_adjust(econom, 'demand_econom', True)
+                comfort = _rain_adjust(comfort, 'demand_comfort', True)
+                # ДОБАВЛЕНО 25.09.2026 (см. _district_in_city_limits выше) -
+                # Комфорт+ дождём поднимается только В ЧЕРТЕ города; за
+                # городом дождь по прямой просьбе пользователя не должен
+                # трогать ничего, кроме Эконома и Комфорта.
+                comfort_plus = _rain_adjust(comfort_plus, 'demand_comfort_plus', in_city)
+                econom = adjusted_district_demand(city, name, lat, lon, econom, now, False, MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_ECONOM, False)
+                comfort = adjusted_district_demand(city, name, lat, lon, comfort, now, False, MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_COMFORT, False)
+                comfort_plus = adjusted_district_demand(city, name, lat, lon, comfort_plus, now, False, MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_COMFORT_PLUS, False)
+                item['demand_econom'] = min(100, round(econom)) if econom is not None else None
+                item['demand_comfort'] = min(100, round(comfort)) if comfort is not None else None
+                item['demand_comfort_plus'] = min(100, round(comfort_plus)) if comfort_plus is not None else None
             else:
                 # ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя - "бизнес
                 # 60-70-80-90-100, премьер 70-80-90-100, элит 85-90-95-100").
@@ -18089,32 +18351,24 @@ async def handle_map_district_demand_api(request):
                 # ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - "спрос
                 # дождя не влияет вообще ни на какие тарифы кроме эконом и
                 # комфорт за пределами городов") - Бизнес/Премьер/Элит
-                # дождевым полом поднимаются ТОЛЬКО в черте города; за
-                # городом дождь на Ultima-тарифы вообще не влияет (см.
+                # дождём поднимаются ТОЛЬКО в черте города; за городом дождь
+                # на Ultima-тарифы вообще не влияет (см.
                 # _district_in_city_limits выше).
-                if district_raining and _district_in_city_limits(city, entry.get('lat'), entry.get('lon')):
-                    # См. комментарий у "дождевого пола" для такси выше -
-                    # та же правка: свой floor на тариф вместо общего 85%.
-                    # ИЗМЕНЕНО 25.09.2026 (см. district_premium_threshold/
-                    # MOSCOW_PREMIUM_ZONE_THRESHOLDS выше) - для Москвы
-                    # floor тоже теперь свой по зоне района (центр/область/
-                    # Рублёвка-Новая Рига), а не единый city_thresholds -
-                    # иначе дождь в центре поднимал бы спрос до заведомо
-                    # завышенного "областного" порога.
-                    business = max(business or 0, district_premium_threshold(city, 'demand_business', entry.get('lat'), entry.get('lon'))[1])
-                    premium = max(premium or 0, district_premium_threshold(city, 'demand_premier', entry.get('lat'), entry.get('lon'))[1])
-                    # ДОБАВЛЕНО 24.09.2026 (загружены данные Краснодара/Сочи -
-                    # в их таблицах вообще НЕТ колонки Элит, demand_elite
-                    # всегда None) - дождевой пол НЕ должен поднимать элит
-                    # там, где для него в принципе нет реальных данных, иначе
-                    # дождь рисовал бы несуществующий "спрос на Элит" в
-                    # городах без этого тарифа вовсе. См.
-                    # CITIES_WITHOUT_ELITE_DEMAND_DATA ниже.
-                    if city not in CITIES_WITHOUT_ELITE_DEMAND_DATA:
-                        elite = max(elite or 0, district_premium_threshold(city, 'demand_elite', entry.get('lat'), entry.get('lon'))[1])
-                item['demand_business'] = business
-                item['demand_premier'] = premium
-                item['demand_elite'] = elite
+                in_city = _district_in_city_limits(city, lat, lon)
+                business = _rain_adjust(business, 'demand_business', in_city)
+                premium = _rain_adjust(premium, 'demand_premier', in_city)
+                # ДОБАВЛЕНО 24.09.2026 (загружены данные Краснодара/Сочи -
+                # в их таблицах вообще НЕТ колонки Элит, demand_elite
+                # всегда None) - дождь НЕ должен поднимать элит там, где для
+                # него в принципе нет реальных данных. См.
+                # CITIES_WITHOUT_ELITE_DEMAND_DATA ниже.
+                elite = _rain_adjust(elite, 'demand_elite', in_city and city not in CITIES_WITHOUT_ELITE_DEMAND_DATA)
+                business = adjusted_district_demand(city, name, lat, lon, business, now, False, MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_BUSINESS, False)
+                premium = adjusted_district_demand(city, name, lat, lon, premium, now, False, MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_PREMIUM, False)
+                elite = adjusted_district_demand(city, name, lat, lon, elite, now, False, MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_ELITE, False)
+                item['demand_business'] = min(100, round(business)) if business is not None else None
+                item['demand_premier'] = min(100, round(premium)) if premium is not None else None
+                item['demand_elite'] = min(100, round(elite)) if elite is not None else None
             result['districts'].append(item)
     except Exception:
         logger.exception(f"❌ Ошибка при получении районного спроса для карты водителей ({city})")
@@ -18149,6 +18403,30 @@ async def handle_map_weather_api(request):
         except Exception:
             logger.exception("❌ Ошибка при получении текущей погоды для карты водителей")
     return web.json_response(result)
+
+MAP_TRAFFIC_LEVEL_API_PATH = '/map/traffic_level'
+
+async def handle_map_traffic_level_api(request):
+    """ДОБАВЛЕНО 26.09.2026 (прямая просьба пользователя - "учёт пробок в
+    куда ехать и обязательным информированием водителя") - карта (см.
+    trafficStateMonitor.add('level', ...) в map_webapp_html) шлёт сюда
+    последний известный уровень пробок Яндекса (0-10) ПО СВОЕМУ городу -
+    сохраняем в простой city->level кэш в памяти (set_city_traffic_level),
+    без привязки к конкретному водителю (пробки - величина ОБЩАЯ на весь
+    город, а не персональная). "Куда ехать" (compute_where_to_go/
+    district_distance_penalty) читает отсюда через get_city_traffic_level -
+    значение считается свежим TRAFFIC_LEVEL_MAX_AGE_SEC (30 мин), иначе
+    штраф не применяется. Публичные агрегированные данные, initData не
+    требуется (как и у /map/weather)."""
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    city = data.get('city') or request.query.get('city', '')
+    level = data.get('level')
+    if city and level is not None:
+        set_city_traffic_level(city, level)
+    return web.json_response({'ok': True})
 
 MAP_RAIN_DISTRICTS_API_PATH = '/map/rain_districts'
 
@@ -27869,6 +28147,7 @@ async def start_subscription_webhook_server():
     app.router.add_get(MAP_AIRPORTS_API_PATH, handle_map_airports_api)
     app.router.add_get(MAP_STATIONS_API_PATH, handle_map_stations_api)
     app.router.add_get(MAP_WEATHER_API_PATH, handle_map_weather_api)
+    app.router.add_post(MAP_TRAFFIC_LEVEL_API_PATH, handle_map_traffic_level_api)
     app.router.add_get(MAP_RAIN_DISTRICTS_API_PATH, handle_map_rain_districts_api)
     app.router.add_get(MAP_DEMAND_API_PATH, handle_map_demand_api)
     app.router.add_get(MAP_DISTRICT_DEMAND_API_PATH, handle_map_district_demand_api)
