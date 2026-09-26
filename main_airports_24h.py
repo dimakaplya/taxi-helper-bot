@@ -17023,29 +17023,81 @@ def unified_app_html():
 
   document.getElementById('cityBadge').textContent = cityLabel();
 
+  // ИСПРАВЛЕНО 26.09.2026 (жалоба пользователя - "крутит постоянно, а
+  // локация включена") - было: голый navigator.geolocation.getCurrentPosition
+  // с родным параметром timeout. В Telegram-вебвью на iOS этот родной
+  // timeout иногда не срабатывает вообще, и запрос виснет навсегда без
+  // единого колбэка (ни успех, ни ошибка) - вечный спиннер. Переписано на
+  // тот же проверенный в бою приём, что уже используется в
+  // map_webapp_html/weather_webapp_html (getDriverLocationOnce): сначала
+  // пробуем нативный Telegram.WebApp.LocationManager (надёжнее внутри
+  // вебвью Telegram), при недоступности - обычный navigator.geolocation,
+  // и ПОВЕРХ обоих - независимый JS setTimeout, который гарантированно
+  // сработает через GEO_GATE_TIMEOUT_MS, даже если оба API вообще никогда
+  // не ответят.
+  const GEO_GATE_TIMEOUT_MS = 12000;
   function requestGeo() {
     document.getElementById('gateSpin').hidden = false;
     document.getElementById('gatePin').hidden = true;
     document.getElementById('gateErr').hidden = true;
     document.getElementById('gateBtn').hidden = true;
     document.getElementById('gateText').textContent = 'Определяем твоё местоположение, чтобы показать актуальную сводку по городу…';
-    if (!navigator.geolocation) {
-      showGeoError('Геолокация не поддерживается этим устройством.');
-      return;
+
+    let settled = false;
+    const succeed = function (lat, lon) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      driverPos = { lat: lat, lon: lon };
+      startApp();
+    };
+    const fail = function (msg) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      showGeoError(msg);
+    };
+
+    const timer = setTimeout(function () {
+      fail('Не получилось определить местоположение за отведённое время. Попробуй ещё раз.');
+    }, GEO_GATE_TIMEOUT_MS);
+
+    function browserFallback() {
+      if (!navigator.geolocation) {
+        fail('Геолокация не поддерживается этим устройством.');
+        return;
+      }
+      navigator.geolocation.getCurrentPosition(
+        function (pos) { succeed(pos.coords.latitude, pos.coords.longitude); },
+        function (err) {
+          let msg = 'Не удалось определить местоположение. Попробуй ещё раз.';
+          if (err && err.code === 1) msg = 'Доступ к геолокации запрещён. Разреши его в настройках Telegram/браузера и попробуй снова.';
+          else if (err && err.code === 3) msg = 'Не получилось определить местоположение за отведённое время. Попробуй ещё раз.';
+          fail(msg);
+        },
+        { enableHighAccuracy: false, timeout: 10000, maximumAge: 60000 }
+      );
     }
-    navigator.geolocation.getCurrentPosition(
-      function (pos) {
-        driverPos = { lat: pos.coords.latitude, lon: pos.coords.longitude };
-        startApp();
-      },
-      function (err) {
-        let msg = 'Не удалось определить местоположение. Попробуй ещё раз.';
-        if (err && err.code === 1) msg = 'Доступ к геолокации запрещён. Разреши его в настройках Telegram/браузера и попробуй снова.';
-        else if (err && err.code === 3) msg = 'Не получилось определить местоположение за отведённое время. Попробуй ещё раз.';
-        showGeoError(msg);
-      },
-      { enableHighAccuracy: false, timeout: 10000, maximumAge: 60000 }
-    );
+
+    const hasLocationManager = !!(tg && tg.LocationManager && typeof tg.LocationManager.init === 'function');
+    if (hasLocationManager) {
+      try {
+        tg.LocationManager.init(function () {
+          try {
+            if (!tg.LocationManager.isLocationAvailable) { browserFallback(); return; }
+            tg.LocationManager.getLocation(function (data) {
+              if (data && typeof data.latitude === 'number' && typeof data.longitude === 'number') {
+                succeed(data.latitude, data.longitude);
+              } else {
+                browserFallback();
+              }
+            });
+          } catch (e) { browserFallback(); }
+        });
+      } catch (e) { browserFallback(); }
+    } else {
+      browserFallback();
+    }
   }
 
   function showGeoError(msg) {
