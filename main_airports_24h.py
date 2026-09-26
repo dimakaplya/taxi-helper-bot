@@ -5725,6 +5725,16 @@ def services_keyboard(category=None, city=None, user_id=None):
     # своей отдельной строки больше нет. "🏙 ВЫБОР ГОРОДА" уже даёт по сути
     # тот же эффект возврата (открывает выбор города), поэтому отдельная
     # кнопка "Назад" на этом (главном) экране была избыточна.
+    # "🧪 НОВОЕ ПРИЛОЖЕНИЕ (тест)" - ДОБАВЛЕНО 26.09.2026 (см. блок "ЕДИНОЕ
+    # ПРИЛОЖЕНИЕ (WebApp) - ЭТАП 1" выше) - ДОПОЛНИТЕЛЬНАЯ строка в самом
+    # низу меню, ничего существующее выше не двигает/не убирает. По выбору
+    # пользователя ("Сначала рядом, потом убрать старое") - временная кнопка
+    # для проверки нового единого мини-аппа, обычный текстовый хендлер (см.
+    # open_unified_app_from_menu), не web_app= прямо на кнопке - та же
+    # причина, что и у "👤 ЛИЧНЫЙ КАБИНЕТ"/"🗺 КАРТА ВОДИТЕЛЕЙ" (initData не
+    # передаётся у web_app= в Reply-клавиатуре, а вкладке "Кабинет" внутри
+    # нового приложения initData нужен).
+    buttons.append([KeyboardButton(text="🧪 НОВОЕ ПРИЛОЖЕНИЕ (тест)")])
     buttons.append([KeyboardButton(text="❓ ПОДДЕРЖКА"), KeyboardButton(text="🏙 ВЫБОР ГОРОДА")])
     return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=buttons)
 
@@ -16652,6 +16662,537 @@ async def handle_where_to_go_webapp(request):
         headers={'Cache-Control': 'no-store, no-cache, must-revalidate', 'Pragma': 'no-cache'},
     )
 
+# ==================== ЕДИНОЕ ПРИЛОЖЕНИЕ (WebApp) - ЭТАП 1 ====================
+# ДОБАВЛЕНО 26.09.2026 (прямая просьба пользователя - "запускай Telegram up
+# приложение делай его ещё раз проверь всю логику механику чтоб все
+# перенеслось все кнопки перенесла чтобы ничего не пришлось заново делать все
+# эти механики и все эти карты все эти слои вот это всё все перенеслось как и
+# есть"). Визуал согласован заранее отдельным макетом (Design-артефакт: 4
+# вкладки Карта/Куда ехать/Сервисы/Кабинет, обязательный шаг геолокации перед
+# входом, шрифты Unbounded+Golos Text, палитра чёрный/жёлтый/серый).
+#
+# ВАЖНО - выбор пользователя по безопасному раскатыванию ("Сначала рядом,
+# потом убрать старое (рекомендую)"): это ДОПОЛНИТЕЛЬНЫЙ, полностью отдельный
+# путь. Старое меню (services_keyboard), все 9 существующих отдельных
+# WebApp-страниц (карта/погода/куда ехать/события/авиа-жд/кабинет/...) и сам
+# /start НЕ изменены и продолжают работать как раньше. Доступ к новому
+# приложению - через отдельную тестовую кнопку в меню услуг (см.
+# open_unified_app_from_menu ниже) для проверки, ничего не заменяет и не
+# убирает. Только после подтверждения пользователем, что всё перенеслось
+# корректно, старое будет убрано и /start переключится на новый единый вход
+# (следующий этап, здесь НЕ делается).
+#
+# Максимальное повторное использование существующих proven API/JS вместо
+# переписывания с нуля:
+#   - Вкладка "Куда ехать" - тот же WHERE_TO_GO_DATA_API_PATH и те же
+#     JS-хелперы (RANK_EMOJI/scoreBar/renderAdvice/renderGoButton), что и
+#     where_to_go_webapp_html() выше - логика скопирована как есть, не
+#     переписана.
+#   - Вкладка "Кабинет" (раздел "Уведомления") - тот же
+#     CABINET_SETTINGS_API_PATH (GET/POST), что и handle_cabinet_settings_api -
+#     тумблеры строятся динамически из notif_types с сервера.
+#   - Вкладка "Сервисы" - реальные ссылки на уже существующие WebApp-страницы
+#     (Погода/События города/Авиа-ЖД) с теми же ?city=&category= параметрами,
+#     что и во всём остальном боте.
+#   - Вкладка "Карта" - ПОКА заглушка "🚧 скоро" (у map_webapp_html() свыше
+#     3000 строк тесно связанного JS - перенос заслуживает отдельного
+#     аккуратного этапа, а не второпях вместе с остальным).
+#
+# Геолокация: ОБЯЗАТЕЛЬНЫЙ шаг перед входом в приложение (пользователь: "без
+# неё не запустится"), простое разрешение браузера/Telegram WebView
+# (navigator.geolocation.getCurrentPosition - тот же API, что уже используется
+# в getCurrentPositionQuiet() внутри where_to_go_webapp_html(), только здесь
+# БЛОКИРУЕТ вход при отказе, с кнопкой "Повторить", а не тихо откатывается на
+# null). Полученные координаты передаются дальше во вкладку "Куда ехать" (как
+# lat/lon в /whereto/data) - повторный запрос геопозиции там не нужен.
+# Город/категория в ЭТОМ этапе берутся из ?city=&category= в URL (как и у
+# всех остальных WebApp-кнопок бота), а НЕ определяются автоматически по GPS -
+# живое автоопределение города по геолокации оставлено для будущего полного
+# перевода /start на единый вход.
+#
+# Как и у where_to_go_webapp_html() - ПРОСТАЯ конкатенация строк (не
+# f-string), поэтому одинарные { } используются в JS напрямую, без удвоения.
+UNIFIED_APP_WEBAPP_PATH = '/app'
+
+def unified_app_html():
+    return """<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Taxi Helper</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Unbounded:wght@600;700;800&family=Golos+Text:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script src=\"""" + TG_WEBAPP_JS_PROXY_PATH + """\"></script>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: #000; color: #fff;
+    font-family: 'Golos Text', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    overscroll-behavior: none;
+  }
+  .wordmark { font-family: 'Unbounded', sans-serif; }
+  [hidden] { display: none !important; }
+
+  #gate {
+    position: fixed; inset: 0; z-index: 50; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; text-align: center; padding: 28px;
+    background: radial-gradient(circle at 50% 20%, #1a1a1a, #000 70%);
+  }
+  #gate .pin { font-size: 52px; margin-bottom: 18px; }
+  #gate h1 { font-family: 'Unbounded', sans-serif; font-size: 20px; margin: 0 0 10px; letter-spacing: .01em; }
+  #gate p { font-size: 14px; color: #aaa; line-height: 1.5; max-width: 300px; margin: 0 0 22px; }
+  #gate .err { color: #ff8a80; font-size: 13px; margin-bottom: 14px; max-width: 300px; line-height: 1.4; }
+  #gate button {
+    border: none; border-radius: 12px; padding: 14px 26px; font-size: 14.5px; font-weight: 700;
+    background: #FFC400; color: #000; font-family: 'Golos Text', sans-serif; cursor: pointer;
+  }
+  #gate button:active { transform: scale(.97); }
+  #gate .spin {
+    width: 26px; height: 26px; border-radius: 50%; border: 3px solid rgba(255,196,0,.25);
+    border-top-color: #FFC400; animation: spin .8s linear infinite; margin-bottom: 18px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { #gate .spin { animation: none; } }
+
+  #shell { position: fixed; inset: 0; display: flex; flex-direction: column; }
+  header {
+    flex-shrink: 0; display: flex; align-items: center; justify-content: space-between;
+    padding: 0 16px; padding-top: env(safe-area-inset-top, 0px); height: calc(52px + env(safe-area-inset-top, 0px));
+    background: #0a0a0a; border-bottom: 1px solid rgba(255,255,255,.08);
+  }
+  header .logo { font-size: 14.5px; font-weight: 700; letter-spacing: .04em; }
+  header .logo b { color: #FFC400; }
+  header .badge {
+    font-size: 12px; color: #FFC400; border: 1px solid rgba(255,196,0,.4); border-radius: 999px;
+    padding: 5px 11px; white-space: nowrap; max-width: 55%; overflow: hidden; text-overflow: ellipsis;
+  }
+  main { flex: 1 1 auto; min-height: 0; position: relative; }
+  .panel { position: absolute; inset: 0; overflow-y: auto; padding: 16px; padding-bottom: 24px; }
+  .panel.full { padding: 0; }
+  nav.tabbar {
+    flex-shrink: 0; display: flex; background: #0a0a0a; border-top: 1px solid rgba(255,255,255,.08);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  nav.tabbar button {
+    flex: 1; background: none; border: none; color: #777; font-family: 'Golos Text', sans-serif;
+    display: flex; flex-direction: column; align-items: center; gap: 3px; padding: 9px 4px 8px;
+    font-size: 11px; cursor: pointer;
+  }
+  nav.tabbar button .ic { font-size: 19px; line-height: 1; }
+  nav.tabbar button.active { color: #FFC400; }
+
+  .soon-box {
+    height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    text-align: center; padding: 40px 30px; color: #888;
+  }
+  .soon-box .ic { font-size: 44px; margin-bottom: 14px; }
+  .soon-box h2 { font-family: 'Unbounded', sans-serif; font-size: 15px; color: #ddd; margin: 0 0 6px; }
+  .soon-box p { font-size: 13px; line-height: 1.5; margin: 0; max-width: 260px; }
+
+  #wtg-state { text-align: center; padding: 60px 16px; opacity: .7; font-size: 14px; }
+  .best {
+    background: linear-gradient(135deg, #1c1c1c, #000); border: 1.5px solid #FFC400;
+    border-radius: 16px; padding: 16px; margin-bottom: 16px; box-shadow: 0 4px 16px rgba(255,196,0,.15);
+  }
+  .best .tag { font-size: 12px; font-weight: 700; color: #FFC400; letter-spacing: .04em; text-transform: uppercase; }
+  .best .label { font-size: 19px; font-weight: 700; margin: 4px 0 8px; }
+  .bar { font-size: 15px; letter-spacing: 2px; color: #FFC400; margin-bottom: 6px; }
+  .bar .off { color: #555; }
+  .reasons { font-size: 13.5px; color: #ccc; line-height: 1.45; }
+  .advice { margin-top: 10px; background: rgba(255,196,0,.12); border-radius: 10px; padding: 9px 11px; font-size: 13px; color: #FFC400; line-height: 1.45; }
+  .list-title { font-size: 12.5px; font-weight: 700; color: #9a9a9a; text-transform: uppercase; letter-spacing: .04em; margin: 14px 0 8px; }
+  .banner { font-size: 13.5px; color: #FFC400; background: rgba(255,196,0,.1); border: 1px solid rgba(255,196,0,.25); border-radius: 10px; padding: 10px 12px; margin-bottom: 14px; line-height: 1.45; }
+  .closures-notice { font-size: 13px; color: #ff8a80; background: rgba(255,82,82,.1); border: 1px solid rgba(255,82,82,.3); border-radius: 10px; padding: 9px 12px; margin-bottom: 12px; line-height: 1.4; }
+  .weather-line { font-size: 12.5px; color: #9a9a9a; margin-bottom: 10px; }
+  .airports-mini { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }
+  .airports-mini .chip { font-size: 11.5px; color: #ccc; background: #131313; border: 1px solid rgba(255,255,255,.08); border-radius: 999px; padding: 5px 10px; white-space: nowrap; }
+  .cand { background: #131313; border: 1px solid rgba(255,255,255,.08); border-radius: 12px; padding: 12px 13px; margin-bottom: 8px; display: flex; gap: 10px; align-items: flex-start; }
+  .cand .rank { font-size: 18px; flex-shrink: 0; width: 22px; text-align: center; }
+  .cand .body { min-width: 0; flex: 1; }
+  .cand .label { font-size: 14.5px; font-weight: 700; }
+  .cand .bar { font-size: 13px; margin: 3px 0; }
+  .cand .reasons { font-size: 12.5px; color: #aaa; }
+  .cand .advice { margin-top: 6px; font-size: 12px; padding: 7px 9px; }
+  .go-btn { display: block; text-align: center; margin-top: 10px; padding: 10px 12px; background: #FFC400; color: #000; font-weight: 700; font-size: 13.5px; border-radius: 10px; text-decoration: none; }
+  .cand .go-btn { margin-top: 8px; padding: 8px 10px; font-size: 12.5px; }
+  .closed-box { margin-top: 14px; font-size: 12.5px; color: #999; background: #131313; border: 1px solid rgba(255,255,255,.08); border-radius: 10px; padding: 10px 12px; }
+  .closed-box b { color: #ddd; }
+  .footnote { font-size: 11.5px; color: #777; margin-top: 16px; line-height: 1.4; }
+
+  .svc-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .tile {
+    background: #131313; border: 1px solid rgba(255,255,255,.08); border-radius: 14px;
+    padding: 16px 12px; text-decoration: none; color: #fff; display: flex; flex-direction: column;
+    gap: 8px; min-height: 84px; position: relative;
+  }
+  .tile .ic { font-size: 24px; }
+  .tile .lbl { font-size: 13px; font-weight: 600; line-height: 1.3; }
+  .tile.placeholder { opacity: .45; }
+  .tile .soon-badge {
+    position: absolute; top: 10px; right: 10px; font-size: 9.5px; color: #FFC400;
+    background: rgba(255,196,0,.12); border-radius: 999px; padding: 2px 7px; letter-spacing: .03em;
+  }
+
+  .cab-title { font-size: 12.5px; font-weight: 700; color: #9a9a9a; text-transform: uppercase; letter-spacing: .04em; margin: 4px 0 10px; }
+  .cab-row {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    background: #131313; border: 1px solid rgba(255,255,255,.08); border-radius: 12px;
+    padding: 13px 14px; margin-bottom: 8px;
+  }
+  .cab-row .lbl { font-size: 13.5px; display: flex; align-items: center; gap: 8px; }
+  .switch { position: relative; width: 44px; height: 26px; flex-shrink: 0; }
+  .switch input { opacity: 0; width: 100%; height: 100%; margin: 0; position: absolute; cursor: pointer; }
+  .switch .track { position: absolute; inset: 0; background: #333; border-radius: 999px; transition: background .15s; }
+  .switch .knob { position: absolute; top: 3px; left: 3px; width: 20px; height: 20px; border-radius: 50%; background: #fff; transition: transform .15s; }
+  .switch input:checked + .track { background: #FFC400; }
+  .switch input:checked + .track + .knob { transform: translateX(18px); }
+  #cab-state { text-align: center; padding: 40px 16px; opacity: .7; font-size: 13.5px; }
+</style>
+</head>
+<body>
+<div id="gate">
+  <div class="spin" id="gateSpin"></div>
+  <div class="pin" id="gatePin" hidden>📍</div>
+  <h1>Нужна геолокация</h1>
+  <p id="gateText">Определяем твоё местоположение, чтобы показать актуальную сводку по городу…</p>
+  <div class="err" id="gateErr" hidden></div>
+  <button id="gateBtn" hidden>Включить геолокацию</button>
+</div>
+<div id="shell" hidden>
+  <header>
+    <div class="logo wordmark">TAXI <b>HELPER</b></div>
+    <div class="badge" id="cityBadge">…</div>
+  </header>
+  <main>
+    <div class="panel full" id="panel-map">
+      <div class="soon-box">
+        <div class="ic">🚧</div>
+        <h2>Карта скоро будет здесь</h2>
+        <p>Полная карта водителей/курьеров с живым спросом и слоями переносится отдельным шагом - пока открывай её как обычно, из меню бота.</p>
+      </div>
+    </div>
+    <div class="panel" id="panel-whereto" hidden>
+      <div id="wtg-state">📍 Определяю твою локацию…</div>
+      <div id="wtg-app" hidden>
+        <div class="weather-line" id="wtgTimeSub"></div>
+        <div id="wtg-content"></div>
+      </div>
+    </div>
+    <div class="panel" id="panel-services" hidden>
+      <div class="svc-grid" id="svcGrid"></div>
+    </div>
+    <div class="panel" id="panel-cabinet" hidden>
+      <div class="cab-title">Уведомления</div>
+      <div id="cab-state">Загружаю…</div>
+      <div id="cab-list" hidden></div>
+    </div>
+  </main>
+  <nav class="tabbar">
+    <button data-tab="map" class="active"><span class="ic">🗺</span>Карта</button>
+    <button data-tab="whereto"><span class="ic">💰</span>Куда ехать</button>
+    <button data-tab="services"><span class="ic">🧰</span>Сервисы</button>
+    <button data-tab="cabinet"><span class="ic">👤</span>Кабинет</button>
+  </nav>
+</div>
+<script>
+  const tg = window.Telegram && window.Telegram.WebApp;
+  if (tg) { tg.ready(); tg.expand(); }
+  if (tg && tg.platform) { fetch('/platform/report', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': tg.initData || '' }, body: JSON.stringify({ platform: tg.platform }) }).catch(function(){}); }
+  const params = new URLSearchParams(window.location.search);
+  const city = params.get('city') || '';
+  const category = params.get('category') || '';
+  let driverPos = null;
+
+  document.getElementById('cityBadge').textContent = city ? city : '—';
+
+  function requestGeo() {
+    document.getElementById('gateSpin').hidden = false;
+    document.getElementById('gatePin').hidden = true;
+    document.getElementById('gateErr').hidden = true;
+    document.getElementById('gateBtn').hidden = true;
+    document.getElementById('gateText').textContent = 'Определяем твоё местоположение, чтобы показать актуальную сводку по городу…';
+    if (!navigator.geolocation) {
+      showGeoError('Геолокация не поддерживается этим устройством.');
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      function (pos) {
+        driverPos = { lat: pos.coords.latitude, lon: pos.coords.longitude };
+        startApp();
+      },
+      function (err) {
+        let msg = 'Не удалось определить местоположение. Попробуй ещё раз.';
+        if (err && err.code === 1) msg = 'Доступ к геолокации запрещён. Разреши его в настройках Telegram/браузера и попробуй снова.';
+        else if (err && err.code === 3) msg = 'Не получилось определить местоположение за отведённое время. Попробуй ещё раз.';
+        showGeoError(msg);
+      },
+      { enableHighAccuracy: false, timeout: 10000, maximumAge: 60000 }
+    );
+  }
+
+  function showGeoError(msg) {
+    document.getElementById('gateSpin').hidden = true;
+    document.getElementById('gatePin').hidden = false;
+    document.getElementById('gateText').textContent = 'Без геолокации приложение не откроется.';
+    const errEl = document.getElementById('gateErr');
+    errEl.textContent = msg;
+    errEl.hidden = false;
+    const btn = document.getElementById('gateBtn');
+    btn.hidden = false;
+    btn.onclick = requestGeo;
+  }
+
+  function startApp() {
+    document.getElementById('gate').hidden = true;
+    document.getElementById('shell').hidden = false;
+  }
+
+  requestGeo();
+
+  const TAB_NAMES = ['map', 'whereto', 'services', 'cabinet'];
+  const loaded = { whereto: false, services: false, cabinet: false };
+
+  document.querySelectorAll('nav.tabbar button').forEach(function (btn) {
+    btn.addEventListener('click', function () { showTab(btn.getAttribute('data-tab')); });
+  });
+
+  function showTab(name) {
+    TAB_NAMES.forEach(function (n) {
+      document.getElementById('panel-' + n).hidden = (n !== name);
+    });
+    document.querySelectorAll('nav.tabbar button').forEach(function (btn) {
+      btn.classList.toggle('active', btn.getAttribute('data-tab') === name);
+    });
+    if (name === 'whereto' && !loaded.whereto) { loaded.whereto = true; loadWhereToGo(); }
+    if (name === 'services' && !loaded.services) { loaded.services = true; renderServices(); }
+    if (name === 'cabinet' && !loaded.cabinet) { loaded.cabinet = true; loadCabinet(); }
+  }
+
+  const RANK_EMOJI = ['🥈', '🥉'];
+  function scoreBar(score) {
+    const filled = Math.min(5, Math.max(0, Math.round(score / 20)));
+    let s = '';
+    for (let i = 0; i < 5; i++) s += i < filled ? '●' : '<span class="off">○</span>';
+    return s;
+  }
+  function renderAdvice(advice) {
+    if (!advice) return '';
+    const text = advice.charAt(0).toUpperCase() + advice.slice(1);
+    return '<div class="advice">💡 ' + text + '.</div>';
+  }
+  function renderGoButton(c) {
+    const navLat = (c.nav_lat === null || c.nav_lat === undefined) ? c.lat : c.nav_lat;
+    const navLon = (c.nav_lon === null || c.nav_lon === undefined) ? c.lon : c.nav_lon;
+    if (navLat === null || navLat === undefined || navLon === null || navLon === undefined) return '';
+    const url = 'https://yandex.ru/maps/?rtext=~' + navLat + ',' + navLon + '&rtt=auto';
+    return '<a class="go-btn" href="' + url + '" target="_blank" rel="noopener">🚗 ПОЕХАЛИ</a>';
+  }
+
+  async function loadWhereToGo() {
+    const stateEl = document.getElementById('wtg-state');
+    if (!city || !category) {
+      stateEl.textContent = 'Город или категория не выбраны.';
+      return;
+    }
+    try {
+      stateEl.textContent = '🧭 Считаю варианты…';
+      let url = '""" + WHERE_TO_GO_DATA_API_PATH + """?city=' + encodeURIComponent(city) + '&category=' + encodeURIComponent(category);
+      if (driverPos) { url += '&lat=' + driverPos.lat + '&lon=' + driverPos.lon; }
+      const resp = await fetch(url, { headers: { 'X-Telegram-Init-Data': (tg && tg.initData) || '' } });
+      if (!resp.ok) throw new Error('http_' + resp.status);
+      const data = await resp.json();
+
+      document.getElementById('cityBadge').textContent = (data.city_name || city) + (category ? ' · ' + category : '');
+      document.getElementById('wtgTimeSub').textContent = [data.time_label, data.weather_label].filter(Boolean).join(' · ');
+
+      const content = document.getElementById('wtg-content');
+      content.innerHTML = '';
+
+      if (data.closures_notice) {
+        const box = document.createElement('div'); box.className = 'closures-notice'; box.textContent = data.closures_notice; content.appendChild(box);
+      }
+      if (data.traffic_notice) {
+        const box = document.createElement('div'); box.className = 'closures-notice'; box.textContent = data.traffic_notice; content.appendChild(box);
+      }
+      if (data.airports_summary && data.airports_summary.length) {
+        const row = document.createElement('div'); row.className = 'airports-mini';
+        data.airports_summary.forEach(function (a) {
+          const chip = document.createElement('div'); chip.className = 'chip';
+          const flightsText = a.flights > 0 ? (a.flights + ' ' + (a.flights === 1 ? 'рейс' : (a.flights < 5 ? 'рейса' : 'рейсов'))) : 'рейсов нет';
+          chip.textContent = '✈️ ' + a.name + ' · ' + flightsText + ' · ' + a.status_emoji + ' ' + a.status_label.toLowerCase();
+          row.appendChild(chip);
+        });
+        content.appendChild(row);
+      }
+      if (data.banner) {
+        const box = document.createElement('div'); box.className = 'banner'; box.textContent = data.banner; content.appendChild(box);
+      }
+
+      const podium = data.podium || [];
+      if (!podium.length) {
+        const warn = document.createElement('div'); warn.className = 'closed-box';
+        warn.textContent = '⛔ Все аэропорты города сейчас закрыты - ориентируйся на центр города и часы пика.';
+        content.appendChild(warn);
+      } else {
+        const best = podium[0];
+        const bestBox = document.createElement('div'); bestBox.className = 'best';
+        bestBox.innerHTML =
+          '<div class="tag">🏆 Сейчас лучше всего</div>' +
+          '<div class="label">' + best.label + '</div>' +
+          '<div class="bar">' + scoreBar(best.score) + '</div>' +
+          '<div class="reasons">' + best.reasons.join(', ') + '</div>' +
+          renderAdvice(best.advice) + renderGoButton(best);
+        content.appendChild(bestBox);
+
+        const rest = podium.slice(1);
+        if (rest.length) {
+          const title = document.createElement('div'); title.className = 'list-title'; title.textContent = 'Остальные варианты';
+          content.appendChild(title);
+          rest.forEach(function (c, i) {
+            const rank = i < RANK_EMOJI.length ? RANK_EMOJI[i] : '▫️';
+            const row = document.createElement('div'); row.className = 'cand';
+            row.innerHTML =
+              '<div class="rank">' + rank + '</div>' +
+              '<div class="body">' +
+                '<div class="label">' + c.label + '</div>' +
+                '<div class="bar">' + scoreBar(c.score) + '</div>' +
+                '<div class="reasons">' + c.reasons.join(', ') + '</div>' +
+                renderAdvice(c.advice) + renderGoButton(c) +
+              '</div>';
+            content.appendChild(row);
+          });
+        }
+      }
+
+      if (data.districts && data.districts.length) {
+        const t = document.createElement('div'); t.className = 'list-title'; t.textContent = '🏘 Рекомендуемые районы (по удалённости)';
+        content.appendChild(t);
+        data.districts.forEach(function (c) {
+          const row = document.createElement('div'); row.className = 'cand';
+          row.innerHTML =
+            '<div class="rank">🏘</div>' +
+            '<div class="body">' +
+              '<div class="label">' + c.label + '</div>' +
+              '<div class="bar">' + scoreBar(c.score) + '</div>' +
+              '<div class="reasons">' + c.reasons.join(', ') + '</div>' +
+              renderGoButton(c) +
+            '</div>';
+          content.appendChild(row);
+        });
+      }
+
+      if (data.closed && data.closed.length) {
+        const box = document.createElement('div'); box.className = 'closed-box';
+        box.innerHTML = '⛔ <b>Закрыто сейчас:</b> ' + data.closed.map(function (c) { return c.label; }).join(', ');
+        content.appendChild(box);
+      }
+
+      const footnote = document.createElement('div'); footnote.className = 'footnote'; footnote.textContent = data.footnote || '';
+      content.appendChild(footnote);
+
+      stateEl.style.display = 'none';
+      document.getElementById('wtg-app').hidden = false;
+    } catch (e) {
+      stateEl.textContent = 'Не удалось посчитать варианты - попробуй закрыть и открыть ещё раз.';
+    }
+  }
+
+  function renderServices() {
+    const grid = document.getElementById('svcGrid');
+    grid.innerHTML = '';
+    const cityQ = encodeURIComponent(city);
+    const catQ = encodeURIComponent(category);
+    const tiles = [];
+    tiles.push({ href: '""" + WEATHER_WEBAPP_PATH + """?city=' + cityQ, ic: '🌤', lbl: 'Погода', real: true });
+    tiles.push({ href: '""" + EVENTS_WEBAPP_PATH + """?city=' + cityQ + '&category=' + catQ, ic: '🚨', lbl: 'События города', real: true });
+    tiles.push({ href: '""" + TRANSPORT_WEBAPP_PATH + """?city=' + cityQ + '&category=' + catQ, ic: '✈️🚆', lbl: 'Авиа/ЖД', real: true });
+    tiles.push({ ic: '📍', lbl: 'Рядом', real: false });
+    tiles.push({ ic: '🔄', lbl: 'Отдать заказ / Ещё', real: false });
+    tiles.forEach(function (t) {
+      if (t.real) {
+        const a = document.createElement('a'); a.className = 'tile'; a.href = t.href; a.target = '_blank'; a.rel = 'noopener';
+        a.innerHTML = '<div class="ic">' + t.ic + '</div><div class="lbl">' + t.lbl + '</div>';
+        grid.appendChild(a);
+      } else {
+        const d = document.createElement('div'); d.className = 'tile placeholder';
+        d.innerHTML = '<div class="ic">' + t.ic + '</div><div class="lbl">' + t.lbl + '</div><div class="soon-badge">СКОРО</div>';
+        grid.appendChild(d);
+      }
+    });
+  }
+
+  function switchRowHtml(item) {
+    return (
+      '<div class="cab-row" data-key="' + item.key + '">' +
+        '<div class="lbl">' + item.emoji + ' ' + item.label + '</div>' +
+        '<label class="switch">' +
+          '<input type="checkbox" ' + (item.enabled ? 'checked' : '') + '>' +
+          '<div class="track"></div><div class="knob"></div>' +
+        '</label>' +
+      '</div>'
+    );
+  }
+
+  function renderCabinetList(data) {
+    const list = document.getElementById('cab-list');
+    let html = (data.notif_types || []).map(switchRowHtml).join('');
+    if (data.show_airport_queue) {
+      html += switchRowHtml({ key: 'airport_queue', emoji: '🚕', label: 'Очередь у аэропорта', enabled: !!data.airport_queue_active });
+    }
+    list.innerHTML = html;
+    list.querySelectorAll('.cab-row input').forEach(function (input) {
+      input.addEventListener('change', function () {
+        const row = input.closest('.cab-row');
+        const key = row.getAttribute('data-key');
+        toggleCabinetSetting(key, input);
+      });
+    });
+  }
+
+  async function loadCabinet() {
+    const stateEl = document.getElementById('cab-state');
+    const list = document.getElementById('cab-list');
+    try {
+      const resp = await fetch('""" + CABINET_SETTINGS_API_PATH + """', { headers: { 'X-Telegram-Init-Data': (tg && tg.initData) || '' } });
+      if (!resp.ok) throw new Error('http_' + resp.status);
+      const data = await resp.json();
+      renderCabinetList(data);
+      stateEl.hidden = true;
+      list.hidden = false;
+    } catch (e) {
+      stateEl.textContent = 'Не удалось загрузить настройки уведомлений.';
+    }
+  }
+
+  async function toggleCabinetSetting(key, input) {
+    input.disabled = true;
+    try {
+      const resp = await fetch('""" + CABINET_SETTINGS_API_PATH + """', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': (tg && tg.initData) || '' },
+        body: JSON.stringify({ key: key })
+      });
+      if (!resp.ok) throw new Error('http_' + resp.status);
+      const data = await resp.json();
+      renderCabinetList(data);
+    } catch (e) {
+      input.checked = !input.checked;
+    }
+  }
+</script>
+</body>
+</html>"""
+
+async def handle_unified_app_webapp(request):
+    return web.Response(
+        text=unified_app_html(), content_type='text/html',
+        headers={'Cache-Control': 'no-store, no-cache, must-revalidate', 'Pragma': 'no-cache'},
+    )
+
 def build_airports_status_summary(city, category):
     """Краткая сводка по ВСЕМ аэропортам города (не только по тому, который
     сводка сейчас рекомендует) - ДОБАВЛЕНО 22.09.2026 (прямая просьба
@@ -23371,6 +23912,33 @@ async def open_cabinet_from_menu(message: types.Message):
         ]]),
     )
 
+@router.message(lambda message: message.text == "🧪 НОВОЕ ПРИЛОЖЕНИЕ (тест)")
+async def open_unified_app_from_menu(message: types.Message):
+    """ТЕСТОВАЯ кнопка нового единого мини-аппа (см. блок "ЕДИНОЕ ПРИЛОЖЕНИЕ
+    (WebApp) - ЭТАП 1" выше, ДОБАВЛЕНО 26.09.2026 по прямому выбору
+    пользователя "Сначала рядом, потом убрать старое (рекомендую)") - старое
+    меню и все отдельные WebApp-страницы НЕ тронуты, эта кнопка -
+    ДОПОЛНИТЕЛЬНЫЙ путь для проверки нового приложения, ничего не заменяет.
+    Тот же рабочий паттерн, что и у open_cabinet_from_menu выше - инлайн-
+    кнопка отдельным сообщением (у кнопок Reply-клавиатуры с web_app=
+    initData не передаётся, см. подробный комментарий там же) - нужен для
+    вкладки "Кабинет" нового приложения (реальные переключатели уведомлений
+    через /cabinet/settings, требует initData)."""
+    user_id = message.from_user.id
+    state = user_state.get(user_id, {})
+    category = state.get('category')
+    city = state.get('city')
+    if not (PUBLIC_URL and city and category):
+        await message.answer("Сначала выбери город и категорию 🙂")
+        return
+    app_url = f"{PUBLIC_URL}{UNIFIED_APP_WEBAPP_PATH}?city={urllib.parse.quote(city)}&category={urllib.parse.quote(category)}"
+    await message.answer(
+        "🧪 Новое приложение Taxi Helper (тест)",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="ОТКРЫТЬ", web_app=WebAppInfo(url=app_url)),
+        ]]),
+    )
+
 @router.message(lambda message: message.text == "⛔ ДОРОЖНЫЕ СОБЫТИЯ")
 async def show_road_events(message: types.Message, user_id_override=None):
     """ДТП и дорожные происшествия по городам - пересылаем сами тексты
@@ -28183,6 +28751,9 @@ async def start_subscription_webhook_server():
     # пользователя (21.09.2026), тот же роутинг-паттерн, что у карты/погоды.
     app.router.add_get(WHERE_TO_GO_WEBAPP_PATH, handle_where_to_go_webapp)
     app.router.add_get(WHERE_TO_GO_DATA_API_PATH, handle_where_to_go_data_api)
+    # Единое приложение (WebApp) - ЭТАП 1, тестовая кнопка (см. блок "ЕДИНОЕ
+    # ПРИЛОЖЕНИЕ (WebApp) - ЭТАП 1" выше, ДОБАВЛЕНО 26.09.2026).
+    app.router.add_get(UNIFIED_APP_WEBAPP_PATH, handle_unified_app_webapp)
     app.router.add_get(MAP_WEBAPP_PATH, handle_map_webapp)
     app.router.add_get(MAP_POSITIONS_API_PATH, handle_map_positions_api)
     app.router.add_get(MAP_MY_PROFILE_API_PATH, handle_map_my_profile_api)
