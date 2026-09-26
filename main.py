@@ -17016,6 +17016,17 @@ def unified_app_html():
   const TIPS_APP_URL_IOS = """ + json.dumps(TIPS_APP_URL_IOS) + """;
   const TIPS_APP_URL_ANDROID = """ + json.dumps(TIPS_APP_URL_ANDROID) + """;
   const CATEGORIES_WITHOUT_EVENTS_OR_AIRPORTS = ['courier', 'cargo']; // см. CATEGORIES_WITHOUT_EVENTS/CATEGORIES_WITHOUT_AIRPORTS в main.py - в Python это одно и то же множество
+  // ДОБАВЛЕНО 26.09.2026 ("делаем рефералку делай по нашей структуре") -
+  // "Мои рефералы"/QR-код ссылки/презентация/вход в кабинет автопарка -
+  // те же самые данные и файлы, что уже отдаёт чат-версия реферальной
+  // программы, просто эндпоинты для мини-приложения (см. REFERRAL_LIST_API_PATH/
+  // REFERRAL_QR_PNG_PATH/PRESENTATION_PDF_WEBAPP_PATH/LEGAL_CABINET_ACCESS_API_PATH/
+  // LEGAL_CABINET_WEBAPP_PATH в main.py).
+  const REFERRAL_LIST_API_PATH = '""" + REFERRAL_LIST_API_PATH + """';
+  const REFERRAL_QR_PNG_PATH = '""" + REFERRAL_QR_PNG_PATH + """';
+  const PRESENTATION_PDF_WEBAPP_PATH = '""" + PRESENTATION_PDF_WEBAPP_PATH + """';
+  const LEGAL_CABINET_ACCESS_API_PATH = '""" + LEGAL_CABINET_ACCESS_API_PATH + """';
+  const LEGAL_CABINET_WEBAPP_PATH = '""" + LEGAL_CABINET_WEBAPP_PATH + """';
   function tgInitDataParam() {
     const v = (tg && tg.initData) || '';
     return v ? ('&tgInitData=' + encodeURIComponent(v)) : '';
@@ -17353,6 +17364,12 @@ def unified_app_html():
         grid.appendChild(a);
       }
     });
+
+    // ДОБАВЛЕНО 26.09.2026 ("водилы юр лица") - плитка входа в кабинет
+    // автопарка добавляется отдельно и асинхронно (не блокирует показ
+    // основной сетки), т.к. требует серверной проверки "есть ли у ЭТОГО
+    // человека купленное/админское юр.лицо" - см. maybeAddLegalCabinetTile.
+    maybeAddLegalCabinetTile();
   }
 
   function openServiceDetail(kind) {
@@ -17374,6 +17391,16 @@ def unified_app_html():
       '<a class="svc-btn ghost" href="' + TIPS_APP_URL_ANDROID + '" target="_blank" rel="noopener">🤖 Получить чаевые на Android</a>';
   }
 
+  // ДОБАВЛЕНО 26.09.2026 (прямая просьба пользователя - "делаем рефералку
+  // делай по нашей структуре") - экран дополнен тем, чего не хватало по
+  // сравнению с чат-версией (show_referral_program/referral_menu_keyboard):
+  // проценты по уровням ("Как это работает" - ТЕ ЖЕ rates_percent, что уже
+  // приходили в data и раньше, просто не отображались), список "Мои
+  // рефералы" и QR-код ссылки (по кнопке, лениво - см. loadReferralList/
+  // loadReferralQr ниже) и ссылка на скачивание презентации. Вывод средств
+  // и переключение схемы Обычная/ЮРЛИЦО (пароль) сознательно остаются
+  // только в чате - те же самые причины/защита, что и раньше, здесь не
+  // трогались.
   async function loadReferralDetail(box) {
     try {
       const resp = await fetch('""" + REFERRAL_DATA_API_PATH + """', { headers: { 'X-Telegram-Init-Data': (tg && tg.initData) || '' } });
@@ -17383,6 +17410,14 @@ def unified_app_html():
         box.innerHTML = '<div class="svc-h">🤝 Реферальная программа</div><div class="svc-card">Скоро здесь можно будет приглашать друзей по своей ссылке и получать процент с их подписки. Раздел в разработке 🚀</div>';
         return;
       }
+      const rates = data.rates_percent || [];
+      const ratesNote = rates.length === 3
+        ? ('<div class="svc-card">Как это работает: ' + rates[0] + '% с каждого ежемесячного платежа приглашённого тобой напрямую (1 уровень), ' +
+           rates[1] + '% с платежей его рефералов (2 уровень) и ' + rates[2] + '% с платежей рефералов 2 уровня (3 уровень) - прямой процент от ' +
+           'суммы платежа на каждом уровне. Начисляется каждый месяц, пока реферал платит подписку. Дальше 3 уровня деньги не идут, но всю ветку ' +
+           'целиком видно в «Мои рефералы» ниже.</div>')
+        : '';
+      const presentationUrl = PRESENTATION_PDF_WEBAPP_PATH;
       box.innerHTML =
         '<div class="svc-h">🤝 Реферальная программа</div>' +
         '<div class="svc-link-text" id="refLink">' + data.link + '</div>' +
@@ -17394,6 +17429,12 @@ def unified_app_html():
         '<div class="svc-row"><span>Баланс</span><span class="v">' + data.balance_rub + ' ₽</span></div>' +
         '<div class="svc-row"><span>Заработано всего</span><span class="v">' + data.total_earned_rub + ' ₽</span></div>' +
         '<div class="svc-row"><span>Выведено всего</span><span class="v">' + data.total_withdrawn_rub + ' ₽</span></div>' +
+        ratesNote +
+        '<button type="button" class="svc-btn ghost" id="refListBtn">📋 Мои рефералы</button>' +
+        '<div id="refListBox"></div>' +
+        '<button type="button" class="svc-btn ghost" id="refQrBtn">📱 QR-код ссылки</button>' +
+        '<div id="refQrBox"></div>' +
+        '<a class="svc-btn ghost" href="' + presentationUrl + '" target="_blank" rel="noopener">📥 Скачать презентацию</a>' +
         '<div class="svc-note">Комиссия за вывод: ' + data.withdrawal_fee_percent + '%. Минимальная сумма вывода: ' + data.min_withdrawal_rub + ' ₽. Вывод средств - как и раньше, через бота в чате.</div>';
       const copyBtn = document.getElementById('refCopyBtn');
       if (copyBtn) {
@@ -17404,9 +17445,92 @@ def unified_app_html():
           } catch (e) { /* буфер обмена недоступен - ссылка всё равно видна текстом выше */ }
         });
       }
+      const listBtn = document.getElementById('refListBtn');
+      if (listBtn) {
+        listBtn.addEventListener('click', function () { loadReferralList(listBtn, document.getElementById('refListBox')); });
+      }
+      const qrBtn = document.getElementById('refQrBtn');
+      if (qrBtn) {
+        qrBtn.addEventListener('click', function () { loadReferralQr(qrBtn, document.getElementById('refQrBox')); });
+      }
     } catch (e) {
       box.innerHTML = '<div class="svc-h">🤝 Реферальная программа</div><div class="svc-card">Не удалось загрузить данные. Попробуй ещё раз.</div>';
     }
+  }
+
+  // "Мои рефералы" - ТЕ ЖЕ данные, что и у кнопки "📋 МОИ РЕФЕРАЛЫ" в чате
+  // (get_referral_breakdown), просто список подгружается лениво по нажатию
+  // и повторный клик просто прячет/показывает уже загруженный список
+  // (без лишнего запроса).
+  async function loadReferralList(btn, box) {
+    if (box.dataset.loaded === '1') { box.hidden = !box.hidden; return; }
+    btn.disabled = true;
+    box.innerHTML = '<div class="svc-note">Загружаю…</div>';
+    try {
+      const resp = await fetch(REFERRAL_LIST_API_PATH, { headers: { 'X-Telegram-Init-Data': (tg && tg.initData) || '' } });
+      if (!resp.ok) throw new Error('http_' + resp.status);
+      const data = await resp.json();
+      const items = data.items || [];
+      if (!items.length) {
+        box.innerHTML = '<div class="svc-note">Пока нет ни одного реферала 1-го уровня - поделись своей ссылкой выше.</div>';
+      } else {
+        box.innerHTML = items.map(function (it) {
+          return '<div class="svc-row"><span>ID ' + it.user_id + '</span><span class="v">' + it.sub_referrals + '</span></div>' +
+                 '<div class="svc-note" style="margin-top:-8px;">прямых рефералов у него (2 уровень) - ' + it.sub_referrals +
+                 ', всего в его ветке (3+ уровень, без начислений) - ' + it.branch_total + '</div>';
+        }).join('');
+      }
+      box.dataset.loaded = '1';
+    } catch (e) {
+      box.innerHTML = '<div class="svc-note">Не удалось загрузить список. Попробуй ещё раз.</div>';
+    }
+    btn.disabled = false;
+  }
+
+  // QR-код персональной ссылки - тот же build_referral_qr_png, что и у
+  // чат-кнопки "📱 QR-КОД ССЫЛКИ". <img> не умеет слать заголовок
+  // X-Telegram-Init-Data, поэтому картинка грузится через fetch() и
+  // превращается в blob-URL - initData не светится в адресе картинки.
+  async function loadReferralQr(btn, box) {
+    if (box.dataset.loaded === '1') { box.hidden = !box.hidden; return; }
+    btn.disabled = true;
+    box.innerHTML = '<div class="svc-note">Загружаю…</div>';
+    try {
+      const resp = await fetch(REFERRAL_QR_PNG_PATH, { headers: { 'X-Telegram-Init-Data': (tg && tg.initData) || '' } });
+      if (!resp.ok) throw new Error('http_' + resp.status);
+      const blob = await resp.blob();
+      const url = URL.createObjectURL(blob);
+      box.innerHTML = '<img src="' + url + '" alt="QR-код реферальной ссылки" style="width:100%;max-width:260px;display:block;margin:10px auto 0;border-radius:12px;">';
+      box.dataset.loaded = '1';
+    } catch (e) {
+      box.innerHTML = '<div class="svc-note">Не удалось загрузить QR-код. Попробуй ещё раз.</div>';
+    }
+    btn.disabled = false;
+  }
+
+  // Плитка входа в "Кабинет автопарка" (/legal_cabinet) - видна ТОЛЬКО тем,
+  // у кого уже есть купленное/админское юр.лицо (см. LEGAL_CABINET_ACCESS_API_PATH/
+  // handle_legal_cabinet_access_api в main.py - то же самое условие, что уже
+  // открывает кнопку "ЮРЛИЦО" прямой ссылкой в чате, а не запросом пароля).
+  // Добавляется поверх обычной сетки плиток renderServices() - молча ничего
+  // не делает, если доступа нет (плитки попросту не будет).
+  async function maybeAddLegalCabinetTile() {
+    try {
+      const resp = await fetch(LEGAL_CABINET_ACCESS_API_PATH, { headers: { 'X-Telegram-Init-Data': (tg && tg.initData) || '' } });
+      if (!resp.ok) return;
+      const data = await resp.json();
+      if (!data.has_access) return;
+      const grid = document.getElementById('svcGrid');
+      if (!grid || grid.querySelector('.tile-legal-cabinet')) return;
+      const initData = (tg && tg.initData) || '';
+      const url = LEGAL_CABINET_WEBAPP_PATH + (initData ? ('?tgInitData=' + encodeURIComponent(initData)) : '');
+      const a = document.createElement('a');
+      a.className = 'tile tile-legal-cabinet';
+      a.href = url;
+      a.rel = 'noopener';
+      a.innerHTML = '<div class="ic">🚘</div><div class="lbl">Кабинет автопарка</div>';
+      grid.appendChild(a);
+    } catch (e) { /* тихо: плитка появляется только если реально есть доступ */ }
   }
 
   async function loadSubscriptionDetail(box) {
@@ -21872,8 +21996,17 @@ const expandedDrivers = new Set();
 function esc(s) { return (s == null ? '' : String(s)).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function fmtMoney(kop) { return Math.round((kop||0)/100).toLocaleString('ru-RU') + '₽'; }
 
+// ДОБАВЛЕНО 26.09.2026 (вход в кабинет юр.лица прямо из единого приложения,
+// см. renderServices/maybeAddLegalCabinetTile в unified_app_html) - тот же
+// откат на URL-параметр tgInitData, что уже используется у карты/обычного
+// кабинета/отдачи заказа (см. _mapInitData в map_webapp_html): при обычном
+// прямом открытии этой страницы (Menu Button/своя инлайн-кнопка) tg.initData
+// заполнен как раньше и tgInitData в URL просто отсутствует; при переходе
+// СЮДА ссылкой из другой уже открытой WebApp-страницы (как здесь) tg.initData
+// у Telegram пустой, поэтому единое приложение явно прокидывает initData
+// параметром - без этого кабинет отвечал бы 401 invalid_init_data.
 async function apiCall(body) {
-  const initData = tg ? tg.initData : '';
+  const initData = (tg && tg.initData) || new URLSearchParams(window.location.search).get('tgInitData') || '';
   const opts = { headers: { 'X-Telegram-Init-Data': initData } };
   if (body) {
     opts.method = 'POST';
@@ -29246,6 +29379,10 @@ async def start_subscription_webhook_server():
     app.router.add_get(UNIFIED_APP_WEBAPP_PATH, handle_unified_app_webapp)
     app.router.add_get(SUPPORT_FAQ_API_PATH, handle_support_faq_api)
     app.router.add_get(REFERRAL_DATA_API_PATH, handle_referral_data_api)
+    app.router.add_get(REFERRAL_LIST_API_PATH, handle_referral_list_api)
+    app.router.add_get(REFERRAL_QR_PNG_PATH, handle_referral_qr_png)
+    app.router.add_get(PRESENTATION_PDF_WEBAPP_PATH, handle_presentation_pdf)
+    app.router.add_get(LEGAL_CABINET_ACCESS_API_PATH, handle_legal_cabinet_access_api)
     app.router.add_get(SUBSCRIPTION_STATUS_API_PATH, handle_subscription_status_api)
     app.router.add_post(SUBSCRIPTION_STATUS_API_PATH, handle_subscription_status_api)
     app.router.add_get(MAP_WEBAPP_PATH, handle_map_webapp)
@@ -30558,6 +30695,90 @@ async def handle_referral_data_api(request):
         'withdrawal_fee_percent': REFERRAL_WITHDRAWAL_FEE_PERCENT,
         'min_withdrawal_rub': REFERRAL_MIN_WITHDRAWAL_RUB,
     })
+
+
+# ДОБАВЛЕНО 26.09.2026 (прямая просьба пользователя - "делаем рефералку
+# делай по нашей структуре": раздел "Реферальная программа" единого
+# приложения дополнен списком "Мои рефералы", QR-кодом ссылки и ссылкой на
+# скачивание презентации - той же самой информацией, что уже есть в
+# чат-версии (referral_list_handler/referral_qr_show/
+# referral_download_presentation), просто отданной как JSON/файл вместо
+# отдельных сообщений бота.
+REFERRAL_LIST_API_PATH = '/referral/list'
+
+
+async def handle_referral_list_api(request):
+    """"Мои рефералы" в едином приложении - ТЕ ЖЕ данные, что уже строит
+    referral_list_handler (get_referral_breakdown), просто в JSON вместо
+    готового текста сообщения - ничего не пересчитано заново."""
+    user_id = _cabinet_require_user(request)
+    if not user_id:
+        return web.json_response({'error': 'invalid_init_data'}, status=401)
+    breakdown = get_referral_breakdown(user_id)
+    return web.json_response({'items': breakdown})
+
+
+# QR-код персональной реферальной ссылки картинкой (PNG) - тот же
+# build_referral_qr_png, что и у чат-кнопки "📱 QR-КОД ССЫЛКИ" (referral_qr_show
+# выше), только отдан HTTP-эндпоинтом, чтобы вставить <img> прямо в мини-
+# приложение. <img> не умеет слать заголовок X-Telegram-Init-Data, поэтому
+# клиент грузит картинку через fetch() (см. loadReferralDetail в
+# unified_app_html) и превращает ответ в blob-URL - initData передаётся
+# обычным заголовком, как и у остальных JSON-эндпоинтов, а не светится в
+# URL/логах сервера.
+REFERRAL_QR_PNG_PATH = '/referral/qr.png'
+
+
+async def handle_referral_qr_png(request):
+    user_id = _cabinet_require_user(request)
+    if not user_id:
+        return web.Response(status=401)
+    me = await bot.get_me()
+    link = get_referral_link(me.username, user_id)
+    try:
+        png_bytes = build_referral_qr_png(link)
+    except Exception:
+        logger.exception("❌ Не удалось сгенерировать QR-код реферальной ссылки (единое приложение)")
+        return web.Response(status=500)
+    return web.Response(
+        body=png_bytes, content_type='image/png',
+        headers={'Cache-Control': 'no-store, no-cache, must-revalidate'},
+    )
+
+
+# Презентация бота (тот же PDF-файл, что шлёт в чат referral_download_
+# presentation) - обычный публичный GET, без проверки initData: файл не
+# содержит персональных данных (никаких реферальных ссылок внутри - в
+# чат-версии тоже "без QR-кода" по той же причине), поэтому его безопасно
+# отдавать прямой ссылкой <a href> из мини-приложения.
+PRESENTATION_PDF_WEBAPP_PATH = '/assets/presentation.pdf'
+
+
+async def handle_presentation_pdf(request):
+    if not os.path.exists(PRESENTATION_PDF_PATH):
+        return web.Response(status=404)
+    return web.FileResponse(
+        PRESENTATION_PDF_PATH,
+        headers={'Content-Disposition': 'attachment; filename="Taxi_Helper_presentation.pdf"'},
+    )
+
+
+# Плитка входа в "Кабинет автопарка" (/legal_cabinet) в разделе "Сервисы"
+# единого приложения - видна ТОЛЬКО тому, у кого кнопка "ЮРЛИЦО" в
+# referral_menu_keyboard уже и так открывается прямой web_app-ссылкой на
+# кабинет (см. cabinet_unlocked там), а не запросом пароля - то же самое
+# условие, продублированное сюда, чтобы решить это ДО открытия раздела
+# "Сервисы" (сама кнопка живёт в чате, а не в мини-приложении).
+LEGAL_CABINET_ACCESS_API_PATH = '/legal_cabinet/access'
+
+
+async def handle_legal_cabinet_access_api(request):
+    user_id = _cabinet_require_user(request)
+    if not user_id:
+        return web.json_response({'error': 'invalid_init_data'}, status=401)
+    owned_entity = get_legal_entity_owned_by(user_id)
+    cabinet_unlocked = get_referrer_type(user_id) == 'admin' or is_legal_entity_referral_subscription_active(user_id)
+    return web.json_response({'has_access': bool(owned_entity and cabinet_unlocked)})
 
 
 def referral_withdraw_cancel_keyboard():
