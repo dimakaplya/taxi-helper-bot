@@ -67,6 +67,19 @@ CITY_BBOX = {
     'sochi': (43.38, 39.60, 43.70, 40.00),
 }
 
+# ДОБАВЛЕНО 26.09.2026 (прямая просьба пользователя - "загрузи базы МО
+# области зарядок заправок") - CITY_BBOX['moscow'] покрывает только сам
+# город (примерно в границах МКАД), Московская область в него не попадает.
+# Бот уже трактует город 'moscow' как "Москва + область" целиком (та же
+# логика, что у moscow_district_demand.json/moscow_delivery_demand.json -
+# см. main.py), поэтому здесь ДОПОЛНИТЕЛЬНО (не вместо bbox, а вместе с
+# ним - см. fetch_all_moscow/main ниже) тянем ещё и всю область отдельным
+# запросом area["name"="Московская область"] (сам город Москва - отдельный
+# субъект РФ в OSM, area с этим именем НЕ включает его, дублей с bbox выше
+# почти нет, а редкие ID, которые всё же совпадут на границе, отфильтровываются
+# по id + повторным сеточным дедупом в fetch_all_moscow).
+MOSCOW_REGION_AREA_NAME = 'Московская область'
+
 GRID_STEP = 0.0015  # ~120 м на широте Москвы
 
 
@@ -147,6 +160,75 @@ out center tags;'''
     return list(cells.values())
 
 
+def dedup_points(points):
+    """Сеточный дедуп (см. fetch_city выше), но принимает уже готовый общий
+    список точек - используется в fetch_all_moscow, чтобы убрать редкие
+    почти-дубли на стыке город/область (после дедупа по id)."""
+    cells = {}
+    order = []
+    for point in points:
+        key = (point['kind'], round(point['lat'] / GRID_STEP), round(point['lon'] / GRID_STEP))
+        existing = cells.get(key)
+        if not existing:
+            cells[key] = point
+            order.append(key)
+        elif not existing.get('name') and point.get('name'):
+            cells[key] = point
+    return [cells[k] for k in order]
+
+
+def fetch_area(area_name):
+    """Как fetch_city, но area["name"=...] вместо bbox - см.
+    MOSCOW_REGION_AREA_NAME выше."""
+    query = f'''[out:json][timeout:180];
+area["name"="{area_name}"]["admin_level"="4"]->.a;
+(
+  node["amenity"="fuel"](area.a);
+  way["amenity"="fuel"](area.a);
+  node["amenity"="charging_station"](area.a);
+  way["amenity"="charging_station"](area.a);
+);
+out center tags;'''
+    resp = requests.post(OVERPASS_URL, data={'data': query}, timeout=max(REQUEST_TIMEOUT, 190))
+    resp.raise_for_status()
+    data = resp.json()
+
+    raw_points = []
+    for el in data.get('elements', []):
+        tags = el.get('tags') or {}
+        kind = classify(tags)
+        if not kind:
+            continue
+        if el.get('type') == 'node':
+            lat, lon = el.get('lat'), el.get('lon')
+        else:
+            center = el.get('center') or {}
+            lat, lon = center.get('lat'), center.get('lon')
+        if lat is None or lon is None:
+            continue
+        osm_id = f"{el.get('type')}/{el.get('id')}"
+        name = tags.get('name') or tags.get('brand') or tags.get('operator')
+        point = {'id': osm_id, 'lat': round(lat, 6), 'lon': round(lon, 6), 'name': name, 'kind': kind}
+        if kind == 'charging':
+            point['sockets'] = socket_info(tags)
+            point['operator'] = tags.get('operator') or tags.get('brand')
+        raw_points.append(point)
+    return dedup_points(raw_points)
+
+
+def fetch_all_moscow():
+    """'moscow' = город + вся область одним набором точек (см.
+    MOSCOW_REGION_AREA_NAME выше) - bbox-точки города + area-точки области,
+    дедуп по id (сначала) и затем ещё раз по сетке (на случай, если
+    какая-то точка на границе всё же не сматчилась по id)."""
+    city_points = fetch_city(CITY_BBOX['moscow'])
+    time.sleep(0.5)
+    region_points = fetch_area(MOSCOW_REGION_AREA_NAME)
+    city_ids = {p['id'] for p in city_points}
+    combined = city_points + [p for p in region_points if p['id'] not in city_ids]
+    return dedup_points(combined)
+
+
 def main():
     result = {
         'generated_at': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'),
@@ -155,7 +237,9 @@ def main():
     for bot_city, bbox in CITY_BBOX.items():
         logger.info(f"🔄 Тяну заправки+зарядки для {bot_city}...")
         try:
-            points = fetch_city(bbox)
+            # ИЗМЕНЕНО 26.09.2026 - см. fetch_all_moscow/MOSCOW_REGION_AREA_NAME
+            # выше: только для 'moscow' добавляем область к городу.
+            points = fetch_all_moscow() if bot_city == 'moscow' else fetch_city(bbox)
             result['cities'][bot_city] = points
             fuel = sum(1 for p in points if p['kind'] == 'fuel')
             charging = sum(1 for p in points if p['kind'] == 'charging')
