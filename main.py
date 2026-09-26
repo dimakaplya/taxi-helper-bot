@@ -8221,7 +8221,30 @@ async def score_district_candidates(city, category, user_lat=None, user_lon=None
     scored.sort(key=lambda d: d['adjusted'], reverse=True)
     result = []
     for d in scored[:limit]:
-        reasons = [f"{d['demand']}% спроса в районе"]
+        # ИЗМЕНЕНО 26.09.2026 (прямая просьба пользователя - "пиши сразу в
+        # районах какие тарифы сейчас в спросе") - раньше здесь была только
+        # безликая "N% спроса в районе", непонятно, к какому именно тарифу
+        # относится это число (d['demand'] - МАКСИМУМ по всем рассматриваемым
+        # тарифам категории/смены, см. цикл выше). Теперь называем САМИ
+        # тарифы, которые сейчас реально в повышенном спросе в этом районе -
+        # переиспользуем recommended_district_tariffs (та же функция и тот же
+        # порог "в спросе", что и у пуша "🚕 СОВЕТ ПО ТАРИФУ РАЙОНА", см. ниже
+        # по файлу), сужаем до отмеченных тарифов смены, если они есть
+        # (used_specific_tariffs). Если ни один тариф не перешёл порог показа
+        # (used_specific_tariffs было указано, но конкретно сейчас "не
+        # горит") - откат на прежнюю безликую формулировку с числом, чтобы
+        # карточка не осталась совсем без объяснения, откуда взялся балл.
+        try:
+            hot_tariffs = recommended_district_tariffs(city, d['name'], category, weekday, now.hour, d['lat'], d['lon'])
+        except Exception:
+            hot_tariffs = []
+        if used_specific_tariffs:
+            hot_tariffs = [t for t in hot_tariffs if t in used_specific_tariffs]
+        if hot_tariffs:
+            tariffs_str = ' и '.join(hot_tariffs)
+            reasons = [f"🔥 сейчас в спросе тариф {tariffs_str} - {d['demand']}% спроса в районе"]
+        else:
+            reasons = [f"{d['demand']}% спроса в районе"]
         # ДОБАВЛЕНО 24.09.2026 (прямая просьба пользователя - "эти тарифы
         # обязательно тогда прописывать куда поехать") - явно показываем,
         # что спрос посчитан именно под отмеченные на старте смены тарифы,
@@ -8271,6 +8294,12 @@ async def score_district_candidates(city, category, user_lat=None, user_lon=None
         result.append({
             'label': f"Район {d['name']}", 'score': d['adjusted'], 'reasons': reasons, 'closed': False,
             'advice': advice, 'lat': d['lat'], 'lon': d['lon'], 'kind': 'district',
+            # ДОБАВЛЕНО 26.09.2026 - см. handle_where_to_go_data_api ниже
+            # (совет "включать доп. тариф или нет" у верхней рекомендации) -
+            # само имя района (без префикса "Район ", как в label) нужно
+            # отдельно, чтобы снова обратиться к матрице спроса по
+            # конкретному тарифу-кандидату на подключение.
+            'district_name': d['name'],
             'nearby_event_lat': nearby_event['lat'] if nearby_event else None,
             'nearby_event_lon': nearby_event['lon'] if nearby_event else None,
         })
@@ -16224,6 +16253,38 @@ async def handle_where_to_go_data_api(request):
     podium = open_candidates[:3]
     district_candidates = [c for c in open_candidates if c.get('kind') == 'district' and c.get('dist_km') is not None]
     district_candidates.sort(key=lambda c: c['dist_km'])
+    # ДОБАВЛЕНО 26.09.2026 (прямая просьба пользователя - "а верхняя
+    # рекомендация включать доп тариф или нет") - ТОЛЬКО у самой верхней
+    # карточки ("🏆 Сейчас лучше всего", т.е. podium[0]) и ТОЛЬКО когда это
+    # район (kind='district') и у водителя активна смена с конкретно
+    # отмеченными тарифами (selected_tariffs, см. выше) - явный совет,
+    # стоит ли подключить дополнительный (более дешёвый) тариф именно в
+    # этом районе прямо сейчас. Та же иерархия/логика "на одну ступень
+    # вниз", что уже используется в пуше "переключись на пониженный
+    # тариф" (_lowest_selected_tariff/_lower_tariff_candidates/
+    # _district_tariff_demand_value/_district_tariff_demand_threshold, см.
+    # ниже по файлу) - переиспользуем её здесь же, а не дублируем.
+    if podium and podium[0].get('kind') == 'district' and selected_tariffs:
+        best = podium[0]
+        district_name = best.get('district_name')
+        current_tariff = _lowest_selected_tariff(category, selected_tariffs)
+        if district_name and current_tariff:
+            weekday_str = str(now.weekday())
+            extra_advice = None
+            try:
+                for candidate in _lower_tariff_candidates(category, current_tariff):
+                    if candidate in selected_tariffs:
+                        continue  # уже подключён - предлагать нечего
+                    value = _district_tariff_demand_value(city, district_name, category, candidate, weekday_str, now.hour)
+                    threshold = _district_tariff_demand_threshold(city, category, candidate, best.get('lat'), best.get('lon'))
+                    if value is not None and threshold and value >= threshold[0]:
+                        extra_advice = f"➕ Стоит подключить доп. тариф {candidate} - спрос в этом районе сейчас повышен"
+                        break
+            except Exception:
+                logger.exception(f"❌ Не удалось посчитать совет по доп. тарифу для 'Куда ехать' ({city}/{category})")
+            if extra_advice is None:
+                extra_advice = "✅ Доп. тариф подключать не нужно - текущих хватит"
+            best['reasons'] = list(best.get('reasons') or []) + [extra_advice]
     banner = where_to_go_banner(city, category)
 
     return web.json_response({
