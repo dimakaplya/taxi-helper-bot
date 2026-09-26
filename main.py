@@ -1364,8 +1364,16 @@ def compute_zone_capacity_shares(icao):
 # от 22.09.2026 - "грузовое такси может отметить и грузовое, и курьер
 # сразу, грузовой водитель может брать и курьерские заказы тоже" - этот
 # принцип не отменялся, просто generic "Курьер" стал двумя конкретными).
+# УБРАНЫ 26.09.2026 (прямая просьба пользователя - "убери из бота отовсюду
+# тариф минивэн детский") - "Минивэн" и "Детский" удалены из списка тарифов
+# такси. Список тарифов - единственный источник правды (везде в боте
+# читается динамически через CATEGORIES[category]['tariffs'], см.
+# shift_tariff_options/format_queue_breakdown и другие места) - убрать их из
+# выбора при старте смены, из панели "Тарифы" на карте, из сводки очереди
+# на аэропорту и т.д. было достаточно поправить ЗДЕСЬ, без изменений в
+# остальном коде.
 CATEGORIES = {
-    'taxi': {'name': '🚕 ТАКСИ', 'tariffs': ['Эконом', 'Комфорт', 'Комфорт+', 'Минивэн', 'Детский']},
+    'taxi': {'name': '🚕 ТАКСИ', 'tariffs': ['Эконом', 'Комфорт', 'Комфорт+']},
     'ultima': {'name': '💎 ТАКСИ ULTIMA', 'tariffs': ['Business', 'Premier', 'Elite', 'Cruise']},
     'courier': {'name': '📦 КУРЬЕР', 'tariffs': ['Яндекс Еда — Курьер', 'Курьер — Экспресс']},
     'cargo': {'name': '🚚 ГРУЗОВОЕ ТАКСИ', 'tariffs': [
@@ -7638,7 +7646,7 @@ async def switch_peak_hours_day(callback_query: types.CallbackQuery):
 # DEFAULT_QUEUE_LONG_MIN - прежнее общее значение 21.
 TARIFF_QUEUE_LONG_MIN = {
     # Такси
-    'Эконом': 66, 'Комфорт': 61, 'Комфорт+': 46, 'Минивэн': 16, 'Детский': 46,
+    'Эконом': 66, 'Комфорт': 61, 'Комфорт+': 46,
     # Ultima
     'Business': 46, 'Premier': 26, 'Elite': 16, 'Cruise': 16,
 }
@@ -8180,9 +8188,19 @@ async def score_district_candidates(city, category, user_lat=None, user_lon=None
     категории. Если смена не активна, initData не пришёл/не проверился, или
     ни один из отмеченных тарифов не нашёлся в этом словаре (например,
     водитель отметил только "Минивэн"/"Cruise", для которых своей колонки
-    нет) - откатываемся на прежнее поведение (индексы всей категории)."""
-    table = get_district_demand(city)
-    indices = MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES.get(category) if table else None
+    нет) - откатываемся на прежнее поведение (индексы всей категории).
+
+    ИСПРАВЛЕНО 26.09.2026 (прямая просьба пользователя - баг-репорт "загрузили
+    районы почему он тока центр показывает это курьеры", см. подробный
+    комментарий у DELIVERY_CATEGORY_TARIFF_INDICES выше) - для courier/cargo
+    теперь читаем районную матрицу ДОСТАВКИ (get_delivery_demand), а не
+    таксомоторную, и индексы берём из DELIVERY_CATEGORY_TARIFF_INDICES/
+    DELIVERY_TARIFF_INDEX вместо MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES/
+    SHIFT_TARIFF_TO_DEMAND_INDEX (is_delivery ниже)."""
+    is_delivery = category in ('courier', 'cargo')
+    table = get_delivery_demand(city) if is_delivery else get_district_demand(city)
+    category_indices = DELIVERY_CATEGORY_TARIFF_INDICES if is_delivery else MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES
+    indices = category_indices.get(category) if table else None
     # used_specific_tariffs - только те отмеченные тарифы, что реально нашлись
     # в SHIFT_TARIFF_TO_DEMAND_INDEX (см. докстринг выше) - непустой список
     # значит, что подбор районов реально сузился под смену, а не под всю
@@ -8191,7 +8209,7 @@ async def score_district_candidates(city, category, user_lat=None, user_lon=None
     # тогда прописывать куда поехать").
     used_specific_tariffs = None
     if selected_tariffs:
-        tariff_map = SHIFT_TARIFF_TO_DEMAND_INDEX.get(category, {})
+        tariff_map = DELIVERY_TARIFF_INDEX if is_delivery else SHIFT_TARIFF_TO_DEMAND_INDEX.get(category, {})
         matched = [t for t in selected_tariffs if t in tariff_map]
         specific_indices = tuple(sorted({tariff_map[t] for t in matched}))
         if specific_indices:
@@ -8252,7 +8270,15 @@ async def score_district_candidates(city, category, user_lat=None, user_lon=None
         # городами больше не проблема - работает для любого города из
         # DISTRICT_DEMAND_FILES, не только Москвы.
         district_raining = district_rain_now(city, name, fallback_rain_now=rain_now)
-        if district_raining:
+        # ИСПРАВЛЕНО 26.09.2026 (прямая просьба пользователя, см. is_delivery
+        # выше) - этот дождевой "пол" настроен и откалиброван ИСКЛЮЧИТЕЛЬНО
+        # под таксомоторные индексы (0/1 = Эконом/Комфорт у ТАКСИ). У курьера
+        # индексы 0/1 - это "Яндекс Еда — Курьер"/"Курьер — Экспресс" (см.
+        # DELIVERY_TARIFF_INDEX) - совсем другие тарифы, которые случайно
+        # совпадают числом с таксомоторными, поэтому set(indices).issubset(
+        # {0, 1}) для courier был бы ложным срабатыванием. Блок целиком
+        # пропускаем для доставки - своего дождевого порога для доставки нет.
+        if district_raining and not is_delivery:
             # ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - "спрос
             # дождя не влияет вообще ни на какие тарифы кроме эконом и
             # комфорт за пределами городов", уточнение - "речь идёт и кнопка
@@ -8311,7 +8337,7 @@ async def score_district_candidates(city, category, user_lat=None, user_lon=None
         # горит") - откат на прежнюю безликую формулировку с числом, чтобы
         # карточка не осталась совсем без объяснения, откуда взялся балл.
         try:
-            hot_tariffs = recommended_district_tariffs(city, d['name'], category, weekday, now.hour, d['lat'], d['lon'])
+            hot_tariffs = recommended_tariffs_for_category(city, category, d['name'], weekday, now.hour, d['lat'], d['lon'])
         except Exception:
             hot_tariffs = []
         if used_specific_tariffs:
@@ -8641,7 +8667,17 @@ async def compute_where_to_go(city, category, user_lat=None, user_lon=None, sele
         # города") - тот же путь теперь и для Питера (была своя матрица
         # спроса загружена пользователем), не только для Москвы -
         # см. DISTRICT_DEMAND_FILES/CITY_CENTER_COORDS.
-        if city in DISTRICT_DEMAND_FILES and category in ('taxi', 'ultima'):
+        # ИСПРАВЛЕНО 26.09.2026 (прямая просьба пользователя - баг-репорт
+        # "загрузили районы почему он тока центр показывает это курьеры") -
+        # это и было КОРНЕВОЙ причиной: условие ниже проверяло РОВНО
+        # 'taxi'/'ultima' и таксомоторный DISTRICT_DEMAND_FILES, поэтому для
+        # courier/cargo score_district_candidates НИКОГДА даже не вызывалась
+        # (сама функция уже умела бы прочитать районную матрицу доставки -
+        # см. is_delivery в её теле выше - но до неё просто не доходило).
+        # _city_has_demand_data (см. выше по файлу) - тот же диспетчер, что
+        # уже используется для пушей/карты - сам выбирает нужный файл
+        # (таксомоторный или доставочный) по category.
+        if _city_has_demand_data(city, category) and category in ('taxi', 'ultima', 'courier', 'cargo'):
             candidates.extend(await score_district_candidates(city, category, user_lat=user_lat, user_lon=user_lon, limit=3, selected_tariffs=selected_tariffs))
             candidates.append(await score_city_center_candidate(city, category))
         else:
@@ -11497,49 +11533,34 @@ MAP_CHROME_CSS = """
      подсветка кнопки "🚦 Пробки", когда слой пробок включён. */
   .layer-toggle-btn.active { background: #ffc400; color: #1c1c1c; border-color: #ffc400; }
   /* ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя, прислал референс-
-     скриншот жёлтой круглой кнопки с иконкой питания - "такой индикатор
-     жёлтый когда водитель на линии и серый когда нет, работает от кнопки,
-     будет на карте анимация радари внутри кнопки"; уточнено в диалоге:
-     статус смены, в углу экрана карты, не привязан к позиции - кликабельная
-     кнопка, тап переключает смену) - круглая кнопка-индикатор смены.
-     Серый (#8E8E93) вне смены, жёлтый (#FFB800, тот же оттенок, что на
-     референсе) во время смены - см. shiftToggleBtn/updateShiftToggleBtnUI
-     в JS ниже.
-     ПЕРЕМЕЩЕНО 25.09.2026 (прямая просьба пользователя - "индикатор смены
-     переместить в левый верхний угол"): раньше стояла в правом нижнем
-     углу карты, теперь - в левом верхнем (top/left вместо bottom/right).
-     Этот угол освободился, т.к. штатный Leaflet зум-контрол переехал по
-     центру левого края (см. .leaflet-control-zoom выше); .filter-toggle
-     и .map-toggles-row сдвинуты правее (left:80px), чтобы не перекрываться
-     с этой кнопкой (56px ширина + 14px отступ от края + зазор). */
-  /* ИЗМЕНЕНО 25.09.2026 (прямая просьба пользователя - "кружок слева
-     всегда жёлтый... с этим вот локатором он постоянно горел, больше
-     ничего не трогай"): кнопка теперь ВСЕГДА показывает жёлтый фон и
-     крутящийся радар-луч, независимо от реального статуса смены - это
-     чисто визуальное изменение, JS-логика клика и статус смены не
-     затронуты (.active/.pending классы по-прежнему навешиваются JS как
-     раньше). ОТМЕНЕНО 25.09.2026 (прямая новая просьба пользователя -
-     "серый когда не на смене, жёлтый когда на смене") - цвет кружка снова
-     отражает реальный статус смены: серый по умолчанию (.active ещё не
-     навешен, т.е. смена не идёт), жёлтый при .active (смена идёт).
-     Радар-луч по-прежнему крутится всегда (это отдельная, не отменяемая
-     просьба) - меняется только background. */
-  .shift-toggle-btn { position: absolute; top: 14px; left: 14px; z-index: 1000; width: 56px; height: 56px; border-radius: 50%; background: #8a8a8a; border: 3px solid #fff; box-shadow: 0 2px 8px rgba(0,0,0,.45); display: flex; align-items: center; justify-content: center; cursor: pointer; user-select: none; overflow: hidden; transition: background .25s, transform .12s; }
-  .shift-toggle-btn:active { transform: scale(.93); }
-  .shift-toggle-btn.active { background: #FFB800; }
-  .shift-toggle-btn.pending { opacity: .6; pointer-events: none; }
-  .shift-toggle-btn .power-icon { position: relative; z-index: 2; width: 26px; height: 26px; filter: drop-shadow(0 1px 1px rgba(0,0,0,.35)); }
-  /* ДОБАВЛЕНО 25.09.2026 (уточнение "внутри анимация радара крутится") -
-     вращающийся conic-gradient "луч", замаскированный кругом кнопки - тот
-     же приём, что у классической радар-развёртки: полупрозрачный сектор
-     крутится вокруг центра, за пределами кнопки не виден (overflow:hidden
-     у .shift-toggle-btn). ИЗМЕНЕНО 25.09.2026: раньше был виден только
-     при активной смене, теперь виден и крутится ВСЕГДА (по прямой
-     просьбе пользователя - кружок должен постоянно "гореть"). */
-  .shift-toggle-btn .radar-sweep { position: absolute; inset: 0; border-radius: 50%; background: conic-gradient(from 0deg, rgba(255,255,255,.6), rgba(255,255,255,0) 40%); opacity: 1; animation: shift-radar-spin 2.4s linear infinite; }
-  .shift-toggle-btn.active .radar-sweep { opacity: 1; animation: shift-radar-spin 2.4s linear infinite; }
-  @keyframes shift-radar-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
-  @media (prefers-reduced-motion: reduce) { .shift-toggle-btn .radar-sweep { animation: none !important; } }
+     скриншот жёлтой круглой кнопки с иконкой питания) - раньше здесь была
+     круглая кнопка-индикатор смены в углу карты (тап переключал смену).
+     ЗАМЕНЕНО 26.09.2026 (прямая просьба пользователя, референс-скриншот
+     Яндекс Про - "можешь сделать такой вот ползунок который можно
+     передвигать слева направо, тем самым активировать выход на линию") -
+     круглая кнопка убрана, вместо неё .shift-slider - широкая полоса-
+     свайпер во всю ширину экрана снизу (см. HTML #shiftSlider/
+     #shiftSliderHandle ниже и JS doShiftToggle/updateShiftToggleBtnUI).
+     Уточнено в диалоге: завершение смены - тем же свайпом (в обе стороны
+     одним и тем же жестом), плашка времени/тарифа (.bottom-info-bar)
+     сдвинута выше, чтобы освободить место снизу для этой полосы. */
+  .shift-slider {
+    position: absolute; left: 12px; right: 12px; bottom: max(14px, env(safe-area-inset-bottom, 0px));
+    z-index: 1000; height: 56px; border-radius: 28px; background: #8a8a8a;
+    border: 3px solid #fff; box-shadow: 0 2px 8px rgba(0,0,0,.45);
+    display: flex; align-items: center; justify-content: center;
+    overflow: hidden; user-select: none; transition: background .25s;
+  }
+  .shift-slider.active { background: #FFB800; }
+  .shift-slider.pending { opacity: .6; }
+  .shift-slider-label { position: relative; z-index: 1; font-family: -apple-system, sans-serif; font-weight: 700; font-size: 15px; color: #1c1c1c; pointer-events: none; }
+  .shift-slider-handle {
+    position: absolute; left: 3px; top: 3px; width: 44px; height: 44px; border-radius: 50%;
+    background: #fff; box-shadow: 0 2px 6px rgba(0,0,0,.4); display: flex; align-items: center;
+    justify-content: center; cursor: grab; touch-action: none; z-index: 2; transition: left .25s ease;
+  }
+  .shift-slider-handle.dragging { transition: none; cursor: grabbing; }
+  .shift-slider-handle svg { width: 22px; height: 22px; }
   /* ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - "сделай выбор
      тарифа с картой прям") - карточка выбора тарифов ПРЯМО НА КАРТЕ вместо
      ухода в чат бота (см. openTariffPicker/closeTariffPicker в JS ниже,
@@ -11576,7 +11597,10 @@ MAP_CHROME_CSS = """
        на всю ширину экрана с равными отступами по бокам (left/right вместо
        центрирования transform'ом), сегменты разъезжаются по всей ширине
        (justify-content: space-around вместо center). */
-    position: absolute; left: 12px; right: 12px; bottom: max(14px, env(safe-area-inset-bottom, 0px));
+    /* ИЗМЕНЕНО 26.09.2026 (прямая просьба пользователя - см. .shift-slider
+       выше) - плашка сдвинута выше на высоту свайпера смены + зазор
+       (56px + 10px = 66px), чтобы не перекрываться с ним внизу экрана. */
+    position: absolute; left: 12px; right: 12px; bottom: calc(max(14px, env(safe-area-inset-bottom, 0px)) + 66px);
     z-index: 1000; display: flex; align-items: center; gap: 8px;
     background: rgba(20,20,20,.82); backdrop-filter: blur(8px); color: #fff;
     border: 1px solid rgba(255,196,0,.35); border-radius: 16px; padding: 10px 16px;
@@ -11901,15 +11925,17 @@ def map_webapp_html():
        не только владельцу кабинета. -->
   <div class="layer-toggle-btn" id="mineToggleBtn" style="display:none">👥 Все</div>
 </div>
-<!-- ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя, референс-скриншот -
-     жёлтый/серый круглый индикатор смены с анимацией радара, кликабельная
-     кнопка в углу экрана) - см. .shift-toggle-btn в CSS выше и
-     shiftToggleBtn/updateShiftToggleBtnUI в JS ниже. -->
-<div class="shift-toggle-btn" id="shiftToggleBtn" title="Начать/завершить смену">
-  <div class="radar-sweep"></div>
-  <svg class="power-icon" viewBox="0 0 24 24" fill="#fff">
-    <path d="M13 3h-2v10h2V3zm4.83 2.17-1.42 1.42A6.92 6.92 0 0 1 19 12c0 3.87-3.13 7-7 7s-7-3.13-7-7c0-2.24 1.06-4.32 2.83-5.65L6.41 5.17A8.936 8.936 0 0 0 3 12c0 4.97 4.03 9 9 9s9-4.03 9-9c0-2.78-1.28-5.3-3.17-6.83z"/>
-  </svg>
+<!-- ЗАМЕНЕНО 26.09.2026 (прямая просьба пользователя, референс-скриншот
+     Яндекс Про - свайп-полоса "Выйти на линию" вместо круглой кнопки) -
+     см. .shift-slider в CSS выше и doShiftToggle/updateShiftToggleBtnUI в
+     JS ниже. Ручка (#shiftSliderHandle) - перетаскиваемый белый кружок,
+     свайп до ~70% ширины полосы = переключить смену (та же логика POST
+     /map/toggle_shift, что была у клика по старой круглой кнопке). -->
+<div class="shift-slider" id="shiftSlider" title="Свайпни, чтобы начать/завершить смену">
+  <div class="shift-slider-label" id="shiftSliderLabel">Выйти на линию</div>
+  <div class="shift-slider-handle" id="shiftSliderHandle">
+    <svg viewBox="0 0 24 24" fill="#1c1c1c"><path d="M8 5v14l11-7z"/></svg>
+  </div>
 </div>
 <!-- ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - "сделай выбор
      тарифа с карты прям") - см. .tariff-picker-overlay в CSS выше и
@@ -12588,18 +12614,27 @@ def map_webapp_html():
   // коммитов 19d7761/cba0350 - этот способ по конструкции не может её
   // уронить, т.к. ничего не меняет в исполнении, только пишет в строку).
   let myProfileDiagState = 'pending';
-  // ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - жёлтый/серый
-  // кликабельный индикатор смены с радар-анимацией, см. .shift-toggle-btn
-  // в CSS и div#shiftToggleBtn в HTML выше) - .active вешает жёлтый цвет +
-  // запускает вращение радара (см. CSS), снят - серый и неподвижен.
-  const shiftToggleBtn = document.getElementById('shiftToggleBtn');
+  // ЗАМЕНЕНО 26.09.2026 (прямая просьба пользователя - свайп-полоса вместо
+  // круглой кнопки, см. .shift-slider в CSS и #shiftSlider/
+  // #shiftSliderHandle в HTML выше). .active красит полосу жёлтым (была
+  // на линии), надпись меняется "Выйти на линию"/"Уйти с линии", ручка
+  // всегда возвращается в начало полосы после любого изменения статуса
+  // (успешный свайп, или подхват статуса из loadMyProfile/tariffPicker).
+  const shiftSlider = document.getElementById('shiftSlider');
+  const shiftSliderLabel = document.getElementById('shiftSliderLabel');
+  const shiftSliderHandle = document.getElementById('shiftSliderHandle');
+  function shiftSliderSetOffset(px) {{
+    if (shiftSliderHandle) shiftSliderHandle.style.left = px + 'px';
+  }}
   function updateShiftToggleBtnUI() {{
-    if (shiftToggleBtn) shiftToggleBtn.classList.toggle('active', myShiftActive);
+    if (shiftSlider) shiftSlider.classList.toggle('active', myShiftActive);
+    if (shiftSliderLabel) shiftSliderLabel.textContent = myShiftActive ? 'Уйти с линии' : 'Выйти на линию';
+    shiftSliderSetOffset(3);
     // ДОБАВЛЕНО 26.09.2026 - см. SELF_MARKER_OFFLINE_FILL/selfIconHtml выше:
     // перекрашиваем свою стрелку на карте сразу же по смене статуса, не
     // дожидаясь следующего обновления геопозиции (updateSelfMarker вызовется
     // сама только когда браузер отдаст новую точку, а это может быть не
-    // сразу после тапа по кнопке).
+    // сразу после свайпа).
     if (selfMarker) {{
       selfMarker.setIcon(L.divIcon({{ className: 'self-icon', html: selfIconHtml(selfHeading), iconSize: [42, 42], iconAnchor: [21, 21] }}));
     }}
@@ -12743,52 +12778,88 @@ def map_webapp_html():
       }}
     }});
   }}
-  // ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - "кликабельная
-  // кнопка", подтверждено в диалоге) - тап переключает реальную смену
-  // (POST /map/toggle_shift, initData обязателен на сервере - см.
-  // handle_map_toggle_shift_api). .pending на время запроса защищает от
-  // повторных тапов, пока предыдущий ещё не завершился (двойной тап мог бы
-  // и начать, и сразу завершить смену, или отправить два запроса подряд).
-  // Сервер переиспользует ТУ ЖЕ логику, что и обычная кнопка в чате бота -
-  // если для старта нужен выбор тарифов, сервер отдаёт tariff_options и
-  // карта сама показывает карточку выбора (см. openTariffPicker выше,
-  // ИЗМЕНЕНО 25.09.2026 - раньше уходило в чат бота); если не хватает
-  // только живой геопозиции - короткое всплывающее уведомление
-  // (tg.showAlert, либо обычный alert как запасной вариант) просит
-  // включить её в чате бота.
-  if (shiftToggleBtn) {{
-    shiftToggleBtn.addEventListener('click', async () => {{
-      if (shiftToggleBtn.classList.contains('pending')) return;
-      const initData = tg ? tg.initData : '';
-      if (!initData) return;
-      shiftToggleBtn.classList.add('pending');
-      try {{
-        const resp = await fetch('/map/toggle_shift', {{
-          method: 'POST',
-          headers: {{ 'X-Telegram-Init-Data': initData }},
-        }});
-        const data = await resp.json().catch(() => ({{}}));
-        if (!resp.ok || !data.ok) {{
-          const msg = data.reason === 'no_city' ? 'Сначала выбери город в боте' : 'Не удалось переключить смену - попробуй ещё раз';
-          if (tg && tg.showAlert) tg.showAlert(msg); else alert(msg);
-          return;
-        }}
-        myShiftActive = !!data.shift_active;
-        updateShiftToggleBtnUI();
-        if (data.tariff_options && data.tariff_options.length) {{
-          openTariffPicker(data.tariff_options);
-          return;
-        }}
-        if (data.awaiting_location) {{
-          const msg = 'Включи трансляцию геопозиции в чате бота, чтобы начать смену';
-          if (tg && tg.showAlert) tg.showAlert(msg); else alert(msg);
-        }}
-      }} catch (e) {{
-        /* тихо - кнопка просто останется в прежнем состоянии */
-      }} finally {{
-        shiftToggleBtn.classList.remove('pending');
+  // ЗАМЕНЕНО 26.09.2026 (прямая просьба пользователя, референс-скриншот
+  // Яндекс Про - "ползунок который можно передвигать слева направо, тем
+  // самым активировать выход на линию", уточнено в диалоге - завершать
+  // смену тем же свайпом) - вместо простого клика теперь свайп ручки
+  // #shiftSliderHandle по полосе #shiftSlider (Pointer Events - единый
+  // API для мыши и тача, setPointerCapture ловит move/up, даже если палец/
+  // курсор ушёл за пределы ручки во время перетаскивания). Не докрутил
+  // дальше SHIFT_SLIDER_COMPLETE_RATIO ширины полосы - ручка просто
+  // откатывается назад, ничего не переключается (защита от случайного
+  // срабатывания, как в референсе). Докрутил - вызывается doShiftToggle(),
+  // которая делает ТОТ ЖЕ POST /map/toggle_shift и разруливает
+  // tariff_options/awaiting_location, что раньше было прямо в обработчике
+  // клика (handle_map_toggle_shift_api на сервере не менялась).
+  const SHIFT_SLIDER_COMPLETE_RATIO = 0.7;
+  let sliderDragging = false;
+  let sliderStartX = 0;
+  let sliderMaxOffset = 0;
+  async function doShiftToggle() {{
+    if (!shiftSlider || shiftSlider.classList.contains('pending')) {{ shiftSliderSetOffset(3); return; }}
+    const initData = tg ? tg.initData : '';
+    if (!initData) {{ shiftSliderSetOffset(3); return; }}
+    shiftSlider.classList.add('pending');
+    try {{
+      const resp = await fetch('/map/toggle_shift', {{
+        method: 'POST',
+        headers: {{ 'X-Telegram-Init-Data': initData }},
+      }});
+      const data = await resp.json().catch(() => ({{}}));
+      if (!resp.ok || !data.ok) {{
+        const msg = data.reason === 'no_city' ? 'Сначала выбери город в боте' : 'Не удалось переключить смену - попробуй ещё раз';
+        if (tg && tg.showAlert) tg.showAlert(msg); else alert(msg);
+        shiftSliderSetOffset(3);
+        return;
       }}
-    }});
+      myShiftActive = !!data.shift_active;
+      updateShiftToggleBtnUI();
+      if (data.tariff_options && data.tariff_options.length) {{
+        openTariffPicker(data.tariff_options);
+        return;
+      }}
+      if (data.awaiting_location) {{
+        const msg = 'Включи трансляцию геопозиции в чате бота, чтобы начать смену';
+        if (tg && tg.showAlert) tg.showAlert(msg); else alert(msg);
+      }}
+    }} catch (e) {{
+      shiftSliderSetOffset(3);
+      /* тихо - полоса просто останется в прежнем состоянии */
+    }} finally {{
+      shiftSlider.classList.remove('pending');
+    }}
+  }}
+  function sliderPointerDown(e) {{
+    if (!shiftSlider || !shiftSliderHandle || shiftSlider.classList.contains('pending')) return;
+    sliderDragging = true;
+    shiftSliderHandle.classList.add('dragging');
+    sliderStartX = e.clientX;
+    sliderMaxOffset = shiftSlider.clientWidth - shiftSliderHandle.clientWidth - 6;
+    try {{ shiftSliderHandle.setPointerCapture(e.pointerId); }} catch (err) {{ /* старый WebView без setPointerCapture - свайп просто не начнётся */ }}
+  }}
+  function sliderPointerMove(e) {{
+    if (!sliderDragging) return;
+    const dx = e.clientX - sliderStartX;
+    const offset = Math.max(0, Math.min(sliderMaxOffset, 3 + dx));
+    shiftSliderSetOffset(offset);
+  }}
+  function sliderPointerUp(e) {{
+    if (!sliderDragging) return;
+    sliderDragging = false;
+    if (shiftSliderHandle) shiftSliderHandle.classList.remove('dragging');
+    const currentLeft = parseFloat((shiftSliderHandle && shiftSliderHandle.style.left) || '3') || 3;
+    const ratio = sliderMaxOffset > 0 ? (currentLeft - 3) / sliderMaxOffset : 0;
+    if (ratio < SHIFT_SLIDER_COMPLETE_RATIO) {{
+      shiftSliderSetOffset(3);
+      return;
+    }}
+    doShiftToggle();
+  }}
+  if (shiftSliderHandle) {{
+    shiftSliderHandle.addEventListener('pointerdown', sliderPointerDown);
+    shiftSliderHandle.addEventListener('pointermove', sliderPointerMove);
+    shiftSliderHandle.addEventListener('pointerup', sliderPointerUp);
+    shiftSliderHandle.addEventListener('pointercancel', sliderPointerUp);
   }}
   function updateSelfMarker(lat, lon, heading) {{
     selfLat = lat;
@@ -16351,8 +16422,15 @@ async def handle_where_to_go_data_api(request):
                 for candidate in _lower_tariff_candidates(category, current_tariff):
                     if candidate in selected_tariffs:
                         continue  # уже подключён - предлагать нечего
-                    value = _district_tariff_demand_value(city, district_name, category, candidate, weekday_str, now.hour)
-                    threshold = _district_tariff_demand_threshold(city, category, candidate, best.get('lat'), best.get('lon'))
+                    # ИСПРАВЛЕНО 26.09.2026 (прямая просьба пользователя, тот
+                    # же баг-репорт, что у score_district_candidates выше -
+                    # _district_tariff_demand_value/_district_tariff_demand_
+                    # threshold читают ТОЛЬКО таксомоторную матрицу, для
+                    # courier/cargo всегда возвращали None/бы дали неверные
+                    # цифры - используем общий диспетчер _tariff_demand_and_
+                    # threshold (см. выше по файлу), который сам выбирает
+                    # таксомоторную или доставочную матрицу по category.
+                    value, threshold = _tariff_demand_and_threshold(city, category, district_name, candidate, weekday_str, now.hour, best.get('lat'), best.get('lon'))
                     if value is not None and threshold and value >= threshold[0]:
                         extra_advice = f"➕ Стоит подключить доп. тариф {candidate} - спрос в этом районе сейчас повышен"
                         break
@@ -16548,10 +16626,12 @@ async def handle_map_my_profile_api(request):
     })
 
 async def handle_map_toggle_shift_api(request):
-    """POST-эндпоинт кликабельного индикатора смены на карте (см.
-    MAP_TOGGLE_SHIFT_API_PATH выше, кнопка shiftToggleBtn в map_webapp_html) -
-    прямая просьба пользователя, прислал референс-скриншот жёлтого кружка с
-    иконкой питания и радар-анимацией. initData ОБЯЗАТЕЛЕН и строго
+    """POST-эндпоинт свайп-полосы смены на карте (см. MAP_TOGGLE_SHIFT_API_PATH
+    выше, #shiftSlider/#shiftSliderHandle в map_webapp_html - раньше здесь
+    была круглая кнопка shiftToggleBtn, ЗАМЕНЕНА 26.09.2026 на свайп-полосу
+    по прямой просьбе пользователя, референс-скриншот Яндекс Про - сам этот
+    серверный эндпоинт и его логика не менялись, вызывается тем же
+    doShiftToggle() по завершении свайпа). initData ОБЯЗАТЕЛЕН и строго
     проверяется - это переключение РЕАЛЬНОЙ смены, а не просто чтение
     данных.
 
@@ -17187,6 +17267,25 @@ MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_ELITE = (5,)  # своя реальная 
 MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES = {
     'taxi': (0, 1, 2),
     'ultima': (3, 4, 5),
+}
+
+# ДОБАВЛЕНО 26.09.2026 (прямая просьба пользователя - "загрузили районы
+# почему он тока центр показывает это курьеры" - баг-репорт: score_district_
+# candidates ниже искал индексы курьера/грузового такси именно в СЛОВАРЕ
+# MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES выше, а там есть только
+# 'taxi'/'ultima' - для courier/cargo indices всегда получался None, и
+# функция сразу откатывалась на единственный общий кандидат "Город/центр"
+# (score_city_candidate), НИКОГДА даже не пытаясь читать уже загруженную
+# районную матрицу доставки moscow_delivery_demand.json - хотя эта матрица
+# уже вовсю используется облаком спроса на карте и пуш-уведомлениями, см.
+# get_delivery_demand/DELIVERY_TARIFF_INDEX выше) - аналог
+# MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES, но по колонкам DELIVERY_TARIFF_INDEX
+# (7 колонок: 2 курьерских + 5 размеров кузова, см. там же) - индексы ВСЕХ
+# тарифов категории по умолчанию, когда конкретные тарифы смены не отмечены/
+# не сузили список (см. selected_tariffs ниже).
+DELIVERY_CATEGORY_TARIFF_INDICES = {
+    'courier': (0, 1),
+    'cargo': (2, 3, 4, 5, 6),
 }
 
 # ДОБАВЛЕНО 24.09.2026 (прямая просьба пользователя - "куда ехать" должно
