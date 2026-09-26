@@ -5355,7 +5355,10 @@ def services_keyboard(category=None, city=None, user_id=None):
         # ИЗМЕНЕНО 25.09.2026 - см. подробный комментарий выше про
         # initData.len=0: URL/тарифный параметр теперь строятся В ХЕНДЛЕРЕ
         # show_driver_map (по нажатию), а не здесь - кнопка просто текстовая.
-        where_to_go_row.append(KeyboardButton(text="🗺 КАРТА ВОДИТЕЛЕЙ"))
+        # ИЗМЕНЕНО 26.09.2026 (прямая просьба пользователя - "кнопку карта
+        # водителей у курьеров замени на карта курьеров") - см.
+        # driver_map_button_label выше по файлу.
+        where_to_go_row.append(KeyboardButton(text=driver_map_button_label(category)))
     top_rows.append(where_to_go_row)
 
     # По просьбе пользователя (21.09.2026): "надо обьеденить кнопки
@@ -8594,18 +8597,37 @@ async def compute_where_to_go(city, category, user_lat=None, user_lon=None, sele
 
     Курьер/Грузовое такси (20.09.2026): аэропорты, вокзалы и афиша концертов
     им не релевантны (это про пассажирские поездки с рейсов/на мероприятия) -
-    для этих категорий единственный кандидат - "Город/центр", но посчитанный
-    по СВОЕЙ таблице часов пика и советам (см. score_city_candidate/
-    get_city_advice, category передаётся туда).
+    эти три источника для них просто пропускаются (см. `if category not in
+    CATEGORIES_WITHOUT_AIRPORTS:` ниже). ИСПРАВЛЕНО 26.09.2026 (прямая
+    просьба пользователя, баг-репорт - районные кандидаты не показывались
+    вообще) - раньше здесь был досрочный return с ЕДИНСТВЕННЫМ кандидатом
+    score_city_candidate, из-за чего для Москвы courier/cargo никогда не
+    доходило до district-кандидатов; теперь для этих категорий, как и для
+    такси/Ultima, есть и районы из score_district_candidates (своя матрица
+    спроса доставки), и "Город/центр" от score_city_center_candidate.
 
     selected_tariffs (ДОБАВЛЕНО 24.09.2026, прямая просьба пользователя) -
     список отмеченных водителем тарифов при активной смене (см.
     handle_where_to_go_data_api/score_district_candidates); влияет только на
     подбор районов "Город/центр" - на всё остальное (аэропорты считаются по
-    классу экономкласс/бизнес/всё, см. CATEGORY_TO_CLASS) не влияет."""
-    if category in CATEGORIES_WITHOUT_AIRPORTS:
-        return [await score_city_candidate(city, category=category)]
+    классу экономкласс/бизнес/всё, см. CATEGORY_TO_CLASS) не влияет.
 
+    ИСПРАВЛЕНО 26.09.2026 (прямая просьба пользователя - баг-репорт "Курьеры
+    и грузовые водители в мск тока центр показывает анализ не выполняется",
+    повторное подтверждение того же бага уже ПОСЛЕ первой попытки его
+    починить в score_district_candidates/DELIVERY_CATEGORY_TARIFF_INDICES) -
+    настоящая корневая причина была ЗДЕСЬ, ещё РАНЬШЕ того исправления: этот
+    ранний return для CATEGORIES_WITHOUT_AIRPORTS отдавал ЕДИНСТВЕННОГО
+    кандидата score_city_candidate и выходил из функции СРАЗУ, даже не
+    добираясь до блока с score_district_candidates ниже - то есть все
+    предыдущие правки внутри score_district_candidates для courier/cargo
+    были правильными, но НИКОГДА не вызывались для этих двух категорий.
+    Теперь для CATEGORIES_WITHOUT_AIRPORTS просто пропускаем ЦИКЛЫ по
+    аэропортам/вокзалам/афише (см. `if category not in
+    CATEGORIES_WITHOUT_AIRPORTS:` ниже - они и правда не относятся к
+    курьеру/грузовому такси, см. докстринг выше), а не всю функцию - дальше
+    по коду доходим до того же блока "Город/центр"/районов, что и у такси/
+    Ultima."""
     # Каждый источник кандидатов обёрнут в свой try/except (по факту бага
     # 21.09.2026: "Не удалось посчитать варианты" стабильно на каждое
     # нажатие "КУДА ЕХАТЬ" - раньше ЛЮБОЕ исключение в ОДНОМ аэропорту/
@@ -8618,30 +8640,37 @@ async def compute_where_to_go(city, category, user_lat=None, user_lon=None, sele
     # (см. send_where_to_go), это по-прежнему возможно, но теперь только
     # когда сломано действительно всё, а не один источник."""
     candidates = []
-    for airport in AIRPORTS_INFO.get(city, []):
-        # Как и в ICAO_TO_AIRPORT - у Шереметьево несколько зональных записей
-        # с одним icao (B/C и D), каждая - самостоятельный кандидат (разная
-        # загрузка по зоне), дедуп не нужен, в отличие от ICAO_TO_AIRPORT.
+    # ИСПРАВЛЕНО 26.09.2026 (см. докстринг выше) - аэропорты/вокзалы/афиша
+    # концертов реально не относятся к курьеру/грузовому такси (это про
+    # пассажирские поездки), поэтому для CATEGORIES_WITHOUT_AIRPORTS эти три
+    # цикла просто пропускаются - но, в отличие от прежнего раннего return,
+    # функция на этом НЕ заканчивается и доходит до блока "Город/центр"/
+    # районов ниже, который уже сам умеет работать для courier/cargo.
+    if category not in CATEGORIES_WITHOUT_AIRPORTS:
+        for airport in AIRPORTS_INFO.get(city, []):
+            # Как и в ICAO_TO_AIRPORT - у Шереметьево несколько зональных записей
+            # с одним icao (B/C и D), каждая - самостоятельный кандидат (разная
+            # загрузка по зоне), дедуп не нужен, в отличие от ICAO_TO_AIRPORT.
+            try:
+                candidates.append(await score_airport_candidate(city, airport, category, user_lat=user_lat, user_lon=user_lon))
+            except Exception:
+                logger.exception(f"❌ Не удалось посчитать кандидата 'Куда ехать' для аэропорта {airport.get('icao')} ({city})")
+        if city in TRAIN_CITIES:
+            try:
+                trains_data = load_trains_data()
+                if trains_data and trains_data.get('stations'):
+                    city_stations = {code: st for code, st in trains_data['stations'].items() if STATION_CITY.get(code) == city}
+                    for code, station in city_stations.items():
+                        try:
+                            candidates.append(score_station_candidate(city, code, station, category))
+                        except Exception:
+                            logger.exception(f"❌ Не удалось посчитать кандидата 'Куда ехать' для вокзала {code} ({city})")
+            except Exception:
+                logger.exception(f"❌ Не удалось загрузить вокзалы для 'Куда ехать' ({city})")
         try:
-            candidates.append(await score_airport_candidate(city, airport, category, user_lat=user_lat, user_lon=user_lon))
+            candidates.extend(score_concert_event_candidates(city, category))
         except Exception:
-            logger.exception(f"❌ Не удалось посчитать кандидата 'Куда ехать' для аэропорта {airport.get('icao')} ({city})")
-    if city in TRAIN_CITIES:
-        try:
-            trains_data = load_trains_data()
-            if trains_data and trains_data.get('stations'):
-                city_stations = {code: st for code, st in trains_data['stations'].items() if STATION_CITY.get(code) == city}
-                for code, station in city_stations.items():
-                    try:
-                        candidates.append(score_station_candidate(city, code, station, category))
-                    except Exception:
-                        logger.exception(f"❌ Не удалось посчитать кандидата 'Куда ехать' для вокзала {code} ({city})")
-        except Exception:
-            logger.exception(f"❌ Не удалось загрузить вокзалы для 'Куда ехать' ({city})")
-    try:
-        candidates.extend(score_concert_event_candidates(city, category))
-    except Exception:
-        logger.exception(f"❌ Не удалось посчитать афишу для 'Куда ехать' ({city})")
+            logger.exception(f"❌ Не удалось посчитать афишу для 'Куда ехать' ({city})")
     # "Город/центр" тоже обёрнут в try/except (по факту повторной жалобы
     # пользователя, 21.09.2026: ошибка "Не удалось посчитать варианты"
     # продолжала стабильно повторяться для Такси Ultima в Москве даже
@@ -10546,6 +10575,14 @@ MAP_CATEGORY_STYLE = {
     'courier': {'color': '#FFFFFF', 'label': 'Курьер', 'icon': '🚶🏽‍♂️'},
     'cargo': {'color': '#E53935', 'label': 'Грузовое такси', 'icon': '🚚'},
 }
+
+# ДОБАВЛЕНО 26.09.2026 (прямая просьба пользователя - "кнопку карта
+# водителей у курьеров замени на карта курьеров") - у курьера на карте
+# показываются другие курьеры, а не "водители" - подпись кнопки/шапки
+# сообщения для этой категории теперь отдельная. Остальные категории
+# (такси/Ultima/грузовое такси) - без изменений, прежний текст.
+def driver_map_button_label(category):
+    return "🗺 КАРТА КУРЬЕРОВ" if category == 'courier' else "🗺 КАРТА ВОДИТЕЛЕЙ"
 
 # ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "заливку смайлика
 # делай Такси желтый / Черный ультима / Желто-красный обводкой курьер /
@@ -23182,7 +23219,7 @@ async def show_city_events(message: types.Message, user_id_override=None):
     finally:
         _skip_message_trim.reset(token)
 
-@router.message(lambda message: message.text == "🗺 КАРТА ВОДИТЕЛЕЙ")
+@router.message(lambda message: message.text in ("🗺 КАРТА ВОДИТЕЛЕЙ", "🗺 КАРТА КУРЬЕРОВ"))
 async def show_driver_map(message: types.Message):
     """ИЗМЕНЕНО 25.09.2026 (жалоба пользователя - плашка внизу карты стабильно
     писала "не на смене" даже при реально активной смене, воспроизводилось
@@ -23217,8 +23254,11 @@ async def show_driver_map(message: types.Message):
     # карта сразу открывается с фильтром по тарифам, отмеченным на старте
     # смены (если она идёт).
     map_url += map_webapp_tariffs_param(user_state.get(user_id, {}))
+    # ИЗМЕНЕНО 26.09.2026 (прямая просьба пользователя - см.
+    # driver_map_button_label выше по файлу) - шапка сообщения тоже
+    # показывает "КАРТА КУРЬЕРОВ" для курьера, а не общую "КАРТА ВОДИТЕЛЕЙ".
     await message.answer(
-        "🗺 КАРТА ВОДИТЕЛЕЙ",
+        driver_map_button_label(category),
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text="ОТКРЫТЬ КАРТУ", web_app=WebAppInfo(url=map_url)),
         ]]),
@@ -25382,7 +25422,7 @@ async def push_rain_alert(city, event):
             category = state.get('category')
             if category:
                 map_url = f"{PUBLIC_URL}{MAP_WEBAPP_PATH}?city={urllib.parse.quote(city)}&category={urllib.parse.quote(category)}" + map_webapp_tariffs_param(state)
-                rows.append([InlineKeyboardButton(text="🗺 Карта водителей", web_app=WebAppInfo(url=map_url))])
+                rows.append([InlineKeyboardButton(text=driver_map_button_label(category), web_app=WebAppInfo(url=map_url))])
         return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
 
     # ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "присылать push
@@ -25549,7 +25589,7 @@ async def push_district_rain_alert(city, district_name, event, user_ids):
             category = state.get('category')
             if category:
                 map_url = f"{PUBLIC_URL}{MAP_WEBAPP_PATH}?city={urllib.parse.quote(city)}&category={urllib.parse.quote(category)}" + map_webapp_tariffs_param(state)
-                rows.append([InlineKeyboardButton(text="🗺 Карта водителей", web_app=WebAppInfo(url=map_url))])
+                rows.append([InlineKeyboardButton(text=driver_map_button_label(category), web_app=WebAppInfo(url=map_url))])
         return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
 
     recipients = []
@@ -30855,7 +30895,7 @@ def _district_advice_keyboard(state, city):
         category = state.get('category')
         if category:
             map_url = f"{PUBLIC_URL}{MAP_WEBAPP_PATH}?city={urllib.parse.quote(city)}&category={urllib.parse.quote(category)}" + map_webapp_tariffs_param(state)
-            rows.append([InlineKeyboardButton(text="🗺 Карта водителей", web_app=WebAppInfo(url=map_url))])
+            rows.append([InlineKeyboardButton(text=driver_map_button_label(category), web_app=WebAppInfo(url=map_url))])
     return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
 
 async def push_district_tariff_tip(user_id, state, city, district_name, tariffs):
