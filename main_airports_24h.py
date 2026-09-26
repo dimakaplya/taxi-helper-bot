@@ -17013,8 +17013,8 @@ def unified_app_html():
   const CATEGORY_NAMES = """ + json.dumps({k: v['name'] for k, v in CATEGORIES.items()}, ensure_ascii=False) + """;
   const CATEGORY_TARIFFS = """ + json.dumps({k: ','.join(v.get('tariffs', [])) for k, v in CATEGORIES.items()}, ensure_ascii=False) + """;
   const DRIVER_CHAT_LINKS = """ + json.dumps(DRIVER_CHAT_LINKS, ensure_ascii=False) + """;
-  const TIPS_APP_URL_IOS = """ + TIPS_APP_URL_IOS + """;
-  const TIPS_APP_URL_ANDROID = """ + TIPS_APP_URL_ANDROID + """;
+  const TIPS_APP_URL_IOS = """ + json.dumps(TIPS_APP_URL_IOS) + """;
+  const TIPS_APP_URL_ANDROID = """ + json.dumps(TIPS_APP_URL_ANDROID) + """;
   const CATEGORIES_WITHOUT_EVENTS_OR_AIRPORTS = ['courier', 'cargo']; // см. CATEGORIES_WITHOUT_EVENTS/CATEGORIES_WITHOUT_AIRPORTS в main.py - в Python это одно и то же множество
   function tgInitDataParam() {
     const v = (tg && tg.initData) || '';
