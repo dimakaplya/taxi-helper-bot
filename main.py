@@ -11938,13 +11938,32 @@ MAP_CHROME_CSS = """
         одновременно опускается обратно вниз (класс .slider-hidden ниже),
         освобождённое место больше не нужно резервировать под полосу. */
   .shift-slider {
-    position: absolute; left: 12px; right: 12px; bottom: max(14px, env(safe-area-inset-bottom, 0px));
+    /* ИЗМЕНЕНО 26.09.2026 (прямая просьба пользователя со скриншотом - "бар
+       выйти на линию надо чуть выше поднять чтобы снизу были видны надписи
+       Яндекса") - было max(14px, safe-area). Обязательный копирайт Яндекс
+       Карт (см. leaflet-plugins Yandex.js в head, вставляется самим Яндекс
+       API, не Leaflet-ом - его нельзя ни убрать, ни закрасить, в отличие от
+       OSM/Leaflet attribution выше, см. attributionControl:false) рисуется
+       у самого низа карты и раньше оказывался прижат вплотную к нижнему
+       краю экрана этой полосой - теперь между ними зазор побольше. */
+    position: absolute; left: 12px; right: 12px; bottom: max(34px, calc(env(safe-area-inset-bottom, 0px) + 20px));
     z-index: 1000; height: 56px; border-radius: 28px; background: #FFB800;
     border: 3px solid #fff; box-shadow: 0 2px 8px rgba(0,0,0,.45);
     display: flex; align-items: center; justify-content: center;
     overflow: hidden; user-select: none; transition: transform .3s ease, opacity .3s ease;
   }
   .shift-slider.pending { opacity: .6; }
+  /* ИЗМЕНЕНО 26.09.2026 (прямая просьба пользователя со скриншотом -
+     "опять не работает кнопка выйти на линию она не активируется") -
+     touch-action:none раньше стоял ТОЛЬКО на маленькой 44px-ручке
+     (.shift-slider-handle ниже), а вся остальная жёлтая полоса (56px
+     высотой, почти во всю ширину экрана) визуально выглядит как обычная
+     кнопка - естественно, что палец касается/тащит именно ЕЁ, а не
+     прицельно маленький кружок слева. Слушатели pointerdown/move/up
+     (см. JS ниже) теперь висят на ВСЕЙ полосе .shift-slider, а не только
+     на ручке - но без touch-action:none здесь браузер перехватывал бы
+     жест как обычный скролл страницы везде, кроме самой ручки. */
+  .shift-slider { touch-action: none; }
   /* on-shift - смена уже активна, полосе для завершения смены (это теперь
      делается из чата бота) больше нечего показывать - уезжает за нижний
      край экрана и полностью исчезает (opacity + pointer-events:none, чтобы
@@ -12024,7 +12043,7 @@ MAP_CHROME_CSS = """
        свайпа уехала за экран, место снизу освобождается - плашка опускается
        обратно на прежнее место (.slider-hidden ниже), а не висит в воздухе
        над пустотой. */
-    position: absolute; left: 12px; right: 12px; bottom: calc(max(14px, env(safe-area-inset-bottom, 0px)) + 66px);
+    position: absolute; left: 12px; right: 12px; bottom: calc(max(34px, calc(env(safe-area-inset-bottom, 0px) + 20px)) + 66px);
     z-index: 1000; display: flex; align-items: center; gap: 8px;
     background: rgba(20,20,20,.82); backdrop-filter: blur(8px); color: #fff;
     border: 1px solid rgba(255,196,0,.35); border-radius: 16px; padding: 10px 16px;
@@ -12037,7 +12056,7 @@ MAP_CHROME_CSS = """
        строку - разрешаем перенос по центру вместо обрезки/наезда на края. */
     flex-wrap: wrap; justify-content: space-around; width: auto; text-align: center;
   }
-  .bottom-info-bar.slider-hidden { bottom: max(14px, env(safe-area-inset-bottom, 0px)); }
+  .bottom-info-bar.slider-hidden { bottom: max(34px, calc(env(safe-area-inset-bottom, 0px) + 20px)); }
   .bottom-info-bar .bib-icon { font-size: 16px; }
   .bottom-info-bar .bib-label { font-size: 13.5px; font-weight: 700; }
   .bottom-info-bar .bib-sep { width: 1px; height: 14px; background: rgba(255,255,255,.25); }
@@ -13313,6 +13332,7 @@ def map_webapp_html():
   let sliderDragging = false;
   let sliderStartX = 0;
   let sliderMaxOffset = 0;
+  let sliderAvailableRoom = 0;
   async function doShiftToggle() {{
     if (!shiftSlider || shiftSlider.classList.contains('pending')) {{ shiftSliderSetOffset(3); return; }}
     const initData = _mapInitData();
@@ -13347,13 +13367,41 @@ def map_webapp_html():
       shiftSlider.classList.remove('pending');
     }}
   }}
+  // ИЗМЕНЕНО 26.09.2026 (прямая просьба пользователя со скриншотом - "опять
+  // не работает кнопка выйти на линию она не активируется") - раньше все 4
+  // слушателя висели ТОЛЬКО на #shiftSliderHandle (маленький 44px кружок) -
+  // палец, коснувшийся любой другой точки широкой жёлтой полосы (а она
+  // визуально читается как обычная кнопка, не как ручка на треке), просто
+  // ничего не запускал. Мат-часть (dx = текущий X минус X в момент
+  // pointerdown) уже была ОТНОСИТЕЛЬНОЙ, а не привязанной к абсолютной
+  // позиции ручки - поэтому достаточно перевесить те же 4 обработчика на
+  // весь контейнер .shift-slider (pointerdown на самой ручке по-прежнему
+  // долетит и сюда через всплытие, т.к. ручка - потомок полосы) - никакой
+  // отдельной ветки для "тронул ручку" вместо "тронул полосу" не нужно.
   function sliderPointerDown(e) {{
     if (!shiftSlider || !shiftSliderHandle || shiftSlider.classList.contains('pending')) return;
     sliderDragging = true;
     shiftSliderHandle.classList.add('dragging');
     sliderStartX = e.clientX;
     sliderMaxOffset = shiftSlider.clientWidth - shiftSliderHandle.clientWidth - 6;
-    try {{ shiftSliderHandle.setPointerCapture(e.pointerId); }} catch (err) {{ /* старый WebView без setPointerCapture - свайп просто не начнётся */ }}
+    // ДОБАВЛЕНО 26.09.2026 (прямая просьба пользователя со скриншотом -
+    // "опять не работает кнопка выйти на линию она не активируется") -
+    // раньше готовность свайпа (SHIFT_SLIDER_COMPLETE_RATIO=0.7) считалась
+    // от sliderMaxOffset - дистанции от ДОМАШНЕЙ позиции ручки (левый край)
+    // до правого края полосы. Но теперь свайп можно начать пальцем ИЗ ЛЮБОЙ
+    // точки полосы (см. правку выше - слушатели висят на всей .shift-slider,
+    // не только на ручке) - если палец стартует из середины/правой части
+    // широкой полосы, до правого края экрана физически остаётся МЕНЬШЕ
+    // места, чем требуемые 70% от sliderMaxOffset, и докрутить до порога
+    // невозможно ни при каком реальном свайпе - ручка всегда откатывается
+    // назад, ничего не срабатывает (то самое "полоса просто откатывается
+    // назад" из жалобы). sliderAvailableRoom - реальное свободное место
+    // ОТ ТОЧКИ, где палец коснулся полосы, до её правого края - порог
+    // завершения свайпа считается от него (см. sliderPointerUp ниже), а не
+    // от фиксированной домашней позиции ручки, поэтому свайп теперь
+    // выполним из любой точки полосы.
+    sliderAvailableRoom = Math.max(1, shiftSlider.getBoundingClientRect().right - e.clientX - (shiftSliderHandle.clientWidth / 2 + 3));
+    try {{ shiftSlider.setPointerCapture(e.pointerId); }} catch (err) {{ /* старый WebView без setPointerCapture - свайп просто не начнётся */ }}
   }}
   function sliderPointerMove(e) {{
     if (!sliderDragging) return;
@@ -13366,18 +13414,19 @@ def map_webapp_html():
     sliderDragging = false;
     if (shiftSliderHandle) shiftSliderHandle.classList.remove('dragging');
     const currentLeft = parseFloat((shiftSliderHandle && shiftSliderHandle.style.left) || '3') || 3;
-    const ratio = sliderMaxOffset > 0 ? (currentLeft - 3) / sliderMaxOffset : 0;
+    const effectiveMax = Math.min(sliderMaxOffset, sliderAvailableRoom);
+    const ratio = effectiveMax > 0 ? (currentLeft - 3) / effectiveMax : 0;
     if (ratio < SHIFT_SLIDER_COMPLETE_RATIO) {{
       shiftSliderSetOffset(3);
       return;
     }}
     doShiftToggle();
   }}
-  if (shiftSliderHandle) {{
-    shiftSliderHandle.addEventListener('pointerdown', sliderPointerDown);
-    shiftSliderHandle.addEventListener('pointermove', sliderPointerMove);
-    shiftSliderHandle.addEventListener('pointerup', sliderPointerUp);
-    shiftSliderHandle.addEventListener('pointercancel', sliderPointerUp);
+  if (shiftSlider) {{
+    shiftSlider.addEventListener('pointerdown', sliderPointerDown);
+    shiftSlider.addEventListener('pointermove', sliderPointerMove);
+    shiftSlider.addEventListener('pointerup', sliderPointerUp);
+    shiftSlider.addEventListener('pointercancel', sliderPointerUp);
   }}
   // ДОБАВЛЕНО 26.09.2026 (прямая просьба пользователя - "не только через
   // чат бота, а на карте вверху слева кнопка серая для выключения смены
