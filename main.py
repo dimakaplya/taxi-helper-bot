@@ -6432,12 +6432,23 @@ async def start(message: types.Message):
             )
 
 # ДОБАВЛЕНО 23.09.2026 (см. MAIN_MENU_INLINE_BUTTON_TEXT/_with_main_menu_button
-# выше) - хендлер инлайн-кнопки "🚕 МЕНЮ TAXI HELPER", которая теперь висит
-# почти на каждом сообщении бота. Открывает главное меню сервисов (те же
-# кнопки, что и после старта смены/выбора города - services_keyboard) для
-# уже выбранных города/категории; если пользователь их ещё не выбрал (самое
-# первое сообщение, "первое /start"), откатывается на send_start_screen -
-# экран выбора города.
+# выше) - хендлер инлайн-кнопки "🚕 МЕНЮ TAXI HELPER", которая висит почти на
+# каждом сообщении бота.
+#
+# ИЗМЕНЕНО 26.09.2026 (жалоба пользователя со скриншотом - "место кабинета
+# по этой кнопке появляется меню где вход в приложение"): раньше, если
+# город/категория уже были выбраны, эта кнопка открывала СТАРОЕ главное меню
+# сервисов текстовыми кнопками (services_keyboard) - ту самую кнопочную
+# клавиатуру, которую пользователь просил убрать полностью ("все других
+# кнопок больше нет и их и не будет более так", см. правку
+# open_app_text_and_keyboard/send_start_screen выше). Эта кнопка - едва ли
+# не самый частый способ "вернуться в меню" (висит почти на каждом
+# сообщении, а не только сразу после /start), поэтому её тоже нужно было
+# перевести на новый флоу: теперь всегда показывает тот же текст + одну
+# инлайн-кнопку входа в приложение, что и /start, независимо от того,
+# выбраны ли уже город/категория (open_app_text_and_keyboard сам решает,
+# что подставить в ссылку - а при пустом городе приложение определит его
+# по геолокации, см. правку в unified_app_html()).
 @router.callback_query(lambda c: c.data == MAIN_MENU_INLINE_BUTTON_CALLBACK)
 async def open_services_menu(callback_query: types.CallbackQuery):
     try:
@@ -6445,16 +6456,8 @@ async def open_services_menu(callback_query: types.CallbackQuery):
     except Exception:
         pass
     user_id = callback_query.from_user.id
-    state = user_state.get(user_id, {})
-    category = state.get('category')
-    city = state.get('city')
-    if not category or not city:
-        await send_start_screen(callback_query.message)
-        return
-    await callback_query.message.answer(
-        "📋 Меню",
-        reply_markup=services_keyboard(category, city, user_id),
-    )
+    text, keyboard = open_app_text_and_keyboard(user_id)
+    await callback_query.message.answer(text, reply_markup=keyboard, parse_mode='Markdown')
 
 # ДОБАВЛЕНО 21.09.2026 (прямая просьба пользователя - "ждать нет времени",
 # нужно было прямо сейчас проверить сырой ответ Yandex Rasp API на предмет
@@ -12801,7 +12804,14 @@ def map_webapp_html():
   // не вызывается нигде в коде (блюр убран с облаков ещё 24.09.2026) -
   // прежний L.svg().addTo(map), который существовал только ради него,
   // убран вместе с ним.
-  const map = L.map('map', {{ preferCanvas: true }}).setView(initialCenter, 11);
+  // ИЗМЕНЕНО 26.09.2026 (прямая просьба пользователя со скриншотом - "убери
+  // это с карты или замажь черным", кружком отмечен водяной знак "Leaflet"
+  // с флагом Украины в правом нижнем углу карты - это встроенный по
+  // умолчанию attribution-контрол библиотеки Leaflet) - attributionControl:
+  // false убирает весь этот контрол целиком (и подпись "© OpenStreetMap"
+  // из L.tileLayer ниже - она всё равно относится только к OSM-фолбэку,
+  // который почти никогда не используется, см. блок про Яндекс.Карты ниже).
+  const map = L.map('map', {{ preferCanvas: true, attributionControl: false }}).setView(initialCenter, 11);
   // ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя, прислал API-ключ
   // Яндекс.Карт - "ключ яндекса подложка ключ апи" / "перейти на Яндекс
   // Карты полностью"): подложка (тайлы) карты теперь Яндекс.Карты через
@@ -17944,14 +17954,38 @@ def unified_app_html():
     }
   }
 
+  // ИЗМЕНЕНО 26.09.2026 (жалоба пользователя - "неработает сохранить"):
+  // раньше эта функция искала свои элементы через document.getElementById -
+  // безобидно, пока у неё был только ОДИН вызывающий (плитка "Город и
+  // категория" в "Сервисах"). После того как та же функция стала
+  // переиспользоваться ЕЩЁ и для кликабельной плашки в шапке (см.
+  // cityBadge/cityPanel выше), при открытии ОБОИХ мест за один сеанс
+  // страницы в DOM оказывалось два элемента с одинаковыми id
+  // (citySelect/catSelect/citySaveBtn/cityNote) - document.getElementById
+  // всегда возвращает первый по порядку в документе, поэтому обработчик
+  // клика мог привязаться не к той кнопке, которую реально видел и нажимал
+  // пользователь - клик по видимой кнопке в этом случае ничего не делал.
+  // Теперь ищем элементы ТОЛЬКО внутри переданного box (box.querySelector) -
+  // сколько бы раз renderCityDetail ни было вызвано в разные контейнеры,
+  // коллизий id больше не будет.
+  //
+  // ИЗМЕНЕНО 26.09.2026 (прямая просьба пользователя - "иконки тарифов без
+  // смайликов"): в нативном OS-пикере (открывается по тапу на <select> на
+  // телефоне) эмодзи из CATEGORY_NAMES ("🚕 ТАКСИ" и т.п.) выглядели чужеродно
+  // рядом с системной галочкой - stripLeadingEmoji убирает эмодзи-префикс
+  // только для текста внутри этого выпадающего списка, сами CATEGORY_NAMES
+  // (используются также в чат-версии и в плашке cityBadge) не трогали.
+  function stripLeadingEmoji(s) {
+    return (s || '').replace(/^[^\sA-Za-zА-Яа-яЁё0-9]+\s*/, '');
+  }
   function renderCityDetail(box) {
     let cityOptions = '';
     Object.keys(CITY_DISPLAY_NAMES).forEach(function (k) {
-      cityOptions += '<option value="' + k + '"' + (k === city ? ' selected' : '') + '>' + CITY_DISPLAY_NAMES[k] + '</option>';
+      cityOptions += '<option value="' + k + '"' + (k === city ? ' selected' : '') + '>' + stripLeadingEmoji(CITY_DISPLAY_NAMES[k]) + '</option>';
     });
     let catOptions = '';
     Object.keys(CATEGORY_NAMES).forEach(function (k) {
-      catOptions += '<option value="' + k + '"' + (k === category ? ' selected' : '') + '>' + CATEGORY_NAMES[k] + '</option>';
+      catOptions += '<option value="' + k + '"' + (k === category ? ' selected' : '') + '>' + stripLeadingEmoji(CATEGORY_NAMES[k]) + '</option>';
     });
     box.innerHTML =
       '<div class="svc-h">🏙 Город и категория</div>' +
@@ -17959,11 +17993,14 @@ def unified_app_html():
       '<select class="svc-select" id="catSelect">' + catOptions + '</select>' +
       '<button type="button" class="svc-btn" id="citySaveBtn">Сохранить</button>' +
       '<div class="svc-note" id="cityNote"></div>';
-    document.getElementById('citySaveBtn').addEventListener('click', async function () {
-      const newCity = document.getElementById('citySelect').value;
-      const newCategory = document.getElementById('catSelect').value;
-      const btn = document.getElementById('citySaveBtn');
-      btn.disabled = true;
+    const citySelectEl = box.querySelector('#citySelect');
+    const catSelectEl = box.querySelector('#catSelect');
+    const saveBtn = box.querySelector('#citySaveBtn');
+    const noteEl = box.querySelector('#cityNote');
+    saveBtn.addEventListener('click', async function () {
+      const newCity = citySelectEl.value;
+      const newCategory = catSelectEl.value;
+      saveBtn.disabled = true;
       try {
         const resp = await fetch('""" + CABINET_CITY_API_PATH + """', {
           method: 'POST',
@@ -17976,8 +18013,8 @@ def unified_app_html():
         url.searchParams.set('category', newCategory);
         window.location.href = url.toString();
       } catch (e) {
-        document.getElementById('cityNote').textContent = 'Не удалось сохранить - попробуй ещё раз.';
-        btn.disabled = false;
+        noteEl.textContent = 'Не удалось сохранить - попробуй ещё раз.';
+        saveBtn.disabled = false;
       }
     });
   }
