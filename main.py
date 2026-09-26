@@ -5495,7 +5495,12 @@ def services_keyboard(category=None, city=None, user_id=None):
     # раньше была только внутри courier_module_keyboard - тот же текстовый
     # хендлер show_fuel_bot ниже по файлу срабатывает и здесь, отдельно
     # добавлять не нужно.
-    buttons.append([KeyboardButton(text="⛽ ГДЕ БЕНЗИН"), KeyboardButton(text="💳 ЧАЕВЫЕ")])
+    # ИЗМЕНЕНО 26.09.2026 (прямая просьба пользователя - "когда на линии -
+    # раздел чаты/чаевые, когда не на линии - только чаты") - текст кнопки
+    # теперь строит chats_menu_button_text (см. show_chats_menu ниже по
+    # файлу) - "💬 ЧАТЫ/ЧАЕВЫЕ" на линии, "💬 ЧАТЫ" вне линии, вместо
+    # прежней статичной "💳 ЧАЕВЫЕ".
+    buttons.append([KeyboardButton(text="⛽ ГДЕ БЕНЗИН"), KeyboardButton(text=chats_menu_button_text(user_id))])
     # "🤝 РЕФЕРАЛЬНАЯ ПРОГРАММА" (по просьбе пользователя, 20.09.2026) - см.
     # блок "РЕФЕРАЛЬНАЯ ПРОГРАММА" ниже (show_referral_program и остальные
     # хендлеры referral_*).
@@ -7454,7 +7459,15 @@ async def show_tips_app_main_menu(message: types.Message):
     "чаевые вынеси на главное меню") - тот же контент, что у show_tips_app
     выше (старая кнопка "💳 ПОЛУЧИТЬ ЧАЕВЫЕ" внутри courier_module_keyboard
     не трогали - оставлена как есть), но без требования in_courier_module и
-    с возвратом в services_keyboard, а не courier_module_keyboard."""
+    с возвратом в services_keyboard, а не courier_module_keyboard.
+
+    ИЗМЕНЕНО 26.09.2026 (прямая просьба пользователя - "раздел чаты/чаевые
+    когда на линии, только чаты когда не на линии") - главное меню теперь
+    показывает ОДНУ объединённую кнопку "💬 ЧАТЫ"/"💬 ЧАТЫ/ЧАЕВЫЕ" (см.
+    chats_menu_button_text/show_chats_menu ниже), эта кнопка с текстом
+    "💳 ЧАЕВЫЕ" в services_keyboard больше не ставится. Хендлер НЕ удалён
+    (оставлен как безопасный фолбэк - вдруг у кого-то в клиенте всё ещё
+    отправится старый текст с закэшированной клавиатуры)."""
     user_id = message.from_user.id
     state = user_state.get(user_id, {})
     text = (
@@ -7467,6 +7480,69 @@ async def show_tips_app_main_menu(message: types.Message):
     await message.answer(
         "Выбери, что нужно дальше 👇",
         reply_markup=services_keyboard(state.get('category'), state.get('city'), user_id),
+    )
+
+# ДОБАВЛЕНО 26.09.2026 (прямая просьба пользователя - "нужно сделать кнопку
+# когда пользователь на линии - показывает раздел чаты/чаевые, когда не на
+# линии - только чаты") - ссылки на групповые чаты водителей.
+# ⚠️ ЗАГЛУШКА: реальных ссылок на чаты по городам пользователь ещё не
+# прислал (спросили явно - "дай сами t.me-ссылки на чаты водителей"), он
+# попросил "пока заглушку ставь" - ниже одна и та же ссылка-заглушка на все
+# города, но структура УЖЕ per-city (тот же приём, что у
+# ROAD_EVENTS_CHANNEL_LINKS выше) - когда пользователь пришлёт реальные
+# ссылки, нужно будет только заменить значения в этом словаре, сам код
+# (build_driver_chats_keyboard/show_chats_menu) трогать не придётся.
+DRIVER_CHAT_LINK_PLACEHOLDER = "https://t.me/+taxihelper_chat_placeholder"
+DRIVER_CHAT_LINKS = {city: DRIVER_CHAT_LINK_PLACEHOLDER for city in CITY_DISPLAY_NAMES}
+
+
+def chats_menu_button_text(user_id):
+    """Текст кнопки главного меню - "💬 ЧАТЫ/ЧАЕВЫЕ" пока водитель НА ЛИНИИ
+    (is_shift_active), иначе просто "💬 ЧАТЫ" (прямая просьба пользователя -
+    доступ к чаевым имеет смысл именно во время смены, чаты водителей нужны
+    в любое время, поэтому видны всегда)."""
+    return "💬 ЧАТЫ/ЧАЕВЫЕ" if is_shift_active(user_state.get(user_id, {})) else "💬 ЧАТЫ"
+
+
+def build_driver_chats_keyboard(city):
+    """Инлайн-кнопка(и) со ссылкой на групповой чат водителей текущего
+    города - см. DRIVER_CHAT_LINKS/⚠️ ЗАГЛУШКА выше. Один ряд на город
+    (сейчас у всех городов одна и та же ссылка-заглушка, но словарь уже
+    позволяет держать разные ссылки под разные города без изменений тут)."""
+    url = DRIVER_CHAT_LINKS.get(city, DRIVER_CHAT_LINK_PLACEHOLDER)
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💬 ЧАТ ВОДИТЕЛЕЙ", url=url)],
+    ])
+
+
+@router.message(lambda message: message.text in ("💬 ЧАТЫ", "💬 ЧАТЫ/ЧАЕВЫЕ"))
+async def show_chats_menu(message: types.Message):
+    """"💬 ЧАТЫ" / "💬 ЧАТЫ/ЧАЕВЫЕ" - главное меню (см. chats_menu_button_text/
+    services_keyboard - сам текст кнопки уже отражает статус смены). Здесь
+    показываем контент по факту: ссылку на чат водителей ВСЕГДА, и (только
+    если смена сейчас реально активна - на случай, если водитель успел
+    завершить смену между тем, как увидел кнопку, и нажатием) следом ещё
+    "💳 Получить чаевые" - тот же контент, что был у отдельной кнопки
+    "💳 ЧАЕВЫЕ" (см. show_tips_app_main_menu выше, кнопка которой теперь
+    объединена с этой)."""
+    user_id = message.from_user.id
+    state = user_state.get(user_id, {})
+    city = state.get('city')
+    await message.answer(
+        "💬 *Чаты водителей*\n\n"
+        "Общайся с другими водителями - обмен новостями, вопросы, помощь на линии.",
+        reply_markup=build_driver_chats_keyboard(city), parse_mode='Markdown',
+    )
+    if is_shift_active(state):
+        tips_text = (
+            "💳 *Получить чаевые*\n\n"
+            "Приложение «Яндекс Чаевые: на карту по QR» - покажи QR-код пассажиру, "
+            "он сканирует и переводит чаевые тебе на карту."
+        )
+        await message.answer(tips_text, reply_markup=build_tips_keyboard(user_id), parse_mode='Markdown')
+    await message.answer(
+        "Выбери, что нужно дальше 👇",
+        reply_markup=services_keyboard(state.get('category'), city, user_id),
     )
 
 @router.message(lambda message: message.text == "📈 СПРОС СЕЙЧАС" and user_state.get(message.from_user.id, {}).get('in_courier_module'))
