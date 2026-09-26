@@ -12305,6 +12305,15 @@ def map_webapp_html():
   // от кружка, заливка). lightenColor/darkenColor ниже - маленькие
   // хелперы на чистом JS (без библиотек) для градиентных стопов.
   const SELF_MARKER_STYLE = {self_marker_style_json};
+  // ДОБАВЛЕНО 26.09.2026 (прямая просьба пользователя - "серый когда не на
+  // линии, желтый когда на линии... тоже такая объёмная, просто цвет
+  // поменяй с жёлтой на серую") - своя стрелка теперь красится по
+  // myShiftActive: жёлтая заливка (SELF_MARKER_STYLE) на линии, серая
+  // (тот же цвет, что .shift-toggle-btn в неактивном состоянии - см. CSS)
+  // не на линии. Форма/градиент/обводка (навArrowIconHtml) не меняются -
+  // меняется только базовый цвет заливки, из которого считается градиент
+  // светлее/темнее по граням, так что "объёмность" сохраняется.
+  const SELF_MARKER_OFFLINE_FILL = '#8a8a8a';
   let selfMarker = null;
   let selfHeading = 0;
   // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "убери чёрный
@@ -12428,7 +12437,10 @@ def map_webapp_html():
     const st = SELF_MARKER_STYLE[myCategory] || SELF_MARKER_STYLE['taxi'];
     // Эмодзи-иконку категории (🚕/🤵🏽/🚶🏽‍♂️/🚚) убрали ИМЕННО у своего маркера -
     // просто стрелка-навигатор без начинки, поворачивается по heading.
-    return navArrowIconHtml(st.fill, st.stroke, heading);
+    // ДОБАВЛЕНО 26.09.2026 - см. SELF_MARKER_OFFLINE_FILL выше: серая, пока
+    // не на линии, жёлтая (st.fill) - на линии.
+    const fill = myShiftActive ? st.fill : SELF_MARKER_OFFLINE_FILL;
+    return navArrowIconHtml(fill, st.stroke, heading);
   }}
   // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "пусть по нажатию
   // на стрелку на карте он берет данные тарифа машина и номера из кабинета
@@ -12478,6 +12490,14 @@ def map_webapp_html():
   const shiftToggleBtn = document.getElementById('shiftToggleBtn');
   function updateShiftToggleBtnUI() {{
     if (shiftToggleBtn) shiftToggleBtn.classList.toggle('active', myShiftActive);
+    // ДОБАВЛЕНО 26.09.2026 - см. SELF_MARKER_OFFLINE_FILL/selfIconHtml выше:
+    // перекрашиваем свою стрелку на карте сразу же по смене статуса, не
+    // дожидаясь следующего обновления геопозиции (updateSelfMarker вызовется
+    // сама только когда браузер отдаст новую точку, а это может быть не
+    // сразу после тапа по кнопке).
+    if (selfMarker) {{
+      selfMarker.setIcon(L.divIcon({{ className: 'self-icon', html: selfIconHtml(selfHeading), iconSize: [42, 42], iconAnchor: [21, 21] }}));
+    }}
   }}
   async function loadMyProfile() {{
     try {{
