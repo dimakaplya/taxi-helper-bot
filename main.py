@@ -14629,7 +14629,24 @@ def map_webapp_html():
   function _cloudLatLngsToTurfPolygon(latlngs) {{
     const ring = latlngs.map(p => [p[1], p[0]]);
     ring.push(ring[0]);
-    return turf.polygon([ring]);
+    const poly = turf.polygon([ring]);
+    // ДОБАВЛЕНО 26.09.2026 (прямая жалоба пользователя - "видно что
+    // накладываются где-то светлее где-то темнее, надо чтобы один был
+    // слой") - облака-круги строятся из 28x14=392 точек (DISTRICT_CLOUD_
+    // POINTS/SEGMENTS выше), из-за чего у соседних полигонов появляются
+    // почти-совпадающие, но не идентичные по float-координатам вершины -
+    // классическая причина падения turf.union на "невалидной" геометрии
+    // (см. историю правок _unionCloudGroup ниже). Округляем координаты до
+    // ~0.1м (precision 6) СРАЗУ при создании полигона - устраняет эти
+    // микро-расхождения без заметного изменения формы, из-за чего union
+    // почти всегда проходит с первого раза и соседние облака одного и
+    // разных источников (матрица/дождь/аэропорты) реально сливаются в один
+    // слой, а не остаются отдельными наложенными друг на друга пятнами.
+    try {{
+      return turf.truncate(poly, {{ precision: 6, coordinates: 2, mutate: true }});
+    }} catch (e) {{
+      return poly;
+    }}
   }}
   function _cloudsIntersect(a, b) {{
     const ba = a._bbox, bb = b._bbox;
@@ -14721,13 +14738,40 @@ def map_webapp_html():
   function _unionCloudGroup(group) {{
     let merged = null;
     const failed = [];
+    // ДОБАВЛЕНО 26.09.2026 (см. _cloudLatLngsToTurfPolygon выше - тот же
+    // повод, жалоба "видно что накладываются где-то светлее где-то
+    // темнее") - если union конкретной пары всё-таки не удался (координаты
+    // уже почищены truncate'ом выше, но геометрия может остаться
+    // вырожденной), раньше кусок просто дорисовывался ОТДЕЛЬНЫМ
+    // полупрозрачным полигоном поверх уже слитой фигуры - а он гарантированно
+    // её перекрывает (иначе не попал бы в эту группу через
+    // _groupOverlappingClouds), из-за чего получалась видимая более тёмная
+    // "линза" двойной заливки ровно там, где облака физически накладываются.
+    // Теперь вместо самого куска пытаемся дорисовать только его
+    // turf.difference(poly, merged) - часть, которая ЕЩЁ НЕ покрыта слитой
+    // фигурой - тогда даже при неудачном union итоговая картинка остаётся
+    // одним слоем без наложения. Если и difference не считается (совсем
+    // вырожденная геометрия) - только тогда, как самый последний запасной
+    // вариант, рисуем кусок как есть (прежнее поведение).
     group.forEach(c => {{
       const poly = _cloudLatLngsToTurfPolygon(c.latlngs);
       if (merged === null) {{ merged = poly; return; }}
+      let unioned = null;
       try {{
-        const u = turf.union(merged, poly);
-        if (u) {{ merged = u; }} else {{ failed.push(c.latlngs); }}
+        unioned = turf.union(merged, poly);
       }} catch (e) {{
+        unioned = null;
+      }}
+      if (unioned) {{ merged = unioned; return; }}
+      let diff = null;
+      try {{
+        diff = turf.difference(poly, merged);
+      }} catch (e) {{
+        diff = null;
+      }}
+      if (diff) {{
+        _turfGeometryToLatLngRings(diff.geometry || diff).forEach(r => failed.push(r));
+      }} else {{
         failed.push(c.latlngs);
       }}
     }});
