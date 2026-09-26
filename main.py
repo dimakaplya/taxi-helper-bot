@@ -11590,12 +11590,16 @@ MAP_CHROME_CSS = """
      индикатор, что был раньше на месте круглой кнопки-переключателя
      (.shift-toggle-btn, см. историю коммитов выше) ДО замены её на
      .shift-slider - серый кружок в углу экрана, жёлтый + анимация
-     "радара" (вращающийся конус) пока водитель на линии. Раньше по нему
-     ещё и кликали, чтобы переключить смену - теперь это делает исключительно
-     .shift-slider внизу, поэтому кружок НЕ кликабельный (без cursor:pointer
-     и обработчиков в JS) - чисто статус-индикатор "я на линии", как и было
-     задумано пользователем изначально по референсу. */
-  .shift-radar-indicator { position: absolute; top: 14px; left: 14px; z-index: 1000; width: 56px; height: 56px; border-radius: 50%; background: #8a8a8a; border: 3px solid #fff; box-shadow: 0 2px 8px rgba(0,0,0,.45); display: flex; align-items: center; justify-content: center; user-select: none; overflow: hidden; transition: background .25s; }
+     "радара" (вращающийся конус) пока водитель на линии.
+     УТОЧНЕНО 26.09.2026 (прямая просьба пользователя - "не только через
+     чат бота, а на карте вверху слева кнопка серая для выключения смены
+     она тоже выключает") - кружок СНОВА кликабельный, но ТОЛЬКО чтобы
+     ЗАВЕРШИТЬ смену (см. shiftRadarIndicator.addEventListener('click', ...)
+     в JS ниже, срабатывает только пока myShiftActive) - выйти на линию
+     по-прежнему можно исключительно свайпом полосы внизу (.shift-slider),
+     сюда это не возвращали. */
+  .shift-radar-indicator { position: absolute; top: 14px; left: 14px; z-index: 1000; width: 56px; height: 56px; border-radius: 50%; background: #8a8a8a; border: 3px solid #fff; box-shadow: 0 2px 8px rgba(0,0,0,.45); display: flex; align-items: center; justify-content: center; user-select: none; overflow: hidden; transition: background .25s, transform .12s; cursor: pointer; }
+  .shift-radar-indicator:active { transform: scale(.93); }
   .shift-radar-indicator.active { background: #FFB800; }
   .shift-radar-indicator .power-icon { position: relative; z-index: 2; width: 26px; height: 26px; filter: drop-shadow(0 1px 1px rgba(0,0,0,.35)); }
   .shift-radar-indicator .radar-sweep { position: absolute; inset: 0; border-radius: 50%; background: conic-gradient(from 0deg, rgba(255,255,255,.6), rgba(255,255,255,0) 40%); opacity: 0; }
@@ -11990,11 +11994,13 @@ def map_webapp_html():
 </div>
 <!-- ВОЗВРАЩЕНО 26.09.2026 (прямая просьба пользователя - "верни обратно
      индикатор радара в верхнем левом углу карты") - см. .shift-radar-
-     indicator в CSS выше и updateShiftToggleBtnUI в JS ниже. Чисто статус-
-     индикатор (не кликабельный - переключение смены теперь только через
-     .shift-slider внизу), поэтому без обработчиков кликов, в отличие от
-     прежней версии этого элемента. -->
-<div class="shift-radar-indicator" id="shiftRadarIndicator" title="Статус смены">
+     indicator в CSS выше и updateShiftToggleBtnUI в JS ниже. Статус-
+     индикатор (серый - не на линии, жёлтый + радар - на линии), а
+     ДОБАВЛЕНО ЕЩЁ РАЗ 26.09.2026 (прямая просьба пользователя - "кнопка
+     серая для выключения смены она тоже выключает") - клик по нему
+     завершает смену (см. addEventListener('click', ...) в JS ниже) -
+     выйти на линию всё так же можно только свайпом .shift-slider внизу. -->
+<div class="shift-radar-indicator" id="shiftRadarIndicator" title="Завершить смену">
   <div class="radar-sweep"></div>
   <svg class="power-icon" viewBox="0 0 24 24" fill="#fff">
     <path d="M13 3h-2v10h2V3zm4.83 2.17-1.42 1.42A6.92 6.92 0 0 1 19 12c0 3.87-3.13 7-7 7s-7-3.13-7-7c0-2.24 1.06-4.32 2.83-5.65L6.41 5.17A8.936 8.936 0 0 0 3 12c0 4.97 4.03 9 9 9s9-4.03 9-9c0-2.78-1.28-5.3-3.17-6.83z"/>
@@ -12939,6 +12945,16 @@ def map_webapp_html():
     shiftSliderHandle.addEventListener('pointermove', sliderPointerMove);
     shiftSliderHandle.addEventListener('pointerup', sliderPointerUp);
     shiftSliderHandle.addEventListener('pointercancel', sliderPointerUp);
+  }}
+  // ДОБАВЛЕНО 26.09.2026 (прямая просьба пользователя - "не только через
+  // чат бота, а на карте вверху слева кнопка серая для выключения смены
+  // она тоже выключает") - клик по радар-индикатору завершает смену, но
+  // ТОЛЬКО пока она активна (myShiftActive) - выйти на линию отсюда
+  // нельзя, для этого по-прежнему только свайп .shift-slider внизу.
+  if (shiftRadarIndicator) {{
+    shiftRadarIndicator.addEventListener('click', () => {{
+      if (myShiftActive) doShiftToggle();
+    }});
   }}
   function updateSelfMarker(lat, lon, heading) {{
     selfLat = lat;
