@@ -5754,6 +5754,29 @@ def services_keyboard(category=None, city=None, user_id=None):
     # reply-клавиатура, и должен продолжать работать как прежде. buttons
     # выше больше никуда не передаётся - оставлен нетронутым (мёртвый код),
     # чтобы при необходимости можно было откатить одной строкой.
+    #
+    # ИЗМЕНЕНО 27.09.2026 (жалоба пользователя со скриншотом - сообщение
+    # "✅ Смена начата" после удаления reply-клавиатуры показывалось вообще
+    # БЕЗ единой кнопки: types.ReplyKeyboardRemove() не попадает под
+    # isinstance(..., ReplyKeyboardMarkup) в SingleMessageMiddleware (см.
+    # has_reply_keyboard там), поэтому она проходит в _with_main_menu_button,
+    # но там ЕДИНСТВЕННЫЕ обрабатываемые случаи - None (создать новую
+    # инлайн-клавиатуру) и InlineKeyboardMarkup (дописать строку) -
+    # ReplyKeyboardRemove просто возвращается "как есть" веткой "и прочее",
+    # без единой кнопки. Пользователь прямо попросил - "везде где выскакивают
+    # сообщения замени [это] на кнопку входа в приложение, а не кнопку
+    # меню" - теперь вместо ReplyKeyboardRemove() возвращаем
+    # InlineKeyboardMarkup с ОДНОЙ кнопкой прямого входа в приложение (тот
+    # же URL/паттерн, что у open_app_text_and_keyboard выше, используется у
+    # /start и "МЕНЮ TAXI HELPER") - единственная точка правки на все
+    # оставшиеся ~28 мест вызова сразу. PUBLIC_URL не задан (локальный
+    # дев-запуск без HTTPS) - остаётся прежний ReplyKeyboardRemove(), тот же
+    # фолбэк, что и у open_app_text_and_keyboard в этом случае.
+    if PUBLIC_URL:
+        app_url = f"{PUBLIC_URL}{UNIFIED_APP_WEBAPP_PATH}?city={urllib.parse.quote(city or '')}&category={urllib.parse.quote(category or '')}"
+        return InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="🚕 ОТКРЫТЬ TAXI HELPER", web_app=WebAppInfo(url=app_url)),
+        ]])
     return types.ReplyKeyboardRemove()
 
 # ==================== МОДУЛЬ "ИНСТРУМЕНТЫ ВОДИТЕЛЯ" (бывш. "Курьеру") ====================
@@ -9996,19 +10019,17 @@ async def start_shift_and_notify(target, user_id, category, city, tariffs):
     tariffs_line = ""
     if tariffs:
         tariffs_line = f"🚕 Тарифы: {format_shift_tariffs_label(tariffs)}\n"
-    shift_header = (
-        "🟢 *СМЕНА НАЧАТА*\n"
-        "▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓\n"
-        f"🕐 {format_shift_start_label(started_at)}\n"
-        f"{tariffs_line}"
-        "▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓\n"
-        "📎 Чтобы считался километраж и ты был виден на карте водителей: Геопозиция → "
-        "*«Транслировать геопозицию»* → *«Пока не отключу»*.\n"
-        "_Без трансляции секундомер идёт как обычно, но км и показ на карте не сработают._"
-    )
-    # Сначала обновляем клавиатуру коротким тех.сообщением (Reply-клавиатуру
-    # нельзя приложить к тому же сообщению, что инлайн-кнопка ниже).
-    await target("✅ Смена начата", reply_markup=services_keyboard(category, city, user_id))
+    # ИЗМЕНЕНО 27.09.2026 (прямая жалоба пользователя со скриншотом - "он
+    # выкидывает вот эту вот историю что смена началась там бла-бла-бла...
+    # человек-то будет смену открывать в приложении телеграмма, зачем ему
+    # бот смотреть и читать"): раньше здесь был длинный текст с рамкой из
+    # ▓, абзацем-инструкцией "чтобы считался километраж... включи
+    # трансляцию" (на этом этапе функция УЖЕ вызвана ПОСЛЕ того, как
+    # трансляция подтверждена - см. require_live_location_for_shift_start/
+    # maybe_start_pending_shift выше - то есть инструкция всегда была
+    # запоздалой) и отдельным абзацем "план работы" с кнопкой "КУДА ЕХАТЬ
+    # AI" (см. ниже). Оставлена только сама суть - время старта и тарифы.
+    shift_header = f"🟢 *Смена начата*\n🕐 {format_shift_start_label(started_at)}\n{tariffs_line}"
     # ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - "бот понимает с
     # какого устройства и предлагает сразу что нужно, а не две кнопки",
     # уточнение - захватывать платформу уже "при старте смены") - см.
@@ -10039,31 +10060,21 @@ async def start_shift_and_notify(target, user_id, category, city, tariffs):
             await target("📲", reply_markup=probe_keyboard)
         except Exception:
             logger.exception(f"❌ Не удалось отправить кнопку захвата платформы user_id={user_id}")
-    # ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя) - раньше сразу же
-    # следом отправлялась ПОЛНАЯ сводка "Куда ехать" одним длинным
-    # сообщением (см. extra_header у send_where_to_go/format_where_to_go_text
-    # выше, было добавлено 20.09.2026 как раз чтобы объединить оба
-    # сообщения в одно). Пользователь попросил сделать короче: полную
-    # сводку теперь не шлём при каждом старте смены сама по себе - вместо
-    # неё короткое приглашение с кнопкой на WebApp "Куда ехать" (который
-    # считает по РЕАЛЬНОЙ текущей геопозиции браузера, полученной внутри
-    # самого WebApp - см. where_to_go_webapp_html/getCurrentPositionQuiet, -
-    # а не по последнему пингу живой геопозиции смены, как текстовая
-    # версия). Если WebApp недоступен (PUBLIC_URL/город не заданы) -
-    # прежнее поведение как фолбэк, чтобы "Куда ехать" не пропала совсем.
+    # ИЗМЕНЕНО 27.09.2026 (та же жалоба, что у shift_header выше - "зачем
+    # ему бот смотреть и читать, он всё равно откроет смену в приложении
+    # телеграмма"): раньше здесь отдельным сообщением уходил абзац "план
+    # работы" с кнопкой "💰 КУДА ЕХАТЬ AI" (ведущей в отдельный WebApp
+    # "Куда ехать"). Убрано - "Куда ехать" уже вкладка внутри единого
+    # приложения (см. unified_app_html), отдельная кнопка на неё больше не
+    # нужна. Вместо неё - ОДНО короткое сообщение (shift_header - время
+    # старта/тарифы) с той же кнопкой прямого входа в приложение, что и
+    # везде в боте (см. services_keyboard выше - единственная точка правки
+    # на все места, где раньше всплывали подобные сообщения). Если WebApp
+    # недоступен (PUBLIC_URL/город не заданы, локальный дев-запуск) -
+    # прежний текстовый фолбэк с реальной сводкой "Куда ехать", чтобы она
+    # не пропала совсем.
     if PUBLIC_URL and city and category:
-        where_to_go_url = f"{PUBLIC_URL}{WHERE_TO_GO_WEBAPP_PATH}?city={urllib.parse.quote(city)}&category={urllib.parse.quote(category)}"
-        cta_text = (
-            f"{shift_header}\n"
-            "▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓\n"
-            "🧭 Ассистент рассчитал для тебя план работы на сейчас - аэропорты, "
-            "районы и события, где сейчас выгоднее всего работать. Открой «Куда "
-            "ехать», чтобы увидеть маршрут и доехать за пару тапов."
-        )
-        cta_keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="💰 КУДА ЕХАТЬ AI", web_app=WebAppInfo(url=where_to_go_url))]
-        ])
-        await target(cta_text, parse_mode='Markdown', reply_markup=cta_keyboard)
+        await target(shift_header, parse_mode='Markdown', reply_markup=services_keyboard(category, city, user_id))
     else:
         # send_where_to_go ожидает объект message (зовёт message.answer(...)
         # внутри) - target у нас уже сама функция answer (message.answer или
@@ -12037,12 +12048,36 @@ MAP_CHROME_CSS = """
   .tariff-picker-confirm { background: #FFB800; color: #1c1c1c; }
   .tariff-picker-confirm:disabled { opacity: .45; cursor: default; }
   /* ДОБАВЛЕНО 27.09.2026 (жалоба пользователя - "выходишь на линию,
-     геолокация не включена, всё просто скидывает и ничего не пишет") -
-     текст самой карточки #geoRequiredOverlay ниже (использует ту же
-     .tariff-picker-overlay/-card, что и выбор тарифа выше). */
-  .geo-required-text { font-size: 14px; line-height: 1.45; margin: 0 0 10px; color: #ddd; }
-  .geo-required-steps { font-size: 14px; line-height: 1.45; margin: 0 0 10px; color: #fff; font-weight: 600; }
-  .geo-required-note { font-size: 12.5px; line-height: 1.4; margin: 0 0 4px; color: #9a9a9a; }
+     геолокация не включена, всё просто скидывает и ничего не пишет" -
+     ИЗМЕНЕНО в тот же день по прямой просьбе пользователя со скриншотом -
+     "сделай ровно так же, с крутящейся загрузкой" - имелся в виду тот же
+     полноэкранный экран-заглушка "Нужна геолокация" с крутящимся
+     спиннером, что уже показывается при входе в приложение (см. #gate/
+     .spin/@keyframes spin в unified_app_html выше) - тот же визуальный
+     язык здесь, в #geoRequiredOverlay, вместо карточки-шторки снизу, как у
+     выбора тарифа. Спиннер крутится, пока не придёт первая геопозиция -
+     дальше смена стартует АВТОМАТИЧЕСКИ (см. maybe_start_pending_shift в
+     main.py), а сам экран закрывается сам собой, как только loadMyProfile
+     увидит myShiftActive=true (см. JS ниже) - ничего повторно нажимать не
+     нужно, ровно как в самом гейте входа в приложение. */
+  .geo-wait-overlay {
+    position: absolute; inset: 0; z-index: 2000; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; text-align: center; padding: 28px;
+    background: radial-gradient(circle at 50% 20%, #1a1a1a, #000 92%);
+  }
+  .geo-wait-spin {
+    width: 26px; height: 26px; border-radius: 50%; border: 3px solid rgba(255,196,0,.25);
+    border-top-color: #FFC400; animation: geoWaitSpin .8s linear infinite; margin-bottom: 18px;
+  }
+  @keyframes geoWaitSpin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .geo-wait-spin { animation: none; } }
+  .geo-wait-overlay h3 { font-family: -apple-system, sans-serif; font-size: 18px; margin: 0 0 10px; font-weight: 700; }
+  .geo-wait-overlay p { font-size: 14px; color: #aaa; line-height: 1.5; max-width: 300px; margin: 0 0 8px; }
+  .geo-wait-overlay .geo-wait-steps { color: #fff; font-weight: 600; }
+  .geo-wait-overlay .geo-wait-close {
+    margin-top: 14px; background: none; border: none; color: #FFC400; font-size: 13.5px;
+    font-weight: 600; cursor: pointer; font-family: -apple-system, sans-serif;
+  }
   /* ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - прислал скриншот
      Яндекс Навигатора с тёмной плашкой снизу экрана, "сделай бар снизу
      такой", уточнено отдельным вопросом - "просто визуальный стиль
@@ -12445,22 +12480,27 @@ def map_webapp_html():
      фоллбэк геолокации на карте), он не всегда способен показать сообщение
      внутри вложенного iframe карты, поэтому водитель видел только, что
      полоса "Выйти на линию" откатывается назад, без единого объяснения
-     почему. Та же самая проверенная карточка-оверлей, что и у выбора
-     тарифа выше (.tariff-picker-overlay/-card) - рисуется прямо в DOM
-     карты, не зависит от моста Telegram, поэтому гарантированно видна.
+     почему.
+     ИЗМЕНЕНО в тот же день (прямая просьба пользователя со скриншотом -
+     "сделай ровно так же, вот с такой крутящейся загрузкой") - раньше
+     здесь была карточка-шторка снизу (как у выбора тарифа), теперь тот же
+     полноэкранный экран с крутящимся спиннером, что уже показывается при
+     входе в приложение (см. #gate/.spin в unified_app_html выше) - тот же
+     смысл ("ждём геопозицию"), тот же визуальный язык, для единообразия.
+     Спиннер крутится, пока не придёт первый пинг геопозиции - дальше смена
+     стартует АВТОМАТИЧЕСКИ (см. maybe_start_pending_shift в main.py), и
+     сам экран закрывается сам собой, как только loadMyProfile увидит
+     myShiftActive=true (см. JS ниже) - ничего повторно нажимать не нужно.
      Текст - тот же смысл, что и в чате бота (см. shift_geolocation_
      required_text в main.py), просто продублирован здесь на клиенте, т.к.
      эта карточка не запрашивает его отдельно с сервера. -->
-<div class="tariff-picker-overlay" id="geoRequiredOverlay" style="display:none">
-  <div class="tariff-picker-card">
-    <h3>📍 Нужна геопозиция</h3>
-    <p class="geo-required-text">Для старта смены нужна геопозиция - без неё бот не может считать километраж, показывать тебя на карте водителей и следить за очередью у аэропорта.</p>
-    <p class="geo-required-steps">Включи трансляцию: скрепка 📎 → Геопозиция → «Транслировать геопозицию» → «Пока не отключу».</p>
-    <p class="geo-required-note">Как только геопозиция придёт - смена стартует автоматически, повторно свайпать полосу не нужно.</p>
-    <div class="tariff-picker-actions">
-      <button type="button" class="tariff-picker-confirm" id="geoRequiredOk" style="flex:none;width:100%;">Понятно</button>
-    </div>
-  </div>
+<div class="geo-wait-overlay" id="geoRequiredOverlay" style="display:none">
+  <div class="geo-wait-spin"></div>
+  <h3>📍 Нужна геопозиция</h3>
+  <p>Ждём трансляцию геопозиции, чтобы начать смену - без неё бот не может считать километраж, показывать тебя на карте водителей и следить за очередью у аэропорта.</p>
+  <p class="geo-wait-steps">Включи: скрепка 📎 → Геопозиция → «Транслировать геопозицию» → «Пока не отключу»</p>
+  <p>Как только геопозиция придёт - смена стартует автоматически, этот экран закроется сам.</p>
+  <button type="button" class="geo-wait-close" id="geoRequiredOk">Свернуть</button>
 </div>
 <script>
   const CATEGORY_STYLE = {style_json};
@@ -13236,6 +13276,13 @@ def map_webapp_html():
       myProfileDiagState = 'ok';
       myShiftActive = !!data.shift_active;
       updateShiftToggleBtnUI();
+      // ДОБАВЛЕНО 27.09.2026 - см. #geoRequiredOverlay в HTML выше -
+      // экран ожидания геопозиции закрывается сам, как только очередной
+      // опрос (см. setInterval(loadMyProfile,...) ниже) увидит, что смена
+      // реально стартовала (отложенный старт сработал по первому пингу
+      // геопозиции, см. maybe_start_pending_shift в main.py) - водителю не
+      // нужно самому закрывать экран или что-то нажимать повторно.
+      if (myShiftActive) closeGeoRequiredOverlay();
       // ДОБАВЛЕНО 25.09.2026 - см. myShiftStartedAtMs/myShiftTariffs выше.
       // Дата парсится ОДИН раз здесь (не на каждый тик tickBottomBar) -
       // dSince считаем от готового timestamp в мс.
