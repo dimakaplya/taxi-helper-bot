@@ -28369,29 +28369,31 @@ async def notify_users_about_new_deploy():
 @router.callback_query(lambda c: c.data == "refresh_menu")
 async def handle_refresh_menu_button(callback_query: types.CallbackQuery):
     """"🔄 ОБНОВИТЬ БОТА" под пушем "Вышло обновление бота" (см. BOT_UPDATED_MESSAGE/
-    BOT_UPDATED_REFRESH_KEYBOARD выше) - просто заново отправляет ТЕКУЩИЙ
-    services_keyboard по уже сохранённым category/city из user_state, чтобы
-    у пользователя на телефоне перерисовалась Reply-клавиатура (она
-    кэшируется Telegram и не обновляется сама, пока не придёт новое
-    сообщение с новым reply_markup). НИЧЕГО в user_state не меняет и не
-    сбрасывает - активная смена, черновик заказа, любое другое состояние
-    остаются как были, ровно то, что просил пользователь ("сохрани уже
-    активированные к примеру начатую смену")."""
+    BOT_UPDATED_REFRESH_KEYBOARD выше).
+
+    ИЗМЕНЕНО 27.09.2026 (жалоба пользователя со скриншотом - "где кнопка
+    открыть приложение", после того как services_keyboard() стала
+    возвращать types.ReplyKeyboardRemove() везде, см. правку "Убрать
+    старую reply-клавиатуру services_keyboard() везде в боте"): раньше эта
+    кнопка просто заново отправляла ТЕКУЩИЙ services_keyboard(), чтобы у
+    пользователя на телефоне перерисовалась Reply-клавиатура - внутри неё
+    жила единственная кнопка входа в единое приложение ("🧪 НОВОЕ
+    ПРИЛОЖЕНИЕ (тест)"). После удаления этой reply-клавиатуры пользователь
+    жал "ОБНОВИТЬ БОТА" и видел только текст "✅ Бот обновлён" без единой
+    рабочей кнопки - сам вход в приложение пропадал. Теперь, как и у
+    /start и инлайн-кнопки "МЕНЮ TAXI HELPER" (см. open_services_menu/
+    send_start_screen выше - тот же актуальный флоу входа в приложение,
+    26.09.2026), показываем тот же текст + инлайн-кнопку
+    "🚕 ОТКРЫТЬ TAXI HELPER" (open_app_text_and_keyboard) - она сама
+    подставит уже выбранные город/категорию в ссылку, а если их ещё нет -
+    приложение определит город по геолокации. НИЧЕГО в user_state не
+    меняет и не сбрасывает - активная смена, черновик заказа, любое другое
+    состояние остаются как были, ровно то, что просил пользователь
+    ("сохрани уже активированные к примеру начатую смену")."""
     await callback_query.answer("Обновляю бота…")
     user_id = callback_query.from_user.id
-    state = user_state.get(user_id, {})
-    category = state.get('category')
-    city = state.get('city')
-    if not category or not city:
-        await callback_query.message.answer(
-            "Сначала выбери категорию и город, чтобы показать меню 🙂",
-            reply_markup=category_keyboard(),
-        )
-        return
-    msg = await callback_query.message.answer(
-        "✅ Бот обновлён 👇",
-        reply_markup=services_keyboard(category, city, user_id),
-    )
+    text, keyboard = open_app_text_and_keyboard(user_id)
+    msg = await callback_query.message.answer(text, reply_markup=keyboard, parse_mode='Markdown')
     await track_bot_update_message(user_id, msg.message_id)
 
 # ==================== ПЛАТНАЯ ПОДПИСКА ====================
