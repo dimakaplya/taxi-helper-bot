@@ -3182,6 +3182,16 @@ def init_db():
     existing_columns = {row[1] for row in cursor.fetchall()}
     if 'completed_orders_count' not in existing_columns:
         cursor.execute('ALTER TABLE driver_profiles ADD COLUMN completed_orders_count INTEGER DEFAULT 0')
+    # ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - "рейтинг свой...
+    # чтобы водитель мог сам на него тыкать и сам себе рейтинг эту
+    # устанавливать в зависимости от приложения которые в приложении у
+    # него стоит") - самостоятельно вписываемый рейтинг (например 4.98),
+    # НЕ считается ботом - просто то, что водитель сам видит в своём
+    # основном таксо-приложении (Яндекс/Ситимобил и т.п.) и переносит сюда
+    # для витрины личного кабинета. NULL, пока не заполнено - см.
+    # get_driver_profile/save_driver_rating/CABINET_RATING_API_PATH.
+    if 'rating' not in existing_columns:
+        cursor.execute('ALTER TABLE driver_profiles ADD COLUMN rating REAL')
     # Миграция (20.09.2026): на уже существующей БД таблица shift_history
     # могла быть создана раньше без этой колонки - CREATE TABLE IF NOT
     # EXISTS её не добавит, поэтому добавляем отдельно, игнорируя ошибку
@@ -3775,14 +3785,14 @@ def get_driver_profile(user_id):
         init_db()
         conn = get_db_connection()
         cursor = conn.execute(
-            'SELECT full_name, tariff, car_model, car_plate, completed_orders_count FROM driver_profiles WHERE user_id = ?', (user_id,)
+            'SELECT full_name, tariff, car_model, car_plate, completed_orders_count, rating FROM driver_profiles WHERE user_id = ?', (user_id,)
         )
         row = cursor.fetchone()
         conn.close()
         if not row:
             return None
         return {'full_name': row[0] or '', 'tariff': row[1] or '', 'car_model': row[2] or '', 'car_plate': row[3] or '',
-                'completed_orders_count': row[4] or 0}
+                'completed_orders_count': row[4] or 0, 'rating': row[5]}
     except Exception as e:
         logger.error(f"❌ Не удалось прочитать профиль водителя {user_id}: {e}")
         return None
@@ -3802,6 +3812,28 @@ def save_driver_profile(user_id, full_name, tariff, car_model, car_plate):
         return True
     except Exception as e:
         logger.error(f"❌ Не удалось сохранить профиль водителя {user_id}: {e}")
+        return False
+
+# ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - тап-редактируемый
+# рейтинг в личном кабинете, см. комментарий у CREATE TABLE driver_profiles
+# выше) - отдельная функция сохранения (не через save_driver_profile,
+# который правит анкету целиком) - рейтинг редактируется отдельным тапом
+# по своей "пилюле", без открытия всей формы анкеты. INSERT..ON CONFLICT
+# создаёт строку, даже если водитель ещё ни разу не заполнял анкету.
+def save_driver_rating(user_id, rating):
+    try:
+        init_db()
+        conn = get_db_connection()
+        conn.execute(
+            'INSERT INTO driver_profiles (user_id, rating, updated_at) VALUES (?, ?, ?) '
+            'ON CONFLICT(user_id) DO UPDATE SET rating = excluded.rating, updated_at = excluded.updated_at',
+            (user_id, rating, datetime.now(ZoneInfo('UTC')).strftime('%Y-%m-%d %H:%M:%S'))
+        )
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"❌ Не удалось сохранить рейтинг водителя {user_id}: {e}")
         return False
 
 # ==================== ТО (ТЕХОБСЛУЖИВАНИЕ) - ДОБАВЛЕНО 22.09.2026 ====================
@@ -17194,10 +17226,24 @@ def unified_app_html():
   .footnote { font-size: 11.5px; color: #777; margin-top: 16px; line-height: 1.4; }
 
   .svc-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  /* ИЗМЕНЕНО 27.09.2026 (прямая просьба пользователя со скриншотом -
+     "сделай расположение всех надписей эталон погода чтоб все так были") -
+     раньше высота плитки была только min-height, и грид растягивал ВСЮ
+     строку под самую высокую ячейку (например когда в соседней плитке
+     подпись переносилась на 2 строки - "Реферальная программа"), из-за
+     чего внутри одной и той же строки все плитки выглядели одинаково
+     (спасибо justify-content:center из прошлой правки), но РАЗНЫЕ строки
+     были разной высоты - плитка "Погода" (короткая строка, короткая
+     подпись) выглядела иначе, чем, скажем, "Чаевые" (короткая подпись, но
+     в строке с длинной "Реферальная программа"). Теперь высота ФИКСИРОВАНА
+     (height, не min-height) и одинакова АБСОЛЮТНО у всех плиток на сетке,
+     а не только в пределах своей строки - "Погода" и есть эта высота,
+     контент везде прижат к верху (justify-content:flex-start, как в
+     "Погода"), а не центрирован - буквально "как Погода" у каждой плитки. */
   .tile {
     background: #131313; border: 1px solid rgba(255,255,255,.08); border-radius: 14px;
     padding: 16px 12px; text-decoration: none; color: #fff; display: flex; flex-direction: column;
-    justify-content: center; gap: 8px; min-height: 84px; position: relative;
+    justify-content: flex-start; gap: 8px; height: 104px; position: relative;
   }
   .tile .ic { height: 23px; display: flex; align-items: center; color: #FFC400; }
   .tile .ic svg { display: block; flex-shrink: 0; }
@@ -21673,7 +21719,7 @@ async def handle_cabinet_data_api(request):
         hours_series = [round(shifts_by_day.get(d, {}).get('minutes', 0) / 60, 1) for d in days_axis]
 
         result = {
-            'profile': get_driver_profile(user_id) or {'full_name': '', 'tariff': '', 'car_model': '', 'car_plate': '', 'completed_orders_count': 0},
+            'profile': get_driver_profile(user_id) or {'full_name': '', 'tariff': '', 'car_model': '', 'car_plate': '', 'completed_orders_count': 0, 'rating': None},
             'totals': {
                 'today_hours': round(today_minutes / 60, 1), 'today_km': round(today_km),
                 'today_net_profit': round(today_net_profit),
@@ -21748,6 +21794,46 @@ async def handle_cabinet_profile_api(request):
     if not ok:
         return web.json_response({'error': 'save_failed'}, status=500)
     return web.json_response({'ok': True})
+
+# ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - "рейтинг свой...
+# чтобы водитель мог сам на него тыкать и сам себе рейтинг эту
+# устанавливать в зависимости от приложения которые в приложении у него
+# стоит") - отдельный лёгкий эндпоинт (не весь /cabinet/profile), потому
+# что в UI это тап по одной "пилюле", а не открытие всей формы анкеты. Тот
+# же способ проверки initData, что и у /cabinet/profile выше - запись
+# персональных данных без валидной подписи не проходит.
+CABINET_RATING_API_PATH = '/cabinet/rating'
+CABINET_RATING_MIN, CABINET_RATING_MAX = 1.0, 5.0  # тот же диапазон, что у реальных рейтингов Яндекс.Такси/Ситимобил
+
+async def handle_cabinet_rating_api(request):
+    """Сохраняет самостоятельно введённый водителем рейтинг (например 4.98,
+    то, что он видит в своём основном таксо-приложении) - POST с телом
+    {rating: number}. Значение НЕ считается ботом, это просто витрина в
+    личном кабинете - только валидируем, что это разумное число 1.00-5.00."""
+    init_data = request.headers.get('X-Telegram-Init-Data', '')
+    parsed = validate_telegram_webapp_init_data(init_data, BOT_TOKEN) if BOT_TOKEN else None
+    if not parsed:
+        return web.json_response({'error': 'invalid_init_data'}, status=401)
+    try:
+        tg_user = json.loads(parsed.get('user', '{}'))
+        user_id = tg_user.get('id')
+    except Exception:
+        user_id = None
+    if not user_id:
+        return web.json_response({'error': 'invalid_init_data'}, status=401)
+
+    try:
+        body = await request.json()
+        rating = round(float(body.get('rating')), 2)
+    except (TypeError, ValueError, AttributeError):
+        return web.json_response({'error': 'invalid_body'}, status=400)
+    if not (CABINET_RATING_MIN <= rating <= CABINET_RATING_MAX):
+        return web.json_response({'error': 'out_of_range'}, status=400)
+
+    ok = save_driver_rating(user_id, rating)
+    if not ok:
+        return web.json_response({'error': 'save_failed'}, status=500)
+    return web.json_response({'ok': True, 'rating': rating})
 
 # ==================== ЛИЧНЫЙ КАБИНЕТ - РАСШИРЕНИЕ (21.09.2026) ====================
 # По прямой просьбе пользователя: "надо обьеденить кнопки инструменты
@@ -23171,6 +23257,84 @@ def cabinet_webapp_html():
     flex-shrink: 0; border: none; border-radius: 8px; padding: 8px 12px; font-size: 12px; font-weight: 700;
     background: rgba(255,196,0,.15); color: #FFC400; text-transform: uppercase;
   }
+
+  /* ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - "личный кабинет
+     должен прям продающий выглядеть... побольше акцент заработок за
+     сегодня... какой-то рейтинг свой... чтобы водитель мог сам на него
+     тыкать и сам себе рейтинг устанавливать... в наших шрифтах в наших
+     цветах в каких-то анимациях") - крупная hero-карточка "Заработано
+     сегодня" вместо мелкой равноправной плитки в сетке "Сегодня", и
+     тап-редактируемый рейтинг (число, которое водитель вписывает сам,
+     ориентируясь на то, что показывает его основное таксо-приложение -
+     у бота нет доступа к реальному рейтингу Яндекс/Ситимобил, поэтому
+     это самостоятельно вводимое значение, не расчёт). Палитра/шрифты -
+     те же чёрный/жёлтый/белый и тот же -apple-system, что и везде в
+     кабинете, никакой новой системы не вводится - только масштаб,
+     движение и акцент. */
+  .profile-card { padding: 18px; gap: 14px; }
+  .avatar { width: 60px; height: 60px; font-size: 25px; }
+  .profile-name { font-size: 19px; font-weight: 800; letter-spacing: -.01em; }
+
+  .hero-earn {
+    position: relative; overflow: hidden; border-radius: 18px; padding: 18px 18px 16px;
+    background: linear-gradient(135deg, #1c1c1c 0%, #000 60%, #241c00 130%);
+    color: #fff; margin-bottom: 16px; box-shadow: 0 8px 24px rgba(255,196,0,.12), 0 6px 20px rgba(0,0,0,.4);
+    border: 1px solid rgba(255,196,0,.4); animation: rowIn .32s ease .05s both;
+  }
+  .hero-earn::before {
+    content: ''; position: absolute; inset: -50%; pointer-events: none;
+    background: radial-gradient(circle, rgba(255,196,0,.28), transparent 60%);
+    animation: heroSheen 11s ease-in-out infinite;
+  }
+  .hero-earn-label {
+    position: relative; font-size: 12.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em;
+    color: rgba(255,255,255,.65); display: flex; align-items: center; gap: 6px;
+  }
+  .hero-earn-dot {
+    width: 7px; height: 7px; border-radius: 50%; background: #34C759; flex-shrink: 0;
+    animation: liveDotPulse 1.8s ease-in-out infinite;
+  }
+  .hero-earn-dot.off { background: rgba(255,255,255,.25); animation: none; }
+  @keyframes liveDotPulse {
+    0% { box-shadow: 0 0 0 0 rgba(52,199,89,.55); }
+    70% { box-shadow: 0 0 0 7px rgba(52,199,89,0); }
+    100% { box-shadow: 0 0 0 0 rgba(52,199,89,0); }
+  }
+  .hero-earn-value {
+    position: relative; font-size: 42px; font-weight: 800; letter-spacing: -.01em; margin-top: 2px;
+    font-variant-numeric: tabular-nums; line-height: 1.1;
+    background: linear-gradient(135deg, #fff, #FFC400 140%);
+    -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
+  }
+  .hero-earn-sub { position: relative; font-size: 12.5px; color: rgba(255,255,255,.55); margin-top: 3px; }
+
+  /* Рейтинг - тап-редактируемая "пилюля" в шапке профиля */
+  .rating-pill {
+    border: none; border-radius: 999px; padding: 3px 10px 3px 8px; font-size: 12.5px; font-weight: 800;
+    background: linear-gradient(135deg, #FFC400, #FFE47a); color: #000; display: inline-flex; align-items: center;
+    gap: 4px; animation: ratingPulse 2.6s ease-in-out infinite; font-variant-numeric: tabular-nums;
+  }
+  .rating-pill .pencil { opacity: .55; font-size: 10px; margin-left: 1px; }
+  @keyframes ratingPulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(255,196,0,.5); }
+    50% { box-shadow: 0 0 0 5px rgba(255,196,0,0); }
+  }
+  .rating-edit-wrap { display: inline-flex; align-items: center; gap: 4px; }
+  .rating-edit-wrap input {
+    width: 52px; padding: 3px 6px; border-radius: 8px; border: 1px solid rgba(255,196,0,.6);
+    background: #000; color: #fff; font-size: 12.5px; font-weight: 700; font-variant-numeric: tabular-nums;
+  }
+  .rating-edit-wrap button {
+    border: none; border-radius: 8px; padding: 4px 9px; font-size: 11.5px; font-weight: 800;
+    background: #FFC400; color: #000; text-transform: uppercase;
+  }
+  .rating-edit-wrap button.cancel { background: rgba(255,255,255,.18); color: #fff; }
+
+  /* Каскадное появление статистических плиток вкладки "Сегодня" - лёгкая
+     задержка по порядку, вместо того чтобы все выпрыгивали одновременно. */
+  .tiles .tile:nth-child(1) { animation-delay: 0ms; }
+  .tiles .tile:nth-child(2) { animation-delay: 50ms; }
+  .tiles .tile:nth-child(3) { animation-delay: 100ms; }
 </style>
 </head>
 <body>
@@ -23201,9 +23365,26 @@ def cabinet_webapp_html():
     <div class="avatar" id="avatarLetter">🚕</div>
     <div class="profile-info">
       <div class="profile-name" id="profileName">Водитель</div>
+      <!-- ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - "рейтинг
+           свой... чтобы водитель мог сам на него тыкать и сам себе
+           рейтинг устанавливать в зависимости от приложения которое у
+           него стоит") - тап открывает инлайн-редактор (см. initRating/
+           startRatingEdit ниже), значение - то, что водитель сам вписал
+           (например то, что показывает его Яндекс/Ситимобил), бот его
+           не считает и не проверяет. -->
+      <div id="ratingBox" style="margin: 4px 0 2px;"></div>
       <div class="profile-sub" id="profileSub"></div>
     </div>
     <button class="edit-btn" id="editBtn">✏️ Изменить</button>
+  </div>
+
+  <!-- ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - "побольше акцент
+       заработок за сегодня") - крупная карточка вместо мелкой равноправной
+       плитки в сетке "Сегодня" ниже (там теперь только "За рулём"/"Пробег"). -->
+  <div class="hero-earn">
+    <div class="hero-earn-label"><span class="hero-earn-dot off" id="heroEarnDot"></span><span id="heroEarnLabel">Заработано сегодня</span></div>
+    <div class="hero-earn-value" id="heroEarnValue">—</div>
+    <div class="hero-earn-sub" id="heroEarnSub">Открой смену, чтобы начать считать</div>
   </div>
 
   <div class="profile-form" id="profileForm">
@@ -23231,8 +23412,7 @@ def cabinet_webapp_html():
   </div>
 
   <h2 class="section-title">Сегодня</h2>
-  <div class="tiles cols-3">
-    <div class="tile accent"><div class="label">Заработано</div><div class="value" id="todayNet">—</div></div>
+  <div class="tiles">
     <div class="tile"><div class="label">За рулём</div><div class="value" id="todayHours">—</div></div>
     <div class="tile"><div class="label">Пробег</div><div class="value" id="todayKm">—</div></div>
   </div>
@@ -23443,6 +23623,39 @@ def cabinet_webapp_html():
     return d.toLocaleDateString('ru-RU', {day: 'numeric', month: 'short'});
   }
 
+  // ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - "побольше акцент
+  // заработок за сегодня... в каких-то анимациях возможных красивых") -
+  // крупная hero-карточка вместо мелкой плитки, с лёгким нарастанием числа
+  // при первой загрузке (плавнее, чем просто резко подставленный текст) и
+  // "живой" зелёной точкой, пока за сегодня уже что-то заработано.
+  function renderHeroEarn(rub) {
+    const valueEl = document.getElementById('heroEarnValue');
+    const dotEl = document.getElementById('heroEarnDot');
+    const subEl = document.getElementById('heroEarnSub');
+    const target = Math.round(rub || 0);
+    if (target > 0) {
+      dotEl.classList.remove('off');
+      subEl.textContent = 'Продолжай в том же духе 🔥';
+    } else {
+      dotEl.classList.add('off');
+      subEl.textContent = 'Открой смену, чтобы начать считать';
+    }
+    if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      valueEl.textContent = fmtMoney(target);
+      return;
+    }
+    const start = 0;
+    const durationMs = 700;
+    const startedAt = performance.now();
+    function step(now) {
+      const progress = Math.min(1, (now - startedAt) / durationMs);
+      const eased = 1 - Math.pow(1 - progress, 3);
+      valueEl.textContent = fmtMoney(start + (target - start) * eased);
+      if (progress < 1) requestAnimationFrame(step);
+    }
+    requestAnimationFrame(step);
+  }
+
   // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "в кабинете на
   // первой же вкладке чтобы вся эта информация из сообщения была после
   // ввода всех данных - итог дня") - общий рендер разбивки "ДЕНЬ - ИТОГ",
@@ -23519,6 +23732,67 @@ def cabinet_webapp_html():
     document.getElementById('fCarModel').value = profile.car_model || '';
     document.getElementById('fCarPlate').value = profile.car_plate || '';
     fillTariffSelect(document.getElementById('fTariff'), profile.tariff || '');
+
+    renderRatingPill(profile.rating);
+  }
+
+  // ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - "рейтинг свой...
+  // чтобы водитель мог сам на него тыкать и сам себе рейтинг устанавливать
+  // в зависимости от приложения которые в приложении у него стоит") -
+  // самостоятельно вводимое число (например 4.98, то, что водитель видит в
+  // своём основном таксо-приложении) - НЕ считается ботом, просто витрина.
+  // Тап по "пилюле" открывает инлайн-редактор прямо на месте (без модалки/
+  // перехода) - тот же приём лёгкого редактирования, что уже применён для
+  // "Изменить" анкету ниже, только точечно для одного значения.
+  let currentRating = null;
+  function renderRatingPill(rating) {
+    currentRating = (rating === null || rating === undefined) ? null : Number(rating);
+    const box = document.getElementById('ratingBox');
+    const shown = currentRating !== null ? currentRating.toFixed(2) : 'указать';
+    box.innerHTML = '<button type="button" class="rating-pill" id="ratingPillBtn">⭐ ' + shown + '<span class="pencil">✏️</span></button>';
+    document.getElementById('ratingPillBtn').addEventListener('click', startRatingEdit);
+  }
+
+  function startRatingEdit() {
+    const box = document.getElementById('ratingBox');
+    box.innerHTML =
+      '<span class="rating-edit-wrap">' +
+      '<input type="number" inputmode="decimal" step="0.01" min="1" max="5" id="ratingInput" placeholder="4.98">' +
+      '<button type="button" id="ratingSaveBtn">✓</button>' +
+      '<button type="button" class="cancel" id="ratingCancelBtn">✕</button>' +
+      '</span>';
+    const input = document.getElementById('ratingInput');
+    if (currentRating !== null) input.value = currentRating.toFixed(2);
+    input.focus();
+    input.select();
+    document.getElementById('ratingCancelBtn').addEventListener('click', () => renderRatingPill(currentRating));
+    document.getElementById('ratingSaveBtn').addEventListener('click', submitRating);
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') submitRating(); if (e.key === 'Escape') renderRatingPill(currentRating); });
+  }
+
+  async function submitRating() {
+    const input = document.getElementById('ratingInput');
+    const val = parseFloat((input.value || '').replace(',', '.'));
+    if (isNaN(val) || val < 1 || val > 5) {
+      input.style.borderColor = '#FF3B30';
+      if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('error');
+      return;
+    }
+    const saveBtn = document.getElementById('ratingSaveBtn');
+    saveBtn.disabled = true;
+    try {
+      const resp = await fetch('""" + CABINET_RATING_API_PATH + """', {
+        method: 'POST',
+        headers: { 'X-Telegram-Init-Data': initData, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rating: val }),
+      });
+      if (!resp.ok) throw new Error('http_' + resp.status);
+      if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
+      renderRatingPill(val);
+    } catch (e) {
+      if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('error');
+      renderRatingPill(currentRating);
+    }
   }
 
   const editBtn = document.getElementById('editBtn');
@@ -23565,7 +23839,7 @@ def cabinet_webapp_html():
       todayShiftData = data.today_shift || null;
       if (data.day_summary) showDaySummary(data.day_summary);
 
-      document.getElementById('todayNet').textContent = fmtMoney(t.today_net_profit);
+      renderHeroEarn(t.today_net_profit);
       document.getElementById('todayHours').textContent = fmtHours(t.today_hours);
       document.getElementById('todayKm').textContent = fmtKm(t.today_km);
 
@@ -30120,6 +30394,7 @@ async def start_subscription_webhook_server():
     app.router.add_get(CABINET_WEBAPP_PATH, handle_cabinet_webapp)
     app.router.add_get(CABINET_DATA_API_PATH, handle_cabinet_data_api)
     app.router.add_post(CABINET_PROFILE_API_PATH, handle_cabinet_profile_api)
+    app.router.add_post(CABINET_RATING_API_PATH, handle_cabinet_rating_api)
     # Расширение личного кабинета (21.09.2026, объединение "Инструменты
     # водителя" + "Настройки" -> "👤 ЛИЧНЫЙ КАБИНЕТ", см. блок "ЛИЧНЫЙ КАБИНЕТ
     # - РАСШИРЕНИЕ" выше) - новые разделы WebApp: Финансы/Спрос сейчас/Часы
