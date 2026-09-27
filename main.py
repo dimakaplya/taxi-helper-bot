@@ -5735,7 +5735,26 @@ def services_keyboard(category=None, city=None, user_id=None):
     # нового приложения initData нужен).
     buttons.append([KeyboardButton(text="🧪 НОВОЕ ПРИЛОЖЕНИЕ (тест)")])
     buttons.append([KeyboardButton(text="❓ ПОДДЕРЖКА"), KeyboardButton(text="🏙 ВЫБОР ГОРОДА")])
-    return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=buttons)
+    # УБРАНО 27.09.2026 (прямая просьба пользователя со скриншотом реального
+    # чата - "убери это меню", подтверждено явным выбором "Везде навсегда" на
+    # уточняющий вопрос, было ли ~30 мест вызова этой функции - отмена
+    # заказа/вывода, погода, начало/конец смены и т.д.): раньше эта функция
+    # СТРОИЛА и возвращала здесь большую reply-клавиатуру (buttons выше) -
+    # именно она всплывала во время смены как старое меню "АКТИВНЫЙ ТАРИФ/
+    # УЙТИ С ЛИНИИ/КУДА ЕХАТЬ/..." под полем ввода. Весь функционал этих
+    # кнопок уже продублирован в едином приложении/инлайн-кнопках (см.
+    # комментарии выше по функции - КУДА ЕХАТЬ AI, КАРТА, ПОГОДА, АВИА/ЖД,
+    # СОБЫТИЯ ГОРОДА и т.д. давно стали WebApp/инлайн-кнопками с тем же
+    # действием), поэтому саму reply-клавиатуру теперь убираем везде -
+    # единственная безопасная точка правки, затрагивающая все ~30 вызовов
+    # сразу, без переписывания каждого места отдельно. Сигнатура функции и
+    # весь код выше (включая set_cabinet_menu_button - персональная кнопка
+    # меню слева от поля ввода, единственный путь в "Личный кабинет") НЕ
+    # тронуты специально - это отдельный механизм Telegram (Menu Button), не
+    # reply-клавиатура, и должен продолжать работать как прежде. buttons
+    # выше больше никуда не передаётся - оставлен нетронутым (мёртвый код),
+    # чтобы при необходимости можно было откатить одной строкой.
+    return types.ReplyKeyboardRemove()
 
 # ==================== МОДУЛЬ "ИНСТРУМЕНТЫ ВОДИТЕЛЯ" (бывш. "Курьеру") ====================
 # Изначально прототип (courier-bot-package) делался под курьеров/доставку
@@ -13502,17 +13521,43 @@ def map_webapp_html():
       {{ enableHighAccuracy: true, maximumAge: 5000, timeout: 15000 }}
     );
   }}
+  // ДОБАВЛЕНО 27.09.2026 (жалоба пользователя - "на карте не показывает
+  // геолокацию свою и другие машины"): у tg.LocationManager.init() ниже не
+  // было НИКАКОГО таймаута - если колбэк не вызывался вообще (тот же класс
+  // проблемы, что уже описан в комментарии у _mapInitData() выше: карта
+  // теперь встраивается ВЛОЖЕННЫМ iframe в unified_app_html, а нативный мост
+  // telegram-web-app.js разговаривает с прямым родителем окна, а не с окном
+  // верхнего уровня - внутри вложенного iframe он на некоторых клиентах,
+  // судя по всему, вообще не отвечает на init()) - весь блок просто вечно
+  // ждал колбэк, который никогда не приходил, а browserFallback (внутри
+  // самого колбэка) от этого тоже никогда не запускался. Раньше без
+  // таймаута отказ был полностью МОЛЧАЛИВЫМ - ни своя стрелка, ни ошибка,
+  // ничего (ровно то, что описано в жалобе - карта не зумируется/не
+  // центрируется на водителя, см. map.setView в updateSelfMarker выше).
+  // locationSettled - защита от двойного запуска, если init() всё-таки
+  // ответит ПОЗЖЕ таймаута.
+  let locationSettled = false;
   if (hasLocationManager) {{
+    const locationManagerTimeout = setTimeout(() => {{
+      if (locationSettled) return;
+      locationSettled = true;
+      startBrowserGeolocationFallback();
+    }}, 4000);
     try {{
       tg.LocationManager.init(() => {{
+        if (locationSettled) return;
         try {{
           if (!tg.LocationManager.isLocationAvailable) {{
             // Геолокация недоступна через Telegram (например, у пользователя
             // выключена совсем на устройстве) - пробуем обычный браузерный
             // способ, вдруг он всё-таки сработает.
+            locationSettled = true;
+            clearTimeout(locationManagerTimeout);
             startBrowserGeolocationFallback();
             return;
           }}
+          locationSettled = true;
+          clearTimeout(locationManagerTimeout);
           usingLocationManager = true;
           // getLocation() у LocationManager - разовый запрос (не watch, как
           // у navigator.geolocation), поэтому опрашиваем сами каждые 5
@@ -13528,11 +13573,19 @@ def map_webapp_html():
           pollLocation();
           setInterval(pollLocation, 5000);
         }} catch (e) {{
-          startBrowserGeolocationFallback();
+          if (!locationSettled) {{
+            locationSettled = true;
+            clearTimeout(locationManagerTimeout);
+            startBrowserGeolocationFallback();
+          }}
         }}
       }});
     }} catch (e) {{
-      startBrowserGeolocationFallback();
+      if (!locationSettled) {{
+        locationSettled = true;
+        clearTimeout(locationManagerTimeout);
+        startBrowserGeolocationFallback();
+      }}
     }}
   }} else {{
     startBrowserGeolocationFallback();
@@ -18026,10 +18079,20 @@ def unified_app_html():
   function stripLeadingEmoji(s) {
     return (s || '').replace(/^[^\sA-Za-zА-Яа-яЁё0-9]+\s*/, '');
   }
+  // ДОБАВЛЕНО 26.09.2026 (прямая просьба пользователя со скриншотом - "города
+  // большими буквами как раньше, наведи порядок чтобы иконки были ровные") -
+  // те же эмодзи по городам, что были в старой клавиатуре city_keyboard()
+  // (main.py, Python) - у CITY_DISPLAY_NAMES эмодзи никогда не было (это
+  // человекочитаемые названия без иконок, используются и в чат-текстах), а
+  // stripLeadingEmoji был для них no-op - реальный эффект был только на
+  // CATEGORY_NAMES. Иконка + ЗАГЛАВНЫЕ буквы строятся здесь заново, только
+  // для этого выпадающего списка.
+  const CITY_ICONS = { moscow: '🏛️', spb: '🕯️', krasnodar: '🌴', sochi: '🏖️' };
   function renderCityDetail(box) {
     let cityOptions = '';
     Object.keys(CITY_DISPLAY_NAMES).forEach(function (k) {
-      cityOptions += '<option value="' + k + '"' + (k === city ? ' selected' : '') + '>' + stripLeadingEmoji(CITY_DISPLAY_NAMES[k]) + '</option>';
+      const icon = CITY_ICONS[k] ? CITY_ICONS[k] + ' ' : '';
+      cityOptions += '<option value="' + k + '"' + (k === city ? ' selected' : '') + '>' + icon + CITY_DISPLAY_NAMES[k].toUpperCase() + '</option>';
     });
     // ДОБАВЛЕНО 26.09.2026 (прямая просьба пользователя - "добавь ещё кнопку
     // город, пятый город, добавь другие города, чтобы не кликабельны были,
