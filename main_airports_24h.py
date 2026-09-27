@@ -12136,7 +12136,28 @@ MAP_CHROME_CSS = """
      чтобы ряд кнопок (Тарифы/Слои/Пробки/Спрос) не прижимался к левому
      краю (сразу после кнопки смены), а центрировался в доступной ширине
      (от left:80px до right:10px). */
-  .map-toggles-row { position: absolute; top: calc(10px + var(--tg-chrome-top, 0px)); left: 80px; right: 10px; z-index: 1000; display: flex; flex-direction: row; flex-wrap: wrap; align-items: flex-start; justify-content: center; gap: 5px; }
+  /* ИЗМЕНЕНО 27.09.2026 (прямая просьба пользователя, референс-скриншот
+     круглой кнопки Яндекс Навигатора "≡🔍" в правом верхнем углу - "сделай
+     такую кнопку, круглую, в правом верхнем углу, по ней открывается меню
+     где спрос/тарифы/пробки и всё-всё-всё, чтобы это можно было скрывать
+     с карты") - весь ряд кнопок (Тарифы/Слои/Пробки/Спрос/Все) теперь по
+     умолчанию СКРЫТ (.collapsed, см. #mapMenuToggleBtn ниже) и
+     раскрывается только по тапу на новую круглую кнопку - карта больше не
+     захламлена постоянно видимым рядом кнопок сверху. top сдвинут ниже
+     (58px вместо 10px), чтобы ряд, когда он открыт, появлялся ПОД новой
+     кнопкой, а не рядом с ней в той же строке - сама кнопка остаётся на
+     своём месте в углу независимо от того, открыт ряд или нет. */
+  .map-toggles-row { position: absolute; top: calc(58px + var(--tg-chrome-top, 0px)); left: 80px; right: 10px; z-index: 1000; display: flex; flex-direction: row; flex-wrap: wrap; align-items: flex-start; justify-content: center; gap: 5px; }
+  .map-toggles-row.collapsed { display: none; }
+  /* Круглая кнопка-переключатель меню слоёв/фильтров карты (см. комментарий
+     выше) - тот же визуальный язык, что у .shift-radar-indicator (тёмный
+     круг, белая обводка), но меньше и в противоположном (правом верхнем)
+     углу, чтобы не конкурировать с кнопкой смены за место. */
+  .map-menu-toggle-btn { position: absolute; top: calc(10px + var(--tg-chrome-top, 0px)); right: 14px; z-index: 1001; width: 44px; height: 44px; border-radius: 50%; background: rgba(28,28,30,.92); border: 2px solid rgba(255,255,255,.55); box-shadow: 0 2px 8px rgba(0,0,0,.45); display: flex; align-items: center; justify-content: center; user-select: none; cursor: pointer; transition: transform .12s, background .2s, border-color .2s; }
+  .map-menu-toggle-btn:active { transform: scale(.92); }
+  .map-menu-toggle-btn.active { background: #ffc400; border-color: #ffc400; }
+  .map-menu-toggle-btn.active svg { stroke: #1c1c1c; }
+  .map-menu-toggle-btn svg { width: 24px; height: 24px; filter: drop-shadow(0 1px 1px rgba(0,0,0,.35)); }
   .layer-toggle-btn { display: inline-block; background: #1c1c1c; color: #fff; border: 1px solid rgba(255,196,0,.4); border-radius: 8px; padding: 5px 7px; font-family: -apple-system, sans-serif; font-size: 11px; font-weight: 600; box-shadow: 0 1px 4px rgba(0,0,0,.35); cursor: pointer; user-select: none; white-space: nowrap; transition: transform .12s; text-transform: uppercase; }
   .layer-toggle-btn:active, .filter-toggle:active { transform: scale(.94); }
   /* ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - редизайн
@@ -12336,6 +12357,12 @@ MAP_CHROME_CSS = """
     flex-wrap: wrap; justify-content: space-around; width: auto; text-align: center;
   }
   .bottom-info-bar.slider-hidden { bottom: max(34px, calc(env(safe-area-inset-bottom, 0px) + 20px)); }
+  /* ДОБАВЛЕНО 27.09.2026 (см. комментарий у #bottomInfoBar в HTML выше -
+     "текст погоды и смайлик слева внизу расположи одной строчкой") -
+     иконка+подпись одного сегмента теперь один flex-элемент (.bib-group),
+     перенос строки родителя (flex-wrap: wrap) больше не может попасть
+     между ними. */
+  .bottom-info-bar .bib-group { display: inline-flex; align-items: center; gap: 5px; flex: 0 0 auto; }
   .bottom-info-bar .bib-icon { font-size: 16px; }
   .bottom-info-bar .bib-label { font-size: 13.5px; font-weight: 700; }
   .bottom-info-bar .bib-sep { width: 1px; height: 14px; background: rgba(255,255,255,.25); }
@@ -12633,16 +12660,41 @@ def map_webapp_html():
      исправление сохранено здесь в истории, хотя сама кнопка теперь
      убрана целиком. -->
 <div id="map"></div>
+<!-- ИСПРАВЛЕНО 27.09.2026 (прямая просьба пользователя, скриншот - "текст
+     погоды и смайлик слева внизу расположи одной строчкой на карте") -
+     раньше иконка (.bib-icon) и её подпись (.bib-time/.bib-label/
+     .bib-rain/.bib-traffic) были ДВУМЯ ОТДЕЛЬНЫМИ flex-элементами прямо
+     внутри .bottom-info-bar (flex-wrap: wrap, см. CSS выше) - на узких
+     экранах перенос строки иногда попадал ровно МЕЖДУ иконкой и текстом
+     одного и того же сегмента (например 🌧 оставался на первой строке, а
+     "моросит слабая сейчас" уезжало на вторую) - выглядело как разрыв
+     внутри одной надписи. Теперь каждая пара иконка+текст обёрнута в
+     общий .bib-group - это ОДИН flex-элемент, перенос строки происходит
+     только МЕЖДУ группами целиком, а не внутри одной пары. -->
 <div class="bottom-info-bar" id="bottomInfoBar">
-  <span class="bib-icon">⏱</span><span class="bib-time" id="bibShiftTime">не на линии</span>
+  <span class="bib-group"><span class="bib-icon">⏱</span><span class="bib-time" id="bibShiftTime">не на линии</span></span>
   <span class="bib-sep"></span>
-  <span class="bib-icon">🚕</span><span class="bib-label" id="bibTariff">—</span>
+  <span class="bib-group"><span class="bib-icon">🚕</span><span class="bib-label" id="bibTariff">—</span></span>
   <span class="bib-sep"></span>
-  <span class="bib-icon">🌧</span><span class="bib-rain" id="bibRainEta">—</span>
+  <span class="bib-group"><span class="bib-icon">🌧</span><span class="bib-rain" id="bibRainEta">—</span></span>
   <span class="bib-sep" id="bibTrafficSep" style="display:none"></span>
-  <span class="bib-icon" id="bibTrafficIcon" style="display:none">🚦</span><span class="bib-traffic" id="bibTrafficScore" style="display:none">—</span>
+  <span class="bib-group" id="bibTrafficGroup" style="display:none"><span class="bib-icon">🚦</span><span class="bib-traffic" id="bibTrafficScore">—</span></span>
 </div>
-<div class="map-toggles-row">
+<!-- ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя, референс-скриншот
+     круглой кнопки Яндекс Навигатора - "три палочки с лупой, круглую, в
+     правом верхнем углу, по ней открывается меню где спрос/тарифы/пробки
+     и всё-всё-всё, чтобы это можно было скрывать с карты") - см.
+     .map-menu-toggle-btn в CSS выше и mapMenuToggleBtn в JS ниже. -->
+<div class="map-menu-toggle-btn" id="mapMenuToggleBtn" title="Слои и фильтры карты">
+  <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round">
+    <line x1="2" y1="5" x2="13" y2="5"/>
+    <line x1="2" y1="10" x2="11" y2="10"/>
+    <line x1="2" y1="15" x2="9" y2="15"/>
+    <circle cx="16.5" cy="15.5" r="4.3"/>
+    <line x1="19.6" y1="18.6" x2="22.5" y2="21.5" stroke-width="2.2"/>
+  </svg>
+</div>
+<div class="map-toggles-row collapsed" id="mapTogglesRow">
   <div class="tariff-toggle-wrap">
     <div class="layer-toggle-btn" id="tariffToggleBtn">🚕 Тарифы</div>
     <div class="tariff-toggle collapsed" id="tariffToggle"></div>
@@ -13178,7 +13230,10 @@ def map_webapp_html():
   function updateTrafficScoreBadge(level) {{
     if (typeof level !== 'number' || isNaN(level)) return;
     const sepEl = document.getElementById('bibTrafficSep');
-    const iconEl = document.getElementById('bibTrafficIcon');
+    // ИЗМЕНЕНО 27.09.2026 (см. #bibTrafficGroup в HTML выше - иконка 🚦 и
+    // текст своб./балл теперь один .bib-group, скрываем/показываем группу
+    // целиком, а не иконку и текст по отдельности).
+    const groupEl = document.getElementById('bibTrafficGroup');
     const scoreEl = document.getElementById('bibTrafficScore');
     reportTrafficLevel(level);
     if (!scoreEl) return;
@@ -13187,16 +13242,13 @@ def map_webapp_html():
     scoreEl.textContent = (abbr ? abbr + ' ' : '') + lvl + '/10';
     scoreEl.className = 'bib-traffic' + (level <= 3 ? ' low' : level >= 7 ? ' high' : '');
     if (sepEl) sepEl.style.display = '';
-    if (iconEl) iconEl.style.display = '';
-    scoreEl.style.display = '';
+    if (groupEl) groupEl.style.display = '';
   }}
   function hideTrafficScoreBadge() {{
     const sepEl = document.getElementById('bibTrafficSep');
-    const iconEl = document.getElementById('bibTrafficIcon');
-    const scoreEl = document.getElementById('bibTrafficScore');
+    const groupEl = document.getElementById('bibTrafficGroup');
     if (sepEl) sepEl.style.display = 'none';
-    if (iconEl) iconEl.style.display = 'none';
-    if (scoreEl) scoreEl.style.display = 'none';
+    if (groupEl) groupEl.style.display = 'none';
   }}
   // ИЗМЕНЕНО 25.09.2026 (прямая жалоба пользователя - "карта сильно
   // виснет") - preferCanvas: true переключает ВСЕ полигоны Leaflet (облака
@@ -16116,6 +16168,31 @@ def map_webapp_html():
     parkingLoaded = false;
   }}
 
+  // ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя, референс-скриншот
+  // круглой кнопки Яндекс Навигатора - "три палочки с лупой, круглую, в
+  // правом верхнем углу, по ней открывается меню где спрос/тарифы/пробки
+  // и всё-всё-всё, чтобы это можно было скрывать с карты") - переключает
+  // видимость ВСЕГО ряда кнопок карты (.map-toggles-row, см. CSS выше и
+  // #mapTogglesRow в HTML выше) разом. При закрытии меню заодно
+  // принудительно схлопывает оба вложенных выпадающих подменю (Тарифы/
+  // Слои), чтобы при следующем открытии они не оказались "раскрыты", пока
+  // сам ряд был скрыт - иначе можно было бы открыть меню и сразу увидеть
+  // случайно оставшуюся раскрытой панель тарифов поверх остального.
+  const mapMenuToggleBtn = document.getElementById('mapMenuToggleBtn');
+  const mapTogglesRow = document.getElementById('mapTogglesRow');
+  if (mapMenuToggleBtn && mapTogglesRow) {{
+    mapMenuToggleBtn.addEventListener('click', () => {{
+      mapTogglesRow.classList.toggle('collapsed');
+      const isOpen = !mapTogglesRow.classList.contains('collapsed');
+      mapMenuToggleBtn.classList.toggle('active', isOpen);
+      if (!isOpen) {{
+        const tariffPanelEl = document.getElementById('tariffToggle');
+        const layerToggleRowEl = document.getElementById('layerToggle');
+        if (tariffPanelEl) tariffPanelEl.classList.add('collapsed');
+        if (layerToggleRowEl) layerToggleRowEl.classList.add('collapsed');
+      }}
+    }});
+  }}
   const layerToggleBtn = document.getElementById('layerToggleBtn');
   const layerToggleRow = document.getElementById('layerToggle');
   layerToggleBtn.addEventListener('click', () => {{
@@ -16148,6 +16225,17 @@ def map_webapp_html():
       trafficShownState = !trafficShownState;
       try {{
         if (trafficShownState) {{
+          // ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - "спрос не
+          // может показываться если включается [пробки], если включается
+          // спрос то отключается пробки, чтобы не было и пробок и спроса
+          // на карте одновременно") - включение пробок автоматически
+          // гасит спрос, если он был включён (см. симметричный код у
+          // demandToggleBtn ниже).
+          if (typeof demandShownState !== 'undefined' && demandShownState) {{
+            demandShownState = false;
+            if (demandToggleBtn) demandToggleBtn.classList.remove('active');
+            clearDemandClouds();
+          }}
           yandexTrafficProvider.setMap(yandexLayer._yandex);
         }} else {{
           yandexTrafficProvider.setMap(null);
@@ -16231,6 +16319,18 @@ def map_webapp_html():
       demandShownState = !demandShownState;
       demandToggleBtn.classList.toggle('active', demandShownState);
       if (demandShownState) {{
+        // ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - "спрос не
+        // может показываться если включается [пробки], если включается
+        // спрос то отключается пробки, чтобы не было и пробок и спроса на
+        // карте одновременно") - включение спроса автоматически гасит
+        // пробки, если они были включены (см. симметричный код у
+        // trafficToggleBtn выше).
+        if (typeof trafficShownState !== 'undefined' && trafficShownState && typeof yandexTrafficProvider !== 'undefined' && yandexTrafficProvider) {{
+          trafficShownState = false;
+          if (trafficToggleBtn) trafficToggleBtn.classList.remove('active');
+          try {{ yandexTrafficProvider.setMap(null); }} catch (e) {{ /* тихо */ }}
+          hideTrafficScoreBadge();
+        }}
         loadDemandCloud();
         loadRainCloud();
         // Облако аэропорта рисуется внутри renderAirports (проверяет
