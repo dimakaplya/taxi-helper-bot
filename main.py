@@ -12022,8 +12022,11 @@ MAP_CHROME_CSS = """
      background html/body уже #000 (см. чуть ниже) - border-radius +
      overflow:hidden на самом #map просто срезает углы плиток/маркеров
      Leaflet мягкой дугой, а чёрный фон страницы проступает в этих
-     срезанных уголках сам, без доп. отступов/рамки. */
-  #map { border-radius: 16px; overflow: hidden; }
+     срезанных уголках сам, без доп. отступов/рамки.
+     УВЕЛИЧЕНО 27.09.2026→28.09.2026 (доп. просьба пользователя - "края
+     больше скругли карты") - было 16px, стало 28px, скругление заметно
+     сильнее на глаз. */
+  #map { border-radius: 28px; overflow: hidden; }
   /* ДОБАВЛЕНО 27.09.2026 (жалоба пользователя - "сма вверх сма вниз
      появляются белый фон подложкой... отключи чтобы два раза тапать на
      экран чтобы он не увеличивал") - overscroll-behavior:none на html/body
@@ -12194,8 +12197,15 @@ MAP_CHROME_CSS = """
      захламлена постоянно видимым рядом кнопок сверху. top сдвинут ниже
      (58px вместо 10px), чтобы ряд, когда он открыт, появлялся ПОД новой
      кнопкой, а не рядом с ней в той же строке - сама кнопка остаётся на
-     своём месте в углу независимо от того, открыт ряд или нет. */
-  .map-toggles-row { position: absolute; top: calc(58px + var(--tg-chrome-top, 0px)); left: 80px; right: 10px; z-index: 1000; display: flex; flex-direction: row; flex-wrap: wrap; align-items: flex-start; justify-content: center; gap: 5px; }
+     своём месте в углу независимо от того, открыт ряд или нет.
+     ВОЗВРАЩЕНО ОБРАТНО 28.09.2026 (прямая просьба пользователя - "при
+     раскрытии бар с тарифами/слоями и т.д. выше должен быть, как и был") -
+     круглая кнопка-переключатель 28.09.2026 переехала из правого верхнего
+     угла в левую колонку зума (см. .map-menu-toggle-btn ниже), больше не
+     занимает место в правом верхнем углу - причина сдвигать ряд вниз на
+     58px исчезла, top возвращён к исходным 10px, ряд снова раскрывается
+     у самого верха карты. */
+  .map-toggles-row { position: absolute; top: calc(10px + var(--tg-chrome-top, 0px)); left: 80px; right: 10px; z-index: 1000; display: flex; flex-direction: row; flex-wrap: wrap; align-items: flex-start; justify-content: center; gap: 5px; }
   .map-toggles-row.collapsed { display: none; }
   /* Круглая кнопка-переключатель меню слоёв/фильтров карты (см. комментарий
      выше) - тот же визуальный язык, что у .shift-radar-indicator (тёмный
@@ -12207,8 +12217,11 @@ MAP_CHROME_CSS = """
      (44px) приведён ровно к размеру круглых кнопок +/- зума
      (.leaflet-control-zoom a выше - 40px, белая обводка 2px solid #fff),
      top уменьшен (была 10px) - кнопка поднята выше. #mapTogglesRow
-     (раскрывающийся ряд Тарифы/Слои/Пробки/Спрос) НЕ трогали - его top
-     остаётся тем же (58px), где и был.
+     (раскрывающийся ряд Тарифы/Слои/Пробки/Спрос) в этот раз НЕ трогали -
+     его top оставался тем же (58px). [УТОЧНЕНИЕ 28.09.2026: после того как
+     кнопка переехала из этого угла (см. ниже), top #mapTogglesRow тоже
+     вернули к исходным 10px - см. комментарий у самого .map-toggles-row
+     выше.]
      ЕЩЁ РАЗ ИЗМЕНЕНО 28.09.2026 (прямая просьба пользователя - "расположи
      кнопку рядом с плюсом и минусом слева... должно быть три кнопки:
      кнопка фильтров, потом плюс, потом минус, они должны идти друг под
@@ -17994,6 +18007,18 @@ def unified_app_html():
      заново, т.к. в unified_app_html своего keyframes selPulse раньше не
      было. */
   .ref-tile.active { border-color: #FFC400; background: rgba(255,196,0,.14); animation: selPulse 2.6s ease-in-out infinite; }
+  /* ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "в каждой плитке
+     реферальной системы пропиши проценты и уровни, чтобы люди понимали") -
+     короткая строка-подпись под названием плитки с процентами по уровням
+     (1/2/3), нормальный регистр (а не UPPERCASE, как у заголовка плитки -
+     .ref-tile выше задаёт text-transform:uppercase всем потомкам) - иначе
+     "1-2-3 уровень" превращалось бы в шумное "1-2-3 УРОВЕНЬ". */
+  .ref-tile-name { display: block; }
+  .ref-tile-rate {
+    display: block; text-transform: none; letter-spacing: 0; font-weight: 600;
+    font-size: 10.5px; color: #FFC400; margin-top: 3px; opacity: .85;
+    font-variant-numeric: tabular-nums;
+  }
   @keyframes selPulse {
     0%, 100% { box-shadow: 0 0 0 0 rgba(255,196,0,.5); }
     50% { box-shadow: 0 0 0 5px rgba(255,196,0,0); }
@@ -18974,15 +18999,36 @@ def unified_app_html():
   }
   function renderReferralMenu(box, data) {
     svcBackAction = svcShowGrid; // ИЗМЕНЕНО 27.09.2026 - из меню реферальной программы "Назад" (кнопка svcBack) ведёт в сетку сервисов, на один шаг назад
+    // ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя со скриншотом сетки
+    // 2x2 - "в каждой плитке реферальной системы пропиши проценты и уровни,
+    // чтобы люди понимали") - короткая подпись под названием каждой плитки с
+    // реальными ставками (та же REFERRAL_RATES_PERCENT, что и в детальных
+    // экранах renderReferralDriverDetail/renderReferralLegalDetail/
+    // renderReferralPhantomDetail - числа отсюда и оттуда никогда не
+    // разойдутся, т.к. источник один и тот же). "Материалы" - не отдельная
+    // схема начислений, а справочник по всем схемам сразу, поэтому вместо
+    // цифр там нейтральная подпись без конкретных процентов.
+    // "Фантом" - НАРОЧНО исключение: это скрытый вход в админскую схему
+    // (см. комментарий в renderReferralPhantomDetail ниже - "никаких новых
+    // подсказок о самом существовании админского бэкдора не добавляется
+    // никому, кроме тех, кто уже внутри") - ставку 40/15/20% показываем в
+    // подписи ТОЛЬКО если у ЭТОГО пользователя схема уже 'admin' (он и так
+    // видит её на детальном экране); всем остальным подпись не показываем,
+    // чтобы не выдавать наличие более выгодной админской схемы.
+    const individualRates = REFERRAL_RATES_PERCENT.individual;
+    const legalRates = REFERRAL_RATES_PERCENT.legal_entity;
+    const phantomRateLine = data.referrer_type === 'admin'
+      ? (REFERRAL_RATES_PERCENT.admin.join('/') + '% · 1-2-3 уровень')
+      : '';
     box.innerHTML =
       '<div class="svc-h">🤝 Реферальная программа</div>' +
       refDashHtml(data) +
       refRatingSectionHtml() +
       '<div class="ref-grid">' +
-        '<button type="button" class="ref-tile" id="refTileDriver"><span class="ref-ic">' + TILE_ICONS.referral + '</span>Водитель / Курьер</button>' +
-        '<button type="button" class="ref-tile" id="refTileLegal"><span class="ref-ic">' + TILE_ICONS.car + '</span>Юридическое лицо</button>' +
-        '<button type="button" class="ref-tile" id="refTileMaterials"><span class="ref-ic">' + TILE_ICONS.subscription + '</span>Материалы</button>' +
-        '<button type="button" class="ref-tile" id="refTilePhantom"><span class="ref-ic">👻</span>Фантом</button>' +
+        '<button type="button" class="ref-tile" id="refTileDriver"><span class="ref-ic">' + TILE_ICONS.referral + '</span><span class="ref-tile-name">Водитель / Курьер</span><span class="ref-tile-rate">' + individualRates.join('/') + '% · 1-2-3 уровень</span></button>' +
+        '<button type="button" class="ref-tile" id="refTileLegal"><span class="ref-ic">' + TILE_ICONS.car + '</span><span class="ref-tile-name">Юридическое лицо</span><span class="ref-tile-rate">' + legalRates.join('/') + '% · 1-2-3 уровень</span></button>' +
+        '<button type="button" class="ref-tile" id="refTileMaterials"><span class="ref-ic">' + TILE_ICONS.subscription + '</span><span class="ref-tile-name">Материалы</span><span class="ref-tile-rate">Все ставки и уровни</span></button>' +
+        '<button type="button" class="ref-tile" id="refTilePhantom"><span class="ref-ic">👻</span><span class="ref-tile-name">Фантом</span>' + (phantomRateLine ? ('<span class="ref-tile-rate">' + phantomRateLine + '</span>') : '') + '</button>' +
       '</div>';
     document.getElementById('refTileDriver').addEventListener('click', function () { renderReferralDriverDetail(box, data); });
     document.getElementById('refTileLegal').addEventListener('click', function () { renderReferralLegalDetail(box, data); });
