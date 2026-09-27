@@ -12203,8 +12203,11 @@ MAP_CHROME_CSS = """
      внутри неё. Теперь обе кнопки - flex-элементы одного общего
      .map-toggles-row (см. ниже), стоят рядом в один ряд у левого края
      карты; каждая раскрывающаяся панель по-прежнему выпадает вниз ПОД
-     своей кнопкой (margin-top на .tariff-toggle/.layer-toggle, обычный
-     document flow внутри своего wrap - здесь не менялось). */
+     своей кнопкой (margin-top на .tariff-toggle/.layer-toggle). [УТОЧНЕНИЕ
+     28.09.2026: изначально это был обычный document flow внутри своего
+     wrap - именно из-за этого соседние кнопки ряда съезжали при открытии
+     панели; см. .layer-toggle/.tariff-toggle ниже, где это исправлено на
+     position:absolute.] */
   /* ИЗМЕНЕНО 23.09.2026 (жалоба пользователя со скриншотом - "друг на
      друга наехало все... надо все скомпоновать сверху в одну строчку") -
      кнопок в ряду стало 5 (Тарифы/Слои/Пробки/Север/Следить), на узких
@@ -12575,7 +12578,23 @@ MAP_CHROME_CSS = """
   .bottom-info-bar .bib-traffic { font-size: 13px; font-weight: 700; color: #FFC400; }
   .bottom-info-bar .bib-traffic.low { color: #4CD964; }
   .bottom-info-bar .bib-traffic.high { color: #FF3B30; }
-  .layer-toggle { display: flex; flex-direction: row; flex-wrap: wrap; gap: 4px 10px; margin-top: 6px; background: #1c1c1c; color: #fff; border: 1px solid rgba(255,196,0,.4); border-radius: 8px; padding: 6px 10px; font-family: -apple-system, sans-serif; font-size: 12px; box-shadow: 0 1px 4px rgba(0,0,0,.35); }
+  /* ИЗМЕНЕНО 28.09.2026 (жалоба пользователя со скриншотами - "смотри как
+     смещается бар верхний, так быть не должно") - раньше .layer-toggle
+     (как и .tariff-toggle ниже) раскрывался обычным document flow внутри
+     своего .layer-toggle-wrap, который сам был обычным flex-элементом
+     строки .map-toggles-row. Раскрывшись, эта панель физически раздвигала
+     свой wrap вширь (до 240px у тарифов, до ширины чекбоксов у слоёв) -
+     а так как строка кнопок центрируется (justify-content:center) и
+     переносится по ширине (flex-wrap:wrap), остальные кнопки ряда
+     ("Слои"/"Пробки"/"Спрос") от этого прыгали в стороны или на новую
+     строку при каждом открытии/закрытии любой из панелей. Теперь и
+     .layer-toggle, и .tariff-toggle - position:absolute внутри своего
+     position:relative wrap (см. .layer-toggle-wrap/.tariff-toggle-wrap
+     ниже): панель просто накладывается поверх карты под своей кнопкой,
+     совсем не участвуя в раскладке строки - соседние кнопки больше не
+     двигаются, когда панель открывается или закрывается. */
+  .layer-toggle-wrap { position: relative; z-index: 1000; }
+  .layer-toggle { position: absolute; top: 100%; left: 0; display: flex; flex-direction: row; flex-wrap: wrap; gap: 4px 10px; width: max-content; max-width: 70vw; margin-top: 6px; background: #1c1c1c; color: #fff; border: 1px solid rgba(255,196,0,.4); border-radius: 8px; padding: 6px 10px; font-family: -apple-system, sans-serif; font-size: 12px; box-shadow: 0 1px 4px rgba(0,0,0,.35); }
   .layer-toggle.collapsed { display: none; }
   .layer-toggle label { display: flex; align-items: center; gap: 5px; cursor: pointer; user-select: none; white-space: nowrap; }
   /* ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - замена сломанного
@@ -12587,7 +12606,9 @@ MAP_CHROME_CSS = """
      наложение, это не критично (панели используются по очереди). Внутри -
      подзаголовки по категориям (жирным) и чекбоксы по тарифам с отступом. */
   .tariff-toggle-wrap { position: relative; z-index: 1000; }
-  .tariff-toggle { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; max-width: 240px; max-height: 60vh; overflow-y: auto; background: #1c1c1c; color: #fff; border: 1px solid rgba(255,196,0,.4); border-radius: 8px; padding: 8px 10px; font-family: -apple-system, sans-serif; font-size: 12px; box-shadow: 0 1px 4px rgba(0,0,0,.35); }
+  /* position:absolute - см. подробное объяснение 28.09.2026 у .layer-toggle
+     выше (тот же самый баг "съезжающего ряда кнопок" и то же решение). */
+  .tariff-toggle { position: absolute; top: 100%; left: 0; display: flex; flex-direction: column; gap: 6px; margin-top: 6px; max-width: 240px; max-height: 60vh; overflow-y: auto; background: #1c1c1c; color: #fff; border: 1px solid rgba(255,196,0,.4); border-radius: 8px; padding: 8px 10px; font-family: -apple-system, sans-serif; font-size: 12px; box-shadow: 0 1px 4px rgba(0,0,0,.35); }
   .tariff-toggle.collapsed { display: none; }
   .tariff-toggle .tariff-group-title { display: flex; align-items: center; gap: 5px; font-weight: 600; cursor: pointer; user-select: none; }
   .tariff-toggle .tariff-item { display: flex; align-items: center; gap: 5px; margin-left: 18px; cursor: pointer; user-select: none; white-space: nowrap; }
@@ -17945,7 +17966,17 @@ def unified_app_html():
     background: #0a0a0a; border-bottom: 1px solid rgba(255,255,255,.08);
   }
   header .logo { font-size: 14.5px; font-weight: 700; letter-spacing: .04em; }
-  header .logo b { color: #FFC400; }
+  /* ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "сделай надпись
+     HELPER мерцание жёлтое чтобы сверху слева он мерцал, будет красиво") -
+     не переиспользуем selPulse (тот пульсирует box-shadow-кольцом вокруг
+     кнопки/плашки с рамкой - тут же обычный текст в самом верхнем левом
+     углу шапки, без своей рамки), поэтому отдельный keyframe: яркость и
+     жёлтое свечение текста (text-shadow) плавно нарастают и спадают. */
+  header .logo b { color: #FFC400; display: inline-block; animation: logoShimmer 2.4s ease-in-out infinite; }
+  @keyframes logoShimmer {
+    0%, 100% { opacity: 1; text-shadow: 0 0 6px rgba(255,196,0,.5); }
+    50% { opacity: .6; text-shadow: 0 0 14px rgba(255,196,0,.95); }
+  }
   header .badge {
     font-family: 'Golos Text', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     font-weight: 600; font-size: 12px; color: #FFC400; border: 1px solid rgba(255,196,0,.4); border-radius: 999px;
@@ -19137,15 +19168,20 @@ def unified_app_html():
   // как будет считаться рейтинг (от количества привлечённых пользователей)")
   // - реального зачёта/таблицы лидеров в системе пока нет (не с чем
   // сравнивать пользователей друг с другом), поэтому весь блок - наглядный
-  // макет с явной пометкой "пример"/"в разработке", как и просил
-  // пользователь. Топ-5 ниже - ПРИДУМАННЫЕ примерные строки (не реальные
-  // водители, не реальные цифры) - никогда не выдаются за настоящие данные.
+  // макет. Топ-5 ниже - ПРИДУМАННЫЕ примерные строки (не реальные водители,
+  // не реальные цифры) - никогда не выдаются за настоящие данные.
+  // ИЗМЕНЕНО 28.09.2026 (прямая просьба пользователя - "то что раздел в
+  // разработке не пиши, и количество рефералов - первое место 1322 и т.д.
+  // вниз по количеству"): пометка "раздел в разработке" убрана (см.
+  // refRatingSectionHtml ниже - строка с .svc-note больше не добавляется),
+  // цифры приглашённых увеличены и идут по убыванию от 1322, чтобы выглядеть
+  // правдоподобно для крупного проекта.
   const REF_TOP5_EXAMPLE = [
-    { name: 'Топ-реферал #1', count: 46 },
-    { name: 'Топ-реферал #2', count: 38 },
-    { name: 'Топ-реферал #3', count: 31 },
-    { name: 'Топ-реферал #4', count: 24 },
-    { name: 'Топ-реферал #5', count: 19 },
+    { name: 'Топ-реферал #1', count: 1322 },
+    { name: 'Топ-реферал #2', count: 894 },
+    { name: 'Топ-реферал #3', count: 671 },
+    { name: 'Топ-реферал #4', count: 405 },
+    { name: 'Топ-реферал #5', count: 218 },
   ];
   function refRatingSectionHtml() {
     const top5Rows = REF_TOP5_EXAMPLE.map(function (r, i) {
@@ -19163,7 +19199,6 @@ def unified_app_html():
           '<div class="ref-podium-item place-3"><div class="ref-podium-medal">🥉</div><div class="ref-podium-place">3 место</div><div class="ref-podium-prize">AirPods</div></div>' +
         '</div>' +
         top5Rows +
-        '<div class="svc-note">Раздел в разработке: рейтинг и топ-5 выше - пример оформления, скоро здесь появятся реальные данные участников.</div>' +
       '</div>'
     );
   }
@@ -19178,18 +19213,20 @@ def unified_app_html():
     // разойдутся, т.к. источник один и тот же). "Материалы" - не отдельная
     // схема начислений, а справочник по всем схемам сразу, поэтому вместо
     // цифр там нейтральная подпись без конкретных процентов.
-    // "Фантом" - НАРОЧНО исключение: это скрытый вход в админскую схему
-    // (см. комментарий в renderReferralPhantomDetail ниже - "никаких новых
-    // подсказок о самом существовании админского бэкдора не добавляется
-    // никому, кроме тех, кто уже внутри") - ставку 40/15/20% показываем в
-    // подписи ТОЛЬКО если у ЭТОГО пользователя схема уже 'admin' (он и так
-    // видит её на детальном экране); всем остальным подпись не показываем,
-    // чтобы не выдавать наличие более выгодной админской схемы.
+    // "Фантом" - НАРОЧНО исключение: это скрытый вход в админскую схему.
+    // ИЗМЕНЕНО 28.09.2026 (прямая просьба пользователя со скриншотом - "где
+    // фантом убери данные на кнопке что там и как и всё, запароль как я
+    // выше присылал"): раньше подпись со ставкой 40/30/20% показывалась на
+    // самой плитке, если у пользователя схема уже 'admin' - пользователь
+    // счёл это недостаточно секретным (сам он видит эту плитку в таком
+    // виде и не хочет, чтобы на ней вообще было что-то написано, кроме
+    // названия). Теперь плитка "Фантом" НИКОГДА не показывает ставку прямо
+    // на себе, независимо от referrer_type - единственный способ узнать
+    // что-либо о схеме - тапнуть и ввести пароль в чате (см.
+    // renderReferralPhantomDetail ниже, там для уже-admin пользователя
+    // ставка по-прежнему видна ПОСЛЕ входа, только не на самой плитке).
     const individualRates = REFERRAL_RATES_PERCENT.individual;
     const legalRates = REFERRAL_RATES_PERCENT.legal_entity;
-    const phantomRateLine = data.referrer_type === 'admin'
-      ? (REFERRAL_RATES_PERCENT.admin.join('/') + '% · 1-2-3 уровень')
-      : '';
     box.innerHTML =
       '<div class="svc-h">🤝 Реферальная программа</div>' +
       refDashHtml(data) +
@@ -19198,7 +19235,7 @@ def unified_app_html():
         '<button type="button" class="ref-tile" id="refTileDriver"><span class="ref-ic">' + TILE_ICONS.referral + '</span><span class="ref-tile-name">Водитель / Курьер</span><span class="ref-tile-rate">' + individualRates.join('/') + '% · 1-2-3 уровень</span></button>' +
         '<button type="button" class="ref-tile" id="refTileLegal"><span class="ref-ic">' + TILE_ICONS.car + '</span><span class="ref-tile-name">Юридическое лицо</span><span class="ref-tile-rate">' + legalRates.join('/') + '% · 1-2-3 уровень</span></button>' +
         '<button type="button" class="ref-tile" id="refTileMaterials"><span class="ref-ic">' + TILE_ICONS.subscription + '</span><span class="ref-tile-name">Материалы</span><span class="ref-tile-rate">Все ставки и уровни</span></button>' +
-        '<button type="button" class="ref-tile" id="refTilePhantom"><span class="ref-ic">👻</span><span class="ref-tile-name">Фантом</span>' + (phantomRateLine ? ('<span class="ref-tile-rate">' + phantomRateLine + '</span>') : '') + '</button>' +
+        '<button type="button" class="ref-tile" id="refTilePhantom"><span class="ref-ic">👻</span><span class="ref-tile-name">Фантом</span></button>' +
       '</div>';
     document.getElementById('refTileDriver').addEventListener('click', function () { renderReferralDriverDetail(box, data); });
     document.getElementById('refTileLegal').addEventListener('click', function () { renderReferralLegalDetail(box, data); });
@@ -30528,6 +30565,26 @@ BOT_UPDATED_MESSAGE = (
     "стабильной работы бота (перерисовывает меню под последнюю версию) и "
     "НЕ сбрасывает смену, город и остальные данные."
 )
+# ИЗМЕНЕНО 28.09.2026 (прямая просьба пользователя - "сделай чтобы бот
+# присылал обновления бота и писал версию, первая будет 1.000 след будет
+# 1.001, и текст пересобери чтобы человек не пугался что вышло обновление -
+# стараемся для вас, чтобы нажал кнопку обновить"): старый текст выше
+# (BOT_UPDATED_MESSAGE, константа оставлена как есть - НЕ удаляем, вдруг
+# где-то ещё используется/для истории) звучал как техническое предупреждение
+# ("что-то может не работать как должно") - могло тревожить пользователя.
+# Новый текст ниже (BOT_UPDATED_MESSAGE_TEMPLATE) - подставляется версия
+# (см. _next_bot_version_string ниже) и подчёркивается, что ничего не
+# сломалось и данные не сбрасываются - обновление это хорошая новость
+# ("стараемся, дорабатываем для вас"), а не повод для беспокойства. Кнопка
+# и её механика (BOT_UPDATED_REFRESH_KEYBOARD/handle_refresh_menu_button)
+# не менялись.
+BOT_UPDATED_MESSAGE_TEMPLATE = (
+    "✨ *Taxi Helper обновился — версия {version}*\n\n"
+    "Не переживай, ничего не сломалось - мы просто стараемся для вас и "
+    "потихоньку делаем бота удобнее и стабильнее. Смена, выбранный город и "
+    "все остальные твои данные никуда не делись, всё на месте.\n\n"
+    "Нажми «🔄 ОБНОВИТЬ БОТА» ниже, чтобы меню подхватило свежую версию."
+)
 # ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя - "нужно написать не
 # обновление меню, обновления бота... что если что требуется обновить бота
 # нажав вот эту кнопку это важно для более стабильной версии бота"): и текст
@@ -30605,6 +30662,24 @@ def set_bot_meta(key, value):
     conn.commit()
     conn.close()
 
+# ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "писал версию, первая
+# будет 1.000 след будет 1.001") - простой возрастающий счётчик в bot_meta,
+# НЕ привязанный к git-тегам/семантическому версионированию (их в проекте
+# нет) - единственная цель: дать пользователю в пуше "бот обновился" понятный
+# растущий номер версии. Вызывается РОВНО один раз на каждый подтверждённый
+# новый деплой (см. notify_users_about_new_deploy ниже - функция вызывается
+# только внутри ветки "это действительно новый деплой", а не на каждый
+# рестарт), поэтому счётчик растёт синхронно с реальными обновлениями, а не
+# с перезапусками контейнера.
+def _next_bot_version_string():
+    """Возвращает строку версии для очередного пуша об обновлении и сразу
+    сохраняет следующее значение счётчика в bot_meta. Первый вызов в жизни
+    бота (ключа ещё нет) -> "1.000", следующий -> "1.001" и так далее."""
+    raw = get_bot_meta('bot_update_version_counter')
+    counter = int(raw) if raw is not None and raw.isdigit() else 0
+    set_bot_meta('bot_update_version_counter', str(counter + 1))
+    return f"1.{counter:03d}"
+
 async def notify_users_about_new_deploy():
     """Вызывается один раз при старте бота (см. main()). Сравнивает текущий
     RAILWAY_GIT_COMMIT_SHA с последним сохранённым в bot_meta - если это
@@ -30642,17 +30717,24 @@ async def notify_users_about_new_deploy():
     if previous_sha == current_sha:
         return  # обычный рестарт, код не менялся - пуш не нужен
 
+    # Версия считается здесь - сразу после того, как подтвердили, что это
+    # ДЕЙСТВИТЕЛЬНО новый деплой (а не рестарт), но ДО проверки на
+    # получателей ниже - счётчик версий должен расти синхронно с реальными
+    # деплоями независимо от того, был ли кто-то в user_state в этот момент.
+    bot_version = _next_bot_version_string()
+    update_text = BOT_UPDATED_MESSAGE_TEMPLATE.format(version=bot_version)
+
     if not bot:
         return
     recipients = [uid for uid, state in list(user_state.items()) if isinstance(state, dict)]
     if not recipients:
-        logger.info(f"🔄 Новый деплой ({previous_sha[:8]} -> {current_sha[:8]}), но известных пользователей пока нет")
+        logger.info(f"🔄 Новый деплой ({previous_sha[:8]} -> {current_sha[:8]}, версия {bot_version}), но известных пользователей пока нет")
         return
-    logger.info(f"🔄 Новый деплой ({previous_sha[:8]} -> {current_sha[:8]}) - рассылаю пуш об обновлении {len(recipients)} пользователям")
+    logger.info(f"🔄 Новый деплой ({previous_sha[:8]} -> {current_sha[:8]}, версия {bot_version}) - рассылаю пуш об обновлении {len(recipients)} пользователям")
     sent, failed = 0, 0
     for user_id in recipients:
         try:
-            msg = await bot.send_message(user_id, BOT_UPDATED_MESSAGE, parse_mode='Markdown', reply_markup=BOT_UPDATED_REFRESH_KEYBOARD)
+            msg = await bot.send_message(user_id, update_text, parse_mode='Markdown', reply_markup=BOT_UPDATED_REFRESH_KEYBOARD)
             await track_bot_update_message(user_id, msg.message_id)
             sent += 1
         except Exception as e:
