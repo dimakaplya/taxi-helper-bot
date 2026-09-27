@@ -13378,13 +13378,36 @@ def map_webapp_html():
   // tg.showAlert()/alert() в doShiftToggle() и в подтверждении выбора
   // тарифов ниже - оба места сигналят одно и то же условие (awaiting_
   // location с сервера).
+  // ИЗМЕНЕНО 27.09.2026 (прямая просьба пользователя со скриншотом входного
+  // гейта - "должно быть вот так вот... висеть крутиться и сообщение что
+  // геолокация не включена") - карта чаще всего открыта ВЛОЖЕННОЙ внутрь
+  // единого приложения (см. unified_app_html, вкладка "Карта"), где вокруг
+  // этого оверлея иначе остаются видны шапка/бейдж города/нижний tabbar
+  // родителя - у вложенного iframe нет средства перекрыть их чисто CSS.
+  // Поэтому ДОПОЛНИТЕЛЬНО сигналим об этом наружу через postMessage - если
+  // страница открыта вложенной (window.parent !== window), родитель сам
+  // покажет свой полноэкранный #gate (тот же экран, что и при входе в
+  // приложение, см. addEventListener('message', ...) в unified_app_html) и
+  // спрячет всё остальное целиком. Сама локальная карточка ниже остаётся
+  // как есть - страховка на случай, если карта открыта НЕ вложенной (см.
+  // show_driver_map/фолбэки с картой топлива и т.п. в main.py, где /map
+  // открывается отдельным WebApp без родителя).
   const geoRequiredOverlay = document.getElementById('geoRequiredOverlay');
   const geoRequiredOk = document.getElementById('geoRequiredOk');
+  function _notifyParentGeoWait(show) {{
+    try {{
+      if (window.parent && window.parent !== window) {{
+        window.parent.postMessage({{ taxiHelperGeoWait: show }}, '*');
+      }}
+    }} catch (e) {{ /* кросс-доменный родитель/нет родителя - просто не шлём */ }}
+  }}
   function openGeoRequiredOverlay() {{
     if (geoRequiredOverlay) geoRequiredOverlay.style.display = 'flex';
+    _notifyParentGeoWait(true);
   }}
   function closeGeoRequiredOverlay() {{
     if (geoRequiredOverlay) geoRequiredOverlay.style.display = 'none';
+    _notifyParentGeoWait(false);
   }}
   if (geoRequiredOk) geoRequiredOk.addEventListener('click', closeGeoRequiredOverlay);
   if (geoRequiredOverlay) {{
@@ -17574,6 +17597,36 @@ def unified_app_html():
     if (initData) { src += '&tgInitData=' + encodeURIComponent(initData); }
     document.getElementById('mapFrame').src = src;
   }
+
+  // ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя со скриншотом входного
+  // гейта - "должно быть вот так вот... висеть крутиться и сообщение что
+  // геолокация не включена, её нужно включить"): раньше карта (вложенный
+  // #mapFrame) при попытке выйти на линию без трансляции живой геопозиции
+  // показывала СВОЙ СОБСТВЕННЫЙ оверлей поверх карты (#geoRequiredOverlay в
+  // map_webapp_html) - карта, шапка "TAXI HELPER"/бейдж города и нижний
+  // tabbar оставались видны вокруг него, пользователь ожидал ровно такой же
+  // полноэкранный блокирующий экран, что уже есть при входе в приложение
+  // (#gate выше) - у вложенного iframe нет способа средствами CSS перекрыть
+  // родительскую страницу, поэтому карта сигналит об этом сюда через
+  // postMessage, а сам полноэкранный экран показывает УЖЕ РОДИТЕЛЬ, переиспользуя
+  // тот же #gate/.spin, что и обычный вход (та же самая разметка/стили,
+  // никакого нового экрана не рисуем - просто на время подменяем текст и
+  // прячем #shell целиком, как в самом начале, до startApp()).
+  window.addEventListener('message', function (e) {
+    if (!e.data || typeof e.data !== 'object' || !('taxiHelperGeoWait' in e.data)) return;
+    if (e.data.taxiHelperGeoWait) {
+      document.getElementById('gateSpin').hidden = false;
+      document.getElementById('gatePin').hidden = true;
+      document.getElementById('gateErr').hidden = true;
+      document.getElementById('gateBtn').hidden = true;
+      document.getElementById('gateText').textContent = 'Геолокация не включена - без неё нельзя начать смену. Включи трансляцию: скрепка 📎 → Геопозиция → «Транслировать геопозицию» → «Пока не отключу». Как только геопозиция придёт - смена стартует автоматически.';
+      document.getElementById('gate').hidden = false;
+      document.getElementById('shell').hidden = true;
+    } else {
+      document.getElementById('gate').hidden = true;
+      document.getElementById('shell').hidden = false;
+    }
+  });
 
   requestGeo();
 
