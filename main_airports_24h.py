@@ -17886,7 +17886,12 @@ def unified_app_html():
       { detail: 'subscription', ic: TILE_ICONS.subscription, lbl: 'Подписка' },
       { href: '""" + VPN_BOT_URL + """', ic: TILE_ICONS.vpn, lbl: 'Бесплатный VPN' },
       { detail: 'support', ic: TILE_ICONS.support, lbl: 'Поддержка' },
-      { detail: 'city', ic: TILE_ICONS.city, lbl: 'Город и категория' },
+      // УБРАНО 27.09.2026 (прямая просьба пользователя - "кнопка город и
+      // категории убери пожалуйста из сервисов") - плитка-дубль убрана,
+      // смена города/категории по-прежнему доступна через плашку cityBadge
+      // в шапке (тот же renderCityDetail, см. openServiceDetail ниже -
+      // ветка 'city' оставлена нетронутой, просто сюда больше не ведёт
+      // отдельная плитка).
     ];
     if (!withoutEventsOrAirports) {
       tiles.splice(2, 0, { href: '""" + TRANSPORT_WEBAPP_PATH + """?city=' + cityQ + '&category=' + catQ, ic: TILE_ICONS.transport, lbl: 'Авиа/ЖД' });
@@ -23342,6 +23347,19 @@ def cabinet_webapp_html():
 <div id="cabinetApp" style="display:none">
 
 <div class="cabinet-nav" id="cabinetNav">
+  <!-- ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - "кабинет
+       автопарка замени место профиля в кабинете, если активирован") -
+       показывается ТОЛЬКО тем, у кого есть купленное/админское юр.лицо
+       (см. maybeShowFleetCabinetPill/LEGAL_CABINET_ACCESS_API_PATH ниже -
+       тот же способ проверки доступа, что уже был у плитки в "Сервисах",
+       см. maybeAddLegalCabinetTile в unified_app_html) - скрыта по
+       умолчанию, стоит ПЕРЕД "Профиль", чтобы у активированных пользователей
+       занимать именно её место (первую позицию), а не появляться где-то
+       сбоку. У обычных водителей без доступа ничего не меняется - "Профиль"
+       как и был первым. Это ССЫЛКА на отдельный WebApp (LEGAL_CABINET_WEBAPP_PATH),
+       а не локальная вкладка - клик не переключает .tab-pane, а уводит со
+       страницы, поэтому не участвует в общем nav-pill click-обработчике ниже. -->
+  <a class="nav-pill" id="fleetCabinetPill" href="#" hidden>🚕 Кабинет автопарка</a>
   <button class="nav-pill active" data-tab="profile">👤 Профиль</button>
   <button class="nav-pill" data-tab="finance">💰 Финансы</button>
   <!-- УБРАНО 24.09.2026 (прямая просьба пользователя - "Спрос и часы пика
@@ -23569,6 +23587,11 @@ def cabinet_webapp_html():
   // открытие WebApp Telegram'ом (при обычном прямом открытии кабинета tg.initData
   // как и раньше, tgInitData в URL просто отсутствует).
   const initData = (tg && tg.initData) || new URLSearchParams(window.location.search).get('tgInitData') || '';
+  // ДОБАВЛЕНО 27.09.2026 (см. fleetCabinetPill/maybeShowFleetCabinetPill
+  // ниже) - те же два пути, что уже использует unified_app_html/
+  // maybeAddLegalCabinetTile для точно такой же плитки в "Сервисах".
+  const LEGAL_CABINET_ACCESS_API_PATH = '""" + LEGAL_CABINET_ACCESS_API_PATH + """';
+  const LEGAL_CABINET_WEBAPP_PATH = '""" + LEGAL_CABINET_WEBAPP_PATH + """';
   // Временная диагностика (21.09.2026) - у пользователя initData приходит
   // пустой уже после переноса telegram-web-app.js на свой домен, непонятно,
   // грузится ли вообще SDK на телефоне. Собираем что видно ИЗ БРАУЗЕРА (без
@@ -23896,6 +23919,26 @@ def cabinet_webapp_html():
   }
   load();
 
+  // ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - "кабинет автопарка
+  // замени место профиля в кабинете, если активирован") - та же проверка
+  // доступа, что уже делает maybeAddLegalCabinetTile для одноимённой
+  // плитки в "Сервисах" (unified_app_html) - "молча" ничего не делает,
+  // если доступа нет. Пилюля стоит ПЕРВОЙ в разметке (перед "Профиль") -
+  // показанная, она занимает именно место "Профиль", сдвигая его на
+  // вторую позицию, а не появляется где-то в середине ряда.
+  async function maybeShowFleetCabinetPill() {
+    try {
+      const resp = await fetch(LEGAL_CABINET_ACCESS_API_PATH, { headers: { 'X-Telegram-Init-Data': initData } });
+      if (!resp.ok) return;
+      const data = await resp.json();
+      if (!data.has_access) return;
+      const pill = document.getElementById('fleetCabinetPill');
+      pill.href = LEGAL_CABINET_WEBAPP_PATH + (initData ? ('?tgInitData=' + encodeURIComponent(initData)) : '');
+      pill.hidden = false;
+    } catch (e) { /* тихо: пилюля появляется только если реально есть доступ */ }
+  }
+  maybeShowFleetCabinetPill();
+
   // ==================== НАВИГАЦИЯ ПО РАЗДЕЛАМ (21.09.2026) ====================
   // Объединение "🧰 ИНСТРУМЕНТЫ ВОДИТЕЛЯ" + "⚙️ НАСТРОЙКИ" в "👤 Личный
   // кабинет" (по просьбе пользователя) - переключение между разделами внутри
@@ -23904,7 +23947,11 @@ def cabinet_webapp_html():
   const loadedTabs = {};
   document.getElementById('cabinetNav').addEventListener('click', (e) => {
     const btn = e.target.closest('.nav-pill');
-    if (!btn) return;
+    // ДОБАВЛЕНО 27.09.2026 - "🚕 Кабинет автопарка" (fleetCabinetPill) тоже
+    // несёт класс nav-pill (для одинакового вида), но это ССЫЛКА на другой
+    // WebApp (data-tab у неё нет) - обработчик локальных вкладок её не
+    // трогает, браузер уводит по href как обычно.
+    if (!btn || !btn.dataset.tab) return;
     const tab = btn.dataset.tab;
     document.querySelectorAll('.nav-pill').forEach(b => b.classList.toggle('active', b === btn));
     document.querySelectorAll('.tab-pane').forEach(p => p.classList.toggle('active', p.id === 'tab-' + tab));
