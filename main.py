@@ -4702,8 +4702,8 @@ def _schedule_delete_message(chat_id, message_id, delay=DELETE_MESSAGE_DELAY_SEC
         return
     _fire_and_forget(_delayed_delete_message(chat_id, message_id, delay))
 
-# ==================== MENU BUTTON ЛИЧНОГО КАБИНЕТА (21.09.2026) ====================
-# По просьбе пользователя - открывать "Личный кабинет" в один тап, а не
+# ==================== MENU BUTTON (кнопка слева от поля ввода) (21.09.2026) ====================
+# По просьбе пользователя - открывать мини-приложение в один тап, а не
 # через промежуточное сообщение с инлайн-кнопкой (см. open_cabinet_from_menu
 # выше в файле). У кнопок с web_app= в Reply-клавиатуре initData приходит
 # пустым (проверено на реальном устройстве - см. комментарий у cabinet_row в
@@ -4711,21 +4711,31 @@ def _schedule_delete_message(chat_id, message_id, delay=DELETE_MESSAGE_DELAY_SEC
 # bot.set_chat_menu_button) с web_app= передаёт initData так же штатно, как
 # инлайн-кнопки - и открывается в один тап, без промежуточного сообщения.
 # Устанавливается ПЕРСОНАЛЬНО на чат (chat_id=user_id), т.к. сама ссылка
-# зависит от тарифов конкретной категории водителя (?tariffs=...) - в
-# отличие от команд бота, Menu Button можно задавать per-chat.
-_cabinet_menu_button_cache = {}  # user_id -> последний выставленный cabinet_url, чтобы не дёргать API повторно с тем же URL
+# зависит от города/категории конкретного водителя - в отличие от команд
+# бота, Menu Button можно задавать per-chat.
+#
+# ИЗМЕНЕНО 27.09.2026 (прямая просьба пользователя, скриншот чата - "поменяй
+# кнопку кабинет на открыть и по ней открывай приложение миниапсс"): раньше
+# эта кнопка вела ТОЛЬКО в standalone "Личный кабинет" (CABINET_WEBAPP_PATH)
+# и называлась "Кабинет" - выглядело непоследовательно рядом с инлайн-
+# кнопками "🚕 ОТКРЫТЬ TAXI HELPER", которые открывают ПОЛНОЕ приложение
+# (UNIFIED_APP_WEBAPP_PATH, все 4 вкладки). Теперь текст - "Открыть", а
+# ссылка - та же самая, что у "🚕 ОТКРЫТЬ TAXI HELPER" (см. app_url в
+# services_keyboard/open_app_text_and_keyboard) - полное приложение, вкладка
+# "Кабинет" внутри него никуда не делась, просто открывается не отдельно.
+_app_menu_button_cache = {}  # user_id -> последний выставленный app_url, чтобы не дёргать API повторно с тем же URL
 
-async def set_cabinet_menu_button(user_id, cabinet_url):
-    if _cabinet_menu_button_cache.get(user_id) == cabinet_url:
+async def set_cabinet_menu_button(user_id, app_url):
+    if _app_menu_button_cache.get(user_id) == app_url:
         return
     try:
         await bot.set_chat_menu_button(
             chat_id=user_id,
-            menu_button=MenuButtonWebApp(text="Кабинет", web_app=WebAppInfo(url=cabinet_url)),
+            menu_button=MenuButtonWebApp(text="Открыть", web_app=WebAppInfo(url=app_url)),
         )
-        _cabinet_menu_button_cache[user_id] = cabinet_url
+        _app_menu_button_cache[user_id] = app_url
     except Exception as e:
-        logger.warning(f"⚠️ Не удалось выставить Menu Button личного кабинета для {user_id}: {e}")
+        logger.warning(f"⚠️ Не удалось выставить Menu Button мини-приложения для {user_id}: {e}")
 
 # ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "сделать чтобы всегда
 # ... снизу эта кнопка была всегда", уточнено в диалоге: кнопка должна жить
@@ -5610,17 +5620,22 @@ def services_keyboard(category=None, city=None, user_id=None):
     # тап") - теперь используем Menu Button (кнопка слева от поля ввода,
     # bot.set_chat_menu_button) с web_app= - initData у неё тоже передаётся
     # штатно, а открывается в один тап, без лишнего сообщения. Ссылка
-    # зависит от тарифов категории, поэтому выставляем ПЕРСОНАЛЬНО на чат
+    # зависит от города/категории, поэтому выставляем ПЕРСОНАЛЬНО на чат
     # (см. set_cabinet_menu_button) - лёгкий fire-and-forget с кэшем по
     # user_id, чтобы не дёргать API Telegram на каждый показ меню с одним и
     # тем же URL. Сама кнопка "👤 ЛИЧНЫЙ КАБИНЕТ" из Reply-клавиатуры теперь
     # УБРАНА (по просьбе пользователя, "удали тогда её из меню") -
     # open_cabinet_from_menu ниже оставлен в коде на случай регресса Menu
     # Button, но с главного меню на него больше нет прямого пути.
+    # ИЗМЕНЕНО 27.09.2026 (прямая просьба пользователя - "поменяй кнопку
+    # кабинет на открыть и по ней открывай приложение миниапсс") - ссылка
+    # теперь ведёт на ПОЛНОЕ приложение (UNIFIED_APP_WEBAPP_PATH), та же
+    # самая, что строится для "🚕 ОТКРЫТЬ TAXI HELPER" (см. app_url в
+    # open_app_text_and_keyboard ниже) - а не только на standalone
+    # "Личный кабинет", как было раньше.
     if PUBLIC_URL and city and user_id is not None:
-        tariff_options = CATEGORIES.get(category, {}).get('tariffs', [])
-        cabinet_url = f"{PUBLIC_URL}{CABINET_WEBAPP_PATH}?tariffs={urllib.parse.quote(','.join(tariff_options))}"
-        _fire_and_forget(set_cabinet_menu_button(user_id, cabinet_url))
+        app_url = f"{PUBLIC_URL}{UNIFIED_APP_WEBAPP_PATH}?city={urllib.parse.quote(city)}&category={urllib.parse.quote(category or '')}"
+        _fire_and_forget(set_cabinet_menu_button(user_id, app_url))
 
     # items теперь хранит готовые KeyboardButton (не текст) - нужно для
     # "🌤 ПОГОДА" ниже, которая в зависимости от PUBLIC_URL/city либо
