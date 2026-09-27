@@ -4751,10 +4751,17 @@ def _schedule_delete_message(chat_id, message_id, delay=DELETE_MESSAGE_DELAY_SEC
 # эта кнопка вела ТОЛЬКО в standalone "Личный кабинет" (CABINET_WEBAPP_PATH)
 # и называлась "Кабинет" - выглядело непоследовательно рядом с инлайн-
 # кнопками "🚕 ОТКРЫТЬ TAXI HELPER", которые открывают ПОЛНОЕ приложение
-# (UNIFIED_APP_WEBAPP_PATH, все 4 вкладки). Теперь текст - "Открыть", а
+# (UNIFIED_APP_WEBAPP_PATH, все 4 вкладки). Текст был "Открыть", а
 # ссылка - та же самая, что у "🚕 ОТКРЫТЬ TAXI HELPER" (см. app_url в
 # services_keyboard/open_app_text_and_keyboard) - полное приложение, вкладка
 # "Кабинет" внутри него никуда не делась, просто открывается не отдельно.
+# ЕЩЁ РАЗ ИЗМЕНЕНО 27.09.2026 (прямая просьба пользователя со скриншотом
+# чужого бота - "такую же кнопку сделай снизу приложение только для нашего
+# бота чтобы по ней можно было заходить в приложение") - это ТА ЖЕ самая
+# механика Telegram (Menu Button слева от поля ввода, bot.set_chat_menu_button
+# с MenuButtonWebApp), что и на скриншоте - просто там она подписана
+# "📱 Приложение". Меняем только текст кнопки на такой же - ссылка и вся
+# логика (какую именно ссылку открывать, когда выставлять) не переписаны.
 _app_menu_button_cache = {}  # user_id -> последний выставленный app_url, чтобы не дёргать API повторно с тем же URL
 
 async def set_cabinet_menu_button(user_id, app_url):
@@ -4763,7 +4770,7 @@ async def set_cabinet_menu_button(user_id, app_url):
     try:
         await bot.set_chat_menu_button(
             chat_id=user_id,
-            menu_button=MenuButtonWebApp(text="Открыть", web_app=WebAppInfo(url=app_url)),
+            menu_button=MenuButtonWebApp(text="📱 Приложение", web_app=WebAppInfo(url=app_url)),
         )
         _app_menu_button_cache[user_id] = app_url
     except Exception as e:
