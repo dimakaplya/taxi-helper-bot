@@ -42,6 +42,38 @@ import fetch_timepad_data  # афиша города (TimePad) для кнопк
                             # (Cloudflare блокирует датацентровые IP, см. комментарий в самом файле)
 from config_loader import get_cities as _get_config_cities  # единый справочник аэропортов/вокзалов - см. config.json и config_loader.py
 
+# ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - "все кнопки сделай
+# чтобы большими буквами были") - оборачиваем InlineKeyboardButton ОДИН РАЗ
+# здесь, сразу после импорта из aiogram.types, вместо того чтобы переписывать
+# text= в сотнях мест по всему файлу (тот же приём "единая точка правки", что
+# уже применялся для города/сервисов): text любой инлайн-кнопки, созданной
+# где угодно ниже через InlineKeyboardButton(...), автоматически приводится к
+# ВЕРХНЕМУ РЕГИСТРУ. Безопасно именно для ЭТОГО класса - у InlineKeyboardButton
+# (в отличие от ReplyKeyboardButton/KeyboardButton) text нигде по коду не
+# участвует в роутинге/сравнении: маршрутизация идёт по callback_data или
+# сразу открывается web_app/url, текст только отображается. ReplyKeyboardButton/
+# KeyboardButton ЗДЕСЬ НЕ ТРОГАЕМ - там текст кое-где сравнивается напрямую с
+# message.text (F.text=="...") и регистр важен для матчинга; для WebApp
+# HTML-кнопок (не Telegram-нативных) заглавные буквы включены отдельно через
+# CSS text-transform:uppercase прямо в разметке мини-приложений.
+# Защита isinstance(_OriginalInlineKeyboardButton, type) - подклассить можно
+# только НАСТОЯЩИЙ класс; в тестовом окружении (verify_main.py и т.п.), где
+# весь aiogram подменяется MagicMock-заглушкой, InlineKeyboardButton там - не
+# класс, а автосгенерированный атрибут-объект, и попытка его подклассить
+# ломает саму заглушку (проверено). В таком случае просто НЕ трогаем
+# InlineKeyboardButton - заглавные буквы там всё равно не наблюдаемы
+# (заглушка ничего реально не строит), а в проде (реальный aiogram) условие
+# истинно и обёртка применяется как задумано.
+_OriginalInlineKeyboardButton = InlineKeyboardButton
+if isinstance(_OriginalInlineKeyboardButton, type):
+    class _UppercaseInlineKeyboardButton(_OriginalInlineKeyboardButton):
+        def __init__(self, **kwargs):
+            text = kwargs.get('text')
+            if isinstance(text, str):
+                kwargs['text'] = text.upper()
+            super().__init__(**kwargs)
+    InlineKeyboardButton = _UppercaseInlineKeyboardButton
+
 BOT_TOKEN = os.getenv('TELEGRAM_TOKEN', '8968196261:AAGjxaTy_evirnWDAO124vmkbbDFy03kekY')
 
 # Файл с реальными данными. Раньше генерировался локальным скриптом на Маке,
@@ -4778,31 +4810,53 @@ MAIN_MENU_INLINE_BUTTON_CALLBACK = "open_services_menu"
 REPLY_KEYBOARD_STALE_HOURS = 12  # оставлено только для истории/совместимости с save_last_reply_keyboard_message - в гейтинг ниже больше не участвует
 _last_reply_keyboard_sent_at = {}  # chat_id -> datetime последней отправки сообщения с ReplyKeyboardMarkup
 
-def _with_main_menu_button(reply_markup):
-    """ОТКЛЮЧЕНО 27.09.2026 (прямая просьба пользователя - "внизу вот меню
-    убери оставь только открыть Taxi Helper, всё больше никаких сообщений")
-    - раньше дописывала строку "🚕 МЕНЮ TAXI HELPER" снизу любой разметки
-    (см. историю ниже). Теперь вся эта логика - no-op, reply_markup
-    возвращается БЕЗ ИЗМЕНЕНИЙ: единственная кнопка на исходящих сообщениях
-    бота - "🚕 ОТКРЫТЬ TAXI HELPER" (см. services_keyboard/
-    open_app_text_and_keyboard), никакой дополнительной строки-меню больше
-    не добавляется. Тело функции ниже - МЁРТВЫЙ КОД, оставлен для быстрого
-    отката, если понадобится вернуть как было (см. тот же приём у
-    services_keyboard/САМ SingleMessageMiddleware по-прежнему вызывает эту
-    функцию - трогать вызывающий код не пришлось).
+def _with_main_menu_button(reply_markup, chat_id=None):
+    """ИЗМЕНЕНО 27.09.2026 (прямая просьба пользователя - "ко всем пушам
+    добавить кнопку ОТКРЫТЬ TAXI HELPER она самая нижняя всегда") - раньше
+    (правка тем же днём чуть выше по времени, см. дату) эта функция была
+    превращена в no-op после жалобы "внизу вот меню убери оставь только
+    открыть Taxi Helper" - тогда речь шла про СТАРУЮ кнопку "🚕 МЕНЮ TAXI
+    HELPER" (callback-меню, MAIN_MENU_INLINE_BUTTON_TEXT), её отключили и
+    текст ниже больше не относится к делу. Сейчас другая, более узкая задача:
+    гарантировать, что "🚕 ОТКРЫТЬ TAXI HELPER" - та же самая WebApp-кнопка,
+    что уже стоит у services_keyboard/open_app_text_and_keyboard - есть
+    ПОСЛЕДНЕЙ строкой буквально на каждом исходящем сообщении бота, а не
+    только там, где её вписали вручную. Десятки push-уведомлений (дождь,
+    аэропорты, парковка, топливо, аренда, обмен заказами между водителями и
+    т.д. - см. полный список в отчёте-исследовании) отправлялись либо вообще
+    без единой кнопки, либо с узкоспециальной кнопкой без выхода в
+    приложение. Реализовано ЦЕНТРАЛИЗОВАННО через тот же choke-point
+    (SingleMessageMiddleware), что уже проверен на ~285 вызовах
+    message.answer()/bot.send_message() по всему файлу - переписывать каждый
+    вызов по отдельности не пришлось (вызывающий код ниже почти не менялся,
+    только пробросили chat_id).
 
-    Было: возвращала reply_markup с добавленной строкой "МЕНЮ TAXI HELPER" -
-    ReplyKeyboardMarkup не трогаем (возвращаем как есть), к
-    InlineKeyboardMarkup дописываем строку снизу, при отсутствии разметки
-    создаём новую с одной этой кнопкой."""
-    return reply_markup
-    # --- МЁРТВЫЙ КОД НИЖЕ (оставлен для отката) ---
-    menu_row = [InlineKeyboardButton(text=MAIN_MENU_INLINE_BUTTON_TEXT, callback_data=MAIN_MENU_INLINE_BUTTON_CALLBACK)]
+    reply_markup is None -> новая клавиатура с одной этой кнопкой.
+    InlineKeyboardMarkup -> дописываем кнопку последней строкой, ЕСЛИ её там
+    ещё нет (дедупликация по тексту последней строки - иначе у
+    services_keyboard/push_holiday_alert/push_peak_hour_alert и т.п., которые
+    и так уже кончаются этой кнопкой, она задвоилась бы). ReplyKeyboardMarkup
+    и прочее (ReplyKeyboardRemove и т.п.) - без изменений; PUBLIC_URL не
+    задан (дев-режим без HTTPS) - тоже без изменений, открыть WebApp всё
+    равно нельзя."""
+    if not PUBLIC_URL:
+        return reply_markup
+    if isinstance(reply_markup, ReplyKeyboardMarkup):
+        return reply_markup
+    state = user_state.get(chat_id) or {}
+    city = state.get('city') or ''
+    category = state.get('category') or ''
+    app_url = f"{PUBLIC_URL}{UNIFIED_APP_WEBAPP_PATH}?city={urllib.parse.quote(city)}&category={urllib.parse.quote(category)}"
+    footer_row = [InlineKeyboardButton(text="🚕 ОТКРЫТЬ TAXI HELPER", web_app=WebAppInfo(url=app_url))]
     if reply_markup is None:
-        return InlineKeyboardMarkup(inline_keyboard=[menu_row])
+        return InlineKeyboardMarkup(inline_keyboard=[footer_row])
     if isinstance(reply_markup, InlineKeyboardMarkup):
-        return InlineKeyboardMarkup(inline_keyboard=list(reply_markup.inline_keyboard) + [menu_row])
-    return reply_markup  # ReplyKeyboardMarkup и прочее - без изменений
+        rows = list(reply_markup.inline_keyboard)
+        last_row_is_footer = bool(rows) and len(rows[-1]) == 1 and getattr(rows[-1][0], 'text', None) == "🚕 ОТКРЫТЬ TAXI HELPER"
+        if last_row_is_footer:
+            return reply_markup
+        return InlineKeyboardMarkup(inline_keyboard=rows + [footer_row])
+    return reply_markup  # ReplyKeyboardRemove и прочее - без изменений
 
 class SingleMessageMiddleware(BaseRequestMiddleware):
     async def __call__(self, make_request, bot_instance: Bot, method: TelegramMethod[TelegramType]):
@@ -4818,11 +4872,14 @@ class SingleMessageMiddleware(BaseRequestMiddleware):
             # ReplyKeyboardMarkup, и на Android именно тап по ним может
             # молча скрыть нижнюю клавиатуру без единого сигнала боту - то
             # есть момент "меню пропало" бот в принципе не видит и не может
-            # его отследить по времени. Теперь инлайн-кнопка "МЕНЮ TAXI
-            # HELPER" добавляется на ЛЮБОЕ сообщение без собственной
-            # ReplyKeyboardMarkup - без исключений и без окна ожидания.
+            # его отследить по времени. Теперь кнопка "🚕 ОТКРЫТЬ TAXI HELPER"
+            # добавляется на ЛЮБОЕ сообщение без собственной
+            # ReplyKeyboardMarkup - без исключений и без окна ожидания (см.
+            # _with_main_menu_button выше - 27.09.2026 её задача сменилась с
+            # "МЕНЮ TAXI HELPER" на "ОТКРЫТЬ TAXI HELPER", дедуп не даёт
+            # задвоить там, где кнопка и так уже есть).
             if not has_reply_keyboard:
-                method.reply_markup = _with_main_menu_button(method.reply_markup)
+                method.reply_markup = _with_main_menu_button(method.reply_markup, chat_id)
             skip_trim = _skip_message_trim.get()
             result = await make_request(bot_instance, method)
             try:
@@ -6811,6 +6868,7 @@ def share_order_webapp_html(category=None):
   .pill {
     padding: 8px 14px; border-radius: 20px; background: #1c1c1c; border: 1px solid rgba(255,255,255,.1);
     color: #ccc; font-size: 13.5px; cursor: pointer; transition: transform .12s, background .15s, border-color .15s;
+    text-transform: uppercase;
   }
   .pill:active { transform: scale(.94); }
   /* ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - "над всеми кнопками
@@ -6832,6 +6890,7 @@ def share_order_webapp_html(category=None):
   #submitBtn {
     width: 100%; margin-top: 22px; padding: 14px; border-radius: 14px; border: none;
     background: #FFC400; color: #000; font-size: 15.5px; font-weight: 800; transition: transform .12s;
+    text-transform: uppercase;
   }
   #submitBtn:active:not(:disabled) { transform: scale(.97); }
   #submitBtn:disabled { opacity: .5; }
@@ -12005,7 +12064,7 @@ MAP_CHROME_CSS = """
      краю (сразу после кнопки смены), а центрировался в доступной ширине
      (от left:80px до right:10px). */
   .map-toggles-row { position: absolute; top: 10px; left: 80px; right: 10px; z-index: 1000; display: flex; flex-direction: row; flex-wrap: wrap; align-items: flex-start; justify-content: center; gap: 5px; }
-  .layer-toggle-btn { display: inline-block; background: #1c1c1c; color: #fff; border: 1px solid rgba(255,196,0,.4); border-radius: 8px; padding: 5px 7px; font-family: -apple-system, sans-serif; font-size: 11px; font-weight: 600; box-shadow: 0 1px 4px rgba(0,0,0,.35); cursor: pointer; user-select: none; white-space: nowrap; transition: transform .12s; }
+  .layer-toggle-btn { display: inline-block; background: #1c1c1c; color: #fff; border: 1px solid rgba(255,196,0,.4); border-radius: 8px; padding: 5px 7px; font-family: -apple-system, sans-serif; font-size: 11px; font-weight: 600; box-shadow: 0 1px 4px rgba(0,0,0,.35); cursor: pointer; user-select: none; white-space: nowrap; transition: transform .12s; text-transform: uppercase; }
   .layer-toggle-btn:active, .filter-toggle:active { transform: scale(.94); }
   /* ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - редизайн
      распространён на все WebApp'ы бота) - лёгкая тактильная отдача кнопок
@@ -12086,7 +12145,7 @@ MAP_CHROME_CSS = """
      не оставался кликабельным невидимый элемент). 140% высоты с запасом
      перекрывает и саму полосу (56px), и border, и нижний safe-area отступ. */
   .shift-slider.on-shift { transform: translateY(140%); opacity: 0; pointer-events: none; }
-  .shift-slider-label { position: relative; z-index: 1; font-family: -apple-system, sans-serif; font-weight: 700; font-size: 15px; color: #1c1c1c; pointer-events: none; }
+  .shift-slider-label { position: relative; z-index: 1; font-family: -apple-system, sans-serif; font-weight: 700; font-size: 15px; color: #1c1c1c; pointer-events: none; text-transform: uppercase; }
   .shift-slider-handle {
     position: absolute; left: 3px; top: 50%; transform: translateY(-50%); width: 44px; height: 44px; border-radius: 50%;
     background: #fff; box-shadow: 0 2px 6px rgba(0,0,0,.4); display: flex; align-items: center;
@@ -12129,7 +12188,7 @@ MAP_CHROME_CSS = """
   .tariff-picker-list label { display: flex; align-items: center; gap: 10px; padding: 11px 4px; font-size: 15px; border-bottom: 1px solid rgba(255,255,255,.08); }
   .tariff-picker-list input { width: 19px; height: 19px; accent-color: #FFB800; }
   .tariff-picker-actions { display: flex; gap: 10px; margin-top: 16px; }
-  .tariff-picker-actions button { flex: 1; border: none; border-radius: 10px; padding: 13px; font-size: 15px; font-weight: 700; font-family: inherit; cursor: pointer; }
+  .tariff-picker-actions button { flex: 1; border: none; border-radius: 10px; padding: 13px; font-size: 15px; font-weight: 700; font-family: inherit; cursor: pointer; text-transform: uppercase; }
   .tariff-picker-cancel { background: #333; color: #fff; }
   .tariff-picker-confirm { background: #FFB800; color: #1c1c1c; }
   .tariff-picker-confirm:disabled { opacity: .45; cursor: default; }
@@ -12162,7 +12221,7 @@ MAP_CHROME_CSS = """
   .geo-wait-overlay .geo-wait-steps { color: #fff; font-weight: 600; }
   .geo-wait-overlay .geo-wait-close {
     margin-top: 14px; background: none; border: none; color: #FFC400; font-size: 13.5px;
-    font-weight: 600; cursor: pointer; font-family: -apple-system, sans-serif;
+    font-weight: 600; cursor: pointer; font-family: -apple-system, sans-serif; text-transform: uppercase;
   }
   /* ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - прислал скриншот
      Яндекс Навигатора с тёмной плашкой снизу экрана, "сделай бар снизу
@@ -12293,7 +12352,7 @@ MAP_CHROME_CSS = """
   .fuel-popup h4, .charging-popup h4 { margin: 0 0 6px; font-size: 13.5px; }
   .fuel-popup .sub, .charging-popup .sub { color: #666; font-size: 11.5px; margin-bottom: 6px; }
   .status-btn-row { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 2px; }
-  .status-btn { border: 1px solid #bbb; border-radius: 6px; padding: 5px 8px; font-size: 12px; font-family: -apple-system, sans-serif; cursor: pointer; background: #f2f2f2; color: #333; }
+  .status-btn { border: 1px solid #bbb; border-radius: 6px; padding: 5px 8px; font-size: 12px; font-family: -apple-system, sans-serif; cursor: pointer; background: #f2f2f2; color: #333; text-transform: uppercase; }
   .status-btn.on-yes { background: #2e7d32; color: #fff; border-color: #2e7d32; }
   .status-btn.on-no { background: #c62828; color: #fff; border-color: #c62828; }
   .status-btn.on-free { background: #2e7d32; color: #fff; border-color: #2e7d32; }
@@ -17333,7 +17392,7 @@ def unified_app_html():
   }
   .tile .ic { height: 23px; display: flex; align-items: center; color: #FFC400; }
   .tile .ic svg { display: block; flex-shrink: 0; }
-  .tile .lbl { font-size: 13px; font-weight: 600; line-height: 1.3; }
+  .tile .lbl { font-size: 13px; font-weight: 600; line-height: 1.3; text-transform: uppercase; }
   .tile.placeholder { opacity: .45; }
   .tile .soon-badge {
     position: absolute; top: 10px; right: 10px; font-size: 9.5px; color: #FFC400;
@@ -17369,7 +17428,7 @@ def unified_app_html():
   .svc-back {
     background: none; border: none; color: #FFC400; font-family: 'Golos Text', sans-serif;
     font-size: 13.5px; font-weight: 600; padding: 8px 0 16px; cursor: pointer;
-    animation: backGlowPulse 2.6s ease-in-out infinite;
+    animation: backGlowPulse 2.6s ease-in-out infinite; text-transform: uppercase;
   }
   .svc-h { font-family: 'Unbounded', sans-serif; font-size: 16px; font-weight: 700; margin: 0 0 12px; }
   .svc-row {
@@ -17387,6 +17446,7 @@ def unified_app_html():
     display: block; width: 100%; text-align: center; text-decoration: none; box-sizing: border-box;
     background: #FFC400; color: #000; font-weight: 700; font-size: 13.5px; border: none;
     border-radius: 10px; padding: 12px; cursor: pointer; font-family: 'Golos Text', sans-serif;
+    text-transform: uppercase;
   }
   .svc-btn.ghost { background: #1c1c1c; color: #FFC400; border: 1px solid rgba(255,196,0,.4); }
   .svc-btn + .svc-btn { margin-top: 8px; }
@@ -17400,11 +17460,11 @@ def unified_app_html():
     aspect-ratio: 1 / 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
     gap: 8px; background: #131313; border: 1px solid rgba(255,196,0,.25); border-radius: 16px; color: #fff;
     font-family: 'Golos Text', sans-serif; font-size: 12.5px; font-weight: 700; text-align: center; padding: 10px;
-    cursor: pointer; line-height: 1.25;
+    cursor: pointer; line-height: 1.25; text-transform: uppercase;
   }
   .ref-tile:active { transform: scale(.96); }
   .ref-tile .ref-ic { font-size: 30px; line-height: 1; }
-  .ref-back { background: none; border: none; color: #FFC400; font-size: 13px; font-weight: 600; padding: 0 0 10px; cursor: pointer; font-family: 'Golos Text', sans-serif; animation: backGlowPulse 2.6s ease-in-out infinite; }
+  .ref-back { background: none; border: none; color: #FFC400; font-size: 13px; font-weight: 600; padding: 0 0 10px; cursor: pointer; font-family: 'Golos Text', sans-serif; animation: backGlowPulse 2.6s ease-in-out infinite; text-transform: uppercase; }
   .svc-input {
     width: 100%; box-sizing: border-box; background: #0a0a0a; border: 1px solid rgba(255,255,255,.15);
     border-radius: 10px; padding: 11px 12px; color: #fff; font-size: 13.5px; margin-bottom: 8px;
@@ -20877,6 +20937,7 @@ def events_webapp_html():
     flex: 1; text-align: center; padding: 10px 6px; border-radius: 12px;
     background: #1c1c1c; border: 1px solid rgba(255,255,255,.08); color: #9a9a9a;
     font-size: 13px; font-weight: 600; cursor: pointer; transition: transform .12s, background .15s, border-color .15s;
+    text-transform: uppercase;
   }
   .tab:active { transform: scale(.95); }
   /* ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - пульсирующий ореол
@@ -21271,6 +21332,7 @@ def transport_webapp_html():
     flex: 1; text-align: center; padding: 10px 6px; border-radius: 12px;
     background: #1c1c1c; border: 1px solid rgba(255,255,255,.08); color: #9a9a9a;
     font-size: 13px; font-weight: 600; cursor: pointer; transition: transform .12s, background .15s, border-color .15s;
+    text-transform: uppercase;
   }
   .tab:active { transform: scale(.95); }
   /* ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - пульсирующий ореол
@@ -21313,6 +21375,7 @@ def transport_webapp_html():
     margin-top: 14px; text-align: center; padding: 16px; border-radius: 14px;
     background: rgba(255,196,0,.14); border: 1.5px solid #FFC400;
     color: #FFC400; font-size: 15.5px; font-weight: 800; cursor: pointer; transition: transform .12s;
+    text-transform: uppercase;
   }
   .queue-toggle-main:active { transform: scale(.97); }
   .queue-form-main { display: none; margin-top: 12px; padding: 12px 14px; background: #141414; border: 1px solid rgba(255,255,255,.08); border-radius: 14px; }
@@ -21322,6 +21385,7 @@ def transport_webapp_html():
   .pill {
     padding: 6px 10px; border-radius: 8px; background: #1c1c1c; border: 1px solid rgba(255,255,255,.12);
     color: #ccc; font-size: 12px; cursor: pointer; user-select: none; transition: transform .12s, background .15s, border-color .15s;
+    text-transform: uppercase;
   }
   .pill:active { transform: scale(.93); }
   .pill.sel { background: rgba(255,196,0,.16); border-color: #FFC400; color: #FFC400; font-weight: 700; }
@@ -21330,6 +21394,7 @@ def transport_webapp_html():
   .queue-submit {
     width: 100%; margin-top: 10px; padding: 10px; border: none; border-radius: 10px;
     background: #FFC400; color: #111; font-size: 13px; font-weight: 800; cursor: pointer; transition: transform .12s;
+    text-transform: uppercase;
   }
   .queue-submit:active:not(:disabled) { transform: scale(.97); }
   .queue-submit:disabled { opacity: .5; }
@@ -22884,7 +22949,7 @@ def legal_cabinet_webapp_html():
   .employment-pill {
     border: 1px solid rgba(127,127,127,.3); border-radius: 999px; padding: 7px 11px; font-size: 12px;
     background: var(--tg-theme-bg-color, #f2f2f7); color: var(--tg-theme-text-color, #000); cursor: pointer;
-    transition: background .15s, border-color .15s;
+    transition: background .15s, border-color .15s; text-transform: uppercase;
   }
   /* ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - пульсирующий ореол
      на всех кнопках с фиксацией выбора, как у плашки рейтинга); keyframe
