@@ -4737,12 +4737,24 @@ REPLY_KEYBOARD_STALE_HOURS = 12  # оставлено только для ист
 _last_reply_keyboard_sent_at = {}  # chat_id -> datetime последней отправки сообщения с ReplyKeyboardMarkup
 
 def _with_main_menu_button(reply_markup):
-    """Возвращает reply_markup с добавленной строкой "МЕНЮ TAXI HELPER" -
+    """ОТКЛЮЧЕНО 27.09.2026 (прямая просьба пользователя - "внизу вот меню
+    убери оставь только открыть Taxi Helper, всё больше никаких сообщений")
+    - раньше дописывала строку "🚕 МЕНЮ TAXI HELPER" снизу любой разметки
+    (см. историю ниже). Теперь вся эта логика - no-op, reply_markup
+    возвращается БЕЗ ИЗМЕНЕНИЙ: единственная кнопка на исходящих сообщениях
+    бота - "🚕 ОТКРЫТЬ TAXI HELPER" (см. services_keyboard/
+    open_app_text_and_keyboard), никакой дополнительной строки-меню больше
+    не добавляется. Тело функции ниже - МЁРТВЫЙ КОД, оставлен для быстрого
+    отката, если понадобится вернуть как было (см. тот же приём у
+    services_keyboard/САМ SingleMessageMiddleware по-прежнему вызывает эту
+    функцию - трогать вызывающий код не пришлось).
+
+    Было: возвращала reply_markup с добавленной строкой "МЕНЮ TAXI HELPER" -
     ReplyKeyboardMarkup не трогаем (возвращаем как есть), к
     InlineKeyboardMarkup дописываем строку снизу, при отсутствии разметки
-    создаём новую с одной этой кнопкой. Всегда возвращает НОВЫЙ объект (не
-    мутирует переданный) - на случай, если markup переиспользуется где-то
-    ещё как общий объект."""
+    создаём новую с одной этой кнопкой."""
+    return reply_markup
+    # --- МЁРТВЫЙ КОД НИЖЕ (оставлен для отката) ---
     menu_row = [InlineKeyboardButton(text=MAIN_MENU_INLINE_BUTTON_TEXT, callback_data=MAIN_MENU_INLINE_BUTTON_CALLBACK)]
     if reply_markup is None:
         return InlineKeyboardMarkup(inline_keyboard=[menu_row])
@@ -17444,7 +17456,7 @@ def unified_app_html():
   // и в renderCityDetail, только "тихий" (без перезагрузки страницы) - для
   // автоопределения при первом запуске.
   function updateCityBadge(cityNameOverride) {
-    const label = cityNameOverride || cityLabel();
+    const label = (cityNameOverride || cityLabel()).toUpperCase();
     const catLabel = stripLeadingEmoji(CATEGORY_NAMES[category] || '');
     document.getElementById('cityBadge').textContent = label + (catLabel ? ' · ' + catLabel : '') + ' ▾';
   }
@@ -18228,20 +18240,14 @@ def unified_app_html():
   function stripLeadingEmoji(s) {
     return (s || '').replace(/^[^\sA-Za-zА-Яа-яЁё0-9]+\s*/, '');
   }
-  // ДОБАВЛЕНО 26.09.2026 (прямая просьба пользователя со скриншотом - "города
-  // большими буквами как раньше, наведи порядок чтобы иконки были ровные") -
-  // те же эмодзи по городам, что были в старой клавиатуре city_keyboard()
-  // (main.py, Python) - у CITY_DISPLAY_NAMES эмодзи никогда не было (это
-  // человекочитаемые названия без иконок, используются и в чат-текстах), а
-  // stripLeadingEmoji был для них no-op - реальный эффект был только на
-  // CATEGORY_NAMES. Иконка + ЗАГЛАВНЫЕ буквы строятся здесь заново, только
-  // для этого выпадающего списка.
-  const CITY_ICONS = { moscow: '🏛️', spb: '🕯️', krasnodar: '🌴', sochi: '🏖️' };
+  // ИЗМЕНЕНО 27.09.2026 (прямая просьба пользователя со скриншотом - "убери
+  // у городов смайлики... все большие буквы заглавные") - раньше здесь
+  // добавлялись эмодзи по городам (CITY_ICONS), теперь убраны совсем -
+  // только ЗАГЛАВНЫЕ буквы, без иконок, для этого выпадающего списка.
   function renderCityDetail(box) {
     let cityOptions = '';
     Object.keys(CITY_DISPLAY_NAMES).forEach(function (k) {
-      const icon = CITY_ICONS[k] ? CITY_ICONS[k] + ' ' : '';
-      cityOptions += '<option value="' + k + '"' + (k === city ? ' selected' : '') + '>' + icon + CITY_DISPLAY_NAMES[k].toUpperCase() + '</option>';
+      cityOptions += '<option value="' + k + '"' + (k === city ? ' selected' : '') + '>' + CITY_DISPLAY_NAMES[k].toUpperCase() + '</option>';
     });
     // ДОБАВЛЕНО 26.09.2026 (прямая просьба пользователя - "добавь ещё кнопку
     // город, пятый город, добавь другие города, чтобы не кликабельны были,
@@ -18250,7 +18256,8 @@ def unified_app_html():
     // просто анонс "остальные города - скоро". value специально вне
     // CITY_DISPLAY_NAMES/RAIN_CITY_COORDS, чтобы даже гипотетический выбор
     // (invalid) не долетел ни до persistCityCategory, ни до бэкенда.
-    cityOptions += '<option value="__coming_soon__" disabled>🔒 Другие города — скоро</option>';
+    // ИЗМЕНЕНО 27.09.2026 - убран замочек-эмодзи, тот же запрос "убери смайлики".
+    cityOptions += '<option value="__coming_soon__" disabled>Другие города — скоро</option>';
     let catOptions = '';
     Object.keys(CATEGORY_NAMES).forEach(function (k) {
       catOptions += '<option value="' + k + '"' + (k === category ? ' selected' : '') + '>' + stripLeadingEmoji(CATEGORY_NAMES[k]) + '</option>';
@@ -18269,6 +18276,18 @@ def unified_app_html():
       const newCity = citySelectEl.value;
       const newCategory = catSelectEl.value;
       saveBtn.disabled = true;
+      // ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - "выбрали город
+      // выбрали тариф нажали сохранить он пропал") - раньше меню оставалось
+      // открытым до конца сетевого запроса + перезагрузки страницы (пара
+      // секунд без всякой visible-реакции на клик выглядели как будто
+      // ничего не произошло). Теперь панель cityPanel (плашка в шапке)
+      // схлопывается СРАЗУ по клику, ещё до ответа сервера - если запрос
+      // всё же упадёт, панель открывается обратно и показывает ошибку.
+      // Для renderCityDetail внутри вкладки "Сервисы" (там нет cityPanel,
+      // это отдельный полноэкранный detail-view) поведение не меняется.
+      const panelEl = document.getElementById('cityPanel');
+      const wasPanelVisible = !!(panelEl && !panelEl.hidden);
+      if (wasPanelVisible) { panelEl.hidden = true; }
       try {
         const resp = await fetch('""" + CABINET_CITY_API_PATH + """', {
           method: 'POST',
@@ -18281,6 +18300,7 @@ def unified_app_html():
         url.searchParams.set('category', newCategory);
         window.location.href = url.toString();
       } catch (e) {
+        if (wasPanelVisible) { panelEl.hidden = false; }
         noteEl.textContent = 'Не удалось сохранить - попробуй ещё раз.';
         saveBtn.disabled = false;
       }
@@ -27471,19 +27491,33 @@ async def send_push_with_retry(user_id, text, *, state=None, parse_mode=None, re
     считает sent/failed и шлёт asyncio.sleep(0.05) между получателями, как
     раньше, это не меняется. **extra - любые дополнительные kwargs для
     bot.send_message (например disable_web_page_preview=True у пуша про
-    дорожные события)."""
+    дорожные события).
+
+    ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - "все пуши которые
+    приходят они в течение 1 минуты должны будут удаляться") - раньше пуш
+    удалялся только когда СТОРОННЯЯ логика (SingleMessageMiddleware, общая
+    очередь последних KEEP_LAST_N_MESSAGES=2 сообщений на чат) вытесняла его
+    из окна другими сообщениями - если после пуша долго не было другой
+    переписки, он просто оставался в чате навсегда. Теперь у ЛЮБОГО успешно
+    отправленного пуша безусловный таймер удаления через
+    DELETE_MESSAGE_DELAY_SECONDS (сейчас 60с), независимо от того, упадёт ли
+    он ещё и под общую чистку - _schedule_delete_message молча не делает
+    ничего, если сообщение уже удалено оттуда, так что двойная постановка в
+    очередь безопасна."""
     if not bot:
         return False
     platform = _push_recipient_platform(user_id, state)
     try:
-        await bot.send_message(user_id, text, parse_mode=parse_mode, reply_markup=reply_markup, **extra)
+        msg = await bot.send_message(user_id, text, parse_mode=parse_mode, reply_markup=reply_markup, **extra)
+        _schedule_delete_message(user_id, msg.message_id)
         return True
     except TelegramRetryAfter as e:
         wait_s = e.retry_after + 0.5
         logger.info(f"⏳ Flood control при пуше {user_id} (platform={platform}) - жду {wait_s:.1f}с и пробую ещё раз")
         await asyncio.sleep(wait_s)
         try:
-            await bot.send_message(user_id, text, parse_mode=parse_mode, reply_markup=reply_markup, **extra)
+            msg = await bot.send_message(user_id, text, parse_mode=parse_mode, reply_markup=reply_markup, **extra)
+            _schedule_delete_message(user_id, msg.message_id)
             return True
         except Exception as e2:
             logger.warning(f"⚠️ Не удалось отправить пуш {user_id} (platform={platform}) после повтора на flood-control: {e2}")
