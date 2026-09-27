@@ -6798,7 +6798,15 @@ def share_order_webapp_html(category=None):
     color: #ccc; font-size: 13.5px; cursor: pointer; transition: transform .12s, background .15s, border-color .15s;
   }
   .pill:active { transform: scale(.94); }
-  .pill.active { background: rgba(255,196,0,.16); border-color: #FFC400; color: #FFC400; font-weight: 700; }
+  /* ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - "над всеми кнопками
+     приложения где есть фиксация выбора" сделать пульсирующий ореол, как у
+     плашки рейтинга в Личном кабинете) - тот же приём: пульсирующее кольцо
+     box-shadow вокруг выбранного варианта. */
+  .pill.active { background: rgba(255,196,0,.16); border-color: #FFC400; color: #FFC400; font-weight: 700; animation: selPulse 2.6s ease-in-out infinite; }
+  @keyframes selPulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(255,196,0,.5); }
+    50% { box-shadow: 0 0 0 5px rgba(255,196,0,0); }
+  }
   .stepper { display: flex; align-items: center; gap: 14px; }
   .stepper button {
     width: 36px; height: 36px; border-radius: 50%; border: 1px solid rgba(255,255,255,.14);
@@ -6877,7 +6885,20 @@ def share_order_webapp_html(category=None):
 </div>
 <script>
   const tg = window.Telegram && window.Telegram.WebApp;
-  if (tg) { tg.ready(); tg.expand(); }
+  if (tg) {
+    tg.ready(); tg.expand();
+    // ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - "жёстко
+    // привязать чтобы открытие миниаппс было только на полный экран и её
+    // нельзя было смахивать вверх вниз") - requestFullscreen (Bot API
+    // 8.0+) разворачивает по-настоящему на весь экран (не просто "на всю
+    // доступную высоту", как expand() выше), disableVerticalSwipes (Bot
+    // API 7.7+) отключает жест "смахнуть вниз", которым обычно
+    // сворачивают/закрывают мини-апп. Методы есть не во всех версиях
+    // клиента Telegram - typeof-проверка + try/catch, чтобы на старых
+    // клиентах молча ничего не делать, а не падать с ошибкой.
+    try { if (typeof tg.disableVerticalSwipes === 'function') tg.disableVerticalSwipes(); } catch (e) {}
+    try { if (typeof tg.requestFullscreen === 'function') tg.requestFullscreen(); } catch (e) {}
+  }
   // ДОБАВЛЕНО 26.09.2026 (перенос "Отдать заказ" в единое приложение, см.
   // unified_app_html() - раздел "Ещё" вкладки "Сервисы") - тот же откат на
   // URL-параметр tgInitData, что и в map_webapp_html/_mapInitData: initData
@@ -11979,7 +12000,13 @@ MAP_CHROME_CSS = """
   }
   /* ДОБАВЛЕНО 23.09.2026 (уточнение пользователя - "включи тумблер пробки") -
      подсветка кнопки "🚦 Пробки", когда слой пробок включён. */
-  .layer-toggle-btn.active { background: #ffc400; color: #1c1c1c; border-color: #ffc400; }
+  /* ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - пульсирующий ореол
+     на всех кнопках с фиксацией выбора, как у плашки рейтинга) */
+  .layer-toggle-btn.active { background: #ffc400; color: #1c1c1c; border-color: #ffc400; animation: selPulse 2.6s ease-in-out infinite; }
+  @keyframes selPulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(255,196,0,.5); }
+    50% { box-shadow: 0 0 0 5px rgba(255,196,0,0); }
+  }
   /* ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя, прислал референс-
      скриншот жёлтой круглой кнопки с иконкой питания) - раньше здесь была
      круглая кнопка-индикатор смены в углу карты (тап переключал смену).
@@ -12571,7 +12598,15 @@ def map_webapp_html():
     if (tg && tg.initData) return tg.initData;
     try {{ return new URLSearchParams(window.location.search).get('tgInitData') || ''; }} catch (e) {{ return ''; }}
   }}
-  if (tg) {{ tg.ready(); tg.expand(); }}
+  if (tg) {{
+    tg.ready(); tg.expand();
+    // ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - "жёстко
+    // привязать чтобы открытие миниаппс было только на полный экран и её
+    // нельзя было смахивать вверх вниз") - см. подробный комментарий у той
+    // же пары вызовов в unified_app_html() и т.д.
+    try {{ if (typeof tg.disableVerticalSwipes === 'function') tg.disableVerticalSwipes(); }} catch (e) {{}}
+    try {{ if (typeof tg.requestFullscreen === 'function') tg.requestFullscreen(); }} catch (e) {{}}
+  }}
   if (tg && tg.platform) {{ fetch('/platform/report', {{ method: 'POST', headers: {{ 'Content-Type': 'application/json', 'X-Telegram-Init-Data': _mapInitData() }}, body: JSON.stringify({{ platform: tg.platform }}) }}).catch(function(){{}}); }}
   const params = new URLSearchParams(window.location.search);
   const city = params.get('city') || '';
@@ -16202,7 +16237,20 @@ def weather_webapp_html():
 </div>
 <script>
   const tg = window.Telegram && window.Telegram.WebApp;
-  if (tg) { tg.ready(); tg.expand(); }
+  if (tg) {
+    tg.ready(); tg.expand();
+    // ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - "жёстко
+    // привязать чтобы открытие миниаппс было только на полный экран и её
+    // нельзя было смахивать вверх вниз") - requestFullscreen (Bot API
+    // 8.0+) разворачивает по-настоящему на весь экран (не просто "на всю
+    // доступную высоту", как expand() выше), disableVerticalSwipes (Bot
+    // API 7.7+) отключает жест "смахнуть вниз", которым обычно
+    // сворачивают/закрывают мини-апп. Методы есть не во всех версиях
+    // клиента Telegram - typeof-проверка + try/catch, чтобы на старых
+    // клиентах молча ничего не делать, а не падать с ошибкой.
+    try { if (typeof tg.disableVerticalSwipes === 'function') tg.disableVerticalSwipes(); } catch (e) {}
+    try { if (typeof tg.requestFullscreen === 'function') tg.requestFullscreen(); } catch (e) {}
+  }
   if (tg && tg.platform) { fetch('/platform/report', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': tg.initData || '' }, body: JSON.stringify({ platform: tg.platform }) }).catch(function(){}); }
   const params = new URLSearchParams(window.location.search);
   const city = params.get('city') || '';
@@ -16781,7 +16829,20 @@ def where_to_go_webapp_html():
 </div>
 <script>
   const tg = window.Telegram && window.Telegram.WebApp;
-  if (tg) { tg.ready(); tg.expand(); }
+  if (tg) {
+    tg.ready(); tg.expand();
+    // ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - "жёстко
+    // привязать чтобы открытие миниаппс было только на полный экран и её
+    // нельзя было смахивать вверх вниз") - requestFullscreen (Bot API
+    // 8.0+) разворачивает по-настоящему на весь экран (не просто "на всю
+    // доступную высоту", как expand() выше), disableVerticalSwipes (Bot
+    // API 7.7+) отключает жест "смахнуть вниз", которым обычно
+    // сворачивают/закрывают мини-апп. Методы есть не во всех версиях
+    // клиента Telegram - typeof-проверка + try/catch, чтобы на старых
+    // клиентах молча ничего не делать, а не падать с ошибкой.
+    try { if (typeof tg.disableVerticalSwipes === 'function') tg.disableVerticalSwipes(); } catch (e) {}
+    try { if (typeof tg.requestFullscreen === 'function') tg.requestFullscreen(); } catch (e) {}
+  }
   if (tg && tg.platform) { fetch('/platform/report', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': tg.initData || '' }, body: JSON.stringify({ platform: tg.platform }) }).catch(function(){}); }
   const params = new URLSearchParams(window.location.search);
   const city = params.get('city') || '';
@@ -17271,9 +17332,20 @@ def unified_app_html():
   #cab-state { text-align: center; padding: 40px 16px; opacity: .7; font-size: 13.5px; }
 
   /* ---------- Сервисы: детальный вид (Реферальная/Подписка/Поддержка/Город) ---------- */
+  /* ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - "две кнопки назад
+     ... так же с пульсацией должны быть на каждом меню и на каждой
+     вкладке кроме карты") - кнопки "Назад" тут текстовые, без фона/рамки,
+     поэтому вместо пульсирующего box-shadow (как у .pill/.nav-pill.active
+     и т.п. - см. selPulse выше) используем пульсирующее свечение текста
+     (text-shadow) - тот же приём, адаптированный под текстовую кнопку. */
+  @keyframes backGlowPulse {
+    0%, 100% { text-shadow: 0 0 0 rgba(255,196,0,0); }
+    50% { text-shadow: 0 0 8px rgba(255,196,0,.9); }
+  }
   .svc-back {
     background: none; border: none; color: #FFC400; font-family: 'Golos Text', sans-serif;
     font-size: 13.5px; font-weight: 600; padding: 8px 0 16px; cursor: pointer;
+    animation: backGlowPulse 2.6s ease-in-out infinite;
   }
   .svc-h { font-family: 'Unbounded', sans-serif; font-size: 16px; font-weight: 700; margin: 0 0 12px; }
   .svc-row {
@@ -17308,7 +17380,7 @@ def unified_app_html():
   }
   .ref-tile:active { transform: scale(.96); }
   .ref-tile .ref-ic { font-size: 30px; line-height: 1; }
-  .ref-back { background: none; border: none; color: #FFC400; font-size: 13px; font-weight: 600; padding: 0 0 10px; cursor: pointer; font-family: 'Golos Text', sans-serif; }
+  .ref-back { background: none; border: none; color: #FFC400; font-size: 13px; font-weight: 600; padding: 0 0 10px; cursor: pointer; font-family: 'Golos Text', sans-serif; animation: backGlowPulse 2.6s ease-in-out infinite; }
   .svc-input {
     width: 100%; box-sizing: border-box; background: #0a0a0a; border: 1px solid rgba(255,255,255,.15);
     border-radius: 10px; padding: 11px 12px; color: #fff; font-size: 13.5px; margin-bottom: 8px;
@@ -17392,7 +17464,20 @@ def unified_app_html():
 </div>
 <script>
   const tg = window.Telegram && window.Telegram.WebApp;
-  if (tg) { tg.ready(); tg.expand(); }
+  if (tg) {
+    tg.ready(); tg.expand();
+    // ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - "жёстко
+    // привязать чтобы открытие миниаппс было только на полный экран и её
+    // нельзя было смахивать вверх вниз") - requestFullscreen (Bot API
+    // 8.0+) разворачивает по-настоящему на весь экран (не просто "на всю
+    // доступную высоту", как expand() выше), disableVerticalSwipes (Bot
+    // API 7.7+) отключает жест "смахнуть вниз", которым обычно
+    // сворачивают/закрывают мини-апп. Методы есть не во всех версиях
+    // клиента Telegram - typeof-проверка + try/catch, чтобы на старых
+    // клиентах молча ничего не делать, а не падать с ошибкой.
+    try { if (typeof tg.disableVerticalSwipes === 'function') tg.disableVerticalSwipes(); } catch (e) {}
+    try { if (typeof tg.requestFullscreen === 'function') tg.requestFullscreen(); } catch (e) {}
+  }
   if (tg && tg.platform) { fetch('/platform/report', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': tg.initData || '' }, body: JSON.stringify({ platform: tg.platform }) }).catch(function(){}); }
   const params = new URLSearchParams(window.location.search);
   // ИЗМЕНЕНО 26.09.2026 (прямая просьба пользователя - "по умолчанию город
@@ -17488,6 +17573,7 @@ def unified_app_html():
   const REFERRAL_QR_PNG_PATH = '""" + REFERRAL_QR_PNG_PATH + """';
   const PRESENTATION_PDF_WEBAPP_PATH = '""" + PRESENTATION_PDF_WEBAPP_PATH + """';
   const LEGAL_CABINET_ACCESS_API_PATH = '""" + LEGAL_CABINET_ACCESS_API_PATH + """';
+  const LEGAL_CABINET_PASSWORD_API_PATH = '""" + LEGAL_CABINET_PASSWORD_API_PATH + """';
   const LEGAL_CABINET_WEBAPP_PATH = '""" + LEGAL_CABINET_WEBAPP_PATH + """';
   function tgInitDataParam() {
     const v = (tg && tg.initData) || '';
@@ -18054,36 +18140,96 @@ def unified_app_html():
   }
 
   // "Юридическое лицо" - вход в схему начислений юр.лица/кабинет автопарка.
-  // Пароль компании (как и раньше) вводится ТОЛЬКО текстом в чате - логика
-  // пароля/оплаты не переписана (см. referral_category_legal_start/
-  // referral_legal_password_flow в main.py) - плитка лишь открывает диалог
-  // с ботом со start-параметром "reflegal", который запускает тот же самый
-  // первый шаг (см. /start в main.py). Тем, у кого уже есть купленный/
-  // админский кабинет, вместо этого сразу показываем прямую ссылку в
-  // "Кабинет автопарка" - та же проверка, что и у плитки в "Сервисах" (см.
-  // maybeAddLegalCabinetTile/LEGAL_CABINET_ACCESS_API_PATH).
+  // ИЗМЕНЕНО 27.09.2026 (прямая просьба пользователя - "ввод паролей
+  // сделать из телеграм апп"; "оплата реферальной программы юр лица
+  // только по нажатию кнопки в реферальной системе в конце") - раньше и
+  // оплата, и пароль компании отправляли водителя в чат с ботом (кнопка
+  // "🔒 Ввести пароль в чате", start-параметр "reflegal", см.
+  // referral_category_legal_start/referral_legal_password_flow в main.py).
+  // Теперь ОБА шага - прямо здесь, в мини-приложении: сначала оплата
+  // подписки на реферальную систему юрлиц (1890₽/мес - см.
+  // REFERRAL_LEGAL_ENTITY_SUBSCRIPTION_PRICE_RUB, ТОЛЬКО тут, по кнопке, а
+  // не автоматом), потом поле для пароля компании (тот же пароль, та же
+  // проверка - apply_legal_entity_password/handle_legal_cabinet_password_api
+  // в main.py, никакой новой бизнес-логики). Сама механика пароля/оплаты
+  // не переписана - только способ её вызвать. openBotDeepLink('reflegal')
+  // оставлен ниже как запасной путь на случай проблем с WebApp-полем.
   async function renderReferralLegalDetail(box, data) {
     box.innerHTML = refBackButton() + '<div class="svc-h">🏢 Юридическое лицо</div><div class="svc-note">Загружаю…</div>';
     wireRefBack(box, data);
-    let hasAccess = false;
+    let access = null;
     try {
       const resp = await fetch(LEGAL_CABINET_ACCESS_API_PATH, { headers: { 'X-Telegram-Init-Data': (tg && tg.initData) || '' } });
-      if (resp.ok) { const d = await resp.json(); hasAccess = !!d.has_access; }
-    } catch (e) { /* тихо считаем, что доступа нет - ниже покажем обычный вход по паролю */ }
+      if (resp.ok) access = await resp.json();
+    } catch (e) { /* тихо - ниже покажем вход по паролю, как раньше при ошибке */ }
     const botUsername = botUsernameFromLink(data.link);
     let html = refBackButton() + '<div class="svc-h">🏢 Юридическое лицо</div>';
-    if (hasAccess) {
+    if (access && access.has_access) {
       html += '<div class="svc-card">У тебя уже есть доступ к кабинету автопарка.</div>' +
         '<a class="svc-btn" href="' + LEGAL_CABINET_WEBAPP_PATH + '?tgInitData=' + encodeURIComponent((tg && tg.initData) || '') + '">🏛 Открыть кабинет автопарка</a>';
+    } else if (access && !access.subscription_active) {
+      html += '<div class="svc-card">Доступ к схеме начислений юр.лица и кабинету автопарка - платная подписка на реферальную систему юрлиц, ' + access.subscription_price_rub + ' ₽/мес.</div>';
+      if (!access.has_email) {
+        html += '<input type="email" class="svc-input" id="refLegalEmail" placeholder="email@example.com">' +
+          '<button type="button" class="svc-btn" id="refLegalEmailBtn">Продолжить</button>';
+      } else if (access.pay_url) {
+        html += '<a class="svc-btn" href="' + access.pay_url + '" target="_blank" rel="noopener">Оплатить ' + access.subscription_price_rub + ' ₽</a>';
+      } else {
+        html += '<div class="svc-note">Не получилось создать ссылку на оплату - попробуй ещё раз чуть позже.</div>';
+      }
     } else {
-      html += '<div class="svc-card">Доступ к схеме начислений юр.лица и кабинету автопарка - по паролю компании (платная подписка). Пароль вводится в чате с ботом.</div>' +
-        '<button type="button" class="svc-btn" id="refLegalOpenChat">🔒 Ввести пароль в чате</button>';
+      html += '<div class="svc-card">Подписка активна - осталось ввести пароль компании (тот же, что открывает «Кабинет автопарка»).</div>' +
+        '<input type="text" class="svc-input" id="refLegalPassword" placeholder="Пароль компании">' +
+        '<button type="button" class="svc-btn" id="refLegalPasswordBtn">Подтвердить</button>' +
+        '<div class="svc-note" id="refLegalPasswordNote"></div>';
     }
     box.innerHTML = html;
     wireRefBack(box, data);
-    const openChatBtn = document.getElementById('refLegalOpenChat');
-    if (openChatBtn) {
-      openChatBtn.addEventListener('click', function () { openBotDeepLink(botUsername, 'reflegal'); });
+    const emailBtn = document.getElementById('refLegalEmailBtn');
+    if (emailBtn) {
+      emailBtn.addEventListener('click', async function () {
+        const email = (document.getElementById('refLegalEmail').value || '').trim();
+        if (!email) return;
+        emailBtn.disabled = true;
+        try {
+          await fetch('""" + SUBSCRIPTION_STATUS_API_PATH + """', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': (tg && tg.initData) || '' },
+            body: JSON.stringify({ email: email })
+          });
+          renderReferralLegalDetail(box, data);
+        } catch (e) { emailBtn.disabled = false; }
+      });
+    }
+    const pwBtn = document.getElementById('refLegalPasswordBtn');
+    if (pwBtn) {
+      pwBtn.addEventListener('click', async function () {
+        const pwInput = document.getElementById('refLegalPassword');
+        const password = (pwInput.value || '').trim();
+        const note = document.getElementById('refLegalPasswordNote');
+        if (!password) return;
+        pwBtn.disabled = true;
+        if (note) note.textContent = '';
+        try {
+          const resp = await fetch('""" + LEGAL_CABINET_PASSWORD_API_PATH + """', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': (tg && tg.initData) || '' },
+            body: JSON.stringify({ password: password })
+          });
+          if (!resp.ok) {
+            if (note) note.innerHTML = 'Неверный пароль - проверь и попробуй снова, либо ' +
+              '<a href="#" id="refLegalOpenChat" style="color:#FFC400;">введи его в чате</a>.';
+            const chatLink = document.getElementById('refLegalOpenChat');
+            if (chatLink) chatLink.addEventListener('click', function (e) { e.preventDefault(); openBotDeepLink(botUsername, 'reflegal'); });
+            pwBtn.disabled = false;
+            return;
+          }
+          renderReferralLegalDetail(box, data);
+        } catch (e) {
+          if (note) note.textContent = 'Не получилось отправить - попробуй ещё раз.';
+          pwBtn.disabled = false;
+        }
+      });
     }
   }
 
@@ -18206,22 +18352,39 @@ def unified_app_html():
     }
   }
 
+  // ИЗМЕНЕНО 27.09.2026 (прямая просьба пользователя, скриншот страницы
+  // "Подписка" - "сделай сверху отображение активности подписки, снизу две
+  // кнопки и две подписки оплатить такси/ultima 149 руб/месяц и
+  // курьеры/грузовые такси 89 руб/месяц") - раньше здесь была ОДНА строка
+  // "Стоимость" и ОДНА кнопка "Оплатить" (только для текущей категории
+  // водителя). Теперь сверху остаётся только сам статус/сколько дней
+  // осталось (у ТЕКУЩЕЙ группы - см. _subscription_status_payload в
+  // main.py), а ниже - по отдельной карточке на КАЖДУЮ из двух подписок
+  // (data.groups), у каждой своя цена и своя кнопка "Оплатить". Подписка
+  // на реферальную систему юрлиц сюда сознательно не добавлена - её оплата
+  // остаётся только по кнопке внутри самой реферальной программы.
   function renderSubscriptionDetail(box, data) {
     const statusLabel = data.status === 'paid' ? '✅ Оплачена' : (data.status === 'trial' ? '🎁 Пробный период' : '—');
     let html =
       '<div class="svc-h">💳 Подписка</div>' +
       '<div class="svc-row"><span>Статус</span><span class="v">' + statusLabel + '</span></div>' +
-      '<div class="svc-row"><span>Осталось дней</span><span class="v">' + data.days_left + '</span></div>' +
-      '<div class="svc-row"><span>Стоимость</span><span class="v">' + data.price_rub + ' ₽ / ' + data.period_days + ' дн.</span></div>';
+      '<div class="svc-row"><span>Осталось дней</span><span class="v">' + data.days_left + '</span></div>';
     if (!data.has_email) {
       html +=
         '<div class="svc-card">Для оплаты нужен email (для чека) - тот же email, что и в чате бота.</div>' +
         '<input type="email" class="svc-input" id="subEmail" placeholder="email@example.com">' +
         '<button type="button" class="svc-btn" id="subEmailBtn">Продолжить</button>';
-    } else if (data.pay_url) {
-      html += '<a class="svc-btn" href="' + data.pay_url + '" target="_blank" rel="noopener">Оплатить ' + data.price_rub + ' ₽</a>';
     } else {
-      html += '<div class="svc-note">Не получилось создать ссылку на оплату - попробуй ещё раз чуть позже.</div>';
+      (data.groups || []).forEach(function (g) {
+        const gLabel = g.status === 'paid' ? '✅ Оплачена' : (g.status === 'trial' ? '🎁 Пробный период' : '—');
+        html += '<div class="svc-card">' +
+          '<div class="svc-row"><span>' + g.label + (g.is_current ? ' <span style="opacity:.5;font-size:10.5px;">· текущая</span>' : '') + '</span><span class="v">' + gLabel + '</span></div>' +
+          '<div class="svc-row"><span>Осталось дней</span><span class="v">' + g.days_left + '</span></div>' +
+          (g.pay_url
+            ? '<a class="svc-btn" href="' + g.pay_url + '" target="_blank" rel="noopener">Оплатить ' + g.price_rub + ' ₽</a>'
+            : '<div class="svc-note">Не получилось создать ссылку на оплату - попробуй ещё раз чуть позже.</div>') +
+          '</div>';
+      });
     }
     box.innerHTML = html;
     const emailBtn = document.getElementById('subEmailBtn');
@@ -20672,7 +20835,13 @@ def events_webapp_html():
     font-size: 13px; font-weight: 600; cursor: pointer; transition: transform .12s, background .15s, border-color .15s;
   }
   .tab:active { transform: scale(.95); }
-  .tab.active { background: rgba(255,196,0,.14); border-color: rgba(255,196,0,.6); color: #FFC400; }
+  /* ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - пульсирующий ореол
+     на всех кнопках с фиксацией выбора, как у плашки рейтинга) */
+  .tab.active { background: rgba(255,196,0,.14); border-color: rgba(255,196,0,.6); color: #FFC400; animation: selPulse 2.6s ease-in-out infinite; }
+  @keyframes selPulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(255,196,0,.5); }
+    50% { box-shadow: 0 0 0 5px rgba(255,196,0,0); }
+  }
   .section { display: none; }
   .section.active { display: block; animation: evIn .28s ease both; }
   .empty { text-align: center; padding: 40px 16px; opacity: .6; font-size: 13.5px; }
@@ -20725,7 +20894,20 @@ def events_webapp_html():
 </div>
 <script>
   const tg = window.Telegram && window.Telegram.WebApp;
-  if (tg) { tg.ready(); tg.expand(); }
+  if (tg) {
+    tg.ready(); tg.expand();
+    // ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - "жёстко
+    // привязать чтобы открытие миниаппс было только на полный экран и её
+    // нельзя было смахивать вверх вниз") - requestFullscreen (Bot API
+    // 8.0+) разворачивает по-настоящему на весь экран (не просто "на всю
+    // доступную высоту", как expand() выше), disableVerticalSwipes (Bot
+    // API 7.7+) отключает жест "смахнуть вниз", которым обычно
+    // сворачивают/закрывают мини-апп. Методы есть не во всех версиях
+    // клиента Telegram - typeof-проверка + try/catch, чтобы на старых
+    // клиентах молча ничего не делать, а не падать с ошибкой.
+    try { if (typeof tg.disableVerticalSwipes === 'function') tg.disableVerticalSwipes(); } catch (e) {}
+    try { if (typeof tg.requestFullscreen === 'function') tg.requestFullscreen(); } catch (e) {}
+  }
   if (tg && tg.platform) { fetch('/platform/report', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': tg.initData || '' }, body: JSON.stringify({ platform: tg.platform }) }).catch(function(){}); }
   const params = new URLSearchParams(window.location.search);
   const city = params.get('city') || '';
@@ -21047,7 +21229,13 @@ def transport_webapp_html():
     font-size: 13px; font-weight: 600; cursor: pointer; transition: transform .12s, background .15s, border-color .15s;
   }
   .tab:active { transform: scale(.95); }
-  .tab.active { background: rgba(255,196,0,.14); border-color: rgba(255,196,0,.6); color: #FFC400; }
+  /* ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - пульсирующий ореол
+     на всех кнопках с фиксацией выбора, как у плашки рейтинга) */
+  .tab.active { background: rgba(255,196,0,.14); border-color: rgba(255,196,0,.6); color: #FFC400; animation: selPulse 2.6s ease-in-out infinite; }
+  @keyframes selPulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(255,196,0,.5); }
+    50% { box-shadow: 0 0 0 5px rgba(255,196,0,0); }
+  }
   .section { display: none; }
   .section.active { display: block; animation: trIn .28s ease both; }
   .legend { font-size: 11px; color: #8a8a8a; margin: 0 0 14px; }
@@ -21128,7 +21316,20 @@ def transport_webapp_html():
 </div>
 <script>
   const tg = window.Telegram && window.Telegram.WebApp;
-  if (tg) { tg.ready(); tg.expand(); }
+  if (tg) {
+    tg.ready(); tg.expand();
+    // ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - "жёстко
+    // привязать чтобы открытие миниаппс было только на полный экран и её
+    // нельзя было смахивать вверх вниз") - requestFullscreen (Bot API
+    // 8.0+) разворачивает по-настоящему на весь экран (не просто "на всю
+    // доступную высоту", как expand() выше), disableVerticalSwipes (Bot
+    // API 7.7+) отключает жест "смахнуть вниз", которым обычно
+    // сворачивают/закрывают мини-апп. Методы есть не во всех версиях
+    // клиента Telegram - typeof-проверка + try/catch, чтобы на старых
+    // клиентах молча ничего не делать, а не падать с ошибкой.
+    try { if (typeof tg.disableVerticalSwipes === 'function') tg.disableVerticalSwipes(); } catch (e) {}
+    try { if (typeof tg.requestFullscreen === 'function') tg.requestFullscreen(); } catch (e) {}
+  }
   if (tg && tg.platform) { fetch('/platform/report', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': tg.initData || '' }, body: JSON.stringify({ platform: tg.platform }) }).catch(function(){}); }
   const params = new URLSearchParams(window.location.search);
   const city = params.get('city') || '';
@@ -22563,7 +22764,13 @@ def legal_cabinet_webapp_html():
     color: var(--tg-theme-text-color, #000); opacity: .65; white-space: nowrap; text-transform: uppercase;
     transition: background .15s, color .15s, opacity .15s, transform .1s;
   }
-  .nav-pill.active { background: #FFC400; color: #000; opacity: 1; }
+  /* ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - пульсирующий ореол
+     на всех кнопках с фиксацией выбора, как у плашки рейтинга) */
+  .nav-pill.active { background: #FFC400; color: #000; opacity: 1; animation: selPulse 2.6s ease-in-out infinite; }
+  @keyframes selPulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(255,196,0,.5); }
+    50% { box-shadow: 0 0 0 5px rgba(255,196,0,0); }
+  }
   .nav-pill:active { transform: scale(.95); }
 
   /* ДОБАВЛЕНО 23.09.2026 - плавный переход между вкладками вместо
@@ -22635,7 +22842,10 @@ def legal_cabinet_webapp_html():
     background: var(--tg-theme-bg-color, #f2f2f7); color: var(--tg-theme-text-color, #000); cursor: pointer;
     transition: background .15s, border-color .15s;
   }
-  .employment-pill.active { background: #FFC400; border-color: #FFC400; color: #000; font-weight: 700; }
+  /* ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - пульсирующий ореол
+     на всех кнопках с фиксацией выбора, как у плашки рейтинга); keyframe
+     selPulse уже объявлен выше в этом же <style> (см. .nav-pill.active). */
+  .employment-pill.active { background: #FFC400; border-color: #FFC400; color: #000; font-weight: 700; animation: selPulse 2.6s ease-in-out infinite; }
   @media (prefers-reduced-motion: reduce) {
     .hero::before { animation: none; }
     .tab-pane.active, .list-item, .car-item, .driver-item, .expand-body.open { animation: none; }
@@ -22741,7 +22951,15 @@ def legal_cabinet_webapp_html():
 </div>
 <script>
 const tg = window.Telegram && window.Telegram.WebApp;
-if (tg) { tg.ready(); tg.expand(); }
+if (tg) {
+  tg.ready(); tg.expand();
+  // ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - "жёстко привязать
+  // чтобы открытие миниаппс было только на полный экран и её нельзя было
+  // смахивать вверх вниз") - см. подробный комментарий у той же пары
+  // вызовов в unified_app_html()/map_webapp_html() и т.д.
+  try { if (typeof tg.disableVerticalSwipes === 'function') tg.disableVerticalSwipes(); } catch (e) {}
+  try { if (typeof tg.requestFullscreen === 'function') tg.requestFullscreen(); } catch (e) {}
+}
 const API = '""" + LEGAL_CABINET_DATA_API_PATH + """';
 const EMPLOYMENT_TYPES = [['ip', 'ИП'], ['self_employed', 'Самозанятый'], ['none', 'Без трудоустройства']];
 let STATE = null;
@@ -23184,7 +23402,11 @@ def cabinet_webapp_html():
     color: var(--tg-theme-text-color, #000); opacity: .65; white-space: nowrap; text-transform: uppercase;
     transition: transform .12s, opacity .15s, background .15s;
   }
-  .nav-pill.active { background: #FFC400; color: #000; opacity: 1; }
+  /* ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - пульсирующий ореол
+     на всех кнопках с фиксацией выбора, как у плашки рейтинга) - тут
+     переиспользуем уже существующий keyframe ratingPulse (см. ниже в этом
+     же <style>, у .rating-pill), а не заводим ещё один такой же. */
+  .nav-pill.active { background: #FFC400; color: #000; opacity: 1; animation: ratingPulse 2.6s ease-in-out infinite; }
   .nav-pill:active { transform: scale(.94); }
   .tab-pane { display: none; }
   .tab-pane.active { display: block; animation: tabIn .28s ease both; }
@@ -23219,7 +23441,9 @@ def cabinet_webapp_html():
     background: var(--tg-theme-secondary-bg-color, #fff); color: var(--tg-theme-text-color, #000);
     opacity: .75; text-transform: uppercase; transition: transform .12s, opacity .15s, background .15s;
   }
-  .pill-btn.active { background: #FFC400; color: #000; opacity: 1; }
+  /* ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - пульсирующий ореол
+     на всех кнопках с фиксацией выбора) - переиспользуем ratingPulse. */
+  .pill-btn.active { background: #FFC400; color: #000; opacity: 1; animation: ratingPulse 2.6s ease-in-out infinite; }
   .pill-btn:active { transform: scale(.94); }
   .point-card {
     background: var(--tg-theme-secondary-bg-color, #fff); border-radius: 12px; padding: 11px 12px; margin-bottom: 8px;
@@ -23574,7 +23798,20 @@ def cabinet_webapp_html():
 </div><!-- /cabinetApp -->
 <script>
   const tg = window.Telegram && window.Telegram.WebApp;
-  if (tg) { tg.ready(); tg.expand(); }
+  if (tg) {
+    tg.ready(); tg.expand();
+    // ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - "жёстко
+    // привязать чтобы открытие миниаппс было только на полный экран и её
+    // нельзя было смахивать вверх вниз") - requestFullscreen (Bot API
+    // 8.0+) разворачивает по-настоящему на весь экран (не просто "на всю
+    // доступную высоту", как expand() выше), disableVerticalSwipes (Bot
+    // API 7.7+) отключает жест "смахнуть вниз", которым обычно
+    // сворачивают/закрывают мини-апп. Методы есть не во всех версиях
+    // клиента Telegram - typeof-проверка + try/catch, чтобы на старых
+    // клиентах молча ничего не делать, а не падать с ошибкой.
+    try { if (typeof tg.disableVerticalSwipes === 'function') tg.disableVerticalSwipes(); } catch (e) {}
+    try { if (typeof tg.requestFullscreen === 'function') tg.requestFullscreen(); } catch (e) {}
+  }
   if (tg && tg.platform) { fetch('/platform/report', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': tg.initData || '' }, body: JSON.stringify({ platform: tg.platform }) }).catch(function(){}); }
   // Вкладка "Чаевые" убрана из кабинета целиком (по прямой просьбе
   // пользователя, 22.09.2026) - раньше здесь была логика показа нужной
@@ -29814,10 +30051,31 @@ async def subscription_email_flow(message: types.Message):
 # что и GET, уже со ссылкой на оплату.
 SUBSCRIPTION_STATUS_API_PATH = '/subscription/status'
 
-async def _subscription_status_payload(user_id):
-    has_email = bool(get_receipt_email(user_id))
-    active_until = subscription_active_until(user_id)
-    sub = get_subscription(user_id)
+# ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя, скриншот страницы
+# "Подписка" - "снизу две кнопки и две подписки оплатить такси/ultima 149
+# руб/месяц и курьеры/грузовые такси 89 руб/месяц") - раньше страница
+# показывала только ОДНУ подписку, той группы, что соответствует ТЕКУЩЕЙ
+# категории водителя (get_user_subscription_group) - вторую было не
+# оплатить, пока не переключишься на неё. Обе группы уже давно независимо
+# считаются в БД (subscription_state ключуется по (user_id, sub_group), см.
+# ensure_subscription/get_subscription/create_tinkoff_payment выше) - здесь
+# просто СОБИРАЕМ статус/ссылку на оплату для ОБЕИХ групп разом, ничего в
+# самой механике подписок не меняя. Реферальная подписка юрлица
+# (SUBSCRIPTION_GROUP_LEGAL_ENTITY_REFERRAL) сюда сознательно НЕ входит -
+# по прямой просьбе пользователя её оплата остаётся ТОЛЬКО по кнопке внутри
+# самой реферальной системы (см. send_legal_entity_referral_paywall).
+SUBSCRIPTION_DISPLAY_GROUPS = (
+    (SUBSCRIPTION_GROUP_TAXI_ULTIMA, 'Такси / Ultima'),
+    (SUBSCRIPTION_GROUP_COURIER_CARGO, 'Курьеры / грузовое такси'),
+)
+
+async def _subscription_group_payload(user_id, sub_group, has_email):
+    """Статус + (если есть email для чека) ссылка на оплату ДЛЯ ОДНОЙ
+    группы подписки - та же логика, что раньше жила прямо внутри
+    _subscription_status_payload (см. ниже), просто вынесена в отдельную
+    функцию, чтобы применить её к каждой из SUBSCRIPTION_DISPLAY_GROUPS."""
+    active_until = subscription_active_until(user_id, sub_group)
+    sub = get_subscription(user_id, sub_group)
     if active_until and sub and sub['paid_until'] and _sub_parse(sub['paid_until']) >= active_until:
         status = 'paid'
         days_left = max(0, (active_until - _sub_now()).days)
@@ -29828,17 +30086,40 @@ async def _subscription_status_payload(user_id):
         status = 'unknown'
         days_left = 0
     payload = {
-        'has_email': has_email,
+        'sub_group': sub_group,
         'status': status,
         'days_left': days_left,
         'active_until': active_until.strftime('%d.%m.%Y') if active_until else None,
-        'price_rub': get_subscription_price_rub(user_id),
+        'price_rub': get_subscription_group_price_rub(sub_group),
         'period_days': SUBSCRIPTION_PERIOD_DAYS,
         'pay_url': None,
     }
     if has_email:
-        payload['pay_url'] = await create_tinkoff_payment(user_id)
+        payload['pay_url'] = await create_tinkoff_payment(user_id, sub_group)
     return payload
+
+async def _subscription_status_payload(user_id):
+    has_email = bool(get_receipt_email(user_id))
+    current_group = get_user_subscription_group(user_id)
+    groups = []
+    for grp, label in SUBSCRIPTION_DISPLAY_GROUPS:
+        g = await _subscription_group_payload(user_id, grp, has_email)
+        g['label'] = label
+        g['is_current'] = (grp == current_group)
+        groups.append(g)
+    # "Активность подписки сверху" (прямая просьба пользователя) - общий
+    # статус вверху страницы показывает ТУ группу, что соответствует
+    # текущей выбранной категории водителя - именно она сейчас реально
+    # открывает/закрывает ему доступ.
+    current = next(g for g in groups if g['is_current'])
+    return {
+        'has_email': has_email,
+        'status': current['status'],
+        'days_left': current['days_left'],
+        'active_until': current['active_until'],
+        'current_group': current_group,
+        'groups': groups,
+    }
 
 async def handle_subscription_status_api(request):
     user_id = _cabinet_require_user(request)
@@ -30398,6 +30679,7 @@ async def start_subscription_webhook_server():
     app.router.add_get(REFERRAL_QR_PNG_PATH, handle_referral_qr_png)
     app.router.add_get(PRESENTATION_PDF_WEBAPP_PATH, handle_presentation_pdf)
     app.router.add_get(LEGAL_CABINET_ACCESS_API_PATH, handle_legal_cabinet_access_api)
+    app.router.add_post(LEGAL_CABINET_PASSWORD_API_PATH, handle_legal_cabinet_password_api)
     app.router.add_get(SUBSCRIPTION_STATUS_API_PATH, handle_subscription_status_api)
     app.router.add_post(SUBSCRIPTION_STATUS_API_PATH, handle_subscription_status_api)
     app.router.add_get(MAP_WEBAPP_PATH, handle_map_webapp)
@@ -30941,6 +31223,34 @@ def add_legal_entity(name, password):
         new_id = None
     conn.close()
     return new_id
+
+
+# ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - "ввод паролей сделать
+# из телеграм апп") - общая логика проверки/применения пароля юр.лица,
+# вынесенная из referral_legal_password_flow (текстовый чат-флоу, см. ниже)
+# в отдельную функцию, чтобы её же переиспользовал новый WebApp-эндпоинт
+# handle_legal_cabinet_password_api - пароль компании (тот же самый) теперь
+# можно ввести прямо в мини-приложении, на экране "Юридическое лицо", а не
+# только текстом в чате с ботом. Сам механизм поиска/владения/legacy-
+# пароля НЕ переписан - буква в букву то же самое, что раньше было инлайн
+# в referral_legal_password_flow.
+def apply_legal_entity_password(user_id, password):
+    legal_entity = find_legal_entity_by_password(password)
+    is_legacy_password = password == REFERRAL_LEGAL_ENTITY_PASSWORD
+    if not legal_entity and is_legacy_password:
+        add_legal_entity("Юр.лицо (старый пароль)", REFERRAL_LEGAL_ENTITY_PASSWORD)
+        legal_entity = find_legal_entity_by_password(password)
+    if not legal_entity and not is_legacy_password:
+        return {'ok': False}
+    set_referrer_type(user_id, 'legal_entity')
+    entity_name = None
+    is_new_owner = False
+    if legal_entity:
+        claim_legal_entity_ownership(legal_entity['id'], user_id)
+        owned = get_legal_entity_owned_by(user_id)
+        is_new_owner = bool(owned and owned['id'] == legal_entity['id'])
+        entity_name = legal_entity['name']
+    return {'ok': True, 'entity_name': entity_name, 'is_owner': is_new_owner}
 
 
 def get_referral_downline_user_ids(user_id):
@@ -31788,13 +32098,61 @@ async def handle_presentation_pdf(request):
 LEGAL_CABINET_ACCESS_API_PATH = '/legal_cabinet/access'
 
 
+# ИЗМЕНЕНО 27.09.2026 (прямая просьба пользователя - "ввод паролей сделать
+# из телеграм апп"; "оплата реферальной программы юр лица только по
+# нажатию кнопки в реферальной системе в конце") - экран "Юридическое
+# лицо" в мини-приложении (renderReferralLegalDetail) раньше умел показать
+# только "уже есть доступ"/"нет доступа", а дальше отправлял в чат и за
+# оплату, и за паролем. Ответ расширен (has_access оставлен как был - им
+# уже пользуются maybeAddLegalCabinetTile/maybeShowFleetCabinetPill, ничего
+# не ломаем), чтобы экран сам мог показать ЛИБО кнопку оплаты (только
+# здесь, внутри реферальной системы - см. handle_legal_cabinet_password_api
+# ниже и REFERRAL_LEGAL_ENTITY_SUBSCRIPTION_PRICE_RUB), ЛИБО поле для
+# пароля компании, не уходя в чат.
 async def handle_legal_cabinet_access_api(request):
     user_id = _cabinet_require_user(request)
     if not user_id:
         return web.json_response({'error': 'invalid_init_data'}, status=401)
     owned_entity = get_legal_entity_owned_by(user_id)
-    cabinet_unlocked = get_referrer_type(user_id) == 'admin' or is_legal_entity_referral_subscription_active(user_id)
-    return web.json_response({'has_access': bool(owned_entity and cabinet_unlocked)})
+    is_admin = get_referrer_type(user_id) == 'admin'
+    subscription_active = is_admin or is_legal_entity_referral_subscription_active(user_id)
+    payload = {
+        'has_access': bool(owned_entity and subscription_active),
+        'has_owned_entity': bool(owned_entity),
+        'subscription_active': subscription_active,
+    }
+    if not subscription_active:
+        payload['subscription_price_rub'] = REFERRAL_LEGAL_ENTITY_SUBSCRIPTION_PRICE_RUB
+        has_email = bool(get_receipt_email(user_id))
+        payload['has_email'] = has_email
+        if has_email:
+            payload['pay_url'] = await create_tinkoff_payment(user_id, SUBSCRIPTION_GROUP_LEGAL_ENTITY_REFERRAL)
+    return web.json_response(payload)
+
+
+LEGAL_CABINET_PASSWORD_API_PATH = '/legal_cabinet/password'
+
+async def handle_legal_cabinet_password_api(request):
+    """WebApp-версия referral_legal_password_flow (см. выше) - тот же
+    apply_legal_entity_password, только без чата. Подписку на реферальную
+    систему юрлиц (1890₽/мес) проверяем ещё раз здесь же (не только на
+    экране) - на случай устаревшего состояния экрана в браузере/WebView."""
+    user_id = _cabinet_require_user(request)
+    if not user_id:
+        return web.json_response({'error': 'invalid_init_data'}, status=401)
+    if get_referrer_type(user_id) != 'admin' and not is_legal_entity_referral_subscription_active(user_id):
+        return web.json_response({'error': 'subscription_required'}, status=402)
+    try:
+        body = await request.json()
+        password = (body.get('password') or '').strip()
+    except Exception:
+        return web.json_response({'error': 'invalid_body'}, status=400)
+    if not password:
+        return web.json_response({'error': 'invalid_body'}, status=400)
+    result = apply_legal_entity_password(user_id, password)
+    if not result['ok']:
+        return web.json_response({'error': 'wrong_password'}, status=400)
+    return web.json_response(result)
 
 
 def referral_withdraw_cancel_keyboard():
@@ -31978,38 +32336,21 @@ async def referral_legal_password_flow(message: types.Message):
         await message.answer("Отменено.", reply_markup=services_keyboard(category, city, user_id))
         return
 
-    # ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя - "будет вводиться
-    # разный пароль... название компании как к этим паролем будут
-    # относиться") - раньше был один пароль на всех (REFERRAL_LEGAL_ENTITY_PASSWORD),
-    # теперь ищем по таблице legal_entities (см. add_legal_entity/
-    # admin_add_legal_entity), СТАРЫЙ пароль оставлен рабочим для обратной
-    # совместимости (тем, кто уже им пользовался). Первый, кто успешно
-    # ввёл пароль КОНКРЕТНОГО юр.лица, становится его владельцем и
-    # получает доступ к "🏛 ЛИЧНЫЙ КАБИНЕТ ЮРЛИЦА" (см. referral_menu_keyboard).
-    legal_entity = find_legal_entity_by_password(text)
-    is_legacy_password = text == REFERRAL_LEGAL_ENTITY_PASSWORD
-    # ИСПРАВЛЕНО 23.09.2026 (жалоба пользователя - "нажимаю юрлицо, не могу
-    # попасть в личный кабинет"): старый пароль REFERRAL_LEGAL_ENTITY_PASSWORD
-    # раньше давал только переключение схемы начислений (referrer_type),
-    # но НЕ создавал строку в legal_entities - значит, get_legal_entity_owned_by
-    # никогда не находил владельца, и кнопка "🏛 ЛИЧНЫЙ КАБИНЕТ ЮРЛИЦА" не
-    # появлялась НИКОГДА, сколько бы раз человек ни вводил этот пароль. Теперь
-    # при первом успешном вводе старого пароля для него автоматически
-    # заводится запись в legal_entities (название по умолчанию, можно потом
-    # переименовать через админку/базу) - дальше работает та же логика
-    # владения (claim_legal_entity_ownership), что и у паролей из /add_legal_entity.
-    if not legal_entity and is_legacy_password:
-        add_legal_entity("Юр.лицо (старый пароль)", REFERRAL_LEGAL_ENTITY_PASSWORD)
-        legal_entity = find_legal_entity_by_password(text)
-    if legal_entity or is_legacy_password:
+    # ИЗМЕНЕНО 27.09.2026 (прямая просьба пользователя - "ввод паролей
+    # сделать из телеграм апп") - сама проверка/применение пароля вынесена
+    # в apply_legal_entity_password (см. выше, рядом с add_legal_entity) -
+    # чтобы её же переиспользовал новый WebApp-эндпоинт
+    # handle_legal_cabinet_password_api. Логика ЗДЕСЬ не поменялась ни на
+    # байт - тот же поиск по legal_entities + legacy-пароль
+    # REFERRAL_LEGAL_ENTITY_PASSWORD, что и раньше (комментарии по истории
+    # изменений этой логики - см. apply_legal_entity_password).
+    result = apply_legal_entity_password(user_id, text)
+    if result['ok']:
         state.pop('awaiting_referral_legal_password', None)
-        set_referrer_type(user_id, 'legal_entity')
-        if legal_entity:
-            claim_legal_entity_ownership(legal_entity['id'], user_id)
+        if result['entity_name']:
             owner_note = " Ты первый ввёл пароль этой компании - тебе открыт «🏛 Кабинет автопарка»." \
-                if get_legal_entity_owned_by(user_id) and get_legal_entity_owned_by(user_id)['id'] == legal_entity['id'] \
-                else ""
-            confirm_text = f"✅ Схема переключена на «Юр.лицо» ({legal_entity['name']})." + owner_note
+                if result['is_owner'] else ""
+            confirm_text = f"✅ Схема переключена на «Юр.лицо» ({result['entity_name']})." + owner_note
         else:
             confirm_text = "✅ Схема переключена на «Юр.лицо»."
         await message.answer(
