@@ -17228,7 +17228,16 @@ def unified_app_html():
   #shell { position: fixed; inset: 0; display: flex; flex-direction: column; }
   header {
     flex-shrink: 0; display: flex; align-items: center; justify-content: space-between;
-    padding: 0 16px; padding-top: env(safe-area-inset-top, 0px); height: calc(52px + env(safe-area-inset-top, 0px));
+    padding: 0 16px;
+    /* ИЗМЕНЕНО 27.09.2026 (жалоба пользователя со скриншотом - "верхние
+       кнопки заезжают") - добавлен var(--tg-chrome-top, 0px) поверх обычного
+       env(safe-area-inset-top): это ОТДЕЛЬНАЯ величина - высота собственных
+       системных кнопок Telegram ("✕ Закрыть"/"⋮") в полноэкранном режиме
+       (см. applyTgChromeInset() в <script> ниже), которая не входит в
+       физический safe-area-inset-top устройства. Без неё лого/плашка города
+       рисовались прямо под этими кнопками Telegram. */
+    padding-top: calc(env(safe-area-inset-top, 0px) + var(--tg-chrome-top, 0px));
+    height: calc(52px + env(safe-area-inset-top, 0px) + var(--tg-chrome-top, 0px));
     background: #0a0a0a; border-bottom: 1px solid rgba(255,255,255,.08);
   }
   header .logo { font-size: 14.5px; font-weight: 700; letter-spacing: .04em; }
@@ -17245,7 +17254,7 @@ def unified_app_html():
      (город/категория), что уже были в разделе "Сервисы" (см. renderCityDetail
      ниже - переиспользуется как есть, без дублирования логики). */
   .city-panel {
-    position: absolute; top: calc(52px + env(safe-area-inset-top, 0px)); left: 12px; right: 12px; z-index: 45;
+    position: absolute; top: calc(52px + env(safe-area-inset-top, 0px) + var(--tg-chrome-top, 0px)); left: 12px; right: 12px; z-index: 45;
     background: #131313; border: 1px solid rgba(255,196,0,.3); border-radius: 14px; padding: 14px;
     box-shadow: 0 12px 32px rgba(0,0,0,.55);
   }
@@ -17492,6 +17501,26 @@ def unified_app_html():
     // клиентах молча ничего не делать, а не падать с ошибкой.
     try { if (typeof tg.disableVerticalSwipes === 'function') tg.disableVerticalSwipes(); } catch (e) {}
     try { if (typeof tg.requestFullscreen === 'function') tg.requestFullscreen(); } catch (e) {}
+    // ДОБАВЛЕНО 27.09.2026 (жалоба пользователя со скриншотом - "верхние
+    // кнопки заезжают") - после requestFullscreen() выше Telegram в
+    // полноэкранном режиме рисует СВОИ системные кнопки ("✕ Закрыть" слева,
+    // "⋮" ещё-меню справа) поверх самого верха страницы - это ОТДЕЛЬНАЯ зона
+    // от физического выреза/чёлки устройства (та уже учтена через
+    // env(safe-area-inset-top) в CSS ниже), и без contentSafeAreaInset её
+    // высота боту неизвестна - поэтому наш заголовок (лого + плашка города)
+    // рисовался с нулевым отступом и попадал прямо под системные кнопки
+    // Telegram. Читаем tg.contentSafeAreaInset.top и прокидываем в
+    // CSS-переменную --tg-chrome-top, на которую подписаны header/.city-panel
+    // в <style> выше; подписка на contentSafeAreaChanged - значение может
+    // прийти не сразу с первым кадром.
+    const applyTgChromeInset = function () {
+      try {
+        const csa = tg.contentSafeAreaInset || {};
+        document.documentElement.style.setProperty('--tg-chrome-top', (csa.top || 0) + 'px');
+      } catch (e) {}
+    };
+    applyTgChromeInset();
+    try { if (typeof tg.onEvent === 'function') tg.onEvent('contentSafeAreaChanged', applyTgChromeInset); } catch (e) {}
   }
   if (tg && tg.platform) { fetch('/platform/report', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': tg.initData || '' }, body: JSON.stringify({ platform: tg.platform }) }).catch(function(){}); }
   const params = new URLSearchParams(window.location.search);
