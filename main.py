@@ -17507,6 +17507,20 @@ def unified_app_html():
   }
   .ref-tile:active { transform: scale(.96); }
   .ref-tile .ref-ic { font-size: 30px; line-height: 1; }
+  /* ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя со скриншотами
+     реферальной системы - "кнопка выбора реферальной системы не
+     подсвечивается ареалом и анимацией... активное которое именно сейчас
+     выбрано") - подсветка плитки ТЕКУЩЕЙ активной схемы начислений (см.
+     renderReferralMenu ниже), тот же пульсирующий ореол selPulse, что уже
+     используется у активных вкладок/тумблеров в других WebApp-файлах
+     (.pill.active/.layer-toggle-btn.active и т.п.) - здесь объявляется
+     заново, т.к. в unified_app_html своего keyframes selPulse раньше не
+     было. */
+  .ref-tile.active { border-color: #FFC400; background: rgba(255,196,0,.14); animation: selPulse 2.6s ease-in-out infinite; }
+  @keyframes selPulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(255,196,0,.5); }
+    50% { box-shadow: 0 0 0 5px rgba(255,196,0,0); }
+  }
   .ref-back { background: none; border: none; color: #FFC400; font-size: 13px; font-weight: 600; padding: 0 0 10px; cursor: pointer; font-family: 'Golos Text', sans-serif; animation: backGlowPulse 2.6s ease-in-out infinite; text-transform: uppercase; }
   .svc-input {
     width: 100%; box-sizing: border-box; background: #0a0a0a; border: 1px solid rgba(255,255,255,.15);
@@ -17722,6 +17736,16 @@ def unified_app_html():
   const LEGAL_CABINET_ACCESS_API_PATH = '""" + LEGAL_CABINET_ACCESS_API_PATH + """';
   const LEGAL_CABINET_PASSWORD_API_PATH = '""" + LEGAL_CABINET_PASSWORD_API_PATH + """';
   const LEGAL_CABINET_WEBAPP_PATH = '""" + LEGAL_CABINET_WEBAPP_PATH + """';
+  // ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - у каждой из трёх
+  // реферальных схем (Водитель/Курьер = individual, Юридическое лицо =
+  // legal_entity, Админ = admin) должно быть своё описание/ставки на своём
+  // экране, см. renderReferralDriverDetail/renderReferralLegalDetail/
+  // renderReferralPhantomDetail ниже) - статические ставки ВСЕХ схем сразу
+  // (та же REFERRAL_RATES_PERCENT из main.py, просто отдана как JSON) -
+  // НЕ зависят от того, какая схема активна у ЭТОГО пользователя сейчас
+  // (то, что приходит в data.rates_percent/data.referrer_type из
+  // /referral/data - см. handle_referral_data_api).
+  const REFERRAL_RATES_PERCENT = """ + json.dumps(REFERRAL_RATES_PERCENT, ensure_ascii=False) + """;
   function tgInitDataParam() {
     const v = (tg && tg.initData) || '';
     return v ? ('&tgInitData=' + encodeURIComponent(v)) : '';
@@ -18250,23 +18274,46 @@ def unified_app_html():
     document.getElementById('refTileLegal').addEventListener('click', function () { renderReferralLegalDetail(box, data); });
     document.getElementById('refTileMaterials').addEventListener('click', function () { renderReferralMaterialsDetail(box, data); });
     document.getElementById('refTilePhantom').addEventListener('click', function () { renderReferralPhantomDetail(box, data); });
+    // ДОБАВЛЕНО 27.09.2026 (см. .ref-tile.active выше) - подсвечиваем
+    // плитку схемы, которая активна у ЭТОГО пользователя ПРЯМО СЕЙЧАС
+    // (data.referrer_type, см. handle_referral_data_api в main.py): 'admin'
+    // светит "Фантом" (единственный вход в админскую схему), 'legal_entity' -
+    // "Юридическое лицо", всё остальное (в т.ч. дефолтный 'individual') -
+    // "Водитель / Курьер".
+    const activeTileId = data.referrer_type === 'admin' ? 'refTilePhantom'
+      : data.referrer_type === 'legal_entity' ? 'refTileLegal'
+      : 'refTileDriver';
+    const activeTileEl = document.getElementById(activeTileId);
+    if (activeTileEl) activeTileEl.classList.add('active');
   }
 
-  // "Водитель/Курьер" - та же карточка (ссылка/статистика/мои рефералы/QR/
-  // презентация), что раньше была единственным содержимым этого раздела -
-  // теперь спрятана за первой из 4 плиток, данные те же (data уже загружены
-  // один раз в loadReferralDetail, повторный запрос не нужен).
-  function renderReferralDriverDetail(box, data) {
-    svcBackAction = function () { renderReferralMenu(box, data); }; // ИЗМЕНЕНО 27.09.2026 - "Назад" отсюда ведёт в меню реферальной программы, на один шаг назад (а не сразу в сетку сервисов)
-    const rates = data.rates_percent || [];
-    const ratesNote = rates.length === 3
+  // ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя со скриншотами экранов
+  // реферальной системы - "при заходе в каждую реферальную систему должно
+  // быть полноценное меню... в главе состоит сумма заработанная за месяц и
+  // дополнительные кнопки, также ссылка на реферальную систему, на QR-код,
+  // ссылка на материалы... описание этой реферальной системы") - раньше
+  // ссылка/статистика/QR/список рефералов были ТОЛЬКО на экране "Водитель/
+  // Курьер" (renderReferralDriverDetail), а "Юридическое лицо" показывало
+  // совсем другое (доступ к отдельному платному "кабинету автопарка") без
+  // единой статистики и описания своей схемы начислений - именно это имел в
+  // виду пользователь, говоря "некорректно отображает реферальную систему
+  // вообще". Теперь общий блок (описание схемы + сумма за месяц + ссылка/
+  // копирование + счётчики уровней + баланс/всего/выведено + сама схема
+  // ставок + "Мои рефералы" + QR + презентация) вынесен в одну функцию и
+  // используется на ВСЕХ экранах схем (Водитель/Курьер, Юридическое лицо,
+  // Админ), просто с разными rates/description - ничего из уже работавшей
+  // статистики/API не пересчитано заново, только переиспользовано в трёх
+  // местах вместо одного.
+  function referralStatsBlockHtml(data, rates, description) {
+    const ratesNote = (rates && rates.length === 3)
       ? ('<div class="svc-card">Как это работает: ' + rates[0] + '% с каждого ежемесячного платежа приглашённого тобой напрямую (1 уровень), ' +
          rates[1] + '% с платежей его рефералов (2 уровень) и ' + rates[2] + '% с платежей рефералов 2 уровня (3 уровень) - прямой процент от ' +
          'суммы платежа на каждом уровне. Начисляется каждый месяц, пока реферал платит подписку. Дальше 3 уровня деньги не идут, но всю ветку ' +
          'целиком видно в «Мои рефералы» ниже.</div>')
       : '';
-    box.innerHTML =
-      '<div class="svc-h">🚕 Водитель / Курьер</div>' +
+    return (
+      (description ? '<div class="svc-card">' + description + '</div>' : '') +
+      '<div class="svc-row"><span>Заработано в этом месяце</span><span class="v">' + (data.this_month_earned_rub || 0) + ' ₽</span></div>' +
       '<div class="svc-link-text" id="refLink">' + data.link + '</div>' +
       '<button type="button" class="svc-btn ghost" id="refCopyBtn">📋 Скопировать ссылку</button>' +
       '<div class="svc-row"><span>Уровень 1</span><span class="v">' + data.level1_count + '</span></div>' +
@@ -18281,7 +18328,11 @@ def unified_app_html():
       '<div id="refListBox"></div>' +
       '<button type="button" class="svc-btn ghost" id="refQrBtn">📱 QR-код ссылки</button>' +
       '<div id="refQrBox"></div>' +
-      '<div class="svc-note">Комиссия за вывод: ' + data.withdrawal_fee_percent + '%. Минимальная сумма вывода: ' + data.min_withdrawal_rub + ' ₽. Вывод средств - как и раньше, через бота в чате.</div>';
+      '<a class="svc-btn ghost" href="' + PRESENTATION_PDF_WEBAPP_PATH + '" target="_blank" rel="noopener">📥 Скачать презентацию</a>' +
+      '<div class="svc-note">Комиссия за вывод: ' + data.withdrawal_fee_percent + '%. Минимальная сумма вывода: ' + data.min_withdrawal_rub + ' ₽. Вывод средств - как и раньше, через бота в чате.</div>'
+    );
+  }
+  function wireReferralStatsBlock(box, data) {
     const copyBtn = document.getElementById('refCopyBtn');
     if (copyBtn) {
       copyBtn.addEventListener('click', function () {
@@ -18299,6 +18350,17 @@ def unified_app_html():
     if (qrBtn) {
       qrBtn.addEventListener('click', function () { loadReferralQr(qrBtn, document.getElementById('refQrBox')); });
     }
+  }
+
+  // "Водитель/Курьер" - обычная схема начислений (individual, 30/15/5%) -
+  // тот же общий блок статистики (см. referralStatsBlockHtml выше), что
+  // теперь и у остальных двух схем, со своим описанием/ставками.
+  function renderReferralDriverDetail(box, data) {
+    svcBackAction = function () { renderReferralMenu(box, data); }; // ИЗМЕНЕНО 27.09.2026 - "Назад" отсюда ведёт в меню реферальной программы, на один шаг назад (а не сразу в сетку сервисов)
+    const rates = REFERRAL_RATES_PERCENT.individual;
+    const description = 'Обычная реферальная программа для водителей и курьеров: приглашай других водителей по своей ссылке и получай процент с каждого их платежа за подписку (' + rates.join('/') + '% с 1/2/3 уровня).';
+    box.innerHTML = '<div class="svc-h">🚕 Водитель / Курьер</div>' + referralStatsBlockHtml(data, rates, description);
+    wireReferralStatsBlock(box, data);
   }
 
   // "Юридическое лицо" - вход в схему начислений юр.лица/кабинет автопарка.
@@ -18325,7 +18387,20 @@ def unified_app_html():
       if (resp.ok) access = await resp.json();
     } catch (e) { /* тихо - ниже покажем вход по паролю, как раньше при ошибке */ }
     const botUsername = botUsernameFromLink(data.link);
-    let html = '<div class="svc-h">🏢 Юридическое лицо</div>';
+    // ДОБАВЛЕНО 27.09.2026 (см. referralStatsBlockHtml выше - прямая просьба
+    // пользователя "у каждой реферальной системы должно быть своё
+    // описание, свой личный кабинет") - блок статистики/описания схемы
+    // юрлица (35/20/10%) показывается ВСЕГДА, независимо от того, оплачена
+    // ли подписка на "кабинет автопарка" и введён ли пароль компании - это
+    // ДВЕ разные вещи: ссылка/статистика реферальной программы - общие для
+    // пользователя данные (та же ссылка, что и на других экранах, просто
+    // ставки другие), а "кабинет автопарка" - отдельный платный продукт,
+    // доступ к которому остаётся строго по паролю/подписке, как и было
+    // (ветки ниже не переписаны, только добавлен блок статистики сверху).
+    const legalRates = REFERRAL_RATES_PERCENT.legal_entity;
+    const legalDescription = 'Реферальная программа для юридических лиц (автопарков): те же приглашения по ссылке, но повышенный процент - ' +
+      legalRates.join('/') + '% с платежей 1/2/3 уровня. Чтобы начисления шли именно по этой схеме - подтверди доступ ниже (подписка + пароль компании).';
+    let html = '<div class="svc-h">🏢 Юридическое лицо</div>' + referralStatsBlockHtml(data, legalRates, legalDescription);
     if (access && access.has_access) {
       html += '<div class="svc-card">У тебя уже есть доступ к кабинету автопарка.</div>' +
         '<a class="svc-btn" href="' + LEGAL_CABINET_WEBAPP_PATH + '?tgInitData=' + encodeURIComponent((tg && tg.initData) || '') + '">🏛 Открыть кабинет автопарка</a>';
@@ -18346,6 +18421,7 @@ def unified_app_html():
         '<div class="svc-note" id="refLegalPasswordNote"></div>';
     }
     box.innerHTML = html;
+    wireReferralStatsBlock(box, data);
     const emailBtn = document.getElementById('refLegalEmailBtn');
     if (emailBtn) {
       emailBtn.addEventListener('click', async function () {
@@ -18418,6 +18494,22 @@ def unified_app_html():
   function renderReferralPhantomDetail(box, data) {
     svcBackAction = function () { renderReferralMenu(box, data); }; // ИЗМЕНЕНО 27.09.2026 - "Назад" отсюда ведёт в меню реферальной программы, на один шаг назад
     const botUsername = botUsernameFromLink(data.link);
+    // ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - "админ
+    // реферальную систему" тоже должна иметь свой личный кабинет со своим
+    // описанием) - если у пользователя УЖЕ активна схема 'admin' (пароль в
+    // чате был введён ранее, см. admin_referral_password_flow в main.py) -
+    // показываем ТОТ ЖЕ общий блок статистики (см. referralStatsBlockHtml
+    // выше), что и у остальных схем, вместо повторного приглашения ввести
+    // пароль. Если схема НЕ 'admin' - экран остаётся ТЕМ ЖЕ секретным
+    // входом, что и был - никаких новых подсказок о самом существовании
+    // админского бэкдора не добавляется никому, кроме тех, кто уже внутри.
+    if (data.referrer_type === 'admin') {
+      const adminRates = REFERRAL_RATES_PERCENT.admin;
+      const adminDescription = 'Админская схема начислений - ' + adminRates.join('/') + '% с платежей 1/2/3 уровня (доступ выдаётся вручную по паролю).';
+      box.innerHTML = '<div class="svc-h">👻 Админ реферальная система</div>' + referralStatsBlockHtml(data, adminRates, adminDescription);
+      wireReferralStatsBlock(box, data);
+      return;
+    }
     box.innerHTML =
       '<div class="svc-h">👻 Фантом</div>' +
       '<div class="svc-card">Пароль вводится в чате с ботом.</div>' +
@@ -31260,6 +31352,29 @@ def get_referral_stats(user_id):
     }
 
 
+def get_referral_earnings_this_month(user_id):
+    """Сколько заработано рефералкой С НАЧАЛА ТЕКУЩЕГО календарного месяца
+    (UTC) - ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - "в главе
+    личного кабинета реферальной системы должна быть сумма заработанная за
+    месяц"). total_earned_kopecks в таблице referrals - это заработано ЗА
+    ВСЁ ВРЕМЯ, отдельного столбца "за месяц" там нет - считаем на лету по
+    referral_earnings.created_at (там КАЖДОЕ начисление - отдельная строка,
+    см. _credit_referral_earning). Тот же формат фильтра по дате
+    ('%Y-%m-01 00:00:00'), что уже используется compute_campaign_profit
+    (period='month') для админского отчёта - чтобы "начало месяца" считалось
+    одинаково везде в файле."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    period_start = datetime.utcnow().strftime('%Y-%m-01 00:00:00')
+    cursor.execute(
+        'SELECT COALESCE(SUM(amount_kopecks), 0) FROM referral_earnings WHERE earner_user_id = ? AND created_at >= ?',
+        (user_id, period_start)
+    )
+    total = cursor.fetchone()[0] or 0
+    conn.close()
+    return total
+
+
 def get_referral_breakdown(user_id, limit=20):
     """Список прямых (1 уровень) рефералов - для каждого: сколько своих
     ПРЯМЫХ рефералов он привёл (это оплачиваемый 2 уровень) и сколько
@@ -32176,10 +32291,26 @@ async def handle_referral_data_api(request):
     stats = get_referral_stats(user_id)
     me = await bot.get_me()
     link = get_referral_link(me.username, user_id)
-    rates = REFERRAL_RATES_PERCENT[get_referrer_type(user_id)]
+    # ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя со скриншотами
+    # экранов реферальной системы - "кнопка выбора... не подсвечивается...
+    # активное которое именно сейчас выбрано") - раньше referrer_type
+    # ВООБЩЕ не отдавался в этом API, из-за чего мини-приложение не могло
+    # знать, какая схема начислений у пользователя активна СЕЙЧАС (ни для
+    # подсветки плитки в renderReferralMenu, ни для показа админского
+    # личного кабинета в renderReferralPhantomDetail - см. unified_app_html
+    # в main.py). rates ниже - ставки ИМЕННО ЭТОЙ, текущей схемы (как и
+    # было); ставки ВСЕХ трёх схем для описаний на самих плитках/экранах
+    # передаются отдельно, статической константой REFERRAL_RATES_PERCENT,
+    # прямо в JS unified_app_html (не зависят от пользователя).
+    referrer_type = get_referrer_type(user_id)
+    rates = REFERRAL_RATES_PERCENT[referrer_type]
+    # ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - "в главе личного
+    # кабинета реферальной системы должна быть сумма заработанная за месяц")
+    this_month_earned = get_referral_earnings_this_month(user_id)
     return web.json_response({
         'live': True,
         'link': link,
+        'referrer_type': referrer_type,
         'level1_count': stats['level1_count'],
         'level2_count': stats['level2_count'],
         'level3_count': stats['level3_count'],
@@ -32187,6 +32318,7 @@ async def handle_referral_data_api(request):
         'balance_rub': round(stats['balance'] / 100),
         'total_earned_rub': round(stats['total_earned'] / 100),
         'total_withdrawn_rub': round(stats['total_withdrawn'] / 100),
+        'this_month_earned_rub': round(this_month_earned / 100),
         'rates_percent': rates,
         'withdrawal_fee_percent': REFERRAL_WITHDRAWAL_FEE_PERCENT,
         'min_withdrawal_rub': REFERRAL_MIN_WITHDRAWAL_RUB,
