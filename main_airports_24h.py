@@ -24163,7 +24163,15 @@ def cabinet_webapp_html():
 </style>
 </head>
 <body>
-<button type="button" onclick="try{if(window.history.length>1){history.back();}else if(window.Telegram&&Telegram.WebApp&&Telegram.WebApp.close){Telegram.WebApp.close();}}catch(e){}" style="position:relative;z-index:2;display:inline-flex;align-items:center;gap:5px;margin:0 0 10px;padding:8px 14px 8px 10px;background:#1c1c1c;border:1px solid rgba(255,255,255,.12);border-radius:10px;color:#fff;font-size:13px;font-weight:600;cursor:pointer;">← Назад</button>
+<!-- УБРАНО 27.09.2026 (прямая просьба пользователя - та же логика, что и
+     у карты, см. комментарий в map_webapp_html выше по файлу: "Кабинет" -
+     это вкладка нижнего меню unified_app_html, встраивается через
+     вложенный #cabinetFrame iframe, а не отдельная страница "поверх"
+     чего-то - переключение между вкладками и так всегда доступно снизу в
+     родительском shell, кнопка "Назад" внутри вложенного iframe была
+     лишней). Раньше здесь стояла кнопка "← Назад" (position:relative;
+     z-index:2 - тот же фикс перекрытия #bgCanvas/стековым контекстом, что
+     у остальных "плоских" страниц) - убрана целиком. -->
 <div id="state">Загружаю данные…</div>
 <div id="cabinetApp" style="display:none">
 
