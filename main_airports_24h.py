@@ -12036,6 +12036,13 @@ MAP_CHROME_CSS = """
   .tariff-picker-cancel { background: #333; color: #fff; }
   .tariff-picker-confirm { background: #FFB800; color: #1c1c1c; }
   .tariff-picker-confirm:disabled { opacity: .45; cursor: default; }
+  /* ДОБАВЛЕНО 27.09.2026 (жалоба пользователя - "выходишь на линию,
+     геолокация не включена, всё просто скидывает и ничего не пишет") -
+     текст самой карточки #geoRequiredOverlay ниже (использует ту же
+     .tariff-picker-overlay/-card, что и выбор тарифа выше). */
+  .geo-required-text { font-size: 14px; line-height: 1.45; margin: 0 0 10px; color: #ddd; }
+  .geo-required-steps { font-size: 14px; line-height: 1.45; margin: 0 0 10px; color: #fff; font-weight: 600; }
+  .geo-required-note { font-size: 12.5px; line-height: 1.4; margin: 0 0 4px; color: #9a9a9a; }
   /* ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - прислал скриншот
      Яндекс Навигатора с тёмной плашкой снизу экрана, "сделай бар снизу
      такой", уточнено отдельным вопросом - "просто визуальный стиль
@@ -12428,6 +12435,30 @@ def map_webapp_html():
     <div class="tariff-picker-actions">
       <button type="button" class="tariff-picker-cancel" id="tariffPickerCancel">Отмена</button>
       <button type="button" class="tariff-picker-confirm" id="tariffPickerConfirm" disabled>▶️ Начать смену</button>
+    </div>
+  </div>
+</div>
+<!-- ДОБАВЛЕНО 27.09.2026 (жалоба пользователя - "выходишь на линию,
+     геолокация не включена, всё просто скидывает и ничего не пишет") -
+     раньше в этом случае показывался tg.showAlert()/alert() - похоже, как и
+     tg.LocationManager.init() (см. правку 26.09.2026 выше про таймаут-
+     фоллбэк геолокации на карте), он не всегда способен показать сообщение
+     внутри вложенного iframe карты, поэтому водитель видел только, что
+     полоса "Выйти на линию" откатывается назад, без единого объяснения
+     почему. Та же самая проверенная карточка-оверлей, что и у выбора
+     тарифа выше (.tariff-picker-overlay/-card) - рисуется прямо в DOM
+     карты, не зависит от моста Telegram, поэтому гарантированно видна.
+     Текст - тот же смысл, что и в чате бота (см. shift_geolocation_
+     required_text в main.py), просто продублирован здесь на клиенте, т.к.
+     эта карточка не запрашивает его отдельно с сервера. -->
+<div class="tariff-picker-overlay" id="geoRequiredOverlay" style="display:none">
+  <div class="tariff-picker-card">
+    <h3>📍 Нужна геопозиция</h3>
+    <p class="geo-required-text">Для старта смены нужна геопозиция - без неё бот не может считать километраж, показывать тебя на карте водителей и следить за очередью у аэропорта.</p>
+    <p class="geo-required-steps">Включи трансляцию: скрепка 📎 → Геопозиция → «Транслировать геопозицию» → «Пока не отключу».</p>
+    <p class="geo-required-note">Как только геопозиция придёт - смена стартует автоматически, повторно свайпать полосу не нужно.</p>
+    <div class="tariff-picker-actions">
+      <button type="button" class="tariff-picker-confirm" id="geoRequiredOk" style="flex:none;width:100%;">Понятно</button>
     </div>
   </div>
 </div>
@@ -13294,6 +13325,26 @@ def map_webapp_html():
       if (e.target === tariffPickerOverlay) closeTariffPicker();
     }});
   }}
+  // ДОБАВЛЕНО 27.09.2026 (жалоба пользователя - "выходишь на линию,
+  // геолокация не включена, всё просто скидывает и ничего не пишет") - см.
+  // #geoRequiredOverlay в HTML выше и подробный комментарий там. Заменяет
+  // tg.showAlert()/alert() в doShiftToggle() и в подтверждении выбора
+  // тарифов ниже - оба места сигналят одно и то же условие (awaiting_
+  // location с сервера).
+  const geoRequiredOverlay = document.getElementById('geoRequiredOverlay');
+  const geoRequiredOk = document.getElementById('geoRequiredOk');
+  function openGeoRequiredOverlay() {{
+    if (geoRequiredOverlay) geoRequiredOverlay.style.display = 'flex';
+  }}
+  function closeGeoRequiredOverlay() {{
+    if (geoRequiredOverlay) geoRequiredOverlay.style.display = 'none';
+  }}
+  if (geoRequiredOk) geoRequiredOk.addEventListener('click', closeGeoRequiredOverlay);
+  if (geoRequiredOverlay) {{
+    geoRequiredOverlay.addEventListener('click', (e) => {{
+      if (e.target === geoRequiredOverlay) closeGeoRequiredOverlay();
+    }});
+  }}
   if (tariffPickerConfirm) {{
     tariffPickerConfirm.addEventListener('click', async () => {{
       if (tariffPickerConfirm.disabled || tariffPickerConfirm.classList.contains('pending')) return;
@@ -13318,8 +13369,7 @@ def map_webapp_html():
         }}
         closeTariffPicker();
         if (data.awaiting_location) {{
-          const msg = 'Включи трансляцию геопозиции в чате бота, чтобы начать смену';
-          if (tg && tg.showAlert) tg.showAlert(msg); else alert(msg);
+          openGeoRequiredOverlay();
           return;
         }}
         // ДОБАВЛЕНО 25.09.2026 - обновляем плашку/кнопку сразу же, не дожидаясь
@@ -13376,8 +13426,7 @@ def map_webapp_html():
         return;
       }}
       if (data.awaiting_location) {{
-        const msg = 'Включи трансляцию геопозиции в чате бота, чтобы начать смену';
-        if (tg && tg.showAlert) tg.showAlert(msg); else alert(msg);
+        openGeoRequiredOverlay();
       }}
     }} catch (e) {{
       shiftSliderSetOffset(3);
