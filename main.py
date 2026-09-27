@@ -12732,12 +12732,23 @@ def map_webapp_html():
   // чекбоксы дизейблятся (серые, некликабельные), пока один из отмеченных
   // не будет снят.
   const tariffKey = (cat, t) => `${{cat}}::${{t}}`;
-  // ИЗМЕНЕНО 25.09.2026 (прямая просьба пользователя - "спрос только один
-  // может отображаться на карте от одного тарифа") - было 2 (лимит подняли
-  // 24.09.2026 по отдельной просьбе показывать до двух тарифов сразу),
-  // снова вернули к 1 - на карте одновременно показывается спрос только
-  // ОДНОГО тарифа, без наложения облаков разных тарифов друг на друга.
-  const TARIFF_SELECTION_MAX = 1;
+  // ИЗМЕНЕНО 27.09.2026 (прямая просьба пользователя - "проверь отображение
+  // пользователей разных тарифов по вкладке тарифы" / "то сам отображающий
+  // других пользователей не вижу") - 25.09.2026 этот лимит был опущен до 1,
+  // ЧТОБЫ РЕШИТЬ ОТДЕЛЬНУЮ проблему с облаками СПРОСА ("спрос только один
+  // может отображаться на карте от одного тарифа"), но TARIFF_SELECTION_MAX
+  // управлял ОБЩИМ набором selectedTariffs, а тот в свою очередь и облаками
+  // спроса (isDemandTariffSelected), И фильтром маркеров ДРУГИХ ВОДИТЕЛЕЙ на
+  // карте (isPositionVisible ниже) - в итоге с лимитом 1 в панели "Тарифы"
+  // отмечался и оставался кликабельным только ОДИН чекбокс (все остальные
+  // сразу дизейблились), из-за чего показать других водителей на других
+  // тарифах стало практически невозможно - ровно то, о чём написал
+  // пользователь. Возвращаем лимит панели/маркеров к 2, как и было
+  // изначально просьбой 24.09.2026 ("не более 2 для всех"), а требование
+  // "спрос только один" реализуем ОТДЕЛЬНО и точечно, только для облака
+  // спроса, см. getPrimaryDemandTariffKey()/isDemandTariffSelected ниже -
+  // теперь эти два требования не противоречат друг другу.
+  const TARIFF_SELECTION_MAX = 2;
   const selectedTariffs = new Set();
   const shiftTariffsParam = params.get('tariffs');
   const shiftTariffs = shiftTariffsParam ? shiftTariffsParam.split(',').filter(Boolean) : null;
@@ -12778,9 +12789,28 @@ def map_webapp_html():
   let activeShiftTariffs = (myCategory && shiftTariffs && shiftTariffs.length)
     ? shiftTariffs.filter(t => (TARIFF_OPTIONS[myCategory] && TARIFF_OPTIONS[myCategory].tariffs || []).includes(t))
     : null;
+  // ДОБАВЛЕНО 27.09.2026 (см. комментарий у TARIFF_SELECTION_MAX выше) -
+  // раньше "не больше 1 облака спроса одновременно" держалось на том, что в
+  // selectedTariffs физически не мог оказаться больше 1 элемента (лимит
+  // панели). Теперь панель/фильтр других водителей допускает до 2 отмеченных
+  // тарифов, поэтому для облака спроса берём только ОДИН из них -
+  // детерминированно первый по порядку категорий/тарифов в TARIFF_OPTIONS
+  // (тот же порядок, в котором рисуется сама панель "Тарифы" выше), чтобы
+  // выбор не "прыгал" между отметками. Отмеченный "лишний" (второй) тариф
+  // при этом продолжает показывать других водителей на карте - под лимит
+  // облаков спроса это никак не попадает.
+  function getPrimaryDemandTariffKey() {{
+    for (const cat of Object.keys(TARIFF_OPTIONS)) {{
+      const tariffs = TARIFF_OPTIONS[cat].tariffs || [];
+      for (const t of tariffs) {{
+        if (selectedTariffs.has(tariffKey(cat, t))) return tariffKey(cat, t);
+      }}
+    }}
+    return null;
+  }}
   function isDemandTariffSelected(cat, t) {{
     if (activeShiftTariffs && cat === myCategory) return activeShiftTariffs.includes(t);
-    return selectedTariffs.has(tariffKey(cat, t));
+    return tariffKey(cat, t) === getPrimaryDemandTariffKey();
   }}
   const tariffPanel = document.getElementById('tariffToggle');
   const tariffBtn = document.getElementById('tariffToggleBtn');
