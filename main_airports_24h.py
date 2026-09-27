@@ -6912,7 +6912,7 @@ def share_order_webapp_html(category=None):
 </style>
 </head>
 <body>
-<button type="button" onclick="try{if(window.history.length>1){history.back();}else if(window.Telegram&&Telegram.WebApp&&Telegram.WebApp.close){Telegram.WebApp.close();}}catch(e){}" style="position:relative;z-index:2;display:inline-flex;align-items:center;gap:5px;margin:0 0 10px;padding:8px 14px 8px 10px;background:#1c1c1c;border:1px solid rgba(255,255,255,.12);border-radius:10px;color:#fff;font-size:13px;font-weight:600;cursor:pointer;">← Назад</button>
+<button type="button" onclick="try{if(window.history.length>1){history.back();}else if(window.Telegram&&Telegram.WebApp&&Telegram.WebApp.close){Telegram.WebApp.close();}}catch(e){}" style="position:relative;z-index:2;display:inline-flex;align-items:center;gap:5px;margin:calc(env(safe-area-inset-top, 0px) + var(--tg-chrome-top, 0px) + 4px) 0 10px;padding:8px 14px 8px 10px;background:#1c1c1c;border:1px solid rgba(255,255,255,.12);border-radius:10px;color:#fff;font-size:13px;font-weight:600;cursor:pointer;">← Назад</button>
 <div id="form">
   <h1>🔄 Отдать заказ</h1>
   <label>📍 Адрес подачи</label>
@@ -16729,7 +16729,7 @@ def weather_webapp_html():
 </style>
 </head>
 <body>
-<button type="button" onclick="try{if(window.history.length>1){history.back();}else if(window.Telegram&&Telegram.WebApp&&Telegram.WebApp.close){Telegram.WebApp.close();}}catch(e){}" style="position:relative;z-index:2;display:inline-flex;align-items:center;gap:5px;margin:0 0 10px;padding:8px 14px 8px 10px;background:#1c1c1c;border:1px solid rgba(255,255,255,.12);border-radius:10px;color:#fff;font-size:13px;font-weight:600;cursor:pointer;">← Назад</button>
+<button type="button" onclick="try{if(window.history.length>1){history.back();}else if(window.Telegram&&Telegram.WebApp&&Telegram.WebApp.close){Telegram.WebApp.close();}}catch(e){}" style="position:relative;z-index:2;display:inline-flex;align-items:center;gap:5px;margin:calc(env(safe-area-inset-top, 0px) + var(--tg-chrome-top, 0px) + 4px) 0 10px;padding:8px 14px 8px 10px;background:#1c1c1c;border:1px solid rgba(255,255,255,.12);border-radius:10px;color:#fff;font-size:13px;font-weight:600;cursor:pointer;">← Назад</button>
 <canvas id="bgCanvas"></canvas>
 <div id="content">
   <div id="state" style="display:none">Загружаю погоду…</div>
@@ -17353,7 +17353,7 @@ def where_to_go_webapp_html():
 </style>
 </head>
 <body>
-<button type="button" onclick="try{if(window.history.length>1){history.back();}else if(window.Telegram&&Telegram.WebApp&&Telegram.WebApp.close){Telegram.WebApp.close();}}catch(e){}" style="position:relative;z-index:2;display:inline-flex;align-items:center;gap:5px;margin:0 0 10px;padding:8px 14px 8px 10px;background:#1c1c1c;border:1px solid rgba(255,255,255,.12);border-radius:10px;color:#fff;font-size:13px;font-weight:600;cursor:pointer;">← Назад</button>
+<button type="button" onclick="try{if(window.history.length>1){history.back();}else if(window.Telegram&&Telegram.WebApp&&Telegram.WebApp.close){Telegram.WebApp.close();}}catch(e){}" style="position:relative;z-index:2;display:inline-flex;align-items:center;gap:5px;margin:calc(env(safe-area-inset-top, 0px) + var(--tg-chrome-top, 0px) + 4px) 0 10px;padding:8px 14px 8px 10px;background:#1c1c1c;border:1px solid rgba(255,255,255,.12);border-radius:10px;color:#fff;font-size:13px;font-weight:600;cursor:pointer;">← Назад</button>
 <div id="state">📍 Определяю твою локацию…</div>
 <div id="app" style="display:none">
   <h1 id="cityTitle">🧭 Куда ехать</h1>
@@ -21816,7 +21816,7 @@ def events_webapp_html():
 </style>
 </head>
 <body>
-<button type="button" onclick="try{if(window.history.length>1){history.back();}else if(window.Telegram&&Telegram.WebApp&&Telegram.WebApp.close){Telegram.WebApp.close();}}catch(e){}" style="position:relative;z-index:2;display:inline-flex;align-items:center;gap:5px;margin:0 0 10px;padding:8px 14px 8px 10px;background:#1c1c1c;border:1px solid rgba(255,255,255,.12);border-radius:10px;color:#fff;font-size:13px;font-weight:600;cursor:pointer;">← Назад</button>
+<button type="button" onclick="try{if(window.history.length>1){history.back();}else if(window.Telegram&&Telegram.WebApp&&Telegram.WebApp.close){Telegram.WebApp.close();}}catch(e){}" style="position:relative;z-index:2;display:inline-flex;align-items:center;gap:5px;margin:calc(env(safe-area-inset-top, 0px) + var(--tg-chrome-top, 0px) + 4px) 0 10px;padding:8px 14px 8px 10px;background:#1c1c1c;border:1px solid rgba(255,255,255,.12);border-radius:10px;color:#fff;font-size:13px;font-weight:600;cursor:pointer;">← Назад</button>
 <div id="state">Загружаю…</div>
 <div id="app" style="display:none">
   <h1 id="title">События</h1>
@@ -22263,7 +22263,7 @@ def transport_webapp_html():
 </style>
 </head>
 <body>
-<button type="button" onclick="try{if(window.history.length>1){history.back();}else if(window.Telegram&&Telegram.WebApp&&Telegram.WebApp.close){Telegram.WebApp.close();}}catch(e){}" style="position:relative;z-index:2;display:inline-flex;align-items:center;gap:5px;margin:0 0 10px;padding:8px 14px 8px 10px;background:#1c1c1c;border:1px solid rgba(255,255,255,.12);border-radius:10px;color:#fff;font-size:13px;font-weight:600;cursor:pointer;">← Назад</button>
+<button type="button" onclick="try{if(window.history.length>1){history.back();}else if(window.Telegram&&Telegram.WebApp&&Telegram.WebApp.close){Telegram.WebApp.close();}}catch(e){}" style="position:relative;z-index:2;display:inline-flex;align-items:center;gap:5px;margin:calc(env(safe-area-inset-top, 0px) + var(--tg-chrome-top, 0px) + 4px) 0 10px;padding:8px 14px 8px 10px;background:#1c1c1c;border:1px solid rgba(255,255,255,.12);border-radius:10px;color:#fff;font-size:13px;font-weight:600;cursor:pointer;">← Назад</button>
 <div id="state">Загружаю…</div>
 <div id="app" style="display:none">
   <h1>✈️🚆 Авиа/ЖД</h1>
@@ -23314,6 +23314,26 @@ async def handle_cabinet_city_api(request):
         return web.json_response({'error': 'shift_active'}, status=409)
     state['city'] = city
     state['category'] = category
+    # ДОБАВЛЕНО 28.09.2026 (жалоба пользователя - "смена открыта Москва,
+    # перезахожу почему-то Сочи стоит, хотя мы жёстко привязали смену") -
+    # причина: постоянная кнопка "📱 Приложение" слева от поля ввода
+    # (Telegram Menu Button, см. set_cabinet_menu_button выше) хранит
+    # ссылку с городом/категорией, "запечёнными" в URL, и обновляется
+    # только КОСВЕННО - сайд-эффектом внутри services_keyboard(), который
+    # срабатывает на обычные ЧАТ-сообщения боту. Раз почти вся работа с
+    # ботом теперь идёт ЧЕРЕЗ ПРИЛОЖЕНИЕ (это же и есть цель всего этапа
+    # "все расчёты в приложении, в чат ничего не приходит"), этот сайд-
+    # эффект мог никогда не сработать - и кнопка годами оставалась со
+    # старым городом даже после смены города прямо здесь. Обновляем Menu
+    # Button СРАЗУ, тем же самым способом (set_cabinet_menu_button),
+    # который уже используется в services_keyboard/open_app_text_and_keyboard -
+    # фоново (fire-and-forget), чтобы не задерживать ответ панели.
+    if PUBLIC_URL:
+        try:
+            new_app_url = f"{PUBLIC_URL}{UNIFIED_APP_WEBAPP_PATH}?city={urllib.parse.quote(city)}&category={urllib.parse.quote(category)}"
+            _fire_and_forget(set_cabinet_menu_button(user_id, new_app_url))
+        except Exception:
+            logger.exception("❌ Не удалось обновить Menu Button после смены города в /cabinet/city")
     return web.json_response({'ok': True, 'city': city, 'category': category})
 
 CABINET_MAINTENANCE_API_PATH = '/cabinet/maintenance'
@@ -23853,7 +23873,7 @@ def legal_cabinet_webapp_html():
 </style>
 </head>
 <body>
-<button type="button" onclick="try{if(window.history.length>1){history.back();}else if(window.Telegram&&Telegram.WebApp&&Telegram.WebApp.close){Telegram.WebApp.close();}}catch(e){}" style="position:relative;z-index:2;display:inline-flex;align-items:center;gap:5px;margin:0 0 10px;padding:8px 14px 8px 10px;background:#1c1c1c;border:1px solid rgba(255,255,255,.12);border-radius:10px;color:#fff;font-size:13px;font-weight:600;cursor:pointer;">← Назад</button>
+<button type="button" onclick="try{if(window.history.length>1){history.back();}else if(window.Telegram&&Telegram.WebApp&&Telegram.WebApp.close){Telegram.WebApp.close();}}catch(e){}" style="position:relative;z-index:2;display:inline-flex;align-items:center;gap:5px;margin:calc(env(safe-area-inset-top, 0px) + var(--tg-chrome-top, 0px) + 4px) 0 10px;padding:8px 14px 8px 10px;background:#1c1c1c;border:1px solid rgba(255,255,255,.12);border-radius:10px;color:#fff;font-size:13px;font-weight:600;cursor:pointer;">← Назад</button>
 <div id="state">Загружаю данные…</div>
 <div id="app" style="display:none">
 
@@ -24309,11 +24329,25 @@ def cabinet_webapp_html():
   html { background: var(--tg-theme-bg-color, #f2f2f7); overscroll-behavior: none; }
   body {
     margin: 0; padding: 16px;
-    /* ИЗМЕНЕНО 27.09.2026 (см. applyTgChromeInset в <script> ниже) - верхний
-       отступ теперь учитывает и физическую чёлку устройства
-       (env(safe-area-inset-top)), и системную шапку Telegram в fullscreen
-       (--tg-chrome-top), иначе первый ряд плашек кабинета залезает под неё. */
-    padding-top: max(16px, calc(env(safe-area-inset-top, 0px) + var(--tg-chrome-top, 0px)));
+    /* ИЗМЕНЕНО 28.09.2026 (прямая просьба пользователя со скриншотом -
+       "уменьшить отступ сверху") - раньше здесь стоял
+       max(16px, calc(env(safe-area-inset-top,0px) + var(--tg-chrome-top,0px)))
+       (правка от 27.09.2026, см. комментарий у applyTgChromeInset в <script>
+       ниже). Но эта страница ВСЕГДА встраивается iframe'ом во вкладку
+       "Кабинет" unified_app_html (см. комментарий "УБРАНО 27.09.2026" у
+       #cabinetApp выше - там же убрана и кнопка "Назад" по той же причине) -
+       а её ВНЕШНЯЯ шапка (header в unified_app_html) УЖЕ резервирует место
+       под и физическую чёлку устройства, и системную шапку Telegram
+       (padding-top/height там же используют ту же формулу), и .panel.full,
+       в который вложен #cabinetFrame, начинается уже НИЖЕ этой шапки без
+       собственного отступа (padding:0). Из-за этого safe-area/chrome-top
+       здесь применялись ВТОРОЙ раз поверх уже сделанного внешней страницей
+       отступа - первый ряд плашек "Профиль/Финансы/..." оказывался заметно
+       ниже, чем нужно. Теперь просто плоский отступ, без повторного учёта
+       чёлки/системной шапки - см. также applyTgChromeInset()/
+       tg.requestFullscreen() ниже, которые теперь не трогают эту страницу,
+       когда она встроена iframe'ом (тот же смысл, тем же способом). */
+    padding-top: 16px;
     padding-bottom: max(16px, env(safe-area-inset-bottom, 0px));
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     background: var(--tg-theme-bg-color, #f2f2f7); color: var(--tg-theme-text-color, #000);
@@ -24843,24 +24877,39 @@ def cabinet_webapp_html():
     // клиентах молча ничего не делать, а не падать с ошибкой.
     try { if (typeof tg.disableVerticalSwipes === 'function') tg.disableVerticalSwipes(); } catch (e) {}
     try { if (typeof tg.requestFullscreen === 'function') tg.requestFullscreen(); } catch (e) {}
-    // ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя со скриншотом -
-    // верхний ряд плашек "Профиль/Финансы/..." залезает под системные
-    // кнопки Telegram в fullscreen) - та же причина/фикс, что уже сделан
-    // для unified_app_html (см. contentSafeAreaInset/--tg-chrome-top там):
-    // requestFullscreen выше добавляет системную шапку Telegram (крестик/
-    // стрелка/меню), которая НЕ входит в обычный env(safe-area-inset-top)
-    // (это только физическая чёлка/статус-бар устройства) - без
-    // contentSafeAreaInset верхний контент рисуется под этой шапкой.
-    // Читаем tg.contentSafeAreaInset.top и прокидываем в CSS-переменную
-    // --tg-chrome-top, на которую подписан body ниже (см. padding-top).
-    var applyTgChromeInset = function () {
-      try {
-        var csa = tg.contentSafeAreaInset || {};
-        document.documentElement.style.setProperty('--tg-chrome-top', (csa.top || 0) + 'px');
-      } catch (e) {}
-    };
-    applyTgChromeInset();
-    try { if (typeof tg.onEvent === 'function') tg.onEvent('contentSafeAreaChanged', applyTgChromeInset); } catch (e) {}
+    // ИЗМЕНЕНО 28.09.2026 (прямая просьба пользователя со скриншотом -
+    // "уменьшить отступ сверху") - requestFullscreen() выше ОСТАВЛЕН как
+    // есть (правка 27.09.2026, "жёстко привязать... на полный экран" -
+    // касается ЛЮБОГО открытия этой страницы, в т.ч. старых standalone-
+    // ссылок вроде cabinet_url в open_cabinet_from_menu, оставленных "на
+    // случай регресса Menu Button" - см. main.py). А вот чтение
+    // tg.contentSafeAreaInset.top в --tg-chrome-top теперь включаем
+    // ТОЛЬКО когда страница открыта САМА ПО СЕБЕ (не встроена iframe'ом) -
+    // основной путь сейчас именно embedded (вкладка "Кабинет"
+    // unified_app_html, см. #cabinetFrame), а её ВНЕШНЯЯ страница уже сама
+    // резервирует место под системную шапку Telegram в своей шапке
+    // (header) - см. подробный комментарий у padding-top body выше. Раньше
+    // это применялось ВСЕГДА, из-за чего в embedded-случае отступ
+    // задваивался (первый ряд плашек "Профиль/Финансы/..." съезжал заметно
+    // ниже, чем нужно). window.self !== window.top - тот же простой и уже
+    // проверенный в этом файле способ определить embedded-контекст, что и
+    // у taxiHelperGeoWait/postMessage в unified_app_html.
+    var isEmbeddedCabinet = true;
+    try { isEmbeddedCabinet = window.self !== window.top; } catch (e) { isEmbeddedCabinet = true; }
+    if (!isEmbeddedCabinet) {
+      // Пишем прямо в document.body.style.paddingTop (а не в CSS-переменную,
+      // как раньше) - в CSS body ниже теперь просто плоские 16px без ссылки
+      // на --tg-chrome-top (см. комментарий там), т.к. embedded-случай
+      // (основной) больше не должен её учитывать вовсе.
+      var applyTgChromeInset = function () {
+        try {
+          var csa = tg.contentSafeAreaInset || {};
+          document.body.style.paddingTop = 'max(16px, calc(env(safe-area-inset-top, 0px) + ' + (csa.top || 0) + 'px))';
+        } catch (e) {}
+      };
+      applyTgChromeInset();
+      try { if (typeof tg.onEvent === 'function') tg.onEvent('contentSafeAreaChanged', applyTgChromeInset); } catch (e) {}
+    }
   }
   if (tg && tg.platform) { fetch('/platform/report', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': tg.initData || '' }, body: JSON.stringify({ platform: tg.platform }) }).catch(function(){}); }
   // Вкладка "Чаевые" убрана из кабинета целиком (по прямой просьбе
