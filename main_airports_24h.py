@@ -12036,6 +12036,16 @@ MAP_CHROME_CSS = """
      больше скругли карты") - было 16px, стало 28px, скругление заметно
      сильнее на глаз. */
   #map { border-radius: 28px; overflow: hidden; }
+  /* ДОБАВЛЕНО 28.09.2026 (жалоба пользователя со скриншотом - "убери так
+     чтобы был только фон без черточки, чтобы прям красиво было") - у Leaflet
+     по умолчанию .leaflet-container имеет свой собственный светло-серый
+     фон (#ddd, из стандартного leaflet.css, ЗДЕСЬ раньше нигде не
+     переопределялся) - он показывался как раз в месте, где начинается
+     скруглённый угол #map: тонкая светлая "черточка" вдоль верхнего края,
+     между чёрным фоном html/body и самими тайлами карты. Перекрашиваем
+     фон самого leaflet-контейнера в тот же #000, что и html/body - шов
+     пропадает, виден только сплошной фон. */
+  .leaflet-container { background: #000; }
   /* ДОБАВЛЕНО 27.09.2026 (жалоба пользователя - "сма вверх сма вниз
      появляются белый фон подложкой... отключи чтобы два раза тапать на
      экран чтобы он не увеличивал") - overscroll-behavior:none на html/body
@@ -12088,7 +12098,9 @@ MAP_CHROME_CSS = """
      .map-toggles-row, .shift-radar-indicator ниже) заменён на
      calc(10px + var(--tg-chrome-top, 0px)), см. applyTgChromeInset в
      <script> ниже. */
-  .filter-toggle { position: absolute; top: calc(10px + var(--tg-chrome-top, 0px)); left: 80px; z-index: 1000; background: #FFC400; color: #000; border-radius: 8px; padding: 8px 12px; font-family: -apple-system, sans-serif; font-size: 12.5px; font-weight: 600; box-shadow: 0 1px 4px rgba(0,0,0,.35); cursor: pointer; user-select: none; text-transform: uppercase; }
+  /* ИЗМЕНЕНО 28.09.2026 (см. .leaflet-control-zoom a выше - "объёмные бары/
+     кнопки", "более выраженная тень/градиент"). */
+  .filter-toggle { position: absolute; top: calc(10px + var(--tg-chrome-top, 0px)); left: 80px; z-index: 1000; background: linear-gradient(180deg, #FFD43D, #FFB800); color: #000; border-radius: 8px; padding: 8px 12px; font-family: -apple-system, sans-serif; font-size: 12.5px; font-weight: 600; box-shadow: 0 2px 6px rgba(0,0,0,.4); cursor: pointer; user-select: none; text-transform: uppercase; }
   /* ИЗМЕНЕНО 25.09.2026 (см. комментарий у .filter-toggle выше) - Leaflet
      зум-контрол (+/- ) редизайн: вместо штатных белых прямоугольных кнопок
      в левом верхнем углу - тёмные круглые кнопки (тот же визуальный язык,
@@ -12112,16 +12124,35 @@ MAP_CHROME_CSS = """
      инлайновые/базовые стили на этих классах, иначе не перебить. */
   .leaflet-top.leaflet-left { top: 0 !important; left: 0 !important; bottom: 0 !important; height: 100% !important; display: flex !important; align-items: center !important; pointer-events: none !important; }
   .leaflet-control-zoom { position: relative !important; top: auto !important; left: auto !important; transform: none !important; margin: 0 0 0 14px !important; pointer-events: auto !important; border: none !important; box-shadow: none !important; background: transparent !important; display: flex !important; flex-direction: column !important; gap: 8px !important; }
+  /* ИЗМЕНЕНО 28.09.2026 (прямая просьба пользователя - "все бары/кнопки с
+     карты будут объёмные", уточнение - "более выраженная тень/градиент") -
+     плоская заливка rgba(28,28,30,.86) заменена на лёгкий вертикальный
+     градиент (чуть светлее сверху, чуть темнее снизу - имитация выпуклой
+     кнопки), плюс к внешней тени добавлена тонкая внутренняя подсветка
+     сверху (inset) - вместе создают ощущение объёма, а не плоского кружка.
+     Цвета/размер/обводка не менялись. */
   .leaflet-control-zoom a, .leaflet-control-zoom a:link, .leaflet-control-zoom a:visited {
     display: flex !important; align-items: center !important; justify-content: center !important;
     width: 40px !important; height: 40px !important; line-height: normal !important;
-    border-radius: 50% !important; background: rgba(28,28,30,.86) !important; color: #fff !important;
+    border-radius: 50% !important; background: linear-gradient(180deg, rgba(52,52,55,.92), rgba(20,20,22,.92)) !important; color: #fff !important;
     font-size: 20px !important; font-weight: 600 !important; border: 2px solid #fff !important;
-    box-shadow: 0 2px 8px rgba(0,0,0,.4) !important; transition: transform .12s, background .2s !important;
+    box-shadow: 0 3px 10px rgba(0,0,0,.45), inset 0 1px 0 rgba(255,255,255,.18) !important; transition: transform .12s, background .2s !important;
   }
   .leaflet-control-zoom a:active { transform: scale(.92) !important; }
   .leaflet-control-zoom a.leaflet-disabled { opacity: .45 !important; background: rgba(28,28,30,.5) !important; }
   .airport-icon { display: flex; align-items: center; justify-content: center; font-size: 20px; filter: drop-shadow(0 1px 2px rgba(0,0,0,.5)); }
+  /* ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "если аэропорты
+     перегружены пусть мерцают иконки, и жд тоже" - уточнение: мигать должна
+     высокая загрузка/спрос, тот же порог, что уже красит жёлтое/зелёное
+     облако повышенного спроса вокруг маркера, см. HIGH_DEMAND_LOAD_THRESHOLD/
+     STATION_HIGH_LOAD_THRESHOLD в JS ниже) - тот же пульсирующий ореол
+     @keyframes selPulse (уже объявлен в этом файле - см. .layer-toggle-btn.active
+     выше, не заводим ещё один такой же), просто применён к самой иконке-
+     бейджу маркера аэропорта/вокзала на карте.
+     border-radius нужен явно - .badge-pulse вешается на .airport-icon-badge
+     (сам div-icon Leaflet), у него самого радиуса нет (скругление рисует
+     SVG внутри), а box-shadow-кольцо анимации иначе легло бы прямоугольником. */
+  .badge-pulse { border-radius: 7px; animation: selPulse 2.2s ease-in-out infinite; }
   /* ВОЗВРАЩЕНО 22.09.2026 (прямая просьба пользователя - на карте
      оказались ДВЕ стрелки друг на друге вместо своей стрелки + кружков
      остальных: "почему две метки, другие пользователи должны быть как
@@ -12246,12 +12277,20 @@ MAP_CHROME_CSS = """
      группа) даёт .leaflet-top.leaflet-left/.leaflet-control-zoom (см. их
      блок выше). Размер/бордер/тень оставлены как есть - уже совпадают с
      .leaflet-control-zoom a. */
-  .map-menu-toggle-btn { width: 40px; height: 40px; border-radius: 50%; background: rgba(28,28,30,.92); border: 2px solid #fff; box-shadow: 0 2px 8px rgba(0,0,0,.45); display: flex; align-items: center; justify-content: center; user-select: none; cursor: pointer; transition: transform .12s, background .2s, border-color .2s; flex-shrink: 0; }
+  /* ИЗМЕНЕНО 28.09.2026 (см. .leaflet-control-zoom a выше - тот же принцип
+     "объёмности": градиент + внутренняя подсветка вместо плоской заливки,
+     эта кнопка стоит в той же колонке зума и должна выглядеть той же
+     "выпуклой" деталью, а не выделяться плоским пятном рядом с +/-). */
+  .map-menu-toggle-btn { width: 40px; height: 40px; border-radius: 50%; background: linear-gradient(180deg, rgba(52,52,55,.96), rgba(20,20,22,.96)); border: 2px solid #fff; box-shadow: 0 3px 10px rgba(0,0,0,.45), inset 0 1px 0 rgba(255,255,255,.18); display: flex; align-items: center; justify-content: center; user-select: none; cursor: pointer; transition: transform .12s, background .2s, border-color .2s; flex-shrink: 0; }
   .map-menu-toggle-btn:active { transform: scale(.92); }
-  .map-menu-toggle-btn.active { background: #ffc400; border-color: #ffc400; }
+  .map-menu-toggle-btn.active { background: linear-gradient(180deg, #FFD43D, #FFB800); border-color: #ffc400; }
   .map-menu-toggle-btn.active svg { stroke: #1c1c1c; }
   .map-menu-toggle-btn svg { width: 21px; height: 21px; filter: drop-shadow(0 1px 1px rgba(0,0,0,.35)); }
-  .layer-toggle-btn { display: inline-block; background: #1c1c1c; color: #fff; border: 1px solid rgba(255,196,0,.4); border-radius: 8px; padding: 5px 7px; font-family: -apple-system, sans-serif; font-size: 11px; font-weight: 600; box-shadow: 0 1px 4px rgba(0,0,0,.35); cursor: pointer; user-select: none; white-space: nowrap; transition: transform .12s; text-transform: uppercase; }
+  /* ИЗМЕНЕНО 28.09.2026 (см. .leaflet-control-zoom a выше - "все бары/кнопки
+     с карты будут объёмные", "более выраженная тень/градиент") - плоская
+     заливка #1c1c1c заменена на лёгкий вертикальный градиент, тень чуть
+     сильнее (была 0 1px 4px). */
+  .layer-toggle-btn { display: inline-block; background: linear-gradient(180deg, #262626, #131313); color: #fff; border: 1px solid rgba(255,196,0,.4); border-radius: 8px; padding: 5px 7px; font-family: -apple-system, sans-serif; font-size: 11px; font-weight: 600; box-shadow: 0 2px 6px rgba(0,0,0,.4); cursor: pointer; user-select: none; white-space: nowrap; transition: transform .12s; text-transform: uppercase; }
   .layer-toggle-btn:active, .filter-toggle:active { transform: scale(.94); }
   /* ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - редизайн
      распространён на все WebApp'ы бота) - лёгкая тактильная отдача кнопок
@@ -12263,7 +12302,7 @@ MAP_CHROME_CSS = """
      подсветка кнопки "🚦 Пробки", когда слой пробок включён. */
   /* ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - пульсирующий ореол
      на всех кнопках с фиксацией выбора, как у плашки рейтинга) */
-  .layer-toggle-btn.active { background: #ffc400; color: #1c1c1c; border-color: #ffc400; animation: selPulse 2.6s ease-in-out infinite; }
+  .layer-toggle-btn.active { background: linear-gradient(180deg, #FFD43D, #FFB800); color: #1c1c1c; border-color: #ffc400; animation: selPulse 2.6s ease-in-out infinite; }
   @keyframes selPulse {
     0%, 100% { box-shadow: 0 0 0 0 rgba(255,196,0,.5); }
     50% { box-shadow: 0 0 0 5px rgba(255,196,0,0); }
@@ -12308,9 +12347,14 @@ MAP_CHROME_CSS = """
        OSM/Leaflet attribution выше, см. attributionControl:false) рисуется
        у самого низа карты и раньше оказывался прижат вплотную к нижнему
        краю экрана этой полосой - теперь между ними зазор побольше. */
+    /* ИЗМЕНЕНО 28.09.2026 (см. .leaflet-control-zoom a выше - "объёмные
+       бары/кнопки", "более выраженная тень/градиент") - плоская заливка
+       #FFB800 заменена на вертикальный градиент, тень посильнее (была
+       0 2px 8px) - согласовано со значениями в @keyframes shiftSliderGlow
+       ниже, т.к. во время анимации именно keyframes управляют box-shadow. */
     position: absolute; left: 12px; right: 12px; bottom: max(34px, calc(env(safe-area-inset-bottom, 0px) + 20px));
-    z-index: 1000; height: 56px; border-radius: 28px; background: #FFB800;
-    border: 3px solid #fff; box-shadow: 0 2px 8px rgba(0,0,0,.45);
+    z-index: 1000; height: 56px; border-radius: 28px; background: linear-gradient(180deg, #FFD43D, #FFB800);
+    border: 3px solid #fff; box-shadow: 0 3px 10px rgba(0,0,0,.45), inset 0 1px 0 rgba(255,255,255,.25);
     display: flex; align-items: center; justify-content: center;
     overflow: hidden; user-select: none; transition: transform .3s ease, opacity .3s ease;
   }
@@ -12327,8 +12371,8 @@ MAP_CHROME_CSS = """
      (.pending, уже приглушена opacity) - на активной смене полоса и так
      уезжает за экран (.on-shift). */
   @keyframes shiftSliderGlow {
-    0%, 100% { box-shadow: 0 2px 8px rgba(0,0,0,.45), 0 0 0 0 rgba(255,255,255,.5); }
-    50% { box-shadow: 0 2px 14px rgba(0,0,0,.5), 0 0 0 8px rgba(255,255,255,0); }
+    0%, 100% { box-shadow: 0 3px 10px rgba(0,0,0,.45), inset 0 1px 0 rgba(255,255,255,.25), 0 0 0 0 rgba(255,255,255,.55); }
+    50% { box-shadow: 0 3px 16px rgba(0,0,0,.5), inset 0 1px 0 rgba(255,255,255,.25), 0 0 0 8px rgba(255,255,255,0); }
   }
   .shift-slider:not(.pending) { animation: shiftSliderGlow 2.4s ease-in-out infinite; }
   .shift-slider.pending { animation: none; }
@@ -12370,9 +12414,14 @@ MAP_CHROME_CSS = """
      в JS ниже, срабатывает только пока myShiftActive) - выйти на линию
      по-прежнему можно исключительно свайпом полосы внизу (.shift-slider),
      сюда это не возвращали. */
-  .shift-radar-indicator { position: absolute; top: calc(14px + var(--tg-chrome-top, 0px)); left: 14px; z-index: 1000; width: 56px; height: 56px; border-radius: 50%; background: #8a8a8a; border: 3px solid #fff; box-shadow: 0 2px 8px rgba(0,0,0,.45); display: flex; align-items: center; justify-content: center; user-select: none; overflow: hidden; transition: background .25s, transform .12s; cursor: pointer; }
+  /* ИЗМЕНЕНО 28.09.2026 (см. .leaflet-control-zoom a выше - "объёмные бары/
+     кнопки", "более выраженная тень/градиент") - оба состояния (серое
+     неактивное/жёлтое активное) получили вертикальный градиент и тень
+     посильнее с внутренней подсветкой сверху, тот же приём, что у круглых
+     кнопок зума/фильтра рядом. */
+  .shift-radar-indicator { position: absolute; top: calc(14px + var(--tg-chrome-top, 0px)); left: 14px; z-index: 1000; width: 56px; height: 56px; border-radius: 50%; background: linear-gradient(180deg, #9a9a9a, #767676); border: 3px solid #fff; box-shadow: 0 3px 10px rgba(0,0,0,.45), inset 0 1px 0 rgba(255,255,255,.25); display: flex; align-items: center; justify-content: center; user-select: none; overflow: hidden; transition: background .25s, transform .12s; cursor: pointer; }
   .shift-radar-indicator:active { transform: scale(.93); }
-  .shift-radar-indicator.active { background: #FFB800; }
+  .shift-radar-indicator.active { background: linear-gradient(180deg, #FFD43D, #FFB800); }
   .shift-radar-indicator .power-icon { position: relative; z-index: 2; width: 26px; height: 26px; filter: drop-shadow(0 1px 1px rgba(0,0,0,.35)); }
   .shift-radar-indicator .radar-sweep { position: absolute; inset: 0; border-radius: 50%; background: conic-gradient(from 0deg, rgba(255,255,255,.6), rgba(255,255,255,0) 40%); opacity: 0; }
   .shift-radar-indicator.active .radar-sweep { opacity: 1; animation: shift-radar-spin 2.4s linear infinite; }
@@ -12472,9 +12521,15 @@ MAP_CHROME_CSS = """
        над пустотой. */
     position: absolute; left: 12px; right: 12px; bottom: calc(max(34px, calc(env(safe-area-inset-bottom, 0px) + 20px)) + 66px);
     z-index: 1000; display: flex; align-items: center; gap: 8px;
-    background: rgba(20,20,20,.82); backdrop-filter: blur(8px); color: #fff;
+    /* ИЗМЕНЕНО 28.09.2026 (см. .leaflet-control-zoom a выше - "объёмные
+       бары/кнопки", "более выраженная тень/градиент") - плоская
+       полупрозрачная заливка заменена на лёгкий вертикальный градиент
+       (чуть светлее сверху), тень усилена (была 0 4px 16px), добавлена
+       тонкая внутренняя подсветка сверху - та же "приподнятая" плашка, что
+       и остальные бары на карте, просто со своим фоном/блюром. */
+    background: linear-gradient(180deg, rgba(32,32,32,.85), rgba(14,14,14,.85)); backdrop-filter: blur(8px); color: #fff;
     border: 1px solid rgba(255,196,0,.35); border-radius: 16px; padding: 10px 16px;
-    font-family: -apple-system, sans-serif; box-shadow: 0 4px 16px rgba(0,0,0,.45);
+    font-family: -apple-system, sans-serif; box-shadow: 0 6px 20px rgba(0,0,0,.5), inset 0 1px 0 rgba(255,255,255,.08);
     pointer-events: none; transition: bottom .3s ease;
     /* ИЗМЕНЕНО 25.09.2026 (прямая просьба пользователя - "добавь через
        сколько дождь или дождь не ожидается", третий сегмент bib-rain ниже)
@@ -14906,7 +14961,16 @@ def map_webapp_html():
           polygon.bindPopup(ppopup);
           airportMarkers.push(polygon);
         }});
-        const icon = L.divIcon({{ className: 'airport-icon airport-icon-badge', html: airportBadgeIconHtml(a.status), iconSize: [26, 26] }});
+        // ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "если аэропорты
+        // перегружены пусть мерцают иконки" - уточнение пользователя:
+        // мигать должна ВЫСОКАЯ загрузка/спрос, тот же порог
+        // HIGH_DEMAND_LOAD_THRESHOLD, что уже решает, рисовать ли жёлтое
+        // облако повышенного спроса вокруг аэропорта чуть выше) - иконка
+        // самого маркера дополнительно пульсирует, чтобы было видно спрос,
+        // даже когда сам маркер вне зоны видимости жёлтого облака/попап не
+        // открыт.
+        const airportHighLoad = a.load !== null && a.load !== undefined && a.load > HIGH_DEMAND_LOAD_THRESHOLD;
+        const icon = L.divIcon({{ className: 'airport-icon airport-icon-badge' + (airportHighLoad ? ' badge-pulse' : ''), html: airportBadgeIconHtml(a.status), iconSize: [26, 26] }});
         const airportEta = etaText(a.lat, a.lon);
         let popup = `<div class="airport-popup"><h4>${{a.emoji || '✈️'}} ${{a.name}}</h4>`;
         if (airportEta) popup += `<div class="row">${{airportEta}} (~${{AVG_SPEED_KMH}} км/ч)</div>`;
@@ -15061,7 +15125,12 @@ def map_webapp_html():
           stationMarkers.push(blob);
         }}
         const isStationHighLoad = s.load !== null && s.load !== undefined && s.load > STATION_HIGH_LOAD_THRESHOLD;
-        const icon = L.divIcon({{ className: 'airport-icon airport-icon-badge', html: stationBadgeIconHtml(isStationHighLoad), iconSize: [26, 26] }});
+        // ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "и жд тоже [пусть
+        // мерцают]") - та же пульсирующая подсветка иконки, что и у
+        // аэропортов выше (см. .badge-pulse), на том же условии высокой
+        // загрузки (isStationHighLoad), которое уже решает, рисовать ли
+        // зелёное облако повышенного спроса вокруг вокзала чуть выше.
+        const icon = L.divIcon({{ className: 'airport-icon airport-icon-badge' + (isStationHighLoad ? ' badge-pulse' : ''), html: stationBadgeIconHtml(isStationHighLoad), iconSize: [26, 26] }});
         const symbol = isStationHighLoad ? '🟢' : '🔴';
         let popup = `<div class="airport-popup"><h4>🚆 ${{s.name}}</h4>`;
         if (s.load !== null && s.load !== undefined) {{
