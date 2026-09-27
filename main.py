@@ -12016,6 +12016,14 @@ def validate_telegram_webapp_init_data(init_data, bot_token):
 # повышенный спрос) и её ломать нельзя, рескин только "рамки" карты.
 MAP_CHROME_CSS = """
   html, body, #map { height: 100%; margin: 0; padding: 0; }
+  /* ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя со скриншотом -
+     "округлённые края на карте, чтобы со всех четырёх углов они были
+     немножко скруглены") - #map занимает весь экран (edge-to-edge),
+     background html/body уже #000 (см. чуть ниже) - border-radius +
+     overflow:hidden на самом #map просто срезает углы плиток/маркеров
+     Leaflet мягкой дугой, а чёрный фон страницы проступает в этих
+     срезанных уголках сам, без доп. отступов/рамки. */
+  #map { border-radius: 16px; overflow: hidden; }
   /* ДОБАВЛЕНО 27.09.2026 (жалоба пользователя - "сма вверх сма вниз
      появляются белый фон подложкой... отключи чтобы два раза тапать на
      экран чтобы он не увеличивал") - overscroll-behavior:none на html/body
@@ -12200,8 +12208,23 @@ MAP_CHROME_CSS = """
      (.leaflet-control-zoom a выше - 40px, белая обводка 2px solid #fff),
      top уменьшен (была 10px) - кнопка поднята выше. #mapTogglesRow
      (раскрывающийся ряд Тарифы/Слои/Пробки/Спрос) НЕ трогали - его top
-     остаётся тем же (58px), где и был. */
-  .map-menu-toggle-btn { position: absolute; top: calc(4px + var(--tg-chrome-top, 0px)); right: 14px; z-index: 1001; width: 40px; height: 40px; border-radius: 50%; background: rgba(28,28,30,.92); border: 2px solid #fff; box-shadow: 0 2px 8px rgba(0,0,0,.45); display: flex; align-items: center; justify-content: center; user-select: none; cursor: pointer; transition: transform .12s, background .2s, border-color .2s; }
+     остаётся тем же (58px), где и был.
+     ЕЩЁ РАЗ ИЗМЕНЕНО 28.09.2026 (прямая просьба пользователя - "расположи
+     кнопку рядом с плюсом и минусом слева... должно быть три кнопки:
+     кнопка фильтров, потом плюс, потом минус, они должны идти друг под
+     другом, все строго одного размера") - кнопка была в правом верхнем
+     углу как ОТДЕЛЬНЫЙ absolute-элемент; теперь вместо этого JS (см.
+     "ДОБАВЛЕНО 28.09.2026" сразу после const map = L.map(...) ниже)
+     физически переносит этот же div ПЕРВЫМ элементом внутрь
+     .leaflet-control-zoom - той же колонки (flex-direction:column,
+     gap:8px), где уже лежат кнопки +/-, так что кнопка становится
+     обычным элементом этой колонки, а не отдельно спозиционированным
+     блоком. position/top/right/z-index больше не нужны - расположение и
+     вертикальное центрирование всей колонки (все 3 кнопки как одна
+     группа) даёт .leaflet-top.leaflet-left/.leaflet-control-zoom (см. их
+     блок выше). Размер/бордер/тень оставлены как есть - уже совпадают с
+     .leaflet-control-zoom a. */
+  .map-menu-toggle-btn { width: 40px; height: 40px; border-radius: 50%; background: rgba(28,28,30,.92); border: 2px solid #fff; box-shadow: 0 2px 8px rgba(0,0,0,.45); display: flex; align-items: center; justify-content: center; user-select: none; cursor: pointer; transition: transform .12s, background .2s, border-color .2s; flex-shrink: 0; }
   .map-menu-toggle-btn:active { transform: scale(.92); }
   .map-menu-toggle-btn.active { background: #ffc400; border-color: #ffc400; }
   .map-menu-toggle-btn.active svg { stroke: #1c1c1c; }
@@ -13355,6 +13378,23 @@ def map_webapp_html():
   // из L.tileLayer ниже - она всё равно относится только к OSM-фолбэку,
   // который почти никогда не используется, см. блок про Яндекс.Карты ниже).
   const map = L.map('map', {{ preferCanvas: true, attributionControl: false }}).setView(initialCenter, 11);
+  // ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "расположи кнопку
+  // [≡🔍] рядом с плюсом и минусом слева... три кнопки друг под другом:
+  // фильтры, потом плюс, потом минус, все строго одного размера") - кнопка
+  // #mapMenuToggleBtn раньше стояла отдельным absolute-блоком в правом
+  // верхнем углу (см. .map-menu-toggle-btn в CSS выше). Zoom-контрол
+  // Leaflet (.leaflet-control-zoom, создаётся СИНХРОННО конструктором
+  // L.map() выше, т.к. zoomControl по умолчанию true) - flex-колонка
+  // (flex-direction:column, gap:8px) с кнопками +/-. Переносим наш div
+  // ПЕРВЫМ ребёнком в эту же колонку - визуально получаются три кнопки
+  // одного размера строго друг под другом (фильтры/+/-), а вертикальное
+  // центрирование всей группы обеспечивает .leaflet-top.leaflet-left
+  // (см. его блок в CSS выше) само, без лишнего JS.
+  try {{
+    var zoomCol = document.querySelector('.leaflet-control-zoom');
+    var menuBtn = document.getElementById('mapMenuToggleBtn');
+    if (zoomCol && menuBtn) {{ zoomCol.insertBefore(menuBtn, zoomCol.firstChild); }}
+  }} catch (e) {{}}
   // ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя, прислал API-ключ
   // Яндекс.Карт - "ключ яндекса подложка ключ апи" / "перейти на Яндекс
   // Карты полностью"): подложка (тайлы) карты теперь Яндекс.Карты через
@@ -17958,6 +17998,98 @@ def unified_app_html():
     0%, 100% { box-shadow: 0 0 0 0 rgba(255,196,0,.5); }
     50% { box-shadow: 0 0 0 5px rgba(255,196,0,0); }
   }
+  /* ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "сверху дашборд
+     реферальной системы: текущая схема, заработано за месяц, количество
+     пользователей, рейтинг реферала (пока везде 5.0)") - показывается НАД
+     сеткой 2x2 (renderReferralMenu ниже). Тот же визуальный язык, что уже
+     используется у карточки заработка/пилюли рейтинга в личном кабинете
+     (.hero-earn/.rating-pill в cabinet_webapp_html) - здесь эти же классы
+     заведены заново (отдельный HTML-документ, общих стилей между ними
+     нет), но с ТЕМИ ЖЕ значениями цветов/шрифтов/анимаций, а не новыми -
+     ratingPulse-эффект пилюли переиспользует уже существующий здесь
+     @keyframes selPulse (тот же самый pulse, тот же принцип "не заводим
+     ещё один такой же", что и у .nav-pill.active в cabinet_webapp_html). */
+  .ref-dash {
+    position: relative; overflow: hidden; border-radius: 18px; padding: 16px 16px 14px;
+    background: linear-gradient(135deg, #1c1c1c 0%, #000 60%, #241c00 130%);
+    color: #fff; margin-bottom: 14px; box-shadow: 0 8px 24px rgba(255,196,0,.12), 0 6px 20px rgba(0,0,0,.4);
+    border: 1px solid rgba(255,196,0,.4);
+  }
+  .ref-dash::before {
+    content: ''; position: absolute; inset: -50%; pointer-events: none;
+    background: radial-gradient(circle, rgba(255,196,0,.28), transparent 60%);
+    animation: refDashSheen 11s ease-in-out infinite;
+  }
+  @keyframes refDashSheen {
+    0%, 100% { opacity: .5; transform: translate(-10%, -10%) rotate(0deg); }
+    50% { opacity: .9; transform: translate(6%, 6%) rotate(8deg); }
+  }
+  .ref-dash-top { position: relative; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .ref-dash-label {
+    font-size: 11.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em;
+    color: rgba(255,255,255,.6); font-family: 'Golos Text', sans-serif;
+  }
+  .ref-dash-rating {
+    border: none; border-radius: 999px; padding: 3px 10px 3px 8px; font-size: 12.5px; font-weight: 800;
+    background: linear-gradient(135deg, #FFC400, #FFE47a); color: #000; display: inline-flex; align-items: center;
+    gap: 4px; animation: selPulse 2.6s ease-in-out infinite; font-variant-numeric: tabular-nums;
+    font-family: 'Golos Text', sans-serif;
+  }
+  .ref-dash-scheme-name {
+    position: relative; font-family: 'Unbounded', sans-serif; font-size: 17px; font-weight: 700;
+    margin-top: 4px; letter-spacing: -.01em;
+  }
+  .ref-dash-stats { position: relative; display: flex; gap: 10px; margin-top: 14px; }
+  .ref-dash-stat { flex: 1; min-width: 0; }
+  .ref-dash-stat-label {
+    font-size: 11px; color: rgba(255,255,255,.55); font-family: 'Golos Text', sans-serif;
+    text-transform: uppercase; letter-spacing: .03em;
+  }
+  .ref-dash-stat-value {
+    font-size: 21px; font-weight: 800; margin-top: 2px; font-variant-numeric: tabular-nums;
+    line-height: 1.15; background: linear-gradient(135deg, #fff, #FFC400 140%);
+    -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
+  }
+  /* ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "рейтинг рефералов
+     проекта, топ-5, призы за 1/2/3 место, пока заглушки, но объяснить как
+     считается рейтинг") - тот же язык карточек/шрифтов, что и у .ref-dash
+     выше и .svc-card/.svc-note по всему разделу "Сервисы" (Unbounded для
+     заголовков, Golos Text для текста, чёрно-жёлтая палитра). */
+  .ref-rating-section { margin-top: 4px; }
+  .ref-rating-title {
+    font-family: 'Unbounded', sans-serif; font-size: 15px; font-weight: 700;
+    margin: 0 0 10px; display: flex; align-items: center; gap: 6px;
+  }
+  .ref-podium { display: flex; align-items: flex-end; gap: 8px; margin: 4px 0 12px; }
+  .ref-podium-item {
+    flex: 1; min-width: 0; background: #131313; border: 1px solid rgba(255,255,255,.1);
+    border-radius: 14px; padding: 12px 6px 10px; text-align: center;
+  }
+  .ref-podium-item.place-1 {
+    border-color: #FFC400; background: linear-gradient(135deg, rgba(255,196,0,.2), rgba(255,196,0,.05));
+    padding-top: 16px; margin-bottom: -8px;
+  }
+  .ref-podium-medal { font-size: 26px; line-height: 1; }
+  .ref-podium-place {
+    font-family: 'Golos Text', sans-serif; font-size: 10px; text-transform: uppercase;
+    letter-spacing: .03em; color: rgba(255,255,255,.55); margin-top: 4px;
+  }
+  .ref-podium-prize {
+    font-family: 'Golos Text', sans-serif; font-size: 11.5px; font-weight: 700; color: #fff;
+    margin-top: 3px; line-height: 1.25;
+  }
+  .ref-top5-row {
+    display: flex; align-items: center; gap: 10px; background: #131313;
+    border: 1px solid rgba(255,255,255,.08); border-radius: 10px; padding: 9px 12px;
+    margin-bottom: 6px; font-size: 13px; font-family: 'Golos Text', sans-serif;
+  }
+  .ref-top5-rank {
+    width: 22px; height: 22px; border-radius: 50%; background: rgba(255,196,0,.15); color: #FFC400;
+    display: flex; align-items: center; justify-content: center; font-weight: 800; font-size: 11.5px;
+    flex-shrink: 0;
+  }
+  .ref-top5-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ref-top5-count { color: rgba(255,255,255,.55); font-size: 12px; flex-shrink: 0; }
   .ref-back { background: none; border: none; color: #FFC400; font-size: 13px; font-weight: 600; padding: 0 0 10px; cursor: pointer; font-family: 'Golos Text', sans-serif; animation: backGlowPulse 2.6s ease-in-out infinite; text-transform: uppercase; }
   .svc-input {
     width: 100%; box-sizing: border-box; background: #0a0a0a; border: 1px solid rgba(255,255,255,.15);
@@ -18774,10 +18906,78 @@ def unified_app_html():
   // единственным содержимым), Юридическое лицо, Материалы, Фантом. По
   // кнопкам/паролям всё, что уже работало в чате, перенесено как есть - см.
   // renderReferralLegalDetail/renderReferralPhantomDetail ниже.
+  // ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "сверху дашборд:
+  // текущая схема, заработано за месяц, количество пользователей, рейтинг
+  // реферала (пока везде 5.0)") - переиспользует ТЕ ЖЕ поля data, что уже
+  // приходят с /referral/data и давно отображаются ниже в
+  // referralStatsBlockHtml (this_month_earned_rub/downline_total) - ничего
+  // нового не запрашивается, просто вынесено крупно наверх. Рейтинг
+  // реферала - НОВОЕ поле, которого в системе пока не существует (нет
+  // накопленной статистики, по которой его считать) - по прямой просьбе
+  // пользователя ("пока база во всём установи пять ноль") жёстко зашит
+  // как 5.0 у ВСЕХ, пока не появится реальный расчёт.
+  function referralSchemeName(referrerType) {
+    return referrerType === 'admin' ? 'Фантом'
+      : referrerType === 'legal_entity' ? 'Юридическое лицо'
+      : 'Водитель / Курьер';
+  }
+  function refDashHtml(data) {
+    return (
+      '<div class="ref-dash">' +
+        '<div class="ref-dash-top">' +
+          '<span class="ref-dash-label">Текущая схема</span>' +
+          '<span class="ref-dash-rating">⭐ 5.0</span>' +
+        '</div>' +
+        '<div class="ref-dash-scheme-name">' + referralSchemeName(data.referrer_type) + '</div>' +
+        '<div class="ref-dash-stats">' +
+          '<div class="ref-dash-stat"><div class="ref-dash-stat-label">Заработано за месяц</div><div class="ref-dash-stat-value">' + (data.this_month_earned_rub || 0) + ' ₽</div></div>' +
+          '<div class="ref-dash-stat"><div class="ref-dash-stat-label">Пользователей в системе</div><div class="ref-dash-stat-value">' + (data.downline_total || 0) + '</div></div>' +
+        '</div>' +
+      '</div>'
+    );
+  }
+  // ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "рейтинг реферальной
+  // системы, топ-5 рефералов проекта, призы: 1 место iPhone 18 Pro Max, 2
+  // место Apple Watch, 3 место AirPods - пока просто заглушки, но объяснить
+  // как будет считаться рейтинг (от количества привлечённых пользователей)")
+  // - реального зачёта/таблицы лидеров в системе пока нет (не с чем
+  // сравнивать пользователей друг с другом), поэтому весь блок - наглядный
+  // макет с явной пометкой "пример"/"в разработке", как и просил
+  // пользователь. Топ-5 ниже - ПРИДУМАННЫЕ примерные строки (не реальные
+  // водители, не реальные цифры) - никогда не выдаются за настоящие данные.
+  const REF_TOP5_EXAMPLE = [
+    { name: 'Топ-реферал #1', count: 46 },
+    { name: 'Топ-реферал #2', count: 38 },
+    { name: 'Топ-реферал #3', count: 31 },
+    { name: 'Топ-реферал #4', count: 24 },
+    { name: 'Топ-реферал #5', count: 19 },
+  ];
+  function refRatingSectionHtml() {
+    const top5Rows = REF_TOP5_EXAMPLE.map(function (r, i) {
+      return '<div class="ref-top5-row"><span class="ref-top5-rank">' + (i + 1) + '</span>' +
+        '<span class="ref-top5-name">' + r.name + '</span>' +
+        '<span class="ref-top5-count">' + r.count + ' приглашённых</span></div>';
+    }).join('');
+    return (
+      '<div class="ref-rating-section">' +
+        '<div class="ref-rating-title">🏆 Рейтинг рефералов проекта</div>' +
+        '<div class="svc-card">Рейтинг реферала считается по количеству пользователей, которых ты привёл в проект - чем больше приглашённых, тем выше место в рейтинге. Топ-5 участников каждый месяц получают призы.</div>' +
+        '<div class="ref-podium">' +
+          '<div class="ref-podium-item place-2"><div class="ref-podium-medal">🥈</div><div class="ref-podium-place">2 место</div><div class="ref-podium-prize">Apple Watch</div></div>' +
+          '<div class="ref-podium-item place-1"><div class="ref-podium-medal">🥇</div><div class="ref-podium-place">1 место</div><div class="ref-podium-prize">iPhone 18 Pro Max</div></div>' +
+          '<div class="ref-podium-item place-3"><div class="ref-podium-medal">🥉</div><div class="ref-podium-place">3 место</div><div class="ref-podium-prize">AirPods</div></div>' +
+        '</div>' +
+        top5Rows +
+        '<div class="svc-note">Раздел в разработке: рейтинг и топ-5 выше - пример оформления, скоро здесь появятся реальные данные участников.</div>' +
+      '</div>'
+    );
+  }
   function renderReferralMenu(box, data) {
     svcBackAction = svcShowGrid; // ИЗМЕНЕНО 27.09.2026 - из меню реферальной программы "Назад" (кнопка svcBack) ведёт в сетку сервисов, на один шаг назад
     box.innerHTML =
       '<div class="svc-h">🤝 Реферальная программа</div>' +
+      refDashHtml(data) +
+      refRatingSectionHtml() +
       '<div class="ref-grid">' +
         '<button type="button" class="ref-tile" id="refTileDriver"><span class="ref-ic">' + TILE_ICONS.referral + '</span>Водитель / Курьер</button>' +
         '<button type="button" class="ref-tile" id="refTileLegal"><span class="ref-ic">' + TILE_ICONS.car + '</span>Юридическое лицо</button>' +
@@ -24346,8 +24546,19 @@ def cabinet_webapp_html():
        ниже, чем нужно. Теперь просто плоский отступ, без повторного учёта
        чёлки/системной шапки - см. также applyTgChromeInset()/
        tg.requestFullscreen() ниже, которые теперь не трогают эту страницу,
-       когда она встроена iframe'ом (тот же смысл, тем же способом). */
-    padding-top: 16px;
+       когда она встроена iframe'ом (тот же смысл, тем же способом).
+       ЕЩЁ РАЗ УМЕНЬШЕНО 28.09.2026 (прямая просьба пользователя со
+       скриншотом - "убери отступ, чтобы смотрелось красиво") - было 16px,
+       сделано 8px - минимальный воздух, а не полноценный отступ. Часть
+       ЧЁРНОЙ области НАД первым рядом плашек на скриншоте пользователя -
+       это высота ВНЕШНЕЙ шапки unified_app_html (см. header/#shell в её
+       CSS) - она обязана резервировать место под системную шапку Telegram
+       (contentSafeAreaInset.top) и физическую чёлку устройства, а на
+       скриншотах пользователя вдобавок ещё и под системную плашку
+       АКТИВНОГО ЗВОНКА на его телефоне (зелёная "📞 0:00" сверху) - это
+       временно увеличивает реальный safe-area/chrome-top и не зависит от
+       вёрстки этой страницы; без звонка та же шапка будет заметно ниже. */
+    padding-top: 8px;
     padding-bottom: max(16px, env(safe-area-inset-bottom, 0px));
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     background: var(--tg-theme-bg-color, #f2f2f7); color: var(--tg-theme-text-color, #000);
