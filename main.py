@@ -6912,7 +6912,16 @@ def share_order_webapp_html(category=None):
 </style>
 </head>
 <body>
-<button type="button" onclick="try{if(window.history.length>1){history.back();}else if(window.Telegram&&Telegram.WebApp&&Telegram.WebApp.close){Telegram.WebApp.close();}}catch(e){}" style="position:relative;z-index:2;display:inline-flex;align-items:center;gap:5px;margin:calc(env(safe-area-inset-top, 0px) + var(--tg-chrome-top, 0px) + 4px) 0 10px;padding:8px 14px 8px 10px;background:#1c1c1c;border:1px solid rgba(255,255,255,.12);border-radius:10px;color:#fff;font-size:13px;font-weight:600;cursor:pointer;">← Назад</button>
+<!-- ИЗМЕНЕНО 28.09.2026 (жалоба пользователя со скриншотом кабинета юрлица -
+     "выровняй по верху, посмотри как опустилось") - margin-top у этой
+     кнопки раньше СНОВА добавлял env(safe-area-inset-top)+var(--tg-chrome-top)
+     (см. правку "back-button-6-pages" от 27.09.2026), а body этой же
+     страницы УЖЕ применяет ту же самую формулу в своём padding-top (см.
+     чуть выше в <style>) - тот же самый отступ считался дважды, и кнопка
+     улетала вниз вдвое дальше, чем нужно. body уже гарантирует, что первый
+     элемент не залезает под системную шапку/чёлку - кнопке остаётся только
+     небольшой самостоятельный отступ. -->
+<button type="button" onclick="try{if(window.history.length>1){history.back();}else if(window.Telegram&&Telegram.WebApp&&Telegram.WebApp.close){Telegram.WebApp.close();}}catch(e){}" style="position:relative;z-index:2;display:inline-flex;align-items:center;gap:5px;margin:4px 0 10px;padding:8px 14px 8px 10px;background:#1c1c1c;border:1px solid rgba(255,255,255,.12);border-radius:10px;color:#fff;font-size:13px;font-weight:600;cursor:pointer;">← Назад</button>
 <div id="form">
   <h1>🔄 Отдать заказ</h1>
   <label>📍 Адрес подачи</label>
@@ -12306,6 +12315,23 @@ MAP_CHROME_CSS = """
     overflow: hidden; user-select: none; transition: transform .3s ease, opacity .3s ease;
   }
   .shift-slider.pending { opacity: .6; }
+  /* ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "сделай анимацию
+     мерцания приятного для бара стрелки") - мягкое дыхание жёлтой полосы
+     "Выйти на линию" (доп. кольцо-ореол поверх обычной тени), чтобы
+     обратить внимание, что смена ещё не начата - свайпнуть, чтобы выйти на
+     линию. Не переиспользуем @keyframes selPulse (см. чуть ниже) один в
+     один, как у активных кнопок/пилюль по остальному проекту - у ЭТОЙ
+     полосы уже есть собственная "подъёмная" тень (0 2px 8px rgba(0,0,0,.45)),
+     и её нужно сохранить и во время анимации, а не заменить только кольцом,
+     как делает selPulse. Останавливается на время самого запроса
+     (.pending, уже приглушена opacity) - на активной смене полоса и так
+     уезжает за экран (.on-shift). */
+  @keyframes shiftSliderGlow {
+    0%, 100% { box-shadow: 0 2px 8px rgba(0,0,0,.45), 0 0 0 0 rgba(255,255,255,.5); }
+    50% { box-shadow: 0 2px 14px rgba(0,0,0,.5), 0 0 0 8px rgba(255,255,255,0); }
+  }
+  .shift-slider:not(.pending) { animation: shiftSliderGlow 2.4s ease-in-out infinite; }
+  .shift-slider.pending { animation: none; }
   /* ИЗМЕНЕНО 26.09.2026 (прямая просьба пользователя со скриншотом -
      "опять не работает кнопка выйти на линию она не активируется") -
      touch-action:none раньше стоял ТОЛЬКО на маленькой 44px-ручке
@@ -16782,6 +16808,21 @@ def weather_webapp_html():
 </style>
 </head>
 <body>
+<!-- ИЗМЕНЕНО 28.09.2026 (жалоба пользователя со скриншотом кабинета юрлица -
+     "выровняй по верху, посмотри как опустилось") - margin-top у этой
+     кнопки раньше СНОВА добавлял env(safe-area-inset-top)+var(--tg-chrome-top)
+     (см. правку "back-button-6-pages" от 27.09.2026), а body этой же
+     страницы УЖЕ применяет ту же самую формулу в своём padding-top у ДРУГИХ
+     плоских страниц (weather/where_to_go/events/transport/share_order/
+     legal_cabinet) - но НЕ у ЭТОЙ (weather_webapp_html): здесь у body нет
+     своего padding-top вообще (fullscreen-канвас с погодой, safe-area
+     учитывает только #content - см. чуть выше в <style>), а кнопка стоит
+     ПЕРЕД #content, отдельно от него. Поэтому здесь margin-top кнопки -
+     ЕДИНСТВЕННЫЙ источник отступа под системную шапку, и он должен
+     остаться прежним (с расчётом env(safe-area-inset-top)+var(--tg-chrome-top)) -
+     иначе именно на этой странице снова воспроизведётся исходный баг
+     "Нету кнопки назад". Двойного счёта тут нет и не было - это правило
+     относится к 5 ДРУГИМ страницам (см. одноимённый комментарий в них). -->
 <button type="button" onclick="try{if(window.history.length>1){history.back();}else if(window.Telegram&&Telegram.WebApp&&Telegram.WebApp.close){Telegram.WebApp.close();}}catch(e){}" style="position:relative;z-index:2;display:inline-flex;align-items:center;gap:5px;margin:calc(env(safe-area-inset-top, 0px) + var(--tg-chrome-top, 0px) + 4px) 0 10px;padding:8px 14px 8px 10px;background:#1c1c1c;border:1px solid rgba(255,255,255,.12);border-radius:10px;color:#fff;font-size:13px;font-weight:600;cursor:pointer;">← Назад</button>
 <canvas id="bgCanvas"></canvas>
 <div id="content">
@@ -17406,7 +17447,16 @@ def where_to_go_webapp_html():
 </style>
 </head>
 <body>
-<button type="button" onclick="try{if(window.history.length>1){history.back();}else if(window.Telegram&&Telegram.WebApp&&Telegram.WebApp.close){Telegram.WebApp.close();}}catch(e){}" style="position:relative;z-index:2;display:inline-flex;align-items:center;gap:5px;margin:calc(env(safe-area-inset-top, 0px) + var(--tg-chrome-top, 0px) + 4px) 0 10px;padding:8px 14px 8px 10px;background:#1c1c1c;border:1px solid rgba(255,255,255,.12);border-radius:10px;color:#fff;font-size:13px;font-weight:600;cursor:pointer;">← Назад</button>
+<!-- ИЗМЕНЕНО 28.09.2026 (жалоба пользователя со скриншотом кабинета юрлица -
+     "выровняй по верху, посмотри как опустилось") - margin-top у этой
+     кнопки раньше СНОВА добавлял env(safe-area-inset-top)+var(--tg-chrome-top)
+     (см. правку "back-button-6-pages" от 27.09.2026), а body этой же
+     страницы УЖЕ применяет ту же самую формулу в своём padding-top (см.
+     чуть выше в <style>) - тот же самый отступ считался дважды, и кнопка
+     улетала вниз вдвое дальше, чем нужно. body уже гарантирует, что первый
+     элемент не залезает под системную шапку/чёлку - кнопке остаётся только
+     небольшой самостоятельный отступ. -->
+<button type="button" onclick="try{if(window.history.length>1){history.back();}else if(window.Telegram&&Telegram.WebApp&&Telegram.WebApp.close){Telegram.WebApp.close();}}catch(e){}" style="position:relative;z-index:2;display:inline-flex;align-items:center;gap:5px;margin:4px 0 10px;padding:8px 14px 8px 10px;background:#1c1c1c;border:1px solid rgba(255,255,255,.12);border-radius:10px;color:#fff;font-size:13px;font-weight:600;cursor:pointer;">← Назад</button>
 <div id="state">📍 Определяю твою локацию…</div>
 <div id="app" style="display:none">
   <h1 id="cityTitle">🧭 Куда ехать</h1>
@@ -17927,6 +17977,13 @@ def unified_app_html():
      просто добавляет ещё один gap, ничего пересчитывать не нужно. */
   .tile .sub { font-size: 10.5px; color: #9a9a9a; font-weight: 500; line-height: 1.3; }
   .tile.placeholder { opacity: .45; }
+  /* ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя со скриншотом сетки
+     "Сервисы" - "реферальная система и впн надо сделать реалом и миганием
+     как кнопки рейтинга чтобы они подсвечивались") - тот же пульсирующий
+     ореол/подсветка рамки, что уже есть у активных плиток/пилюль
+     (.ref-tile.active чуть ниже переиспользует тот же @keyframes selPulse -
+     здесь он уже объявлен один раз на файл, второй раз не заводим). */
+  .tile.highlight { border-color: #FFC400; background: rgba(255,196,0,.10); animation: selPulse 2.6s ease-in-out infinite; }
   .tile .soon-badge {
     position: absolute; top: 10px; right: 10px; font-size: 9.5px; color: #FFC400;
     background: rgba(255,196,0,.12); border-radius: 999px; padding: 2px 7px; letter-spacing: .03em;
@@ -18512,6 +18569,27 @@ def unified_app_html():
     document.getElementById('mapFrame').src = src;
   }
 
+  // ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "когда открываешь
+  // где бензин он должен не просто карту открыть а переходить на раздел
+  // карты снизу первая вкладка и открывать с фильтром заправки") - раньше
+  // плитка "Где бензин" в "Сервисах" была обычной ссылкой <a href=...> на
+  // ТУ ЖЕ страницу /map, что открывалась ОТДЕЛЬНО (новый standalone-экран
+  // поверх мини-приложения, вкладки снизу пропадали). Теперь вместо
+  // перехода по ссылке - переключаем встроенную вкладку "Карта" (первая
+  // внизу, тот же #mapFrame/loadMapFrame выше) и ПЕРЕЗАГРУЖАЕМ её тем же
+  // /map с ?layer=fuel (map_webapp_html уже умеет включать чекбокс "⛽
+  // Заправки" и грузить станции по этому параметру - см. комментарий
+  // "23.09.2026" у params.get('layer') в map_webapp_html), так что фильтр
+  // заправок применяется сразу же, без отдельного экрана и без потери
+  // нижнего таббара.
+  function openFuelMapTab() {
+    showTab('map');
+    let src = '""" + MAP_WEBAPP_PATH + """?city=' + encodeURIComponent(city) + '&category=' + encodeURIComponent(category) + '&layer=fuel';
+    const initData = (tg && tg.initData) || '';
+    if (initData) { src += '&tgInitData=' + encodeURIComponent(initData); }
+    document.getElementById('mapFrame').src = src;
+  }
+
   // ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя со скриншотом входного
   // гейта - "должно быть вот так вот... висеть крутиться и сообщение что
   // геолокация не включена, её нужно включить"): раньше карта (вложенный
@@ -18741,7 +18819,6 @@ def unified_app_html():
     const withoutEventsOrAirports = CATEGORIES_WITHOUT_EVENTS_OR_AIRPORTS.indexOf(category) !== -1;
     let eventsUrl = '""" + EVENTS_WEBAPP_PATH + """?city=' + cityQ + '&category=' + catQ;
     if (withoutEventsOrAirports) { eventsUrl += '&tab=roads'; }
-    const fuelMapUrl = '""" + MAP_WEBAPP_PATH + """?city=' + cityQ + '&category=' + catQ + '&layer=fuel' + tgInitDataParam();
     const shareOrderUrl = '""" + SHARE_ORDER_WEBAPP_PATH + """?category=' + catQ + tgInitDataParam();
     const chatUrl = DRIVER_CHAT_LINKS[city] || '';
 
@@ -18752,12 +18829,12 @@ def unified_app_html():
       { href: '""" + WEATHER_WEBAPP_PATH + """?city=' + cityQ, ic: TILE_ICONS.weather, lbl: 'Погода', id: 'weatherTile', sub: true },
       { href: eventsUrl, ic: withoutEventsOrAirports ? TILE_ICONS.roadEvents : TILE_ICONS.events, lbl: withoutEventsOrAirports ? 'Дорожные события' : 'События города' },
       { href: shareOrderUrl, ic: TILE_ICONS.exchange, lbl: 'Отдать заказ' },
-      { href: fuelMapUrl, ic: TILE_ICONS.fuel, lbl: 'Где бензин' },
+      { action: openFuelMapTab, ic: TILE_ICONS.fuel, lbl: 'Где бензин' },
       { href: chatUrl, ic: TILE_ICONS.chat, lbl: 'Чаты водителей' },
       { detail: 'tips', ic: TILE_ICONS.tips, lbl: 'Чаевые' },
-      { detail: 'referral', ic: TILE_ICONS.referral, lbl: 'Реферальная программа' },
+      { detail: 'referral', ic: TILE_ICONS.referral, lbl: 'Реферальная программа', highlight: true },
       { detail: 'subscription', ic: TILE_ICONS.subscription, lbl: 'Подписка' },
-      { href: '""" + VPN_BOT_URL + """', ic: TILE_ICONS.vpn, lbl: 'Бесплатный VPN' },
+      { href: '""" + VPN_BOT_URL + """', ic: TILE_ICONS.vpn, lbl: 'Бесплатный VPN', highlight: true },
       { detail: 'support', ic: TILE_ICONS.support, lbl: 'Поддержка' },
       // ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя, скриншот раздела
       // "Сервисы" - "место автопарк сделай кнопку ШТРАФЫ заглушку в
@@ -18784,18 +18861,42 @@ def unified_app_html():
       // после рендера (см. loadWeatherTileSub ниже) - изначально пустая,
       // чтобы не блокировать показ сетки ожиданием сети.
       const subHtml = t.sub ? '<div class="sub" id="' + t.id + 'Sub"></div>' : '';
-      if (t.detail) {
+      let el = null;
+      if (t.action) {
+        // ДОБАВЛЕНО 28.09.2026 (см. openFuelMapTab выше - "Где бензин" теперь
+        // переключает встроенную вкладку "Карта", а не открывает отдельную
+        // страницу) - та же кнопка-плитка, что у t.detail ниже, просто вызывает
+        // произвольный колбэк вместо openServiceDetail(...).
+        const b = document.createElement('button'); b.type = 'button'; b.className = 'tile'; b.style.width = '100%'; b.style.font = 'inherit';
+        if (t.id) b.id = t.id;
+        b.innerHTML = '<div class="ic">' + t.ic + '</div><div class="lbl">' + t.lbl + '</div>' + subHtml;
+        b.addEventListener('click', t.action);
+        grid.appendChild(b);
+        el = b;
+      } else if (t.detail) {
         const b = document.createElement('button'); b.type = 'button'; b.className = 'tile'; b.style.width = '100%'; b.style.font = 'inherit';
         if (t.id) b.id = t.id;
         b.innerHTML = '<div class="ic">' + t.ic + '</div><div class="lbl">' + t.lbl + '</div>' + subHtml;
         b.addEventListener('click', function () { openServiceDetail(t.detail); });
         grid.appendChild(b);
+        el = b;
       } else if (t.href) {
         const a = document.createElement('a'); a.className = 'tile'; a.href = t.href; a.rel = 'noopener';
         if (t.id) a.id = t.id;
         a.innerHTML = '<div class="ic">' + t.ic + '</div><div class="lbl">' + t.lbl + '</div>' + subHtml;
         grid.appendChild(a);
+        el = a;
       }
+      // ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя со скриншотом сетки
+      // "Сервисы" - "реферальная система и впн надо сделать реалом и
+      // миганием как кнопки рейтинга чтобы они подсвечивались") - те же
+      // пульсирующий жёлтый ореол и подсветка рамки, что уже использует
+      // @keyframes selPulse у активных плиток/пилюль по всему проекту (см.
+      // .ref-tile.active/.layer-toggle-btn.active и т.д. - тот же самый
+      // keyframes, не заводим ещё один такой же), просто применены к двум
+      // конкретным плиткам сервисов (t.highlight, см. tiles-массив выше),
+      // чтобы обратить на них внимание.
+      if (el && t.highlight) el.classList.add('highlight');
     });
 
     // УБРАНО 27.09.2026 (прямая просьба пользователя со скриншотом - "удали
@@ -22062,7 +22163,16 @@ def events_webapp_html():
 </style>
 </head>
 <body>
-<button type="button" onclick="try{if(window.history.length>1){history.back();}else if(window.Telegram&&Telegram.WebApp&&Telegram.WebApp.close){Telegram.WebApp.close();}}catch(e){}" style="position:relative;z-index:2;display:inline-flex;align-items:center;gap:5px;margin:calc(env(safe-area-inset-top, 0px) + var(--tg-chrome-top, 0px) + 4px) 0 10px;padding:8px 14px 8px 10px;background:#1c1c1c;border:1px solid rgba(255,255,255,.12);border-radius:10px;color:#fff;font-size:13px;font-weight:600;cursor:pointer;">← Назад</button>
+<!-- ИЗМЕНЕНО 28.09.2026 (жалоба пользователя со скриншотом кабинета юрлица -
+     "выровняй по верху, посмотри как опустилось") - margin-top у этой
+     кнопки раньше СНОВА добавлял env(safe-area-inset-top)+var(--tg-chrome-top)
+     (см. правку "back-button-6-pages" от 27.09.2026), а body этой же
+     страницы УЖЕ применяет ту же самую формулу в своём padding-top (см.
+     чуть выше в <style>) - тот же самый отступ считался дважды, и кнопка
+     улетала вниз вдвое дальше, чем нужно. body уже гарантирует, что первый
+     элемент не залезает под системную шапку/чёлку - кнопке остаётся только
+     небольшой самостоятельный отступ. -->
+<button type="button" onclick="try{if(window.history.length>1){history.back();}else if(window.Telegram&&Telegram.WebApp&&Telegram.WebApp.close){Telegram.WebApp.close();}}catch(e){}" style="position:relative;z-index:2;display:inline-flex;align-items:center;gap:5px;margin:4px 0 10px;padding:8px 14px 8px 10px;background:#1c1c1c;border:1px solid rgba(255,255,255,.12);border-radius:10px;color:#fff;font-size:13px;font-weight:600;cursor:pointer;">← Назад</button>
 <div id="state">Загружаю…</div>
 <div id="app" style="display:none">
   <h1 id="title">События</h1>
@@ -22509,7 +22619,16 @@ def transport_webapp_html():
 </style>
 </head>
 <body>
-<button type="button" onclick="try{if(window.history.length>1){history.back();}else if(window.Telegram&&Telegram.WebApp&&Telegram.WebApp.close){Telegram.WebApp.close();}}catch(e){}" style="position:relative;z-index:2;display:inline-flex;align-items:center;gap:5px;margin:calc(env(safe-area-inset-top, 0px) + var(--tg-chrome-top, 0px) + 4px) 0 10px;padding:8px 14px 8px 10px;background:#1c1c1c;border:1px solid rgba(255,255,255,.12);border-radius:10px;color:#fff;font-size:13px;font-weight:600;cursor:pointer;">← Назад</button>
+<!-- ИЗМЕНЕНО 28.09.2026 (жалоба пользователя со скриншотом кабинета юрлица -
+     "выровняй по верху, посмотри как опустилось") - margin-top у этой
+     кнопки раньше СНОВА добавлял env(safe-area-inset-top)+var(--tg-chrome-top)
+     (см. правку "back-button-6-pages" от 27.09.2026), а body этой же
+     страницы УЖЕ применяет ту же самую формулу в своём padding-top (см.
+     чуть выше в <style>) - тот же самый отступ считался дважды, и кнопка
+     улетала вниз вдвое дальше, чем нужно. body уже гарантирует, что первый
+     элемент не залезает под системную шапку/чёлку - кнопке остаётся только
+     небольшой самостоятельный отступ. -->
+<button type="button" onclick="try{if(window.history.length>1){history.back();}else if(window.Telegram&&Telegram.WebApp&&Telegram.WebApp.close){Telegram.WebApp.close();}}catch(e){}" style="position:relative;z-index:2;display:inline-flex;align-items:center;gap:5px;margin:4px 0 10px;padding:8px 14px 8px 10px;background:#1c1c1c;border:1px solid rgba(255,255,255,.12);border-radius:10px;color:#fff;font-size:13px;font-weight:600;cursor:pointer;">← Назад</button>
 <div id="state">Загружаю…</div>
 <div id="app" style="display:none">
   <h1>✈️🚆 Авиа/ЖД</h1>
@@ -24119,7 +24238,16 @@ def legal_cabinet_webapp_html():
 </style>
 </head>
 <body>
-<button type="button" onclick="try{if(window.history.length>1){history.back();}else if(window.Telegram&&Telegram.WebApp&&Telegram.WebApp.close){Telegram.WebApp.close();}}catch(e){}" style="position:relative;z-index:2;display:inline-flex;align-items:center;gap:5px;margin:calc(env(safe-area-inset-top, 0px) + var(--tg-chrome-top, 0px) + 4px) 0 10px;padding:8px 14px 8px 10px;background:#1c1c1c;border:1px solid rgba(255,255,255,.12);border-radius:10px;color:#fff;font-size:13px;font-weight:600;cursor:pointer;">← Назад</button>
+<!-- ИЗМЕНЕНО 28.09.2026 (жалоба пользователя со скриншотом кабинета юрлица -
+     "выровняй по верху, посмотри как опустилось") - margin-top у этой
+     кнопки раньше СНОВА добавлял env(safe-area-inset-top)+var(--tg-chrome-top)
+     (см. правку "back-button-6-pages" от 27.09.2026), а body этой же
+     страницы УЖЕ применяет ту же самую формулу в своём padding-top (см.
+     чуть выше в <style>) - тот же самый отступ считался дважды, и кнопка
+     улетала вниз вдвое дальше, чем нужно. body уже гарантирует, что первый
+     элемент не залезает под системную шапку/чёлку - кнопке остаётся только
+     небольшой самостоятельный отступ. -->
+<button type="button" onclick="try{if(window.history.length>1){history.back();}else if(window.Telegram&&Telegram.WebApp&&Telegram.WebApp.close){Telegram.WebApp.close();}}catch(e){}" style="position:relative;z-index:2;display:inline-flex;align-items:center;gap:5px;margin:4px 0 10px;padding:8px 14px 8px 10px;background:#1c1c1c;border:1px solid rgba(255,255,255,.12);border-radius:10px;color:#fff;font-size:13px;font-weight:600;cursor:pointer;">← Назад</button>
 <div id="state">Загружаю данные…</div>
 <div id="app" style="display:none">
 
