@@ -9822,25 +9822,35 @@ async def check_long_shifts():
                 # достигнут, смена завершается и остальные пуши для неё уже
                 # не нужны - state['shift'] исчезнет).
                 if elapsed_hours >= SHIFT_AUTO_FINISH_HOURS:
-                    category = state.get('category')
-                    city = state.get('city')
+                    # ИЗМЕНЕНО 27.09.2026 (прямая просьба пользователя - "все
+                    # расчёты после смены в приложении, в бот никаких
+                    # сообщений более не приходило", подтверждено отдельно
+                    # для этого пути - "Тоже убрать") - раньше здесь была
+                    # finish_shift_and_notify (слала сообщение в чат). Теперь
+                    # сводка кладётся в pending_shift_summary - водитель
+                    # увидит её карточкой в приложении на карте при следующем
+                    # опросе /map/my_profile, а не сообщением в чате (в
+                    # момент автозавершения приложение почти наверняка
+                    # закрыто).
                     try:
-                        await finish_shift_and_notify(
-                            user_id, category, city,
-                            functools.partial(bot.send_message, user_id),
+                        summary = finish_shift_and_summarize(
+                            user_id,
                             header=(
-                                f"⏰ *Смена автоматически завершена после {SHIFT_AUTO_FINISH_HOURS} часов "
-                                "секундомера* - мы решили, что ты мог просто забыть её выключить."
+                                f"⏰ Смена автоматически завершена после {SHIFT_AUTO_FINISH_HOURS} часов "
+                                "секундомера - мы решили, что ты мог просто забыть её выключить."
                             ),
                         )
+                        state['pending_shift_summary'] = summary
                     except Exception as e:
                         logger.error(f"❌ Не удалось автозавершить смену пользователю {user_id}: {e}")
                     # ДОБАВЛЕНО 23.09.2026 (подготовка к росту до 5000
-                    # пользователей) - пауза между отправками, как и в
-                    # остальных похожих фоновых рассылках файла (см.
-                    # check_nearby_drivers) - если много водителей одновременно
-                    # достигнут лимита часов, шлём не залпом (риск 429 от
-                    # Telegram), а с той же паузой ~20 сообщений/сек.
+                    # пользователей), ИЗМЕНЕНО 27.09.2026 - теперь здесь
+                    # больше нет отправки сообщений в Telegram, поэтому риска
+                    # flood-control нет; пауза оставлена как есть - finish_shift
+                    # внутри синхронно пишет в SQLite (save_shift_record), и
+                    # короткая пауза между пользователями не даёт этим
+                    # записям идти совсем уж залпом, если разом набежит много
+                    # автозавершений.
                     await asyncio.sleep(0.05)
                     continue
 
@@ -10085,7 +10095,15 @@ async def toggle_shift(message: types.Message):
 
     if not is_shift_active(state):
         return  # защитный случай - кнопка не должна была показать "Завершить", если смены нет
-    await finish_shift_and_notify(user_id, category, city, message.answer)
+    # ИЗМЕНЕНО 27.09.2026 (прямая просьба пользователя - "все расчёты после
+    # смены исключительно в приложении, в бот никаких сообщений более не
+    # приходило", подтверждено отдельно и для этой кнопки - "Тоже убрать") -
+    # раньше здесь была finish_shift_and_notify (слала "СМЕНА ЗАВЕРШЕНА" +
+    # предложение указать доход прямо в чат). Теперь сводка не шлётся
+    # сообщением, а кладётся в state['pending_shift_summary'] - водитель
+    # увидит её карточкой в приложении на карте (вкладка "Карта") при
+    # следующем опросе /map/my_profile.
+    state['pending_shift_summary'] = finish_shift_and_summarize(user_id)
 
 @router.message(_is_shift_tariff_button_press)
 async def open_live_shift_tariffs(message: types.Message):
@@ -10329,55 +10347,62 @@ async def shift_tariff_confirm(callback_query: types.CallbackQuery):
     await callback_query.message.edit_reply_markup(reply_markup=None)
     await start_shift_and_notify(callback_query.message.answer, user_id, category, city, tariffs)
 
-async def finish_shift_and_notify(user_id, category, city, send_func, header=None):
-    """Общая логика завершения смены: считает итоги (finish_shift), шлёт
-    сообщение "СМЕНА ЗАВЕРШЕНА" и предлагает указать доход за день - вынесена
-    из toggle_shift (по просьбе пользователя, 20.09.2026: "сделай так чтобы
-    смена автоматически завершалась после 18 часов"), чтобы тем же кодом
-    пользовался и хендлер кнопки "⛔️⛔️УЙТИ С ЛИНИИ⛔️⛔️", и фоновая
-    автозавершающая задача (см. check_long_shifts). send_func - функция
-    отправки сообщения с сигнатурой message.answer (kwargs reply_markup/
-    parse_mode) - у ручного завершения это message.answer, у автоматического
-    partial(bot.send_message, user_id). header - опциональный текст ПЕРЕД
-    "СМЕНА ЗАВЕРШЕНА" (используется для "⏰ Автоматически завершена по
-    достижении лимита времени", см. auto_finish_long_shifts)."""
+def finish_shift_and_summarize(user_id, header=None):
+    """Общая логика завершения смены: считает итоги (finish_shift) и
+    собирает структурированную сводку - вынесена из toggle_shift (по
+    просьбе пользователя, 20.09.2026: "сделай так чтобы смена автоматически
+    завершалась после 18 часов"), используется и хендлером кнопки
+    "⛔️⛔️УЙТИ С ЛИНИИ⛔️⛔️" в чате, и фоновой автозавершающей задачей (см.
+    check_long_shifts), и свайпом на карте (handle_map_toggle_shift_api).
+
+    ИЗМЕНЕНО 27.09.2026 (прямая просьба пользователя - "давай все расчёты
+    после смены переведём на приложение чтобы все расчёты выполнялись
+    исключительно в приложении, в бот никаких сообщений более не
+    приходило"): раньше эта функция называлась finish_shift_and_notify,
+    принимала send_func и сама слала ДВА сообщения в чат ("СМЕНА ЗАВЕРШЕНА"
+    + "Хочешь посчитать доход"). Теперь она ничего никуда не шлёт - только
+    считает и возвращает словарь сводки (shift_summary), а что с ним делать
+    решает вызывающий код:
+      - handle_map_toggle_shift_api (свайп на карте) отдаёт сводку прямо в
+        JSON-ответе - приложение открыто прямо сейчас, карточка показывается
+        сразу, без похода в pending_shift_summary;
+      - check_long_shifts (автозавершение по таймауту) и хендлер кнопки
+        "⛔️⛔️УЙТИ С ЛИНИИ⛔️⛔️" в чате кладут её в
+        state['pending_shift_summary'] - в момент завершения приложение
+        могло быть не открыто, поэтому карточка появится там при следующем
+        опросе /map/my_profile (см. handle_map_my_profile_api), который
+        забирает её оттуда и сразу удаляет (одноразовая доставка, как
+        флеш-сообщение - иначе карточка всплывала бы повторно на каждом
+        опросе).
+    header - опциональный текст для варианта "автозавершение по таймауту"
+    (раньше шёл ПЕРЕД текстом сообщения в чат, теперь просто отдельное поле
+    сводки auto_finished_header - в приложении показывается тем же смыслом,
+    своей вёрсткой)."""
     duration_minutes, total_km, _airport_wait_minutes = finish_shift(user_id)
     # По просьбе пользователя (21.09.2026): сразу по завершении смены
     # показать потраченное на топливо/эл-заряд, используя ранее сохранённые
     # цену топлива и средний расход (см. FINANCE_REMEMBERED_FIELDS/
     # finance_defaults - тот же профиль, что заполняется в "💰 ФИНАНСЫ"). Если
-    # ни разу не вводились - строку пропускаем (не заставляем вводить
-    # прямо тут, обычный ввод остаётся в "💰 УКАЗАТЬ ДОХОД ЗА ДЕНЬ" ниже).
+    # ни разу не вводились - просто не отдаём fuel_cost (приложение само не
+    # покажет эту строку), обычный ввод остаётся в кнопке "💰 Указать доход"
+    # карточки итогов смены.
     state = user_state.get(user_id) or {}
     defaults = finance_defaults(state)
     consumption = defaults.get('consumption')
     fuel_price = defaults.get('fuel_price')
-    fuel_line = ""
+    fuel_cost = None
     if consumption and fuel_price:
-        fuel_cost = (total_km / 100) * consumption * fuel_price
-        fuel_line = f"⛽ Потрачено на топливо: ~{fuel_cost:.0f} ₽ ({consumption:g} л/100км × {fuel_price:g} ₽/л)\n"
-    body = (
-        "🔴 *СМЕНА ЗАВЕРШЕНА*\n"
-        "▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓\n"
-        f"⏱ {format_shift_duration(duration_minutes)}   🛣 {total_km:.1f} км\n"
-        f"{fuel_line}"
-        "▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓\n"
-        "_Запись сохранена в «💰 Финансы» → «📈 Статистика смен»._"
-    )
-    if header:
-        body = f"{header}\n{body}"
-    await send_func(body, reply_markup=services_keyboard(category, city, user_id), parse_mode='Markdown')
-    # По просьбе пользователя (20.09.2026): сразу после завершения смены
-    # предлагаем указать доход за день - отдельной инлайн-кнопкой (а не
-    # сразу форсируем ввод текста, чтобы не мешать, если человек ещё за
-    # рулём/занят). Km подставляем автоматически из только что завершённой
-    # смены - см. start_finance_after_shift.
-    await send_func(
-        "Хочешь сразу посчитать доход за эту смену?",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="💰 УКАЗАТЬ ДОХОД ЗА ДЕНЬ", callback_data="start_finance_after_shift"),
-        ]]),
-    )
+        fuel_cost = round((total_km / 100) * consumption * fuel_price)
+    return {
+        'duration_minutes': duration_minutes,
+        'duration_text': format_shift_duration(duration_minutes),
+        'total_km': round(total_km, 1),
+        'fuel_cost': fuel_cost,
+        'consumption': consumption,
+        'fuel_price': fuel_price,
+        'auto_finished_header': header,
+        'finished_at': datetime.now(timezone.utc).isoformat(),
+    }
 
 def airport_queue_enable_text():
     """Общий текст-инструкция - используется и в toggle_airport_queue_tracking
@@ -11227,6 +11252,21 @@ MAP_TOGGLE_SHIFT_API_PATH = '/map/toggle_shift'
 # приходит в теле запроса, initData ОБЯЗАТЕЛЕН по той же причине, что и у
 # /map/toggle_shift (реальный старт смены, не чтение данных).
 MAP_START_SHIFT_API_PATH = '/map/start_shift'
+
+# ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - "все расчёты после
+# смены переведём на приложение, в бот никаких сообщений более не
+# приходило") - карточка итогов смены на карте (shift_summary/
+# pending_shift_summary, см. finish_shift_and_summarize выше) заменяет
+# сообщения "СМЕНА ЗАВЕРШЕНА"/"Хочешь посчитать доход" в чате, но сам
+# пошаговый расчёт дохода (advance_finance_step) остаётся чат-визардом
+# (осознанное решение пользователя - "Минимально" на прямой вопрос, не
+# переписывать эту логику в приложении). Этот POST-эндпоинт - явный запуск
+# того же визарда с картой (кнопка "💰 Указать доход" в карточке итогов),
+# initData ОБЯЗАТЕЛЕН - запускает реальное действие (черновик расчёта +
+# сообщение в чат), а не просто читает данные. См.
+# handle_map_start_finance_api ниже - повторяет серверную часть
+# start_finance_after_shift без объекта callback_query.
+MAP_START_FINANCE_API_PATH = '/map/start_finance'
 
 # ==================== ЗАПРАВКИ + ЭЛЕКТРОЗАРЯДКИ НА КАРТЕ ====================
 # ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "вынеси на карту все
@@ -12153,11 +12193,19 @@ MAP_CHROME_CSS = """
      выше) - тот же визуальный язык, что у .shift-radar-indicator (тёмный
      круг, белая обводка), но меньше и в противоположном (правом верхнем)
      углу, чтобы не конкурировать с кнопкой смены за место. */
-  .map-menu-toggle-btn { position: absolute; top: calc(10px + var(--tg-chrome-top, 0px)); right: 14px; z-index: 1001; width: 44px; height: 44px; border-radius: 50%; background: rgba(28,28,30,.92); border: 2px solid rgba(255,255,255,.55); box-shadow: 0 2px 8px rgba(0,0,0,.45); display: flex; align-items: center; justify-content: center; user-select: none; cursor: pointer; transition: transform .12s, background .2s, border-color .2s; }
+  /* ИЗМЕНЕНО 27.09.2026 (прямая просьба пользователя со скриншотом -
+     "кнопку сверху справа перенеси выше кнопки +, сделай такого же
+     размера, а появление верхнего бара там же сверху где и был") - размер
+     (44px) приведён ровно к размеру круглых кнопок +/- зума
+     (.leaflet-control-zoom a выше - 40px, белая обводка 2px solid #fff),
+     top уменьшен (была 10px) - кнопка поднята выше. #mapTogglesRow
+     (раскрывающийся ряд Тарифы/Слои/Пробки/Спрос) НЕ трогали - его top
+     остаётся тем же (58px), где и был. */
+  .map-menu-toggle-btn { position: absolute; top: calc(4px + var(--tg-chrome-top, 0px)); right: 14px; z-index: 1001; width: 40px; height: 40px; border-radius: 50%; background: rgba(28,28,30,.92); border: 2px solid #fff; box-shadow: 0 2px 8px rgba(0,0,0,.45); display: flex; align-items: center; justify-content: center; user-select: none; cursor: pointer; transition: transform .12s, background .2s, border-color .2s; }
   .map-menu-toggle-btn:active { transform: scale(.92); }
   .map-menu-toggle-btn.active { background: #ffc400; border-color: #ffc400; }
   .map-menu-toggle-btn.active svg { stroke: #1c1c1c; }
-  .map-menu-toggle-btn svg { width: 24px; height: 24px; filter: drop-shadow(0 1px 1px rgba(0,0,0,.35)); }
+  .map-menu-toggle-btn svg { width: 21px; height: 21px; filter: drop-shadow(0 1px 1px rgba(0,0,0,.35)); }
   .layer-toggle-btn { display: inline-block; background: #1c1c1c; color: #fff; border: 1px solid rgba(255,196,0,.4); border-radius: 8px; padding: 5px 7px; font-family: -apple-system, sans-serif; font-size: 11px; font-weight: 600; box-shadow: 0 1px 4px rgba(0,0,0,.35); cursor: pointer; user-select: none; white-space: nowrap; transition: transform .12s; text-transform: uppercase; }
   .layer-toggle-btn:active, .filter-toggle:active { transform: scale(.94); }
   /* ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - редизайн
@@ -12286,6 +12334,23 @@ MAP_CHROME_CSS = """
   .tariff-picker-cancel { background: #333; color: #fff; }
   .tariff-picker-confirm { background: #FFB800; color: #1c1c1c; }
   .tariff-picker-confirm:disabled { opacity: .45; cursor: default; }
+  /* ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - "все расчёты после
+     смены переведём на приложение, в бот больше не приходило сообщений") -
+     карточка итогов смены прямо на карте вместо сообщения "СМЕНА
+     ЗАВЕРШЕНА" в чате бота, тот же визуальный язык (тёмная шторка снизу),
+     что и у .tariff-picker-overlay выше - см. #shiftSummaryOverlay в HTML
+     ниже, openShiftSummaryOverlay/closeShiftSummaryOverlay в JS ниже. */
+  .shift-summary-overlay { position: absolute; inset: 0; z-index: 2000; background: rgba(0,0,0,.55); display: flex; align-items: flex-end; justify-content: center; }
+  .shift-summary-card { width: 100%; max-width: 480px; background: #1c1c1c; color: #fff; border-top-left-radius: 18px; border-top-right-radius: 18px; border: 1px solid rgba(255,196,0,.4); border-bottom: none; padding: 18px 18px calc(18px + env(safe-area-inset-bottom, 0px)); font-family: -apple-system, sans-serif; box-shadow: 0 -4px 20px rgba(0,0,0,.5); box-sizing: border-box; }
+  .shift-summary-card h3 { margin: 0 0 10px; font-size: 17px; font-weight: 700; }
+  .shift-summary-card .shift-summary-header-note { font-size: 13px; color: #FFC400; margin: 0 0 10px; line-height: 1.4; }
+  .shift-summary-row { font-size: 15px; padding: 9px 0; border-bottom: 1px solid rgba(255,255,255,.08); font-variant-numeric: tabular-nums; }
+  .shift-summary-row:last-child { border-bottom: none; }
+  .shift-summary-actions { display: flex; gap: 10px; margin-top: 16px; }
+  .shift-summary-actions button { flex: 1; border: none; border-radius: 10px; padding: 13px; font-size: 15px; font-weight: 700; font-family: inherit; cursor: pointer; text-transform: uppercase; }
+  .shift-summary-close-btn { background: #333; color: #fff; }
+  .shift-summary-finance-btn { background: #FFB800; color: #1c1c1c; }
+  .shift-summary-finance-btn:disabled { opacity: .45; cursor: default; }
   /* ДОБАВЛЕНО 27.09.2026 (жалоба пользователя - "выходишь на линию,
      геолокация не включена, всё просто скидывает и ничего не пишет" -
      ИЗМЕНЕНО в тот же день по прямой просьбе пользователя со скриншотом -
@@ -12765,6 +12830,28 @@ def map_webapp_html():
     <div class="tariff-picker-actions">
       <button type="button" class="tariff-picker-cancel" id="tariffPickerCancel">Отмена</button>
       <button type="button" class="tariff-picker-confirm" id="tariffPickerConfirm" disabled>▶️ Начать смену</button>
+    </div>
+  </div>
+</div>
+<!-- ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - "все расчёты после
+     смены переведём на приложение, в бот больше не приходило сообщений") -
+     карточка итогов смены прямо на карте вместо сообщения "СМЕНА
+     ЗАВЕРШЕНА" в чате бота. Появляется сразу по завершении смены свайпом
+     (см. shift_summary в ответе /map/toggle_shift, doShiftToggle в JS
+     ниже) или при следующем опросе профиля, если смена завершилась, пока
+     приложение было закрыто (см. pending_shift_summary в ответе
+     /map/my_profile, loadMyProfile в JS ниже). Кнопка "💰 Указать доход"
+     запускает тот же чат-визард расчёта дохода, что и раньше - просто
+     явным тапом из приложения, а не автоматическим сообщением в чат (см.
+     MAP_START_FINANCE_API_PATH/handle_map_start_finance_api в main.py). -->
+<div class="shift-summary-overlay" id="shiftSummaryOverlay" style="display:none">
+  <div class="shift-summary-card">
+    <h3>🔴 Смена завершена</h3>
+    <p class="shift-summary-header-note" id="shiftSummaryHeader" style="display:none"></p>
+    <div id="shiftSummaryBody"></div>
+    <div class="shift-summary-actions">
+      <button type="button" class="shift-summary-close-btn" id="shiftSummaryClose">Закрыть</button>
+      <button type="button" class="shift-summary-finance-btn" id="shiftSummaryFinanceBtn">💰 Указать доход</button>
     </div>
   </div>
 </div>
@@ -13631,6 +13718,14 @@ def map_webapp_html():
       // геопозиции, см. maybe_start_pending_shift в main.py) - водителю не
       // нужно самому закрывать экран или что-то нажимать повторно.
       if (myShiftActive) closeGeoRequiredOverlay();
+      // ДОБАВЛЕНО 27.09.2026 (см. #shiftSummaryOverlay/pending_shift_summary
+      // выше) - смена завершилась автозавершением по таймауту или кнопкой
+      // "⛔️⛔️УЙТИ С ЛИНИИ⛔️⛔️" в чате, пока это открытие карты не видело -
+      // сервер отдаёт сводку ОДИН РАЗ (сам её удаляет у себя после отдачи),
+      // показываем ту же карточку итогов, что и после свайпа на карте.
+      if (data.pending_shift_summary) {{
+        openShiftSummaryOverlay(data.pending_shift_summary);
+      }}
       // ДОБАВЛЕНО 25.09.2026 - см. myShiftStartedAtMs/myShiftTariffs выше.
       // Дата парсится ОДИН раз здесь (не на каждый тик tickBottomBar) -
       // dSince считаем от готового timestamp в мс.
@@ -13718,6 +13813,66 @@ def map_webapp_html():
   if (tariffPickerOverlay) {{
     tariffPickerOverlay.addEventListener('click', (e) => {{
       if (e.target === tariffPickerOverlay) closeTariffPicker();
+    }});
+  }}
+  // ДОБАВЛЕНО 27.09.2026 (см. #shiftSummaryOverlay в HTML выше и подробный
+  // комментарий там) - карточка итогов смены вместо сообщений в чат бота.
+  const shiftSummaryOverlay = document.getElementById('shiftSummaryOverlay');
+  const shiftSummaryHeader = document.getElementById('shiftSummaryHeader');
+  const shiftSummaryBody = document.getElementById('shiftSummaryBody');
+  const shiftSummaryClose = document.getElementById('shiftSummaryClose');
+  const shiftSummaryFinanceBtn = document.getElementById('shiftSummaryFinanceBtn');
+  function openShiftSummaryOverlay(summary) {{
+    if (!shiftSummaryOverlay || !shiftSummaryBody || !summary) return;
+    const rows = [];
+    const durationText = summary.duration_text || '—';
+    const km = (typeof summary.total_km === 'number') ? summary.total_km.toFixed(1) : '0.0';
+    rows.push(`⏱ ${{durationText}}   🛣 ${{km}} км`);
+    if (summary.fuel_cost) {{
+      rows.push(`⛽ Потрачено на топливо: ~${{summary.fuel_cost}} ₽`);
+    }}
+    shiftSummaryBody.innerHTML = rows.map(r => `<div class="shift-summary-row">${{r}}</div>`).join('');
+    if (shiftSummaryHeader) {{
+      if (summary.auto_finished_header) {{
+        shiftSummaryHeader.textContent = summary.auto_finished_header;
+        shiftSummaryHeader.style.display = '';
+      }} else {{
+        shiftSummaryHeader.style.display = 'none';
+      }}
+    }}
+    shiftSummaryOverlay.style.display = 'flex';
+  }}
+  function closeShiftSummaryOverlay() {{
+    if (shiftSummaryOverlay) shiftSummaryOverlay.style.display = 'none';
+  }}
+  if (shiftSummaryClose) shiftSummaryClose.addEventListener('click', closeShiftSummaryOverlay);
+  if (shiftSummaryOverlay) {{
+    shiftSummaryOverlay.addEventListener('click', (e) => {{
+      if (e.target === shiftSummaryOverlay) closeShiftSummaryOverlay();
+    }});
+  }}
+  if (shiftSummaryFinanceBtn) {{
+    shiftSummaryFinanceBtn.addEventListener('click', async () => {{
+      if (shiftSummaryFinanceBtn.disabled) return;
+      const initData = _mapInitData();
+      if (!initData) return;
+      shiftSummaryFinanceBtn.disabled = true;
+      try {{
+        const resp = await fetch('/map/start_finance', {{
+          method: 'POST',
+          headers: {{ 'X-Telegram-Init-Data': initData }},
+        }});
+        const data = await resp.json().catch(() => ({{}}));
+        closeShiftSummaryOverlay();
+        const msg = (resp.ok && data.ok)
+          ? 'Открыл расчёт дохода в чате бота - переключись туда, чтобы продолжить 💰'
+          : 'Не удалось запустить расчёт - попробуй ещё раз';
+        if (tg && tg.showAlert) tg.showAlert(msg); else alert(msg);
+      }} catch (e) {{
+        /* тихо - карточка просто закрыта, кнопку "Финансы" можно нажать позже */
+      }} finally {{
+        shiftSummaryFinanceBtn.disabled = false;
+      }}
     }});
   }}
   // ДОБАВЛЕНО 27.09.2026 (жалоба пользователя - "выходишь на линию,
@@ -13839,6 +13994,14 @@ def map_webapp_html():
       }}
       myShiftActive = !!data.shift_active;
       updateShiftToggleBtnUI();
+      // ДОБАВЛЕНО 27.09.2026 (см. #shiftSummaryOverlay/shift_summary выше) -
+      // смена только что завершилась этим самым свайпом - сервер отдал
+      // сводку прямо в ответе, показываем карточку итогов сразу же, вместо
+      // сообщения в чат бота.
+      if (data.shift_summary) {{
+        openShiftSummaryOverlay(data.shift_summary);
+        return;
+      }}
       if (data.tariff_options && data.tariff_options.length) {{
         openTariffPicker(data.tariff_options);
         return;
@@ -17703,6 +17866,13 @@ def unified_app_html():
   .tile .ic { height: 23px; display: flex; align-items: center; color: #FFC400; }
   .tile .ic svg { display: block; flex-shrink: 0; }
   .tile .lbl { font-size: 13px; font-weight: 600; line-height: 1.3; text-transform: uppercase; }
+  /* ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - "на эти кнопки
+     выводи информацию где погода - погоду" - короткая живая подсказка под
+     плиткой "Погода", см. loadWeatherTileSub в JS ниже). Фиксированная
+     высота .tile (104px, см. комментарий выше) уже даёт запас под третью
+     строку - .tile использует flex-column с gap, третий дочерний элемент
+     просто добавляет ещё один gap, ничего пересчитывать не нужно. */
+  .tile .sub { font-size: 10.5px; color: #9a9a9a; font-weight: 500; line-height: 1.3; }
   .tile.placeholder { opacity: .45; }
   .tile .soon-badge {
     position: absolute; top: 10px; right: 10px; font-size: 9.5px; color: #FFC400;
@@ -17990,6 +18160,10 @@ def unified_app_html():
     support: '<svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="8.5"/><path d="M9.3 9.6a2.7 2.7 0 1 1 3.9 2.4c-.8.4-1.2.9-1.2 1.7v.3" stroke-linecap="round" stroke-linejoin="round"/><circle cx="12" cy="16.7" r=".9" fill="currentColor" stroke="none"/></svg>',
     city: '<svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><rect x="4" y="10.5" width="6" height="9.5"/><rect x="13" y="4.5" width="7" height="15.5"/><path d="M2 20h20" stroke-linecap="round"/></svg>',
     car: '<svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"><path d="M4.5 16h15M4.5 16l1.3-4.3A2 2 0 0 1 7.7 10.3h8.6a2 2 0 0 1 1.9 1.4L19.5 16"/><path d="M4.5 16v3M19.5 16v3"/><circle cx="7.5" cy="16.3" r="1.5" stroke-linecap="butt" stroke-linejoin="miter"/><circle cx="16.5" cy="16.3" r="1.5" stroke-linecap="butt" stroke-linejoin="miter"/></svg>',
+    // ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя, скриншот раздела
+    // "Сервисы" - "место автопарк сделай кнопку ШТРАФЫ заглушку в
+    // разработке") - иконка-квитанция (зигзаг снизу, как у чека/штрафа).
+    fines: '<svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"><path d="M5 3h14v18l-2.5-1.5L14 21l-2-1.5L10 21l-2.5-1.5L5 21V3Z"/><path d="M8 8h8M8 12h8M8 16h4"/></svg>',
   };
   // ДОБАВЛЕНО 26.09.2026 ("делаем рефералку делай по нашей структуре") -
   // "Мои рефералы"/QR-код ссылки/презентация/вход в кабинет автопарка -
@@ -18415,7 +18589,10 @@ def unified_app_html():
     const chatUrl = DRIVER_CHAT_LINKS[city] || '';
 
     const tiles = [
-      { href: '""" + WEATHER_WEBAPP_PATH + """?city=' + cityQ, ic: TILE_ICONS.weather, lbl: 'Погода' },
+      // ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - "на эти кнопки
+      // выводи информацию где погода - погоду") - id/sub включают короткую
+      // живую подсказку под плиткой (см. loadWeatherTileSub в JS ниже).
+      { href: '""" + WEATHER_WEBAPP_PATH + """?city=' + cityQ, ic: TILE_ICONS.weather, lbl: 'Погода', id: 'weatherTile', sub: true },
       { href: eventsUrl, ic: withoutEventsOrAirports ? TILE_ICONS.roadEvents : TILE_ICONS.events, lbl: withoutEventsOrAirports ? 'Дорожные события' : 'События города' },
       { href: shareOrderUrl, ic: TILE_ICONS.exchange, lbl: 'Отдать заказ' },
       { href: fuelMapUrl, ic: TILE_ICONS.fuel, lbl: 'Где бензин' },
@@ -18425,6 +18602,15 @@ def unified_app_html():
       { detail: 'subscription', ic: TILE_ICONS.subscription, lbl: 'Подписка' },
       { href: '""" + VPN_BOT_URL + """', ic: TILE_ICONS.vpn, lbl: 'Бесплатный VPN' },
       { detail: 'support', ic: TILE_ICONS.support, lbl: 'Поддержка' },
+      // ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя, скриншот раздела
+      // "Сервисы" - "место автопарк сделай кнопку ШТРАФЫ заглушку в
+      // разработке") - плитка-заглушка рядом с "Кабинет автопарка" (тот
+      // тоже добавляется в конец сетки, см. maybeAddLegalCabinetTile ниже).
+      // Открывает тот же паттерн detail-панели, что "Чаевые"/"Поддержка" и
+      // т.д. (см. openServiceDetail/renderFinesDetail ниже), просто с
+      // заглушкой "в разработке" вместо реального раздела - тем же текстом,
+      // что уже используется для других заглушек в чате бота.
+      { detail: 'fines', ic: TILE_ICONS.fines, lbl: 'Штрафы' },
       // УБРАНО 27.09.2026 (прямая просьба пользователя - "кнопка город и
       // категории убери пожалуйста из сервисов") - плитка-дубль убрана,
       // смена города/категории по-прежнему доступна через плашку cityBadge
@@ -18437,14 +18623,21 @@ def unified_app_html():
     }
 
     tiles.forEach(function (t) {
+      // ДОБАВЛЕНО 27.09.2026 (см. weatherTile/sub выше) - опциональная
+      // третья строка-подсказка внутри плитки, заполняется асинхронно
+      // после рендера (см. loadWeatherTileSub ниже) - изначально пустая,
+      // чтобы не блокировать показ сетки ожиданием сети.
+      const subHtml = t.sub ? '<div class="sub" id="' + t.id + 'Sub"></div>' : '';
       if (t.detail) {
         const b = document.createElement('button'); b.type = 'button'; b.className = 'tile'; b.style.width = '100%'; b.style.font = 'inherit';
-        b.innerHTML = '<div class="ic">' + t.ic + '</div><div class="lbl">' + t.lbl + '</div>';
+        if (t.id) b.id = t.id;
+        b.innerHTML = '<div class="ic">' + t.ic + '</div><div class="lbl">' + t.lbl + '</div>' + subHtml;
         b.addEventListener('click', function () { openServiceDetail(t.detail); });
         grid.appendChild(b);
       } else if (t.href) {
         const a = document.createElement('a'); a.className = 'tile'; a.href = t.href; a.rel = 'noopener';
-        a.innerHTML = '<div class="ic">' + t.ic + '</div><div class="lbl">' + t.lbl + '</div>';
+        if (t.id) a.id = t.id;
+        a.innerHTML = '<div class="ic">' + t.ic + '</div><div class="lbl">' + t.lbl + '</div>' + subHtml;
         grid.appendChild(a);
       }
     });
@@ -18454,6 +18647,47 @@ def unified_app_html():
     // основной сетки), т.к. требует серверной проверки "есть ли у ЭТОГО
     // человека купленное/админское юр.лицо" - см. maybeAddLegalCabinetTile.
     maybeAddLegalCabinetTile();
+    // ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - "на эти кнопки
+    // выводи информацию где погода - погоду") - короткая живая подсказка
+    // (эмодзи + температура) под плиткой "Погода", см. loadWeatherTileSub
+    // ниже. Тоже асинхронно, не блокирует показ сетки.
+    loadWeatherTileSub();
+  }
+
+  // ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - "на эти кнопки
+  // выводи информацию где погода - погоду, приведи текст в порядок кнопок")
+  // - те же коды погоды (WEATHERCODE_INFO в main.py), что и на самой
+  // странице "Погода" (weather_webapp_html), только в сжатом виде для
+  // маленькой плитки - копия компактной таблицы эмодзи (weather_webapp_html
+  // и unified_app_html - разные HTML-документы с разными <script>, общих
+  // JS-переменных между ними нет, поэтому таблица продублирована здесь).
+  const WEATHERCODE_EMOJI_TILE = {
+    0: '☀️', 1: '🌤', 2: '⛅', 3: '☁️', 45: '🌫', 48: '🌫',
+    51: '🌦', 53: '🌦', 55: '🌧', 56: '🌧', 57: '🌧', 61: '🌧', 63: '🌧', 65: '🌧',
+    66: '🌧', 67: '🌧', 71: '🌨', 73: '🌨', 75: '❄️', 77: '🌨',
+    80: '🌧', 81: '🌧', 82: '⛈', 85: '🌨', 86: '❄️', 95: '⛈', 96: '⛈', 99: '⛈',
+  };
+  function loadWeatherTileSub() {
+    const el = document.getElementById('weatherTileSub');
+    if (!el) return;
+    fetch('""" + WEATHER_DATA_API_PATH + """?city=' + encodeURIComponent(city))
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (data) {
+        // Плитка могла уже пропасть из DOM (ушли с вкладки "Сервисы" или
+        // сетка перерисовалась заново, пока летел запрос) - тихо выходим.
+        if (!el.isConnected) return;
+        const cur = data && data.current;
+        if (!cur || cur.temperature_2m == null) { el.textContent = ''; return; }
+        const temp = Math.round(cur.temperature_2m);
+        const hour = new Date().getHours();
+        const night = (hour < 6 || hour >= 21);
+        let emoji = WEATHERCODE_EMOJI_TILE[cur.weathercode] || '🌡';
+        // Та же поправка "ночью солнца не бывает", что и на самой странице
+        // погоды (см. WEATHERCODE_EMOJI_NIGHT в weather_webapp_html).
+        if (night && (cur.weathercode === 0 || cur.weathercode === 1)) emoji = '🌙';
+        el.textContent = emoji + ' ' + temp + '°';
+      })
+      .catch(function () { el.textContent = ''; });
   }
 
   function openServiceDetail(kind) {
@@ -18466,6 +18700,17 @@ def unified_app_html():
     if (kind === 'subscription') return loadSubscriptionDetail(box);
     if (kind === 'support') return loadSupportDetail(box);
     if (kind === 'city') return renderCityDetail(box);
+    if (kind === 'fines') return renderFinesDetail(box);
+  }
+
+  // ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - плитка "Штрафы" в
+  // сетке сервисов, заглушка "в разработке") - тот же текст заглушки, что
+  // уже используется для других недоделанных разделов в чате бота (см.
+  // "Этот раздел в разработке 🚧 — скоро будет" в main.py).
+  function renderFinesDetail(box) {
+    box.innerHTML =
+      '<div class="svc-h">🚨 Штрафы</div>' +
+      '<div class="svc-card">Этот раздел в разработке 🚧 — скоро будет.</div>';
   }
 
   function renderTipsDetail(box) {
@@ -19027,7 +19272,22 @@ def unified_app_html():
           headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': (tg && tg.initData) || '' },
           body: JSON.stringify({ city: newCity, category: newCategory })
         });
-        if (!resp.ok) throw new Error('http_' + resp.status);
+        // ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - "кнопкой
+        // сохранить жёстко делай привязку к городу... смены и тд") - сервер
+        // теперь отказывает менять город/категорию во время активной смены
+        // (см. handle_cabinet_city_api в main.py, error === 'shift_active') -
+        // показываем понятное сообщение вместо общей ошибки/тихого разъезда
+        // города между картой/сервисами и текущей сменой.
+        const data = await resp.json().catch(function () { return {}; });
+        if (!resp.ok) {
+          if (data.error === 'shift_active') {
+            if (wasPanelVisible) { panelEl.hidden = false; }
+            noteEl.textContent = 'Нельзя менять город или категорию во время смены - сначала заверши смену.';
+            saveBtn.disabled = false;
+            return;
+          }
+          throw new Error('http_' + resp.status);
+        }
         const url = new URL(window.location.href);
         url.searchParams.set('city', newCity);
         url.searchParams.set('category', newCategory);
@@ -19467,9 +19727,23 @@ async def handle_map_my_profile_api(request):
         is_legal_entity_referrer = get_referrer_type(user_id) == 'legal_entity'
     except Exception:
         is_legal_entity_referrer = False
+    # ДОБАВЛЕНО 27.09.2026 (см. finish_shift_and_summarize/
+    # pending_shift_summary выше) - разовая доставка сводки о последней
+    # завершённой смене для тех 2 путей завершения, где приложение в момент
+    # завершения могло быть не открыто (автозавершение по таймауту, кнопка
+    # "⛔️⛔️УЙТИ С ЛИНИИ⛔️⛔️" в чате) - карта подхватит её этим же опросом и
+    # покажет карточку итогов (см. openShiftSummaryOverlay в JS ниже).
+    # pop(), а не get() - забираем и сразу удаляем, чтобы карточка не
+    # всплывала повторно на каждом следующем опросе (тот же принцип, что у
+    # флеш-сообщений).
+    try:
+        pending_shift_summary = (user_state.get(user_id) or {}).pop('pending_shift_summary', None)
+    except Exception:
+        pending_shift_summary = None
     return web.json_response({
         'profile': profile, 'shift_active': shift_active, 'is_legal_entity_referrer': is_legal_entity_referrer,
         'shift_started_at': shift_started_at, 'shift_tariffs': shift_tariffs,
+        'pending_shift_summary': pending_shift_summary,
     })
 
 async def handle_map_toggle_shift_api(request):
@@ -19521,8 +19795,16 @@ async def handle_map_toggle_shift_api(request):
     send_func = functools.partial(bot.send_message, user_id)
     try:
         if is_shift_active(state):
-            await finish_shift_and_notify(user_id, category, city, send_func)
-            return web.json_response({'ok': True, 'shift_active': False})
+            # ИЗМЕНЕНО 27.09.2026 (прямая просьба пользователя - "все
+            # расчёты после смены исключительно в приложении, в бот никаких
+            # сообщений более не приходило") - раньше здесь была
+            # finish_shift_and_notify (слала "СМЕНА ЗАВЕРШЕНА" + предложение
+            # указать доход прямо в чат через send_func). Теперь сводка
+            # отдаётся прямо в этом JSON-ответе (shift_summary) - приложение
+            # открыто в момент свайпа, поэтому карточку итогов можно
+            # показать сразу же на карте, без похода в pending_shift_summary.
+            summary = finish_shift_and_summarize(user_id)
+            return web.json_response({'ok': True, 'shift_active': False, 'shift_summary': summary})
         if category in MAP_CATEGORY_STYLE and shift_tariff_options(category):
             # ИЗМЕНЕНО 25.09.2026 (прямая просьба пользователя - "сделай выбор
             # тарифа с карты прям") - раньше тут слался экран выбора тарифов
@@ -19601,6 +19883,51 @@ async def handle_map_start_shift_api(request):
         return web.json_response({'ok': True, 'shift_active': True})
     except Exception:
         logger.exception(f"❌ /map/start_shift: ошибка старта смены user_id={user_id}")
+        return web.json_response({'ok': False, 'reason': 'error'}, status=500)
+
+async def handle_map_start_finance_api(request):
+    """POST-эндпоинт кнопки "💰 Указать доход" в карточке итогов смены на
+    карте (см. MAP_START_FINANCE_API_PATH выше, #shiftSummaryOverlay/
+    openShiftSummaryOverlay в JS ниже) - добавлен 27.09.2026 по той же
+    просьбе пользователя, что и shift_summary/pending_shift_summary выше.
+
+    Сам пошаговый расчёт дохода (advance_finance_step - шаги income/km/
+    consumption/car_ownership/rent/expenses) НЕ переносится в приложение -
+    осознанное решение пользователя ("Минимально" на прямой вопрос об
+    объёме переноса): визард завязан на текстовый диалог в чате и слишком
+    объёмный, чтобы переписывать его в вебвью карты. Меняется только
+    СПОСОБ запуска - раньше это была инлайн-кнопка под сообщением "СМЕНА
+    ЗАВЕРШЕНА" в чате (start_finance_after_shift), теперь то же самое
+    действие (тот же state['courier_finance_draft'], тот же первый промпт)
+    запускается явным тапом из приложения. Здесь просто повторена
+    серверная часть start_finance_after_shift, без объекта callback_query
+    (его нет в WebApp-контексте, как и у handle_map_toggle_shift_api
+    выше) - initData ОБЯЗАТЕЛЕН, это реальный запуск черновика расчёта и
+    отправка сообщения в чат, а не просто чтение данных."""
+    init_data = request.headers.get('X-Telegram-Init-Data', '')
+    if not BOT_TOKEN or not init_data:
+        return web.json_response({'ok': False, 'reason': 'no_auth'}, status=401)
+    parsed = validate_telegram_webapp_init_data(init_data, BOT_TOKEN)
+    if parsed is None:
+        logger.warning("⚠️ /map/start_finance: не прошла проверка initData")
+        return web.json_response({'ok': False, 'reason': 'no_auth'}, status=401)
+    try:
+        user_json = json.loads(parsed.get('user', '{}'))
+        user_id = user_json.get('id')
+    except Exception:
+        user_id = None
+    if not user_id:
+        return web.json_response({'ok': False, 'reason': 'no_auth'}, status=401)
+    try:
+        state = user_state.setdefault(user_id, {})
+        state['courier_finance_draft'] = {'step': 'income', 'data': {}}
+        await bot.send_message(
+            user_id, COURIER_FINANCE_STEP_PROMPTS['income'],
+            reply_markup=courier_finance_cancel_keyboard(),
+        )
+        return web.json_response({'ok': True})
+    except Exception:
+        logger.exception(f"❌ /map/start_finance: ошибка запуска расчёта дохода user_id={user_id}")
         return web.json_response({'ok': False, 'reason': 'error'}, status=500)
 
 async def handle_map_airports_api(request):
@@ -22984,6 +23311,19 @@ async def handle_cabinet_city_api(request):
     if category not in CATEGORIES:
         return web.json_response({'error': 'invalid_category'}, status=400)
     state = user_state.setdefault(user_id, {})
+    # ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - "кнопкой сохранить
+    # жёстко делай привязку к городу всех кнопок сервисов куда поехать смены
+    # и тд") - раньше город/категория менялись БЕЗ проверки, идёт ли уже
+    # смена: если сменить город прямо во время активной смены, сервер
+    # начинал считать спрос/тарифы/позицию по НОВОМУ городу, а сама смена
+    # (тарифы, статистика, километраж) оставалась привязана к старому -
+    # получался рассинхрон между картой/сервисами/"куда ехать" и текущей
+    # сменой. Теперь во время активной смены город/категория "жёстко"
+    # зафиксированы - менять их нельзя, пока смена не завершена (проверяем
+    # именно РЕАЛЬНОЕ изменение значений, а не повторное сохранение тех же
+    # самых города/категории - см. saveBtn в JS ниже, ветка error === 'shift_active').
+    if is_shift_active(state) and (state.get('city') != city or state.get('category') != category):
+        return web.json_response({'error': 'shift_active'}, status=409)
     state['city'] = city
     state['category'] = category
     return web.json_response({'ok': True, 'city': city, 'category': category})
@@ -31409,6 +31749,7 @@ async def start_subscription_webhook_server():
     app.router.add_get(MAP_MY_PROFILE_API_PATH, handle_map_my_profile_api)
     app.router.add_post(MAP_TOGGLE_SHIFT_API_PATH, handle_map_toggle_shift_api)
     app.router.add_post(MAP_START_SHIFT_API_PATH, handle_map_start_shift_api)
+    app.router.add_post(MAP_START_FINANCE_API_PATH, handle_map_start_finance_api)
     app.router.add_get(MAP_AIRPORTS_API_PATH, handle_map_airports_api)
     app.router.add_get(MAP_STATIONS_API_PATH, handle_map_stations_api)
     app.router.add_get(MAP_WEATHER_API_PATH, handle_map_weather_api)
