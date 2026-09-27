@@ -17185,7 +17185,7 @@ def unified_app_html():
   .tile {
     background: #131313; border: 1px solid rgba(255,255,255,.08); border-radius: 14px;
     padding: 16px 12px; text-decoration: none; color: #fff; display: flex; flex-direction: column;
-    gap: 8px; min-height: 84px; position: relative;
+    justify-content: center; gap: 8px; min-height: 84px; position: relative;
   }
   .tile .ic { height: 23px; display: flex; align-items: center; color: #FFC400; }
   .tile .ic svg { display: block; flex-shrink: 0; }
