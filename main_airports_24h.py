@@ -18604,9 +18604,8 @@ def unified_app_html():
       { detail: 'support', ic: TILE_ICONS.support, lbl: 'Поддержка' },
       // ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя, скриншот раздела
       // "Сервисы" - "место автопарк сделай кнопку ШТРАФЫ заглушку в
-      // разработке") - плитка-заглушка рядом с "Кабинет автопарка" (тот
-      // тоже добавляется в конец сетки, см. maybeAddLegalCabinetTile ниже).
-      // Открывает тот же паттерн detail-панели, что "Чаевые"/"Поддержка" и
+      // разработке") - плитка-заглушка в конце сетки. Открывает тот же
+      // паттерн detail-панели, что "Чаевые"/"Поддержка" и
       // т.д. (см. openServiceDetail/renderFinesDetail ниже), просто с
       // заглушкой "в разработке" вместо реального раздела - тем же текстом,
       // что уже используется для других заглушек в чате бота.
@@ -18642,11 +18641,14 @@ def unified_app_html():
       }
     });
 
-    // ДОБАВЛЕНО 26.09.2026 ("водилы юр лица") - плитка входа в кабинет
-    // автопарка добавляется отдельно и асинхронно (не блокирует показ
-    // основной сетки), т.к. требует серверной проверки "есть ли у ЭТОГО
-    // человека купленное/админское юр.лицо" - см. maybeAddLegalCabinetTile.
-    maybeAddLegalCabinetTile();
+    // УБРАНО 27.09.2026 (прямая просьба пользователя со скриншотом - "удали
+    // кнопку кабинет автопарка отсюда он здесь не нужен") - плитка входа в
+    // кабинет автопарка (добавлялась отдельно и асинхронно через
+    // maybeAddLegalCabinetTile, см. историю функции ниже) больше не
+    // показывается в "Сервисах". Доступ к кабинету автопарка никуда не
+    // делся - он по-прежнему открывается из вкладки "Кабинет" (см.
+    // fleetCabinetPill/maybeShowFleetCabinetPill в cabinet_webapp_html) и
+    // кнопкой "ЮРЛИЦО" в чате - убран только этот, дублирующий, вход.
     // ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - "на эти кнопки
     // выводи информацию где погода - погоду") - короткая живая подсказка
     // (эмодзи + температура) под плиткой "Погода", см. loadWeatherTileSub
@@ -19079,30 +19081,16 @@ def unified_app_html():
     btn.disabled = false;
   }
 
-  // Плитка входа в "Кабинет автопарка" (/legal_cabinet) - видна ТОЛЬКО тем,
-  // у кого уже есть купленное/админское юр.лицо (см. LEGAL_CABINET_ACCESS_API_PATH/
-  // handle_legal_cabinet_access_api в main.py - то же самое условие, что уже
-  // открывает кнопку "ЮРЛИЦО" прямой ссылкой в чате, а не запросом пароля).
-  // Добавляется поверх обычной сетки плиток renderServices() - молча ничего
-  // не делает, если доступа нет (плитки попросту не будет).
-  async function maybeAddLegalCabinetTile() {
-    try {
-      const resp = await fetch(LEGAL_CABINET_ACCESS_API_PATH, { headers: { 'X-Telegram-Init-Data': (tg && tg.initData) || '' } });
-      if (!resp.ok) return;
-      const data = await resp.json();
-      if (!data.has_access) return;
-      const grid = document.getElementById('svcGrid');
-      if (!grid || grid.querySelector('.tile-legal-cabinet')) return;
-      const initData = (tg && tg.initData) || '';
-      const url = LEGAL_CABINET_WEBAPP_PATH + (initData ? ('?tgInitData=' + encodeURIComponent(initData)) : '');
-      const a = document.createElement('a');
-      a.className = 'tile tile-legal-cabinet';
-      a.href = url;
-      a.rel = 'noopener';
-      a.innerHTML = '<div class="ic">' + TILE_ICONS.car + '</div><div class="lbl">Кабинет автопарка</div>';
-      grid.appendChild(a);
-    } catch (e) { /* тихо: плитка появляется только если реально есть доступ */ }
-  }
+  // УБРАНО 27.09.2026 (прямая просьба пользователя со скриншотом - "удали
+  // кнопку кабинет автопарка отсюда он здесь не нужен") - раньше здесь была
+  // maybeAddLegalCabinetTile() - добавляла плитку входа в "Кабинет
+  // автопарка" (/legal_cabinet) поверх обычной сетки renderServices() тем,
+  // у кого есть купленное/админское юр.лицо (см. LEGAL_CABINET_ACCESS_API_PATH/
+  // handle_legal_cabinet_access_api в main.py). Сама функция и её вызов
+  // удалены целиком - вход в кабинет автопарка остаётся доступен из
+  // вкладки "Кабинет" (fleetCabinetPill/maybeShowFleetCabinetPill в
+  // cabinet_webapp_html) и кнопкой "ЮРЛИЦО" в чате, так что доступ никуда
+  // не делся - убрана только эта, дублирующая, плитка в "Сервисах".
 
   async function loadSubscriptionDetail(box) {
     try {
