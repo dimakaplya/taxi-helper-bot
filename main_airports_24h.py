@@ -6860,7 +6860,7 @@ def share_order_webapp_html(category=None):
   html { background: #000; overscroll-behavior: none; }
   body {
     margin: 0; padding: 18px; padding-bottom: max(18px, env(safe-area-inset-bottom, 0px));
-    padding-top: max(18px, env(safe-area-inset-top, 0px));
+    padding-top: max(18px, calc(env(safe-area-inset-top, 0px) + var(--tg-chrome-top, 0px)));
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     background: #000; color: #fff; overscroll-behavior: none; touch-action: manipulation;
   }
@@ -6912,6 +6912,7 @@ def share_order_webapp_html(category=None):
 </style>
 </head>
 <body>
+<button type="button" onclick="try{if(window.history.length>1){history.back();}else if(window.Telegram&&Telegram.WebApp&&Telegram.WebApp.close){Telegram.WebApp.close();}}catch(e){}" style="position:relative;z-index:2;display:inline-flex;align-items:center;gap:5px;margin:0 0 10px;padding:8px 14px 8px 10px;background:#1c1c1c;border:1px solid rgba(255,255,255,.12);border-radius:10px;color:#fff;font-size:13px;font-weight:600;cursor:pointer;">← Назад</button>
 <div id="form">
   <h1>🔄 Отдать заказ</h1>
   <label>📍 Адрес подачи</label>
@@ -6980,6 +6981,20 @@ def share_order_webapp_html(category=None):
     // клиентах молча ничего не делать, а не падать с ошибкой.
     try { if (typeof tg.disableVerticalSwipes === 'function') tg.disableVerticalSwipes(); } catch (e) {}
     try { if (typeof tg.requestFullscreen === 'function') tg.requestFullscreen(); } catch (e) {}
+    // ДОБАВЛЕНО 27.09.2026 (см. contentSafeAreaInset в unified_app_html -
+    // та же причина: requestFullscreen выше добавляет системную шапку
+    // Telegram, которая не входит в обычный env(safe-area-inset-top) -
+    // без этого верхний контент рисуется под ней) - читаем
+    // tg.contentSafeAreaInset.top и прокидываем в CSS-переменную
+    // --tg-chrome-top.
+    var applyTgChromeInset = function () {
+      try {
+        var csa = tg.contentSafeAreaInset || {};
+        document.documentElement.style.setProperty('--tg-chrome-top', (csa.top || 0) + 'px');
+      } catch (e) {}
+    };
+    applyTgChromeInset();
+    try { if (typeof tg.onEvent === 'function') tg.onEvent('contentSafeAreaChanged', applyTgChromeInset); } catch (e) {}
   }
   // ДОБАВЛЕНО 26.09.2026 (перенос "Отдать заказ" в единое приложение, см.
   // unified_app_html() - раздел "Ещё" вкладки "Сервисы") - тот же откат на
@@ -8763,8 +8778,29 @@ async def score_district_candidates(city, category, user_lat=None, user_lon=None
         for slot in slots:
             start_h, end_h = slot[0], slot[1]
             if start_h <= now.hour < end_h:
-                demand = max(slot[2 + i] for i in indices)
-                slot_start_h, slot_end_h = start_h, end_h
+                # ИСПРАВЛЕНО 27.09.2026 (прямая просьба пользователя -
+                # баг-репорт "Краснодар нет отображение по районам
+                # рекомендаций" + "тоже самое и питер тоже самое во всех
+                # тарифах") - реальная причина: у Краснодара/Сочи колонка
+                # "Элит" (индекс 5) в файле стоит None (данные по этому
+                # тарифу для этих городов не собирались, см. tariff_order в
+                # krasnodar/sochi_district_demand.json), а для Ultima
+                # indices = (3, 4, 5) - see MOSCOW_DISTRICT_DEMAND_TARIFF_
+                # INDICES. max(None, число) кидал TypeError ВНУТРИ этого
+                # цикла, исключение улетало наверх и гасилось общим
+                # try/except в compute_where_to_go - НИ ОДНОГО района не
+                # попадало в кандидаты для ВСЕГО города, хотя реальные данные
+                # по Бизнес/Премьер (индексы 3/4) были загружены и валидны.
+                # Теперь просто игнорируем None-колонки и берём максимум ПО
+                # ТЕМ индексам, где данные реально есть - если данных нет ни
+                # по одному из выбранных тарифов (values пуст), район
+                # остаётся без спроса на этот час (demand=None -> continue
+                # ниже), как и раньше, но ТОЛЬКО для него самого, а не для
+                # всего города разом.
+                values = [slot[2 + i] for i in indices if slot[2 + i] is not None]
+                if values:
+                    demand = max(values)
+                    slot_start_h, slot_end_h = start_h, end_h
                 break
         if demand is None:
             continue
@@ -10220,15 +10256,27 @@ async def start_shift_and_notify(target, user_id, category, city, tariffs):
     # недоступен (PUBLIC_URL/город не заданы, локальный дев-запуск) -
     # прежний текстовый фолбэк с реальной сводкой "Куда ехать", чтобы она
     # не пропала совсем.
-    if PUBLIC_URL and city and category:
-        await target(shift_header, parse_mode='Markdown', reply_markup=services_keyboard(category, city, user_id))
-    else:
-        # send_where_to_go ожидает объект message (зовёт message.answer(...)
-        # внутри) - target у нас уже сама функция answer (message.answer или
-        # callback_query.message.answer), поэтому оборачиваем в простой
-        # объект с атрибутом .answer вместо неё самой (см.
-        # _AnswerFuncAsMessage ниже).
-        await send_where_to_go(_AnswerFuncAsMessage(target), user_id, city, category, extra_header=shift_header)
+    # УБРАНО 27.09.2026 (прямая просьба пользователя, скриншот сообщения
+    # "🟢 Смена начата..." + кнопка "🚕 ОТКРЫТЬ TAXI HELPER" - "вообще не
+    # выводи это сообщение с кнопкой") - водитель теперь ВСЕГДА стартует
+    # смену прямо из единого приложения (unified_app_html), отдельное
+    # сообщение в чате бота с дублирующей кнопкой входа ему больше не
+    # нужно вообще, даже в короткой форме (см. предыдущую правку 27.09.2026
+    # там же - "он выкидывает вот эту вот историю что смена началась" -
+    # тогда текст просто укоротили, теперь убирают целиком). Сама логика
+    # старта смены (start_shift/выход на карту выше) не меняется - меняется
+    # только то, что после неё в чат больше ничего не шлётся.
+    pass
+    # ПРЕЖНЯЯ ВЕРСИЯ (до 27.09.2026) - оставлена для отката:
+    # if PUBLIC_URL and city and category:
+    #     await target(shift_header, parse_mode='Markdown', reply_markup=services_keyboard(category, city, user_id))
+    # else:
+    #     # send_where_to_go ожидает объект message (зовёт message.answer(...)
+    #     # внутри) - target у нас уже сама функция answer (message.answer или
+    #     # callback_query.message.answer), поэтому оборачиваем в простой
+    #     # объект с атрибутом .answer вместо неё самой (см.
+    #     # _AnswerFuncAsMessage ниже).
+    #     await send_where_to_go(_AnswerFuncAsMessage(target), user_id, city, category, extra_header=shift_header)
 
 @router.callback_query(lambda c: c.data.startswith("shift_tariff_toggle_"))
 async def shift_tariff_toggle(callback_query: types.CallbackQuery):
@@ -11973,7 +12021,14 @@ MAP_CHROME_CSS = """
      (.shift-toggle-btn, см. её блок ниже) - отступ слева увеличен с 56px
      до 80px, чтобы жёлтая кнопка/ряд тулбара не перекрывали эту кнопку
      (56px её ширина + 14px отступ от края + зазор). */
-  .filter-toggle { position: absolute; top: 10px; left: 80px; z-index: 1000; background: #FFC400; color: #000; border-radius: 8px; padding: 8px 12px; font-family: -apple-system, sans-serif; font-size: 12.5px; font-weight: 600; box-shadow: 0 1px 4px rgba(0,0,0,.35); cursor: pointer; user-select: none; text-transform: uppercase; }
+  /* ИЗМЕНЕНО 27.09.2026 (та же причина, что и contentSafeAreaInset в
+     unified_app_html/cabinet_webapp_html - requestFullscreen добавляет
+     системную шапку Telegram, которая не входит в env(safe-area-inset-top))
+     - top: 10px у всех верхних плавающих элементов карты (.filter-toggle,
+     .map-toggles-row, .shift-radar-indicator ниже) заменён на
+     calc(10px + var(--tg-chrome-top, 0px)), см. applyTgChromeInset в
+     <script> ниже. */
+  .filter-toggle { position: absolute; top: calc(10px + var(--tg-chrome-top, 0px)); left: 80px; z-index: 1000; background: #FFC400; color: #000; border-radius: 8px; padding: 8px 12px; font-family: -apple-system, sans-serif; font-size: 12.5px; font-weight: 600; box-shadow: 0 1px 4px rgba(0,0,0,.35); cursor: pointer; user-select: none; text-transform: uppercase; }
   /* ИЗМЕНЕНО 25.09.2026 (см. комментарий у .filter-toggle выше) - Leaflet
      зум-контрол (+/- ) редизайн: вместо штатных белых прямоугольных кнопок
      в левом верхнем углу - тёмные круглые кнопки (тот же визуальный язык,
@@ -12081,7 +12136,7 @@ MAP_CHROME_CSS = """
      чтобы ряд кнопок (Тарифы/Слои/Пробки/Спрос) не прижимался к левому
      краю (сразу после кнопки смены), а центрировался в доступной ширине
      (от left:80px до right:10px). */
-  .map-toggles-row { position: absolute; top: 10px; left: 80px; right: 10px; z-index: 1000; display: flex; flex-direction: row; flex-wrap: wrap; align-items: flex-start; justify-content: center; gap: 5px; }
+  .map-toggles-row { position: absolute; top: calc(10px + var(--tg-chrome-top, 0px)); left: 80px; right: 10px; z-index: 1000; display: flex; flex-direction: row; flex-wrap: wrap; align-items: flex-start; justify-content: center; gap: 5px; }
   .layer-toggle-btn { display: inline-block; background: #1c1c1c; color: #fff; border: 1px solid rgba(255,196,0,.4); border-radius: 8px; padding: 5px 7px; font-family: -apple-system, sans-serif; font-size: 11px; font-weight: 600; box-shadow: 0 1px 4px rgba(0,0,0,.35); cursor: pointer; user-select: none; white-space: nowrap; transition: transform .12s; text-transform: uppercase; }
   .layer-toggle-btn:active, .filter-toggle:active { transform: scale(.94); }
   /* ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - редизайн
@@ -12184,7 +12239,7 @@ MAP_CHROME_CSS = """
      в JS ниже, срабатывает только пока myShiftActive) - выйти на линию
      по-прежнему можно исключительно свайпом полосы внизу (.shift-slider),
      сюда это не возвращали. */
-  .shift-radar-indicator { position: absolute; top: 14px; left: 14px; z-index: 1000; width: 56px; height: 56px; border-radius: 50%; background: #8a8a8a; border: 3px solid #fff; box-shadow: 0 2px 8px rgba(0,0,0,.45); display: flex; align-items: center; justify-content: center; user-select: none; overflow: hidden; transition: background .25s, transform .12s; cursor: pointer; }
+  .shift-radar-indicator { position: absolute; top: calc(14px + var(--tg-chrome-top, 0px)); left: 14px; z-index: 1000; width: 56px; height: 56px; border-radius: 50%; background: #8a8a8a; border: 3px solid #fff; box-shadow: 0 2px 8px rgba(0,0,0,.45); display: flex; align-items: center; justify-content: center; user-select: none; overflow: hidden; transition: background .25s, transform .12s; cursor: pointer; }
   .shift-radar-indicator:active { transform: scale(.93); }
   .shift-radar-indicator.active { background: #FFB800; }
   .shift-radar-indicator .power-icon { position: relative; z-index: 2; width: 26px; height: 26px; filter: drop-shadow(0 1px 1px rgba(0,0,0,.35)); }
@@ -12552,6 +12607,17 @@ def map_webapp_html():
 </style>
 </head>
 <body>
+<!-- ИСПРАВЛЕНО 27.09.2026 (по итогам проверки кликабельности перед
+     деплоем - "малоли есть какие то баги не кликабельные кнопки") -
+     кнопка "Назад" изначально стояла в top:10px/left:10px, ровно там же,
+     где и .shift-radar-indicator (кружок-тумблер смены, 56x56, тот же
+     z-index 1000) - при равном z-index более поздний по DOM элемент
+     (сам кружок) рисуется поверх и перехватывает клики, кнопка "Назад"
+     физически не нажималась. Сдвинута НИЖЕ кружка (top: 74px), в
+     свободную область слева, где нет других плавающих контролов
+     (.map-toggles-row справа начинается от left:80px, зум-контролы
+     Leaflet по центру левого края - см. .leaflet-top.leaflet-left выше). -->
+<button type="button" onclick="try{{if(window.history.length>1){{history.back();}}else if(window.Telegram&&Telegram.WebApp&&Telegram.WebApp.close){{Telegram.WebApp.close();}}}}catch(e){{}}" style="position:absolute;top:calc(74px + var(--tg-chrome-top, 0px));left:14px;z-index:1000;display:flex;align-items:center;gap:5px;padding:8px 12px 8px 10px;background:#1c1c1c;border:1px solid rgba(255,255,255,.18);border-radius:8px;color:#fff;font-size:12.5px;font-weight:600;cursor:pointer;">← Назад</button>
 <div id="map"></div>
 <div class="bottom-info-bar" id="bottomInfoBar">
   <span class="bib-icon">⏱</span><span class="bib-time" id="bibShiftTime">не на линии</span>
@@ -12698,6 +12764,20 @@ def map_webapp_html():
     // же пары вызовов в unified_app_html() и т.д.
     try {{ if (typeof tg.disableVerticalSwipes === 'function') tg.disableVerticalSwipes(); }} catch (e) {{}}
     try {{ if (typeof tg.requestFullscreen === 'function') tg.requestFullscreen(); }} catch (e) {{}}
+    // ДОБАВЛЕНО 27.09.2026 (см. contentSafeAreaInset в unified_app_html -
+    // та же причина: requestFullscreen выше добавляет системную шапку
+    // Telegram, которая не входит в обычный env(safe-area-inset-top)) -
+    // читаем tg.contentSafeAreaInset.top и прокидываем в CSS-переменную
+    // --tg-chrome-top, на которую подписаны .filter-toggle/.map-toggles-row/
+    // .shift-radar-indicator выше.
+    var applyTgChromeInset = function () {{
+      try {{
+        var csa = tg.contentSafeAreaInset || {{}};
+        document.documentElement.style.setProperty('--tg-chrome-top', (csa.top || 0) + 'px');
+      }} catch (e) {{}}
+    }};
+    applyTgChromeInset();
+    try {{ if (typeof tg.onEvent === 'function') tg.onEvent('contentSafeAreaChanged', applyTgChromeInset); }} catch (e) {{}}
   }}
   if (tg && tg.platform) {{ fetch('/platform/report', {{ method: 'POST', headers: {{ 'Content-Type': 'application/json', 'X-Telegram-Init-Data': _mapInitData() }}, body: JSON.stringify({{ platform: tg.platform }}) }}).catch(function(){{}}); }}
   const params = new URLSearchParams(window.location.search);
@@ -14953,7 +15033,12 @@ def map_webapp_html():
   // Python, посчитаны по реальным перцентилям каждого города отдельно, а не
   // одна таблица на всех) - DISTRICT_CLOUD_THRESHOLDS ниже теперь объект
   // {{city: {{field: [show, show]}}}}, выбираем свой город по переменной city.
-  const DEMAND_CLOUD_SHOW_THRESHOLD_PERCENT = 50;
+  // ИЗМЕНЕНО 27.09.2026 (прямая просьба пользователя - "опустим процент
+  // отображения спроса до 80") - см. DEMAND_CLOUD_FLAT_THRESHOLD_PERCENT/
+  // moscowPremiumThreshold ниже, тот же единый порог теперь у ЛЮБОГО
+  // города/тарифа, эта константа осталась только как последний фолбэк.
+  const DEMAND_CLOUD_SHOW_THRESHOLD_PERCENT = 80;
+  const DEMAND_CLOUD_FLAT_THRESHOLD_PERCENT = 80;
   const DEMAND_CLOUD_COLOR = '#9b30ff'; // фиолетовый - единственный цвет облака спроса
   const DEMAND_CLOUD_OPACITY = 0.20;
   // Свои пороги показа на каждый город/тариф - см.
@@ -14987,22 +15072,26 @@ def map_webapp_html():
     }}
     return 'oblast';
   }}
+  // ЗАМЕНЕНО 27.09.2026 (прямая просьба пользователя - "давай опустим
+  // процент отображения спроса до 80", уточнено через AskUserQuestion -
+  // "по процентилям у нас общий для всех городов и тарифов") - вместо
+  // калибровки по зоне Москвы/перцентилям по (город, тариф) один плоский
+  // порог 80% для ЛЮБОГО города и тарифа - синхронизировано с
+  // district_premium_threshold в Python (та же правка, тот же принцип).
   function moscowPremiumThreshold(cityKey, field, lat, lon) {{
-    if (cityKey === 'moscow' && MOSCOW_PREMIUM_ZONE_THRESHOLDS.center[field]) {{
-      const zone = moscowDemandZone(lat, lon);
-      return MOSCOW_PREMIUM_ZONE_THRESHOLDS[zone][field];
-    }}
-    // ИЗМЕНЕНО 25.09.2026 (см. DEMAND_CLOUD_UNIFIED_THRESHOLDS выше) -
-    // раньше тут был плоский DISTRICT_CLOUD_THRESHOLDS_BY_CITY один на
-    // весь город; теперь единый порог (85-й процентиль своих данных) на
-    // (город, тариф), тоже один на весь город (зона убрана), синхронизировано с
-    // district_premium_threshold в Python (клиент и сервер должны решать
-    // "показывать/не показывать" одинаково).
-    const cityTable = DEMAND_CLOUD_UNIFIED_THRESHOLDS[cityKey];
-    if (cityTable && cityTable[field]) return cityTable[field];
-    const cityThresholds = DISTRICT_CLOUD_THRESHOLDS_BY_CITY[cityKey] || {{}};
-    return cityThresholds[field] || [DEMAND_CLOUD_SHOW_THRESHOLD_PERCENT];
+    return [DEMAND_CLOUD_FLAT_THRESHOLD_PERCENT, DEMAND_CLOUD_FLAT_THRESHOLD_PERCENT];
   }}
+  // ПРЕЖНЯЯ ОТКАЛИБРОВАННАЯ ВЕРСИЯ (до 27.09.2026) - оставлена для отката:
+  // function moscowPremiumThreshold(cityKey, field, lat, lon) {{
+  //   if (cityKey === 'moscow' && MOSCOW_PREMIUM_ZONE_THRESHOLDS.center[field]) {{
+  //     const zone = moscowDemandZone(lat, lon);
+  //     return MOSCOW_PREMIUM_ZONE_THRESHOLDS[zone][field];
+  //   }}
+  //   const cityTable = DEMAND_CLOUD_UNIFIED_THRESHOLDS[cityKey];
+  //   if (cityTable && cityTable[field]) return cityTable[field];
+  //   const cityThresholds = DISTRICT_CLOUD_THRESHOLDS_BY_CITY[cityKey] || {{}};
+  //   return cityThresholds[field] || [DEMAND_CLOUD_SHOW_THRESHOLD_PERCENT];
+  // }}
   function demandCloudColorByLevel(_demand) {{
     return DEMAND_CLOUD_COLOR;
   }}
@@ -15376,29 +15465,50 @@ def map_webapp_html():
     }}
   }}
   let unifiedDemandMarkers = [];
+  // ИЗМЕНЕНО 27.09.2026 (прямая просьба пользователя, скриншот района у
+  // KRR в Краснодаре/Такси Ultima - "облака спроса показывают два слоя
+  // один бледнее другой темнее у нас один слой единый для всех погода не
+  // погода не важно") - раньше КАЖДОЕ облако спроса (матрица/дождь/
+  // аэропорт - не важно источник, отсюда и "погода не погода не важно" в
+  // формулировке пользователя) рисовалось ДВУМЯ полигонами сразу: широкий
+  // приглушённый "ореол" (fillOpacity*0.55) + вписанное внутрь плотное
+  // "ядро" (полная fillOpacity, см. закомментированную прежнюю версию
+  // ниже) - это и создавало визуальный эффект "два слоя, один бледнее
+  // другой темнее", который пользователь просил убрать. Теперь ОДИН
+  // плоский полигон единой прозрачности на облако - без ореола/ядра,
+  // одинаково для любого источника облака. Старая "объёмная" версия
+  // оставлена ниже закомментированной на случай отката.
   function _pushVolumeCloudPolygon(ring, fillOpacity) {{
     const color = DEMAND_CLOUD_COLOR;
-    const outer = L.polygon([ring], {{
+    const layer = L.polygon([ring], {{
       color, weight: 0, stroke: false,
-      fillColor: color, fillOpacity: fillOpacity * 0.55,
+      fillColor: color, fillOpacity,
       smoothFactor: 3,
     }}).addTo(map);
-    unifiedDemandMarkers.push(outer);
-    // Внутренний "отступ" может не получиться (совсем маленькое облако,
-    // вырожденная геометрия) - тогда просто остаётся один внешний слой,
-    // без ядра, а не сломанная фигура.
-    const innerRings = _insetPolygonRings(ring, CLOUD_VOLUME_INSET_KM);
-    if (innerRings) {{
-      innerRings.forEach(innerRing => {{
-        const inner = L.polygon([innerRing], {{
-          color, weight: 0, stroke: false,
-          fillColor: color, fillOpacity,
-          smoothFactor: 3,
-        }}).addTo(map);
-        unifiedDemandMarkers.push(inner);
-      }});
-    }}
+    unifiedDemandMarkers.push(layer);
   }}
+  // ПРЕЖНЯЯ "ОБЪЁМНАЯ" ДВУХСЛОЙНАЯ ВЕРСИЯ (до 27.09.2026) - оставлена для
+  // отката:
+  // function _pushVolumeCloudPolygon(ring, fillOpacity) {{
+  //   const color = DEMAND_CLOUD_COLOR;
+  //   const outer = L.polygon([ring], {{
+  //     color, weight: 0, stroke: false,
+  //     fillColor: color, fillOpacity: fillOpacity * 0.55,
+  //     smoothFactor: 3,
+  //   }}).addTo(map);
+  //   unifiedDemandMarkers.push(outer);
+  //   const innerRings = _insetPolygonRings(ring, CLOUD_VOLUME_INSET_KM);
+  //   if (innerRings) {{
+  //     innerRings.forEach(innerRing => {{
+  //       const inner = L.polygon([innerRing], {{
+  //         color, weight: 0, stroke: false,
+  //         fillColor: color, fillOpacity,
+  //         smoothFactor: 3,
+  //       }}).addTo(map);
+  //       unifiedDemandMarkers.push(inner);
+  //     }});
+  //   }}
+  // }}
   function _redrawUnifiedDemandClouds() {{
     unifiedDemandMarkers.forEach(m => map.removeLayer(m));
     unifiedDemandMarkers = [];
@@ -16267,7 +16377,7 @@ def weather_webapp_html():
   #bgCanvas { position: fixed; inset: 0; width: 100%; height: 100%; z-index: 0; }
   #content {
     position: relative; z-index: 1; height: 100%; display: flex; flex-direction: column;
-    padding: max(18px, env(safe-area-inset-top, 0px)) 18px 18px;
+    padding: max(18px, calc(env(safe-area-inset-top, 0px) + var(--tg-chrome-top, 0px))) 18px 18px;
     color: #fff; text-shadow: 0 1px 6px rgba(0,0,0,.25);
     animation: wxIn .4s ease both;
   }
@@ -16338,6 +16448,7 @@ def weather_webapp_html():
 </style>
 </head>
 <body>
+<button type="button" onclick="try{if(window.history.length>1){history.back();}else if(window.Telegram&&Telegram.WebApp&&Telegram.WebApp.close){Telegram.WebApp.close();}}catch(e){}" style="position:relative;z-index:2;display:inline-flex;align-items:center;gap:5px;margin:0 0 10px;padding:8px 14px 8px 10px;background:#1c1c1c;border:1px solid rgba(255,255,255,.12);border-radius:10px;color:#fff;font-size:13px;font-weight:600;cursor:pointer;">← Назад</button>
 <canvas id="bgCanvas"></canvas>
 <div id="content">
   <div id="state" style="display:none">Загружаю погоду…</div>
@@ -16373,6 +16484,20 @@ def weather_webapp_html():
     // клиентах молча ничего не делать, а не падать с ошибкой.
     try { if (typeof tg.disableVerticalSwipes === 'function') tg.disableVerticalSwipes(); } catch (e) {}
     try { if (typeof tg.requestFullscreen === 'function') tg.requestFullscreen(); } catch (e) {}
+    // ДОБАВЛЕНО 27.09.2026 (см. contentSafeAreaInset в unified_app_html -
+    // та же причина: requestFullscreen выше добавляет системную шапку
+    // Telegram, которая не входит в обычный env(safe-area-inset-top) -
+    // без этого верхний контент рисуется под ней) - читаем
+    // tg.contentSafeAreaInset.top и прокидываем в CSS-переменную
+    // --tg-chrome-top.
+    var applyTgChromeInset = function () {
+      try {
+        var csa = tg.contentSafeAreaInset || {};
+        document.documentElement.style.setProperty('--tg-chrome-top', (csa.top || 0) + 'px');
+      } catch (e) {}
+    };
+    applyTgChromeInset();
+    try { if (typeof tg.onEvent === 'function') tg.onEvent('contentSafeAreaChanged', applyTgChromeInset); } catch (e) {}
   }
   if (tg && tg.platform) { fetch('/platform/report', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': tg.initData || '' }, body: JSON.stringify({ platform: tg.platform }) }).catch(function(){}); }
   const params = new URLSearchParams(window.location.search);
@@ -16862,7 +16987,9 @@ def where_to_go_webapp_html():
   * { box-sizing: border-box; }
   html { background: #000; overscroll-behavior: none; }
   body {
-    margin: 0; padding: 16px; padding-bottom: max(16px, env(safe-area-inset-bottom, 0px));
+    margin: 0; padding: 16px;
+    padding-top: max(16px, calc(env(safe-area-inset-top, 0px) + var(--tg-chrome-top, 0px)));
+    padding-bottom: max(16px, env(safe-area-inset-bottom, 0px));
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     background: #000; color: #fff; overscroll-behavior: none; touch-action: manipulation;
   }
@@ -16945,6 +17072,7 @@ def where_to_go_webapp_html():
 </style>
 </head>
 <body>
+<button type="button" onclick="try{if(window.history.length>1){history.back();}else if(window.Telegram&&Telegram.WebApp&&Telegram.WebApp.close){Telegram.WebApp.close();}}catch(e){}" style="position:relative;z-index:2;display:inline-flex;align-items:center;gap:5px;margin:0 0 10px;padding:8px 14px 8px 10px;background:#1c1c1c;border:1px solid rgba(255,255,255,.12);border-radius:10px;color:#fff;font-size:13px;font-weight:600;cursor:pointer;">← Назад</button>
 <div id="state">📍 Определяю твою локацию…</div>
 <div id="app" style="display:none">
   <h1 id="cityTitle">🧭 Куда ехать</h1>
@@ -16966,6 +17094,20 @@ def where_to_go_webapp_html():
     // клиентах молча ничего не делать, а не падать с ошибкой.
     try { if (typeof tg.disableVerticalSwipes === 'function') tg.disableVerticalSwipes(); } catch (e) {}
     try { if (typeof tg.requestFullscreen === 'function') tg.requestFullscreen(); } catch (e) {}
+    // ДОБАВЛЕНО 27.09.2026 (см. contentSafeAreaInset в unified_app_html -
+    // та же причина: requestFullscreen выше добавляет системную шапку
+    // Telegram, которая не входит в обычный env(safe-area-inset-top) -
+    // без этого верхний контент рисуется под ней) - читаем
+    // tg.contentSafeAreaInset.top и прокидываем в CSS-переменную
+    // --tg-chrome-top.
+    var applyTgChromeInset = function () {
+      try {
+        var csa = tg.contentSafeAreaInset || {};
+        document.documentElement.style.setProperty('--tg-chrome-top', (csa.top || 0) + 'px');
+      } catch (e) {}
+    };
+    applyTgChromeInset();
+    try { if (typeof tg.onEvent === 'function') tg.onEvent('contentSafeAreaChanged', applyTgChromeInset); } catch (e) {}
   }
   if (tg && tg.platform) { fetch('/platform/report', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': tg.initData || '' }, body: JSON.stringify({ platform: tg.platform }) }).catch(function(){}); }
   const params = new URLSearchParams(window.location.search);
@@ -19561,8 +19703,12 @@ MAP_DEMAND_API_PATH = '/map/demand'
 # map_webapp_html. Эти два константа-словаря оставлены (используются только
 # для фолбэка категорий без реальных почасовых % - курьер/грузовое такси),
 # но их значения тоже приведены к единому порогу 50%.
-MAP_DEMAND_CLOUD_THRESHOLD_BY_CATEGORY = {'taxi': 50, 'ultima': 50}
-MAP_DEMAND_CLOUD_THRESHOLD_DEFAULT = 50
+# ИЗМЕНЕНО 27.09.2026 (прямая просьба пользователя - "опустим процент
+# отображения спроса до 80", см. DEMAND_CLOUD_FLAT_THRESHOLD_PERCENT/
+# district_premium_threshold ниже - тот же единый порог 80%, теперь и в
+# этом словаре-фолбэке для категорий без районных данных).
+MAP_DEMAND_CLOUD_THRESHOLD_BY_CATEGORY = {'taxi': 80, 'ultima': 80}
+MAP_DEMAND_CLOUD_THRESHOLD_DEFAULT = 80
 # ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "в дождь рисовать
 # всегда спрос") - пока в городе идут осадки, % спроса для облака не может
 # быть ниже этого значения, даже если по часовой таблице сейчас "тихий" час -
@@ -19825,16 +19971,26 @@ def _delivery_tariff_demand_value(city, zone_name, tariff, weekday, hour):
 def recommended_delivery_tariffs(city, zone_name, category, weekday, hour):
     """Аналог recommended_district_tariffs (см. её докстринг выше), но для
     курьера/грузового такси - какие 1-2 тарифа этой категории СЕЙЧАС
-    показывают спрос выше своего порога (DISTRICT_CLOUD_THRESHOLDS_BY_CITY,
-    те же поля DELIVERY_TARIFF_FIELD, что рисует и облако на карте - "то,
-    что рекомендует пуш" и "то, что рисует карта" не расходятся)."""
+    показывают спрос выше своего порога (те же поля DELIVERY_TARIFF_FIELD,
+    что рисует и облако на карте - "то, что рекомендует пуш" и "то, что
+    рисует карта" не расходятся).
+
+    ИСПРАВЛЕНО 27.09.2026 (по итогам самопроверки после смены порога на
+    единый 80% - "опустим процент отображения спроса до 80" - раньше
+    порог здесь читался НАПРЯМУЮ из DISTRICT_CLOUD_THRESHOLDS_BY_CITY,
+    минуя district_premium_threshold(), так что пуш с советом по тарифу
+    курьера/грузового такси продолжал бы работать по СТАРЫМ откалиброванным
+    цифрам (например ~56-58% в Москве, до 87% в Сочи), пока карта (см. JS
+    moscowPremiumThreshold в map_webapp_html) уже показывает облако по
+    новому единому порогу 80% - ровно то расхождение "пуш"/"карта", которого
+    этот докстринг просил избегать. Теперь оба идут через ОДНУ функцию."""
     scored = []
     for tariff in shift_tariff_options(category):
         field = DELIVERY_TARIFF_FIELD.get(tariff)
         if not field:
             continue
         value = _delivery_tariff_demand_value(city, zone_name, tariff, weekday, hour)
-        threshold = (DISTRICT_CLOUD_THRESHOLDS_BY_CITY.get(city) or {}).get(field)
+        threshold = district_premium_threshold(city, field, None, None)
         if value is not None and threshold and value >= threshold[0]:
             scored.append((tariff, value))
     scored.sort(key=lambda pair: -pair[1])
@@ -20239,6 +20395,16 @@ def _moscow_demand_zone(lat, lon):
 # СОБСТВЕННЫХ данных тарифа (верхние ~15% реально самых загруженных
 # моментов по всем районам/часам/дням недели) - проверено на данных:
 # частота показа стабильно 15-19% везде, а не разброс в десятки раз.
+#
+# ЗАМЕНЕНО 27.09.2026 (прямая просьба пользователя - "опустим процент
+# отображения спроса до 80", уточнено через AskUserQuestion - "по
+# процентилям у нас общий для всех городов и тарифов") - вся эта
+# откалиброванная по перцентилям таблица (и MOSCOW_PREMIUM_ZONE_THRESHOLDS
+# выше, и курортная сезонность) БОЛЬШЕ НЕ ИСПОЛЬЗУЕТСЯ порогом показа - см.
+# DEMAND_CLOUD_FLAT_THRESHOLD_PERCENT/district_premium_threshold ниже.
+# Таблица оставлена в файле как есть (мёртвые данные) на случай отката к
+# прежней калибровке - каждое число менять руками не нужно.
+DEMAND_CLOUD_FLAT_THRESHOLD_PERCENT = 80
 DEMAND_CLOUD_UNIFIED_THRESHOLDS = {
     'moscow': {
         'demand_econom': (73, 73), 'demand_comfort': (63, 63), 'demand_comfort_plus': (63, 63),
@@ -20274,17 +20440,35 @@ def district_premium_threshold(city, field, lat, lon):
     вызовы незачем). Откат на старый плоский get_district_cloud_thresholds(city)[field],
     если города нет ни в одной из двух таблиц (не должно происходить у
     городов из DISTRICT_DEMAND_CITIES, но лучше разумный дефолт, чем
-    KeyError)."""
-    if city == 'moscow' and field in MOSCOW_PREMIUM_ZONE_THRESHOLDS['center']:
-        zone = _moscow_demand_zone(lat, lon)
-        return MOSCOW_PREMIUM_ZONE_THRESHOLDS[zone][field]
-    pair = (DEMAND_CLOUD_UNIFIED_THRESHOLDS.get(city) or {}).get(field)
-    if pair:
-        multiplier = _resort_season_threshold_multiplier(city)
-        if multiplier == 1.0:
-            return pair
-        return tuple(max(1, min(100, round(v * multiplier))) for v in pair)
-    return get_district_cloud_thresholds(city).get(field)
+    KeyError).
+
+    ЗАМЕНЕНО 27.09.2026 (прямая просьба пользователя - "давай опустим
+    процент отображения спроса до 80", уточнено через AskUserQuestion -
+    "по процентилям у нас общий для всех городов и тарифов") - вся
+    откалиброванная по городам/тарифам система (MOSCOW_PREMIUM_ZONE_
+    THRESHOLDS/DEMAND_CLOUD_UNIFIED_THRESHOLDS/get_district_cloud_thresholds
+    выше, сезонность Краснодара/Сочи) заменена ОДНИМ фиксированным порогом
+    80% для ЛЮБОГО города и ЛЮБОГО тарифа - облако спроса теперь показывается
+    везде одинаково честно при спросе >=80%, без исключений по зоне Москвы
+    или курортной сезонности. Таблицы выше (MOSCOW_PREMIUM_ZONE_THRESHOLDS и
+    т.д.) оставлены в файле нетронутыми - используются только синхронной
+    JS-копией moscowPremiumThreshold в map_webapp_html, см. тот же комментарий
+    там же - на случай отката к прежней калибровке. lat/lon/field
+    параметры оставлены ради общей сигнатуры функции (вызывающий код везде
+    передаёт их, менять все вызовы незачем)."""
+    return (DEMAND_CLOUD_FLAT_THRESHOLD_PERCENT, DEMAND_CLOUD_FLAT_THRESHOLD_PERCENT)
+    # ПРЕЖНЯЯ ОТКАЛИБРОВАННАЯ ПО ГОРОДУ/ТАРИФУ ВЕРСИЯ (до 27.09.2026) -
+    # оставлена для отката:
+    # if city == 'moscow' and field in MOSCOW_PREMIUM_ZONE_THRESHOLDS['center']:
+    #     zone = _moscow_demand_zone(lat, lon)
+    #     return MOSCOW_PREMIUM_ZONE_THRESHOLDS[zone][field]
+    # pair = (DEMAND_CLOUD_UNIFIED_THRESHOLDS.get(city) or {}).get(field)
+    # if pair:
+    #     multiplier = _resort_season_threshold_multiplier(city)
+    #     if multiplier == 1.0:
+    #         return pair
+    #     return tuple(max(1, min(100, round(v * multiplier))) for v in pair)
+    # return get_district_cloud_thresholds(city).get(field)
 
 # ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя, скриншот с
 # фиолетовыми пятнами разбросанными по Тверской/Калужской/Смоленской
@@ -20310,10 +20494,20 @@ def _district_in_city_limits(city, lat, lon):
 MAP_DISTRICT_DEMAND_API_PATH = '/map/district_demand'
 
 def _district_slot_value(slots, hour, indices):
+    # ЗАЩИЩЕНО 27.09.2026 (профилактически, по итогам аудита после бага в
+    # score_district_candidates - "Краснодар нет отображение по районам
+    # рекомендаций") - на сегодня все вызывающие передают сюда ОДИНОЧНЫЙ
+    # индекс (idx,), так что None-колонка "Элит" у Краснодара/Сочи (см.
+    # CITIES_WITHOUT_ELITE_DEMAND_DATA) сама по себе не падала здесь (max
+    # одного элемента просто возвращает его, включая None, без сравнения).
+    # Но если сюда когда-нибудь передадут МНОЖЕСТВЕННЫЙ индекс (как раньше
+    # ошибочно падало в score_district_candidates) - тот же max() упадёт
+    # той же TypeError. Фильтруем None заранее, той же логикой, что и там.
     for slot in slots:
         start_h, end_h = slot[0], slot[1]
         if start_h <= hour < end_h:
-            return max(slot[2 + i] for i in indices)
+            values = [slot[2 + i] for i in indices if slot[2 + i] is not None]
+            return max(values) if values else None
     return None
 
 # ДОБАВЛЕНО 24.09.2026 (прямая просьба пользователя - пуш "час пик" должен
@@ -21081,19 +21275,29 @@ def events_webapp_html():
   html { background: #000; overscroll-behavior: none; }
   body {
     margin: 0; padding: 16px; padding-bottom: max(16px, env(safe-area-inset-bottom, 0px));
-    padding-top: max(16px, env(safe-area-inset-top, 0px));
+    padding-top: max(16px, calc(env(safe-area-inset-top, 0px) + var(--tg-chrome-top, 0px)));
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     background: #000; color: #fff; overscroll-behavior: none; touch-action: manipulation;
   }
   h1 { font-size: 17px; margin: 0 0 12px; }
   #state { text-align: center; padding: 60px 16px; opacity: .7; font-size: 14px; }
   .tabs { display: flex; gap: 8px; margin-bottom: 14px; }
+  /* ИЗМЕНЕНО 27.09.2026 (прямая просьба пользователя - "иконки с подписями...
+     свести все к единому стилю как у погоды, то есть иконка и под ней
+     слева получается надпись") - раньше .tab был одной строкой по центру
+     (эмодзи+текст инлайн). Теперь та же структура, что у плиток Сервисов/
+     Погоды (.tile .ic/.lbl) - иконка сверху, подпись под ней СЛЕВА (не по
+     центру), см. .tab .ic/.tab .lbl ниже и разметку <div class="tab">
+     (теперь <div class="ic">.../<div class="lbl">... вместо одной текстовой
+     строки). */
   .tab {
-    flex: 1; text-align: center; padding: 10px 6px; border-radius: 12px;
+    flex: 1; text-align: left; padding: 12px 10px; border-radius: 12px;
     background: #1c1c1c; border: 1px solid rgba(255,255,255,.08); color: #9a9a9a;
-    font-size: 13px; font-weight: 600; cursor: pointer; transition: transform .12s, background .15s, border-color .15s;
-    text-transform: uppercase;
+    display: flex; flex-direction: column; justify-content: flex-start; gap: 7px;
+    cursor: pointer; transition: transform .12s, background .15s, border-color .15s;
   }
+  .tab .ic { font-size: 19px; line-height: 1; }
+  .tab .lbl { font-size: 12.5px; font-weight: 600; line-height: 1.25; text-transform: uppercase; }
   .tab:active { transform: scale(.95); }
   /* ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - пульсирующий ореол
      на всех кнопках с фиксацией выбора, как у плашки рейтинга) */
@@ -21142,12 +21346,13 @@ def events_webapp_html():
 </style>
 </head>
 <body>
+<button type="button" onclick="try{if(window.history.length>1){history.back();}else if(window.Telegram&&Telegram.WebApp&&Telegram.WebApp.close){Telegram.WebApp.close();}}catch(e){}" style="position:relative;z-index:2;display:inline-flex;align-items:center;gap:5px;margin:0 0 10px;padding:8px 14px 8px 10px;background:#1c1c1c;border:1px solid rgba(255,255,255,.12);border-radius:10px;color:#fff;font-size:13px;font-weight:600;cursor:pointer;">← Назад</button>
 <div id="state">Загружаю…</div>
 <div id="app" style="display:none">
   <h1 id="title">События</h1>
   <div class="tabs" id="tabs">
-    <div class="tab" id="tabConcerts" data-tab="concerts">🎭 Афиша</div>
-    <div class="tab" id="tabRoads" data-tab="roads">⛔ Дороги</div>
+    <div class="tab" id="tabConcerts" data-tab="concerts"><div class="ic">🎭</div><div class="lbl">Афиша</div></div>
+    <div class="tab" id="tabRoads" data-tab="roads"><div class="ic">⛔</div><div class="lbl">Дороги</div></div>
   </div>
   <div class="section" id="secConcerts"></div>
   <div class="section" id="secRoads"></div>
@@ -21167,6 +21372,20 @@ def events_webapp_html():
     // клиентах молча ничего не делать, а не падать с ошибкой.
     try { if (typeof tg.disableVerticalSwipes === 'function') tg.disableVerticalSwipes(); } catch (e) {}
     try { if (typeof tg.requestFullscreen === 'function') tg.requestFullscreen(); } catch (e) {}
+    // ДОБАВЛЕНО 27.09.2026 (см. contentSafeAreaInset в unified_app_html -
+    // та же причина: requestFullscreen выше добавляет системную шапку
+    // Telegram, которая не входит в обычный env(safe-area-inset-top) -
+    // без этого верхний контент рисуется под ней) - читаем
+    // tg.contentSafeAreaInset.top и прокидываем в CSS-переменную
+    // --tg-chrome-top.
+    var applyTgChromeInset = function () {
+      try {
+        var csa = tg.contentSafeAreaInset || {};
+        document.documentElement.style.setProperty('--tg-chrome-top', (csa.top || 0) + 'px');
+      } catch (e) {}
+    };
+    applyTgChromeInset();
+    try { if (typeof tg.onEvent === 'function') tg.onEvent('contentSafeAreaChanged', applyTgChromeInset); } catch (e) {}
   }
   if (tg && tg.platform) { fetch('/platform/report', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': tg.initData || '' }, body: JSON.stringify({ platform: tg.platform }) }).catch(function(){}); }
   const params = new URLSearchParams(window.location.search);
@@ -21477,19 +21696,29 @@ def transport_webapp_html():
   html { background: #000; overscroll-behavior: none; }
   body {
     margin: 0; padding: 16px; padding-bottom: max(16px, env(safe-area-inset-bottom, 0px));
-    padding-top: max(16px, env(safe-area-inset-top, 0px));
+    padding-top: max(16px, calc(env(safe-area-inset-top, 0px) + var(--tg-chrome-top, 0px)));
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     background: #000; color: #fff; overscroll-behavior: none; touch-action: manipulation;
   }
   h1 { font-size: 17px; margin: 0 0 12px; }
   #state { text-align: center; padding: 60px 16px; opacity: .7; font-size: 14px; }
   .tabs { display: flex; gap: 8px; margin-bottom: 14px; }
+  /* ИЗМЕНЕНО 27.09.2026 (прямая просьба пользователя - "иконки с подписями...
+     свести все к единому стилю как у погоды, то есть иконка и под ней
+     слева получается надпись") - раньше .tab был одной строкой по центру
+     (эмодзи+текст инлайн). Теперь та же структура, что у плиток Сервисов/
+     Погоды (.tile .ic/.lbl) - иконка сверху, подпись под ней СЛЕВА (не по
+     центру), см. .tab .ic/.tab .lbl ниже и разметку <div class="tab">
+     (теперь <div class="ic">.../<div class="lbl">... вместо одной текстовой
+     строки). */
   .tab {
-    flex: 1; text-align: center; padding: 10px 6px; border-radius: 12px;
+    flex: 1; text-align: left; padding: 12px 10px; border-radius: 12px;
     background: #1c1c1c; border: 1px solid rgba(255,255,255,.08); color: #9a9a9a;
-    font-size: 13px; font-weight: 600; cursor: pointer; transition: transform .12s, background .15s, border-color .15s;
-    text-transform: uppercase;
+    display: flex; flex-direction: column; justify-content: flex-start; gap: 7px;
+    cursor: pointer; transition: transform .12s, background .15s, border-color .15s;
   }
+  .tab .ic { font-size: 19px; line-height: 1; }
+  .tab .lbl { font-size: 12.5px; font-weight: 600; line-height: 1.25; text-transform: uppercase; }
   .tab:active { transform: scale(.95); }
   /* ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - пульсирующий ореол
      на всех кнопках с фиксацией выбора, как у плашки рейтинга) */
@@ -21564,12 +21793,13 @@ def transport_webapp_html():
 </style>
 </head>
 <body>
+<button type="button" onclick="try{if(window.history.length>1){history.back();}else if(window.Telegram&&Telegram.WebApp&&Telegram.WebApp.close){Telegram.WebApp.close();}}catch(e){}" style="position:relative;z-index:2;display:inline-flex;align-items:center;gap:5px;margin:0 0 10px;padding:8px 14px 8px 10px;background:#1c1c1c;border:1px solid rgba(255,255,255,.12);border-radius:10px;color:#fff;font-size:13px;font-weight:600;cursor:pointer;">← Назад</button>
 <div id="state">Загружаю…</div>
 <div id="app" style="display:none">
   <h1>✈️🚆 Авиа/ЖД</h1>
   <div class="tabs" id="tabs">
-    <div class="tab active" id="tabAirports" data-tab="airports">✈️ Аэропорты</div>
-    <div class="tab" id="tabTrains" data-tab="trains">🚆 Вокзалы</div>
+    <div class="tab active" id="tabAirports" data-tab="airports"><div class="ic">✈️</div><div class="lbl">Аэропорты</div></div>
+    <div class="tab" id="tabTrains" data-tab="trains"><div class="ic">🚆</div><div class="lbl">Вокзалы</div></div>
   </div>
   <div class="legend">🔴0-25% Не ехать | 🟡26-50% Уточни очередь | 🟢51-85% Занимай очередь | 🟣&gt;85% Срочно ехать</div>
   <div class="section active" id="secAirports">
@@ -21594,6 +21824,20 @@ def transport_webapp_html():
     // клиентах молча ничего не делать, а не падать с ошибкой.
     try { if (typeof tg.disableVerticalSwipes === 'function') tg.disableVerticalSwipes(); } catch (e) {}
     try { if (typeof tg.requestFullscreen === 'function') tg.requestFullscreen(); } catch (e) {}
+    // ДОБАВЛЕНО 27.09.2026 (см. contentSafeAreaInset в unified_app_html -
+    // та же причина: requestFullscreen выше добавляет системную шапку
+    // Telegram, которая не входит в обычный env(safe-area-inset-top) -
+    // без этого верхний контент рисуется под ней) - читаем
+    // tg.contentSafeAreaInset.top и прокидываем в CSS-переменную
+    // --tg-chrome-top.
+    var applyTgChromeInset = function () {
+      try {
+        var csa = tg.contentSafeAreaInset || {};
+        document.documentElement.style.setProperty('--tg-chrome-top', (csa.top || 0) + 'px');
+      } catch (e) {}
+    };
+    applyTgChromeInset();
+    try { if (typeof tg.onEvent === 'function') tg.onEvent('contentSafeAreaChanged', applyTgChromeInset); } catch (e) {}
   }
   if (tg && tg.platform) { fetch('/platform/report', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': tg.initData || '' }, body: JSON.stringify({ platform: tg.platform }) }).catch(function(){}); }
   const params = new URLSearchParams(window.location.search);
@@ -22983,7 +23227,13 @@ def legal_cabinet_webapp_html():
   * { box-sizing: border-box; }
   html { background: var(--tg-theme-bg-color, #f2f2f7); overscroll-behavior: none; }
   body {
-    margin: 0; padding: 16px; padding-bottom: max(16px, env(safe-area-inset-bottom, 0px));
+    margin: 0; padding: 16px;
+    /* ИЗМЕНЕНО 27.09.2026 (см. applyTgChromeInset в <script> ниже) - верхний
+       отступ теперь учитывает и физическую чёлку устройства
+       (env(safe-area-inset-top)), и системную шапку Telegram в fullscreen
+       (--tg-chrome-top), иначе первый ряд плашек кабинета залезает под неё. */
+    padding-top: max(16px, calc(env(safe-area-inset-top, 0px) + var(--tg-chrome-top, 0px)));
+    padding-bottom: max(16px, env(safe-area-inset-bottom, 0px));
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     background: var(--tg-theme-bg-color, #f2f2f7); color: var(--tg-theme-text-color, #000);
     overscroll-behavior: none; touch-action: manipulation;
@@ -23120,6 +23370,7 @@ def legal_cabinet_webapp_html():
 </style>
 </head>
 <body>
+<button type="button" onclick="try{if(window.history.length>1){history.back();}else if(window.Telegram&&Telegram.WebApp&&Telegram.WebApp.close){Telegram.WebApp.close();}}catch(e){}" style="position:relative;z-index:2;display:inline-flex;align-items:center;gap:5px;margin:0 0 10px;padding:8px 14px 8px 10px;background:#1c1c1c;border:1px solid rgba(255,255,255,.12);border-radius:10px;color:#fff;font-size:13px;font-weight:600;cursor:pointer;">← Назад</button>
 <div id="state">Загружаю данные…</div>
 <div id="app" style="display:none">
 
@@ -23226,6 +23477,20 @@ if (tg) {
   // вызовов в unified_app_html()/map_webapp_html() и т.д.
   try { if (typeof tg.disableVerticalSwipes === 'function') tg.disableVerticalSwipes(); } catch (e) {}
   try { if (typeof tg.requestFullscreen === 'function') tg.requestFullscreen(); } catch (e) {}
+    // ДОБАВЛЕНО 27.09.2026 (см. contentSafeAreaInset в unified_app_html -
+    // та же причина: requestFullscreen выше добавляет системную шапку
+    // Telegram, которая не входит в обычный env(safe-area-inset-top) -
+    // без этого верхний контент рисуется под ней) - читаем
+    // tg.contentSafeAreaInset.top и прокидываем в CSS-переменную
+    // --tg-chrome-top.
+    var applyTgChromeInset = function () {
+      try {
+        var csa = tg.contentSafeAreaInset || {};
+        document.documentElement.style.setProperty('--tg-chrome-top', (csa.top || 0) + 'px');
+      } catch (e) {}
+    };
+    applyTgChromeInset();
+    try { if (typeof tg.onEvent === 'function') tg.onEvent('contentSafeAreaChanged', applyTgChromeInset); } catch (e) {}
 }
 const API = '""" + LEGAL_CABINET_DATA_API_PATH + """';
 const EMPLOYMENT_TYPES = [['ip', 'ИП'], ['self_employed', 'Самозанятый'], ['none', 'Без трудоустройства']];
@@ -23560,7 +23825,13 @@ def cabinet_webapp_html():
   * { box-sizing: border-box; }
   html { background: var(--tg-theme-bg-color, #f2f2f7); overscroll-behavior: none; }
   body {
-    margin: 0; padding: 16px; padding-bottom: max(16px, env(safe-area-inset-bottom, 0px));
+    margin: 0; padding: 16px;
+    /* ИЗМЕНЕНО 27.09.2026 (см. applyTgChromeInset в <script> ниже) - верхний
+       отступ теперь учитывает и физическую чёлку устройства
+       (env(safe-area-inset-top)), и системную шапку Telegram в fullscreen
+       (--tg-chrome-top), иначе первый ряд плашек кабинета залезает под неё. */
+    padding-top: max(16px, calc(env(safe-area-inset-top, 0px) + var(--tg-chrome-top, 0px)));
+    padding-bottom: max(16px, env(safe-area-inset-bottom, 0px));
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     background: var(--tg-theme-bg-color, #f2f2f7); color: var(--tg-theme-text-color, #000);
     overscroll-behavior: none; touch-action: manipulation;
@@ -23837,6 +24108,7 @@ def cabinet_webapp_html():
 </style>
 </head>
 <body>
+<button type="button" onclick="try{if(window.history.length>1){history.back();}else if(window.Telegram&&Telegram.WebApp&&Telegram.WebApp.close){Telegram.WebApp.close();}}catch(e){}" style="position:relative;z-index:2;display:inline-flex;align-items:center;gap:5px;margin:0 0 10px;padding:8px 14px 8px 10px;background:#1c1c1c;border:1px solid rgba(255,255,255,.12);border-radius:10px;color:#fff;font-size:13px;font-weight:600;cursor:pointer;">← Назад</button>
 <div id="state">Загружаю данные…</div>
 <div id="cabinetApp" style="display:none">
 
@@ -24080,6 +24352,24 @@ def cabinet_webapp_html():
     // клиентах молча ничего не делать, а не падать с ошибкой.
     try { if (typeof tg.disableVerticalSwipes === 'function') tg.disableVerticalSwipes(); } catch (e) {}
     try { if (typeof tg.requestFullscreen === 'function') tg.requestFullscreen(); } catch (e) {}
+    // ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя со скриншотом -
+    // верхний ряд плашек "Профиль/Финансы/..." залезает под системные
+    // кнопки Telegram в fullscreen) - та же причина/фикс, что уже сделан
+    // для unified_app_html (см. contentSafeAreaInset/--tg-chrome-top там):
+    // requestFullscreen выше добавляет системную шапку Telegram (крестик/
+    // стрелка/меню), которая НЕ входит в обычный env(safe-area-inset-top)
+    // (это только физическая чёлка/статус-бар устройства) - без
+    // contentSafeAreaInset верхний контент рисуется под этой шапкой.
+    // Читаем tg.contentSafeAreaInset.top и прокидываем в CSS-переменную
+    // --tg-chrome-top, на которую подписан body ниже (см. padding-top).
+    var applyTgChromeInset = function () {
+      try {
+        var csa = tg.contentSafeAreaInset || {};
+        document.documentElement.style.setProperty('--tg-chrome-top', (csa.top || 0) + 'px');
+      } catch (e) {}
+    };
+    applyTgChromeInset();
+    try { if (typeof tg.onEvent === 'function') tg.onEvent('contentSafeAreaChanged', applyTgChromeInset); } catch (e) {}
   }
   if (tg && tg.platform) { fetch('/platform/report', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': tg.initData || '' }, body: JSON.stringify({ platform: tg.platform }) }).catch(function(){}); }
   // Вкладка "Чаевые" убрана из кабинета целиком (по прямой просьбе
@@ -34013,45 +34303,55 @@ async def _push_peak_hour_alert_personalized(city, category, target_date, target
     except Exception:
         pass
     sent, skipped_no_geo, skipped_no_demand = 0, 0, 0
+    # ЗАЩИЩЕНО 27.09.2026 (по итогам аудита перед деплоем - раньше тело
+    # цикла НЕ было обёрнуто в try/except, в отличие от check_low_tariff_
+    # demand_alerts ниже по файлу - одно исключение у ОДНОГО водителя
+    # (например в find_event_window_near/district_rain_now) молча обрывало
+    # бы пуш "час пик" всем ОСТАЛЬНЫМ водителям в этом городе/категории на
+    # этот цикл, не только ему одному). Теперь ошибка у одного водителя
+    # логируется и пропускается, остальные получают пуш как обычно.
     for user_id, state in candidates:
-        shift = state.get('shift') or {}
-        user_lat, user_lon = shift.get('last_lat'), shift.get('last_lon')
-        if user_lat is None or user_lon is None:
-            skipped_no_geo += 1
-            continue
-        nearest = find_nearest_district(city, user_lat, user_lon)
-        if not nearest:
-            skipped_no_geo += 1
-            continue
-        district_name, _dist_km, district_lat, district_lon = nearest
-        tariffs = shift.get('tariffs')
-        if not district_has_real_demand_at_hour(city, district_name, category, tariffs, weekday, target_hour):
-            skipped_no_demand += 1
-            continue
-        lines = [
-            f"📅 *{city_name} · {district_name}*",
-            "",
-            f"Через {PEAK_HOUR_PUSH_LEAD_MINUTES} минут ({start_dt.strftime('%H:%M')}) начинается "
-            f"{peak_color_emoji} *час пик* {peak_bar} в твоём районе - спрос здесь вырастет, самое время быть на линии.",
-        ]
-        if district_rain_now(city, district_name, fallback_rain_now=rain_now_fallback):
-            lines.append("🌧 В районе сейчас идут осадки.")
-        else:
-            lines.append("☀️ Осадков в районе сейчас нет.")
-        event = find_event_window_near(city, district_lat, district_lon)
-        if event:
-            start_txt = datetime.fromtimestamp(event['start_ts'], tz=tz).strftime('%H:%M')
-            end_txt = datetime.fromtimestamp(event['end_ts'], tz=tz).strftime('%H:%M')
-            lines.append(f"🎉 Рядом мероприятие «{event['title']}»: с {start_txt} до {end_txt}.")
-        text = "\n".join(lines)
-        # см. комментарий в push_rain_alert - "кнопки нет, поломалось
-        # после рестарта".
-        ok = await send_push_with_retry(
-            user_id, text, state=state, parse_mode='Markdown',
-            reply_markup=services_keyboard(category, city, user_id),
-        )
-        if ok:
-            sent += 1
+        try:
+            shift = state.get('shift') or {}
+            user_lat, user_lon = shift.get('last_lat'), shift.get('last_lon')
+            if user_lat is None or user_lon is None:
+                skipped_no_geo += 1
+                continue
+            nearest = find_nearest_district(city, user_lat, user_lon)
+            if not nearest:
+                skipped_no_geo += 1
+                continue
+            district_name, _dist_km, district_lat, district_lon = nearest
+            tariffs = shift.get('tariffs')
+            if not district_has_real_demand_at_hour(city, district_name, category, tariffs, weekday, target_hour):
+                skipped_no_demand += 1
+                continue
+            lines = [
+                f"📅 *{city_name} · {district_name}*",
+                "",
+                f"Через {PEAK_HOUR_PUSH_LEAD_MINUTES} минут ({start_dt.strftime('%H:%M')}) начинается "
+                f"{peak_color_emoji} *час пик* {peak_bar} в твоём районе - спрос здесь вырастет, самое время быть на линии.",
+            ]
+            if district_rain_now(city, district_name, fallback_rain_now=rain_now_fallback):
+                lines.append("🌧 В районе сейчас идут осадки.")
+            else:
+                lines.append("☀️ Осадков в районе сейчас нет.")
+            event = find_event_window_near(city, district_lat, district_lon)
+            if event:
+                start_txt = datetime.fromtimestamp(event['start_ts'], tz=tz).strftime('%H:%M')
+                end_txt = datetime.fromtimestamp(event['end_ts'], tz=tz).strftime('%H:%M')
+                lines.append(f"🎉 Рядом мероприятие «{event['title']}»: с {start_txt} до {end_txt}.")
+            text = "\n".join(lines)
+            # см. комментарий в push_rain_alert - "кнопки нет, поломалось
+            # после рестарта".
+            ok = await send_push_with_retry(
+                user_id, text, state=state, parse_mode='Markdown',
+                reply_markup=services_keyboard(category, city, user_id),
+            )
+            if ok:
+                sent += 1
+        except Exception:
+            logger.exception(f"❌ Не удалось отправить персонализированный пуш 'час пика' user_id={user_id} ({city}/{category})")
         await asyncio.sleep(0.05)  # Telegram допускает ~30 сообщений/сек в разные чаты
     logger.info(
         f"📅 Пуш о часе пика (персонализированный по районам) по городу {city}/{category} "
@@ -34239,7 +34539,10 @@ def _tariff_demand_and_threshold(city, category, zone_name, tariff, weekday, hou
     if category in ('courier', 'cargo'):
         value = _delivery_tariff_demand_value(city, zone_name, tariff, weekday, hour)
         field = DELIVERY_TARIFF_FIELD.get(tariff)
-        threshold = (DISTRICT_CLOUD_THRESHOLDS_BY_CITY.get(city) or {}).get(field)
+        # ИСПРАВЛЕНО 27.09.2026 (та же правка, что у recommended_delivery_
+        # tariffs выше по файлу - единый порог 80% через district_premium_
+        # threshold вместо прямого чтения DISTRICT_CLOUD_THRESHOLDS_BY_CITY).
+        threshold = district_premium_threshold(city, field, lat, lon)
         return value, threshold
     return None, None
 
