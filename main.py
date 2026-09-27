@@ -12482,13 +12482,15 @@ def map_webapp_html():
     # В ТРЕТИЙ РАЗ ИЗМЕНЕНО 25.09.2026 (см. "показывать тогда, когда он есть
     # реально"/DEMAND_CLOUD_UNIFIED_THRESHOLDS/district_premium_threshold
     # выше) - зона центр/область убрана, один порог на (город, тариф) -
-    # 85-й процентиль собственных данных тарифа (верхние ~15% реально самых
-    # загруженных моментов) для ВСЕХ городов/тарифов, кроме Бизнес/Премьер/
-    # Элит Москвы (у них своя уже проверенная таблица выше). Сезонность Краснодара/Сочи
-    # применена на сервере ЗАРАНЕЕ (сама district_premium_threshold её
-    # применить в JSON-дампе не может - сезонность завязана на текущее
-    # время сервера, а не на lat/lon, поэтому проще передать уже готовые,
-    # скорректированные числа).
+    # 80-й процентиль собственных данных тарифа (верхние ~20% реально самых
+    # загруженных моментов - сдвинуто с 85-го на 80-й процентиль 27.09.2026,
+    # прямая просьба пользователя "порог 85% на 80 смести") для ВСЕХ
+    # городов/тарифов, кроме Бизнес/Премьер/Элит Москвы (у них своя уже
+    # проверенная таблица выше). Сезонность Краснодара/Сочи применена на
+    # сервере ЗАРАНЕЕ (сама district_premium_threshold её применить в
+    # JSON-дампе не может - сезонность завязана на текущее время сервера, а
+    # не на lat/lon, поэтому проще передать уже готовые, скорректированные
+    # числа).
     demand_cloud_unified_thresholds_json = json.dumps({
         city_key: {
             field: tuple(
@@ -12607,17 +12609,29 @@ def map_webapp_html():
 </style>
 </head>
 <body>
-<!-- ИСПРАВЛЕНО 27.09.2026 (по итогам проверки кликабельности перед
+<!-- УБРАНО 27.09.2026 (прямая просьба пользователя - "на карте кнопка
+     назад не нужна, она нужна исключительно вкладкам Сервисов [настройки,
+     личный кабинет и т.д.], главное чтобы снизу был доступен бар выбора
+     чтобы люди могли переключаться между меню") - карта открывается как
+     вкладка "Карта" внутри unified_app_html (см. #mapFrame - вложенный
+     iframe), а не отдельной страницей "поверх" чего-то, откуда нужно бы
+     возвращаться назад; переключение между вкладками (Карта/Куда ехать/
+     Сервисы/Кабинет) и так всегда доступно снизу в родительском shell -
+     кнопка "Назад" внутри вложенного iframe была лишней и к тому же могла
+     смещаться некорректно из-за особенностей вложенного iframe (см.
+     комментарий про "у вложенного iframe нет средства перекрыть их чисто
+     CSS" ниже по файлу). Раньше стояла тут же, сдвинутая ниже кружка
+     .shift-radar-indicator (top: 74px) - убрана целиком, кружок больше
+     ничего не перекрывает.
+     ИСПРАВЛЕНО 27.09.2026 (по итогам проверки кликабельности перед
      деплоем - "малоли есть какие то баги не кликабельные кнопки") -
      кнопка "Назад" изначально стояла в top:10px/left:10px, ровно там же,
      где и .shift-radar-indicator (кружок-тумблер смены, 56x56, тот же
      z-index 1000) - при равном z-index более поздний по DOM элемент
      (сам кружок) рисуется поверх и перехватывает клики, кнопка "Назад"
-     физически не нажималась. Сдвинута НИЖЕ кружка (top: 74px), в
-     свободную область слева, где нет других плавающих контролов
-     (.map-toggles-row справа начинается от left:80px, зум-контролы
-     Leaflet по центру левого края - см. .leaflet-top.leaflet-left выше). -->
-<button type="button" onclick="try{{if(window.history.length>1){{history.back();}}else if(window.Telegram&&Telegram.WebApp&&Telegram.WebApp.close){{Telegram.WebApp.close();}}}}catch(e){{}}" style="position:absolute;top:calc(74px + var(--tg-chrome-top, 0px));left:14px;z-index:1000;display:flex;align-items:center;gap:5px;padding:8px 12px 8px 10px;background:#1c1c1c;border:1px solid rgba(255,255,255,.18);border-radius:8px;color:#fff;font-size:12.5px;font-weight:600;cursor:pointer;">← Назад</button>
+     физически не нажималась. Сдвинута НИЖЕ кружка (top: 74px) - это
+     исправление сохранено здесь в истории, хотя сама кнопка теперь
+     убрана целиком. -->
 <div id="map"></div>
 <div class="bottom-info-bar" id="bottomInfoBar">
   <span class="bib-icon">⏱</span><span class="bib-time" id="bibShiftTime">не на линии</span>
@@ -15033,12 +15047,13 @@ def map_webapp_html():
   // Python, посчитаны по реальным перцентилям каждого города отдельно, а не
   // одна таблица на всех) - DISTRICT_CLOUD_THRESHOLDS ниже теперь объект
   // {{city: {{field: [show, show]}}}}, выбираем свой город по переменной city.
-  // ИЗМЕНЕНО 27.09.2026 (прямая просьба пользователя - "опустим процент
-  // отображения спроса до 80") - см. DEMAND_CLOUD_FLAT_THRESHOLD_PERCENT/
-  // moscowPremiumThreshold ниже, тот же единый порог теперь у ЛЮБОГО
-  // города/тарифа, эта константа осталась только как последний фолбэк.
-  const DEMAND_CLOUD_SHOW_THRESHOLD_PERCENT = 80;
-  const DEMAND_CLOUD_FLAT_THRESHOLD_PERCENT = 80;
+  // ИЗМЕНЕНО 27.09.2026, ОТКАЧЕНО ОБРАТНО 27.09.2026 (пользователь попросил
+  // единый плоский порог 80% для всех городов/тарифов, затем явно попросил
+  // вернуть прежнюю калибровку обратно - "очень важно") - эта константа
+  // снова только последний фолбэк (см. moscowPremiumThreshold ниже, теперь
+  // снова калиброванная по (город, тариф) версия).
+  const DEMAND_CLOUD_SHOW_THRESHOLD_PERCENT = 50;
+  const DEMAND_CLOUD_FLAT_THRESHOLD_PERCENT = 80; // больше не используется - оставлено для истории (см. moscowPremiumThreshold ниже)
   const DEMAND_CLOUD_COLOR = '#9b30ff'; // фиолетовый - единственный цвет облака спроса
   const DEMAND_CLOUD_OPACITY = 0.20;
   // Свои пороги показа на каждый город/тариф - см.
@@ -15056,11 +15071,13 @@ def map_webapp_html():
   const MOSCOW_PREMIUM_ZONE_GEO = {moscow_premium_zone_geo_json};
   // В ТРЕТИЙ РАЗ ИЗМЕНЕНО 25.09.2026 (прямая просьба пользователя -
   // "показывать тогда, когда он есть реально"; см. DEMAND_CLOUD_UNIFIED_
-  // THRESHOLDS/district_premium_threshold в Python) - порог = 85-й
-  // процентиль собственных данных тарифа (верхние ~15% реально самых
-  // загруженных моментов), один на (город, тариф) для ВСЕХ городов и
-  // тарифов, кроме Бизнес/Премьер/Элит Москвы (у них своя, уже проверенная
-  // таблица выше, эта сюда не заходит). Сезонность Краснодара/Сочи уже
+  // THRESHOLDS/district_premium_threshold в Python) - порог = 80-й
+  // процентиль собственных данных тарифа (верхние ~20% реально самых
+  // загруженных моментов - сдвинуто с 85-го на 80-й процентиль 27.09.2026
+  // по прямой просьбе пользователя "порог 85% на 80 смести"), один на
+  // (город, тариф) для ВСЕХ городов и тарифов, кроме Бизнес/Премьер/Элит
+  // Москвы (у них своя, уже проверенная таблица выше, эта сюда не
+  // заходит). Сезонность Краснодара/Сочи уже
   // учтена на сервере при формировании JSON.
   const DEMAND_CLOUD_UNIFIED_THRESHOLDS = {demand_cloud_unified_thresholds_json};
   function moscowDemandZone(lat, lon) {{
@@ -15072,25 +15089,26 @@ def map_webapp_html():
     }}
     return 'oblast';
   }}
-  // ЗАМЕНЕНО 27.09.2026 (прямая просьба пользователя - "давай опустим
-  // процент отображения спроса до 80", уточнено через AskUserQuestion -
-  // "по процентилям у нас общий для всех городов и тарифов") - вместо
-  // калибровки по зоне Москвы/перцентилям по (город, тариф) один плоский
-  // порог 80% для ЛЮБОГО города и тарифа - синхронизировано с
-  // district_premium_threshold в Python (та же правка, тот же принцип).
+  // ЗАМЕНЕНО 27.09.2026, ОТКАЧЕНО ОБРАТНО 27.09.2026 (пользователь сначала
+  // попросил единый плоский порог 80% для ЛЮБОГО города/тарифа, затем явно
+  // попросил вернуть прежнюю калибровку по зоне Москвы/перцентилям
+  // обратно - "очень важно" - калиброванная версия снова живая,
+  // синхронизировано с district_premium_threshold в Python (та же правка,
+  // тот же принцип).
   function moscowPremiumThreshold(cityKey, field, lat, lon) {{
-    return [DEMAND_CLOUD_FLAT_THRESHOLD_PERCENT, DEMAND_CLOUD_FLAT_THRESHOLD_PERCENT];
+    if (cityKey === 'moscow' && MOSCOW_PREMIUM_ZONE_THRESHOLDS.center[field]) {{
+      const zone = moscowDemandZone(lat, lon);
+      return MOSCOW_PREMIUM_ZONE_THRESHOLDS[zone][field];
+    }}
+    const cityTable = DEMAND_CLOUD_UNIFIED_THRESHOLDS[cityKey];
+    if (cityTable && cityTable[field]) return cityTable[field];
+    const cityThresholds = DISTRICT_CLOUD_THRESHOLDS_BY_CITY[cityKey] || {{}};
+    return cityThresholds[field] || [DEMAND_CLOUD_SHOW_THRESHOLD_PERCENT];
   }}
-  // ПРЕЖНЯЯ ОТКАЛИБРОВАННАЯ ВЕРСИЯ (до 27.09.2026) - оставлена для отката:
+  // ПЛОСКИЙ ЕДИНЫЙ ПОРОГ 80% ДЛЯ ВСЕХ (27.09.2026, откачено обратно тем же
+  // числом - оставлено для истории, НЕ используется):
   // function moscowPremiumThreshold(cityKey, field, lat, lon) {{
-  //   if (cityKey === 'moscow' && MOSCOW_PREMIUM_ZONE_THRESHOLDS.center[field]) {{
-  //     const zone = moscowDemandZone(lat, lon);
-  //     return MOSCOW_PREMIUM_ZONE_THRESHOLDS[zone][field];
-  //   }}
-  //   const cityTable = DEMAND_CLOUD_UNIFIED_THRESHOLDS[cityKey];
-  //   if (cityTable && cityTable[field]) return cityTable[field];
-  //   const cityThresholds = DISTRICT_CLOUD_THRESHOLDS_BY_CITY[cityKey] || {{}};
-  //   return cityThresholds[field] || [DEMAND_CLOUD_SHOW_THRESHOLD_PERCENT];
+  //   return [DEMAND_CLOUD_FLAT_THRESHOLD_PERCENT, DEMAND_CLOUD_FLAT_THRESHOLD_PERCENT];
   // }}
   function demandCloudColorByLevel(_demand) {{
     return DEMAND_CLOUD_COLOR;
@@ -19703,12 +19721,13 @@ MAP_DEMAND_API_PATH = '/map/demand'
 # map_webapp_html. Эти два константа-словаря оставлены (используются только
 # для фолбэка категорий без реальных почасовых % - курьер/грузовое такси),
 # но их значения тоже приведены к единому порогу 50%.
-# ИЗМЕНЕНО 27.09.2026 (прямая просьба пользователя - "опустим процент
-# отображения спроса до 80", см. DEMAND_CLOUD_FLAT_THRESHOLD_PERCENT/
-# district_premium_threshold ниже - тот же единый порог 80%, теперь и в
-# этом словаре-фолбэке для категорий без районных данных).
-MAP_DEMAND_CLOUD_THRESHOLD_BY_CATEGORY = {'taxi': 80, 'ultima': 80}
-MAP_DEMAND_CLOUD_THRESHOLD_DEFAULT = 80
+# ИЗМЕНЕНО 27.09.2026, ОТКАЧЕНО ОБРАТНО 27.09.2026 (пользователь сначала
+# попросил единый порог 80% везде, включая этот словарь-фолбэк для
+# категорий без районных данных, см. DEMAND_CLOUD_FLAT_THRESHOLD_PERCENT/
+# district_premium_threshold ниже; затем явно попросил вернуть как было -
+# "очень важно" - значения снова прежние 50%).
+MAP_DEMAND_CLOUD_THRESHOLD_BY_CATEGORY = {'taxi': 50, 'ultima': 50}
+MAP_DEMAND_CLOUD_THRESHOLD_DEFAULT = 50
 # ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "в дождь рисовать
 # всегда спрос") - пока в городе идут осадки, % спроса для облака не может
 # быть ниже этого значения, даже если по часовой таблице сейчас "тихий" час -
@@ -19733,8 +19752,8 @@ async def handle_map_demand_api(request):
     а не по одному тарифу). Для остальных город/категория таких данных нет
     (только уровень low/mid/high/peak, см. WEEKDAY_HOUR_LOAD) - в этом
     случае берём условный процент по уровню (peak->90, high->75 и т.д.),
-    чтобы хотя бы час пик тоже давал облако (порог 80% проходит только
-    peak)."""
+    чтобы хотя бы час пик тоже давал облако (порог DEMAND_CLOUD_SHOW_
+    THRESHOLD_PERCENT=50 проходят peak и high)."""
     city = request.query.get('city', '')
     category = request.query.get('category', '') or None
     result = {'demand': None, 'lat': None, 'lon': None}
@@ -20396,32 +20415,54 @@ def _moscow_demand_zone(lat, lon):
 # моментов по всем районам/часам/дням недели) - проверено на данных:
 # частота показа стабильно 15-19% везде, а не разброс в десятки раз.
 #
-# ЗАМЕНЕНО 27.09.2026 (прямая просьба пользователя - "опустим процент
-# отображения спроса до 80", уточнено через AskUserQuestion - "по
-# процентилям у нас общий для всех городов и тарифов") - вся эта
-# откалиброванная по перцентилям таблица (и MOSCOW_PREMIUM_ZONE_THRESHOLDS
-# выше, и курортная сезонность) БОЛЬШЕ НЕ ИСПОЛЬЗУЕТСЯ порогом показа - см.
-# DEMAND_CLOUD_FLAT_THRESHOLD_PERCENT/district_premium_threshold ниже.
-# Таблица оставлена в файле как есть (мёртвые данные) на случай отката к
-# прежней калибровке - каждое число менять руками не нужно.
-DEMAND_CLOUD_FLAT_THRESHOLD_PERCENT = 80
+# ЗАМЕНЕНО 27.09.2026, ОТКАЧЕНО ОБРАТНО 27.09.2026 (прямая просьба
+# пользователя - сначала "опустим процент отображения спроса до 80",
+# уточнено через AskUserQuestion - "по процентилям у нас общий для всех
+# городов и тарифов" - эта таблица была временно заменена одним плоским
+# порогом 80% для всех. Затем пользователь явно попросил вернуть как
+# было - "очень важно" - оказалось, что единый плоский порог это не то,
+# что он хотел; правильный путь - обсуждать сам процентильный параметр
+# ниже, а не заменять его чем-то плоским). Эта таблица СНОВА ИСПОЛЬЗУЕТСЯ
+# порогом показа - см. district_premium_threshold ниже.
+# DEMAND_CLOUD_FLAT_THRESHOLD_PERCENT оставлена как неиспользуемая
+# константа - на случай, если понадобится для истории/отладки; сам плоский
+# порог больше нигде не применяется.
+#
+# ИЗМЕНЕНО 27.09.2026 (прямая просьба пользователя - "порог 85% на 80
+# смести") - ориентир перцентиля для ВСЕЙ таблицы ниже сдвинут с 85-го на
+# 80-й процентиль (верхние ~20% реально самых загруженных моментов вместо
+# ~15%) - облако теперь будет показываться немного чаще везде одинаково
+# (по прикидке на тех же данных - около 20-24% времени вместо 15-19%).
+# Пересчитано программно по тем же историческим данным district_demand
+# (moscow/spb/krasnodar/sochi_district_demand.json), той же методикой, что
+# и раньше - один np.percentile(80) по всем значениям (район x будний день
+# x получасовой слот) отдельно на каждую пару (город, тариф), без
+# усреднения по районам/дням заранее. Значения krasnodar/sochi 'demand_
+# elite' по-прежнему берутся равными своему demand_premier (нет
+# собственных данных Элит для этих двух городов, см.
+# CITIES_WITHOUT_ELITE_DEMAND_DATA). MOSCOW_PREMIUM_ZONE_THRESHOLDS (Бизнес/
+# Премьер/Элит Москвы, зоны центр/область/Рублёвка-Новая Рига) НЕ
+# затронуты - это отдельная, уже тонко настроенная система на своих
+# перцентилях (p97 центр и т.д.), пользователь просил сдвинуть именно
+# единый 85%-процентиль, а не её.
+DEMAND_CLOUD_FLAT_THRESHOLD_PERCENT = 80  # больше не используется как порог показа (см. выше)
 DEMAND_CLOUD_UNIFIED_THRESHOLDS = {
     'moscow': {
-        'demand_econom': (73, 73), 'demand_comfort': (63, 63), 'demand_comfort_plus': (63, 63),
+        'demand_econom': (68, 68), 'demand_comfort': (59, 59), 'demand_comfort_plus': (58, 58),
     },
     'spb': {
-        'demand_econom': (79, 79), 'demand_comfort': (81, 81), 'demand_comfort_plus': (87, 87),
-        'demand_business': (93, 93), 'demand_premier': (99, 99), 'demand_elite': (100, 100),
+        'demand_econom': (75, 75), 'demand_comfort': (77, 77), 'demand_comfort_plus': (82, 82),
+        'demand_business': (87, 87), 'demand_premier': (93, 93), 'demand_elite': (98, 98),
     },
     'krasnodar': {
-        'demand_econom': (100, 100), 'demand_comfort': (67, 67), 'demand_comfort_plus': (45, 45),
-        'demand_business': (22, 22), 'demand_premier': (10, 10),
-        'demand_elite': (10, 10),  # нет своих данных - взято значение Премьера, см. CITIES_WITHOUT_ELITE_DEMAND_DATA
+        'demand_econom': (98, 98), 'demand_comfort': (63, 63), 'demand_comfort_plus': (42, 42),
+        'demand_business': (21, 21), 'demand_premier': (9, 9),
+        'demand_elite': (9, 9),  # нет своих данных - взято значение Премьера, см. CITIES_WITHOUT_ELITE_DEMAND_DATA
     },
     'sochi': {
-        'demand_econom': (77, 77), 'demand_comfort': (81, 81), 'demand_comfort_plus': (89, 89),
-        'demand_business': (95, 95), 'demand_premier': (99, 99),
-        'demand_elite': (99, 99),  # нет своих данных - взято значение Премьера
+        'demand_econom': (69, 69), 'demand_comfort': (72, 72), 'demand_comfort_plus': (78, 78),
+        'demand_business': (83, 83), 'demand_premier': (87, 87),
+        'demand_elite': (87, 87),  # нет своих данных - взято значение Премьера
     },
 }
 
@@ -20430,10 +20471,12 @@ def district_premium_threshold(city, field, lat, lon):
     Премьер/Элит - по её собственной, уже проверенной зоне (центр/область/
     элитная зона Рублёвка-Новая Рига, см. MOSCOW_PREMIUM_ZONE_THRESHOLDS
     выше). Для ВСЕГО остального (Эконом/Комфорт/Комфорт+ Москвы + все
-    тарифы Питера/Краснодара/Сочи) - единый порог по городу целиком, 85-й
+    тарифы Питера/Краснодара/Сочи) - единый порог по городу целиком, 80-й
     процентиль СОБСТВЕННЫХ данных тарифа (см. DEMAND_CLOUD_UNIFIED_
-    THRESHOLDS выше - верхние ~15% реально самых загруженных моментов), с
-    поправкой на курортную сезонность (как и раньше у get_district_cloud_
+    THRESHOLDS выше - верхние ~20% реально самых загруженных моментов,
+    сдвинуто с 85-го процентиля 27.09.2026 по прямой просьбе пользователя
+    "порог 85% на 80 смести"), с поправкой на курортную сезонность (как и
+    раньше у get_district_cloud_
     thresholds). lat/lon здесь больше не влияют на порог для этих полей
     (зона убрана по просьбе пользователя) - параметры оставлены ради общей
     сигнатуры функции (вызывающий код везде передаёт lat/lon, менять все
@@ -20442,33 +20485,45 @@ def district_premium_threshold(city, field, lat, lon):
     городов из DISTRICT_DEMAND_CITIES, но лучше разумный дефолт, чем
     KeyError).
 
-    ЗАМЕНЕНО 27.09.2026 (прямая просьба пользователя - "давай опустим
-    процент отображения спроса до 80", уточнено через AskUserQuestion -
-    "по процентилям у нас общий для всех городов и тарифов") - вся
-    откалиброванная по городам/тарифам система (MOSCOW_PREMIUM_ZONE_
-    THRESHOLDS/DEMAND_CLOUD_UNIFIED_THRESHOLDS/get_district_cloud_thresholds
-    выше, сезонность Краснодара/Сочи) заменена ОДНИМ фиксированным порогом
-    80% для ЛЮБОГО города и ЛЮБОГО тарифа - облако спроса теперь показывается
-    везде одинаково честно при спросе >=80%, без исключений по зоне Москвы
-    или курортной сезонности. Таблицы выше (MOSCOW_PREMIUM_ZONE_THRESHOLDS и
-    т.д.) оставлены в файле нетронутыми - используются только синхронной
-    JS-копией moscowPremiumThreshold в map_webapp_html, см. тот же комментарий
-    там же - на случай отката к прежней калибровке. lat/lon/field
-    параметры оставлены ради общей сигнатуры функции (вызывающий код везде
-    передаёт их, менять все вызовы незачем)."""
-    return (DEMAND_CLOUD_FLAT_THRESHOLD_PERCENT, DEMAND_CLOUD_FLAT_THRESHOLD_PERCENT)
-    # ПРЕЖНЯЯ ОТКАЛИБРОВАННАЯ ПО ГОРОДУ/ТАРИФУ ВЕРСИЯ (до 27.09.2026) -
-    # оставлена для отката:
-    # if city == 'moscow' and field in MOSCOW_PREMIUM_ZONE_THRESHOLDS['center']:
-    #     zone = _moscow_demand_zone(lat, lon)
-    #     return MOSCOW_PREMIUM_ZONE_THRESHOLDS[zone][field]
-    # pair = (DEMAND_CLOUD_UNIFIED_THRESHOLDS.get(city) or {}).get(field)
-    # if pair:
-    #     multiplier = _resort_season_threshold_multiplier(city)
-    #     if multiplier == 1.0:
-    #         return pair
-    #     return tuple(max(1, min(100, round(v * multiplier))) for v in pair)
-    # return get_district_cloud_thresholds(city).get(field)
+    ЗАМЕНЕНО 27.09.2026, ОТКАЧЕНО ОБРАТНО 27.09.2026 (прямая просьба
+    пользователя - сначала "давай опустим процент отображения спроса до
+    80", уточнено через AskUserQuestion как "по процентилям у нас общий
+    для всех городов и тарифов" - вся откалиброванная по городам/тарифам
+    система была заменена ОДНИМ фиксированным порогом 80% для ЛЮБОГО
+    города и ЛЮБОГО тарифа. Затем пользователь явно попросил вернуть всё
+    обратно как было - "очень важно" - оказалось, что единый плоский
+    порог это не то, что нужно; вместо этого нужно обсудить, как
+    правильно настраивать именно процентильный параметр
+    (DEMAND_CLOUD_UNIFIED_THRESHOLDS - тогда ещё 85-й процентиль
+    собственных данных каждого города/тарифа). Поэтому калиброванная
+    логика ниже восстановлена как ЖИВАЯ, а плоский вариант оставлен
+    закомментированным ради истории изменений.
+
+    ЕЩЁ РАЗ ИЗМЕНЕНО 27.09.2026 (прямая просьба пользователя - "порог 85%
+    на 80 смести") - сам ориентир процентиля в таблице DEMAND_CLOUD_
+    UNIFIED_THRESHOLDS сдвинут с 85-го на 80-й (пересчитано по тем же
+    историческим данным той же методикой - см. комментарий над таблицей
+    выше). MOSCOW_PREMIUM_ZONE_THRESHOLDS не тронута - отдельная система
+    на своих перцентилях.
+
+    lat/lon здесь влияют на порог только для московских Бизнес/Премьер/
+    Элит (через зону center/oblast/elite, см. MOSCOW_PREMIUM_ZONE_
+    THRESHOLDS); для остальных случаев зона не используется, но параметры
+    оставлены ради общей сигнатуры функции (вызывающий код везде передаёт
+    lat/lon, менять все вызовы незачем)."""
+    if city == 'moscow' and field in MOSCOW_PREMIUM_ZONE_THRESHOLDS['center']:
+        zone = _moscow_demand_zone(lat, lon)
+        return MOSCOW_PREMIUM_ZONE_THRESHOLDS[zone][field]
+    pair = (DEMAND_CLOUD_UNIFIED_THRESHOLDS.get(city) or {}).get(field)
+    if pair:
+        multiplier = _resort_season_threshold_multiplier(city)
+        if multiplier == 1.0:
+            return pair
+        return tuple(max(1, min(100, round(v * multiplier))) for v in pair)
+    return get_district_cloud_thresholds(city).get(field)
+    # ПЛОСКИЙ ЕДИНЫЙ ПОРОГ 80% ДЛЯ ВСЕХ (27.09.2026, откачено обратно тем же
+    # числом - оставлено для истории, НЕ используется):
+    # return (DEMAND_CLOUD_FLAT_THRESHOLD_PERCENT, DEMAND_CLOUD_FLAT_THRESHOLD_PERCENT)
 
 # ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя, скриншот с
 # фиолетовыми пятнами разбросанными по Тверской/Калужской/Смоленской
@@ -34540,8 +34595,11 @@ def _tariff_demand_and_threshold(city, category, zone_name, tariff, weekday, hou
         value = _delivery_tariff_demand_value(city, zone_name, tariff, weekday, hour)
         field = DELIVERY_TARIFF_FIELD.get(tariff)
         # ИСПРАВЛЕНО 27.09.2026 (та же правка, что у recommended_delivery_
-        # tariffs выше по файлу - единый порог 80% через district_premium_
-        # threshold вместо прямого чтения DISTRICT_CLOUD_THRESHOLDS_BY_CITY).
+        # tariffs выше по файлу - порог теперь всегда идёт через district_
+        # premium_threshold вместо прямого чтения DISTRICT_CLOUD_THRESHOLDS_
+        # BY_CITY, так что пуш-подсказки по тарифу и карта не могут
+        # расходиться в пороге, независимо от того, какая логика калибровки
+        # сейчас живая внутри district_premium_threshold).
         threshold = district_premium_threshold(city, field, lat, lon)
         return value, threshold
     return None, None
