@@ -12807,14 +12807,15 @@ def map_webapp_html():
     const timeEl = document.getElementById('bibShiftTime');
     const tariffEl = document.getElementById('bibTariff');
     if (timeEl) {{
-      // ДОБАВЛЕНО 25.09.2026 (жалоба пользователя - "пишут не на смене а по
-      // факту на смене") - пока причина не найдена, временно подмешиваем
-      // myProfileDiagState в текст, чтобы увидеть НА КАКОМ шаге
-      // loadMyProfile остановилась (нет initData / код ошибки HTTP /
-      // исключение) прямо на скриншоте с телефона, без консоли браузера.
+      // УБРАНО 27.09.2026 (прямая просьба пользователя - "На линии ОК
+      // убери это ОК") - раньше сюда временно подмешивался диагностический
+      // myProfileDiagState (см. коммит 25.09.2026 про "пишут не на смене а
+      // по факту на смене") - отладка была завершена, но вывод забыли
+      // убрать, и он вылез в интерфейс как "не на линии [ok]". Убираем
+      // диагностику из текста, оставляем только сам статус.
       timeEl.textContent = (myShiftActive && myShiftStartedAtMs)
         ? 'на линии ' + formatShiftDuration(Date.now() - myShiftStartedAtMs)
-        : 'не на линии [' + myProfileDiagState + ']';
+        : 'не на линии';
     }}
     if (tariffEl) {{
       tariffEl.textContent = (myShiftActive && myShiftTariffs.length) ? myShiftTariffs.join(', ') : '—';
