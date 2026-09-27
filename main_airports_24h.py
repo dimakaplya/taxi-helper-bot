@@ -6850,11 +6850,12 @@ def share_order_webapp_html(category=None):
 <style>
   :root { color-scheme: light dark; }
   * { box-sizing: border-box; }
+  html { background: #000; overscroll-behavior: none; }
   body {
     margin: 0; padding: 18px; padding-bottom: max(18px, env(safe-area-inset-bottom, 0px));
     padding-top: max(18px, env(safe-area-inset-top, 0px));
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    background: #000; color: #fff;
+    background: #000; color: #fff; overscroll-behavior: none; touch-action: manipulation;
   }
   h1 { font-size: 17px; margin: 0 0 14px; }
   label { display: block; font-size: 12.5px; color: #9a9a9a; margin: 14px 0 6px; }
@@ -11920,6 +11921,16 @@ def validate_telegram_webapp_init_data(init_data, bot_token):
 # повышенный спрос) и её ломать нельзя, рескин только "рамки" карты.
 MAP_CHROME_CSS = """
   html, body, #map { height: 100%; margin: 0; padding: 0; }
+  /* ДОБАВЛЕНО 27.09.2026 (жалоба пользователя - "сма вверх сма вниз
+     появляются белый фон подложкой... отключи чтобы два раза тапать на
+     экран чтобы он не увеличивал") - overscroll-behavior:none на html/body
+     не даёт странице "оттягиваться" при свайпе за верх/низ (rubber-band),
+     из-за которого проглядывал белый фон под страницей; background:#000 на
+     html - подстраховка того же самого на случай, если браузер всё же
+     чуть-чуть оттянет. touch-action:manipulation убирает двойной тап -
+     zoom (стандартный приём, pinch-zoom двумя пальцами при этом не
+     трогаем). */
+  html, body { background: #000; overscroll-behavior: none; touch-action: manipulation; }
   /* ИЗМЕНЕНО 22.09.2026: CartoDB (basemaps.cartocdn.com) закрыли бесплатный
      анонимный доступ без API-ключа - тайлы перестали грузиться ("API key
      required", см. скриншот пользователя). Вернулись к обычным тайлам
@@ -16209,11 +16220,12 @@ def weather_webapp_html():
 <style>
   :root { color-scheme: light dark; }
   * { box-sizing: border-box; }
-  html, body { height: 100%; margin: 0; }
+  html, body { height: 100%; margin: 0; overscroll-behavior: none; }
   body {
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     overflow: hidden; position: relative;
     transition: background 1.2s ease;
+    touch-action: manipulation;
   }
   #bgCanvas { position: fixed; inset: 0; width: 100%; height: 100%; z-index: 0; }
   #content {
@@ -16811,10 +16823,11 @@ def where_to_go_webapp_html():
 <style>
   :root { color-scheme: light dark; }
   * { box-sizing: border-box; }
+  html { background: #000; overscroll-behavior: none; }
   body {
     margin: 0; padding: 16px; padding-bottom: max(16px, env(safe-area-inset-bottom, 0px));
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    background: #000; color: #fff;
+    background: #000; color: #fff; overscroll-behavior: none; touch-action: manipulation;
   }
   h1 { font-size: 17px; margin: 0 0 2px; }
   .sub { font-size: 12.5px; color: #9a9a9a; margin-bottom: 14px; }
@@ -17254,11 +17267,11 @@ def unified_app_html():
 <style>
   :root { color-scheme: dark; }
   * { box-sizing: border-box; }
-  html, body { height: 100%; }
+  html, body { height: 100%; background: #000; overscroll-behavior: none; }
   body {
     margin: 0; background: #000; color: #fff;
     font-family: 'Golos Text', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    overscroll-behavior: none;
+    overscroll-behavior: none; touch-action: manipulation;
   }
   .wordmark { font-family: 'Unbounded', sans-serif; }
   [hidden] { display: none !important; }
@@ -18052,7 +18065,21 @@ def unified_app_html():
     document.getElementById('svc-detail-view').hidden = true;
     document.getElementById('svc-grid-view').hidden = false;
   }
-  document.getElementById('svcBack').addEventListener('click', svcShowGrid);
+  // ИЗМЕНЕНО 27.09.2026 (прямая просьба пользователя - "две кнопки вернуться
+  // обратно надо ставить только одно чтобы она возвращалась на один шаг
+  // назад") - раньше единственная кнопка "← Назад" внутри #svc-detail-view
+  // (id="svcBack", всегда видна) была жёстко привязана к svcShowGrid, а
+  // разделы реферальной программы (см. renderReferralMenu/render*Detail
+  // ниже) рисовали ЕЩЁ ОДНУ свою кнопку "← Назад" (refBackButton()/
+  // wireRefBack()) прямо в начале #svcDetailContent - визуально получались
+  // две кнопки подряд. Теперь кнопка одна (внешняя, svcBack), а куда именно
+  // она ведёт - решает svcBackAction: каждый render-экран сам выставляет
+  // себе на один шаг назад (сетка сервисов -> меню реферальной программы ->
+  // конкретный раздел реферальной программы). refBackButton()/wireRefBack()
+  // оставлены ниже как есть (просто больше не вызываются) - на случай
+  // отката.
+  let svcBackAction = svcShowGrid;
+  document.getElementById('svcBack').addEventListener('click', function () { svcBackAction(); });
 
   function renderServices() {
     const grid = document.getElementById('svcGrid');
@@ -18111,6 +18138,7 @@ def unified_app_html():
   function openServiceDetail(kind) {
     const box = document.getElementById('svcDetailContent');
     box.innerHTML = '<div style="text-align:center;padding:40px 16px;opacity:.7;font-size:13.5px;">Загружаю…</div>';
+    svcBackAction = svcShowGrid; // ИЗМЕНЕНО 27.09.2026 - см. комментарий у svcShowGrid выше: из любого раздела сервисов "Назад" по умолчанию ведёт в сетку сервисов, на один шаг назад
     svcShowDetail();
     if (kind === 'tips') return renderTipsDetail(box);
     if (kind === 'referral') return loadReferralDetail(box);
@@ -18179,6 +18207,7 @@ def unified_app_html():
   // кнопкам/паролям всё, что уже работало в чате, перенесено как есть - см.
   // renderReferralLegalDetail/renderReferralPhantomDetail ниже.
   function renderReferralMenu(box, data) {
+    svcBackAction = svcShowGrid; // ИЗМЕНЕНО 27.09.2026 - из меню реферальной программы "Назад" (кнопка svcBack) ведёт в сетку сервисов, на один шаг назад
     box.innerHTML =
       '<div class="svc-h">🤝 Реферальная программа</div>' +
       '<div class="ref-grid">' +
@@ -18198,6 +18227,7 @@ def unified_app_html():
   // теперь спрятана за первой из 4 плиток, данные те же (data уже загружены
   // один раз в loadReferralDetail, повторный запрос не нужен).
   function renderReferralDriverDetail(box, data) {
+    svcBackAction = function () { renderReferralMenu(box, data); }; // ИЗМЕНЕНО 27.09.2026 - "Назад" отсюда ведёт в меню реферальной программы, на один шаг назад (а не сразу в сетку сервисов)
     const rates = data.rates_percent || [];
     const ratesNote = rates.length === 3
       ? ('<div class="svc-card">Как это работает: ' + rates[0] + '% с каждого ежемесячного платежа приглашённого тобой напрямую (1 уровень), ' +
@@ -18206,7 +18236,6 @@ def unified_app_html():
          'целиком видно в «Мои рефералы» ниже.</div>')
       : '';
     box.innerHTML =
-      refBackButton() +
       '<div class="svc-h">🚕 Водитель / Курьер</div>' +
       '<div class="svc-link-text" id="refLink">' + data.link + '</div>' +
       '<button type="button" class="svc-btn ghost" id="refCopyBtn">📋 Скопировать ссылку</button>' +
@@ -18223,7 +18252,6 @@ def unified_app_html():
       '<button type="button" class="svc-btn ghost" id="refQrBtn">📱 QR-код ссылки</button>' +
       '<div id="refQrBox"></div>' +
       '<div class="svc-note">Комиссия за вывод: ' + data.withdrawal_fee_percent + '%. Минимальная сумма вывода: ' + data.min_withdrawal_rub + ' ₽. Вывод средств - как и раньше, через бота в чате.</div>';
-    wireRefBack(box, data);
     const copyBtn = document.getElementById('refCopyBtn');
     if (copyBtn) {
       copyBtn.addEventListener('click', function () {
@@ -18259,15 +18287,15 @@ def unified_app_html():
   // не переписана - только способ её вызвать. openBotDeepLink('reflegal')
   // оставлен ниже как запасной путь на случай проблем с WebApp-полем.
   async function renderReferralLegalDetail(box, data) {
-    box.innerHTML = refBackButton() + '<div class="svc-h">🏢 Юридическое лицо</div><div class="svc-note">Загружаю…</div>';
-    wireRefBack(box, data);
+    svcBackAction = function () { renderReferralMenu(box, data); }; // ИЗМЕНЕНО 27.09.2026 - "Назад" отсюда ведёт в меню реферальной программы, на один шаг назад
+    box.innerHTML = '<div class="svc-h">🏢 Юридическое лицо</div><div class="svc-note">Загружаю…</div>';
     let access = null;
     try {
       const resp = await fetch(LEGAL_CABINET_ACCESS_API_PATH, { headers: { 'X-Telegram-Init-Data': (tg && tg.initData) || '' } });
       if (resp.ok) access = await resp.json();
     } catch (e) { /* тихо - ниже покажем вход по паролю, как раньше при ошибке */ }
     const botUsername = botUsernameFromLink(data.link);
-    let html = refBackButton() + '<div class="svc-h">🏢 Юридическое лицо</div>';
+    let html = '<div class="svc-h">🏢 Юридическое лицо</div>';
     if (access && access.has_access) {
       html += '<div class="svc-card">У тебя уже есть доступ к кабинету автопарка.</div>' +
         '<a class="svc-btn" href="' + LEGAL_CABINET_WEBAPP_PATH + '?tgInitData=' + encodeURIComponent((tg && tg.initData) || '') + '">🏛 Открыть кабинет автопарка</a>';
@@ -18288,7 +18316,6 @@ def unified_app_html():
         '<div class="svc-note" id="refLegalPasswordNote"></div>';
     }
     box.innerHTML = html;
-    wireRefBack(box, data);
     const emailBtn = document.getElementById('refLegalEmailBtn');
     if (emailBtn) {
       emailBtn.addEventListener('click', async function () {
@@ -18341,6 +18368,7 @@ def unified_app_html():
   // те же данные/файл, что уже были частью карточки "Водитель/Курьер" выше,
   // просто вынесены в отдельную плитку.
   function renderReferralMaterialsDetail(box, data) {
+    svcBackAction = function () { renderReferralMenu(box, data); }; // ИЗМЕНЕНО 27.09.2026 - "Назад" отсюда ведёт в меню реферальной программы, на один шаг назад
     const rates = data.rates_percent || [];
     const ratesNote = rates.length === 3
       ? ('<div class="svc-card">Как это работает: ' + rates[0] + '% с каждого ежемесячного платежа приглашённого тобой напрямую (1 уровень), ' +
@@ -18348,11 +18376,9 @@ def unified_app_html():
          'платежа на каждом уровне, каждый месяц, пока реферал платит подписку.</div>')
       : '';
     box.innerHTML =
-      refBackButton() +
       '<div class="svc-h">📚 Материалы реферальной системы</div>' +
       ratesNote +
       '<a class="svc-btn ghost" href="' + PRESENTATION_PDF_WEBAPP_PATH + '" target="_blank" rel="noopener">📥 Скачать презентацию</a>';
-    wireRefBack(box, data);
   }
 
   // "Фантом" - скрытый вход, работает ТОЧНО так же, как раньше в чате (тот
@@ -18360,13 +18386,12 @@ def unified_app_html():
   // в main.py), плитка лишь открывает диалог с ботом со start-параметром
   // "refphantom" (см. /start в main.py).
   function renderReferralPhantomDetail(box, data) {
+    svcBackAction = function () { renderReferralMenu(box, data); }; // ИЗМЕНЕНО 27.09.2026 - "Назад" отсюда ведёт в меню реферальной программы, на один шаг назад
     const botUsername = botUsernameFromLink(data.link);
     box.innerHTML =
-      refBackButton() +
       '<div class="svc-h">👻 Фантом</div>' +
       '<div class="svc-card">Пароль вводится в чате с ботом.</div>' +
       '<button type="button" class="svc-btn" id="refPhantomOpenChat">👻 Ввести пароль в чате</button>';
-    wireRefBack(box, data);
     document.getElementById('refPhantomOpenChat').addEventListener('click', function () { openBotDeepLink(botUsername, 'refphantom'); });
   }
 
@@ -20924,11 +20949,12 @@ def events_webapp_html():
 <style>
   :root { color-scheme: light dark; }
   * { box-sizing: border-box; }
+  html { background: #000; overscroll-behavior: none; }
   body {
     margin: 0; padding: 16px; padding-bottom: max(16px, env(safe-area-inset-bottom, 0px));
     padding-top: max(16px, env(safe-area-inset-top, 0px));
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    background: #000; color: #fff;
+    background: #000; color: #fff; overscroll-behavior: none; touch-action: manipulation;
   }
   h1 { font-size: 17px; margin: 0 0 12px; }
   #state { text-align: center; padding: 60px 16px; opacity: .7; font-size: 14px; }
@@ -21319,11 +21345,12 @@ def transport_webapp_html():
 <style>
   :root { color-scheme: light dark; }
   * { box-sizing: border-box; }
+  html { background: #000; overscroll-behavior: none; }
   body {
     margin: 0; padding: 16px; padding-bottom: max(16px, env(safe-area-inset-bottom, 0px));
     padding-top: max(16px, env(safe-area-inset-top, 0px));
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    background: #000; color: #fff;
+    background: #000; color: #fff; overscroll-behavior: none; touch-action: manipulation;
   }
   h1 { font-size: 17px; margin: 0 0 12px; }
   #state { text-align: center; padding: 60px 16px; opacity: .7; font-size: 14px; }
@@ -22825,10 +22852,12 @@ def legal_cabinet_webapp_html():
 <style>
   :root { color-scheme: light dark; }
   * { box-sizing: border-box; }
+  html { background: var(--tg-theme-bg-color, #f2f2f7); overscroll-behavior: none; }
   body {
     margin: 0; padding: 16px; padding-bottom: max(16px, env(safe-area-inset-bottom, 0px));
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     background: var(--tg-theme-bg-color, #f2f2f7); color: var(--tg-theme-text-color, #000);
+    overscroll-behavior: none; touch-action: manipulation;
   }
   h2.section-title { font-size: 14px; font-weight: 700; opacity: .8; margin: 20px 0 8px; letter-spacing: .2px; }
 
@@ -23400,10 +23429,12 @@ def cabinet_webapp_html():
 <style>
   :root { color-scheme: light dark; }
   * { box-sizing: border-box; }
+  html { background: var(--tg-theme-bg-color, #f2f2f7); overscroll-behavior: none; }
   body {
     margin: 0; padding: 16px; padding-bottom: max(16px, env(safe-area-inset-bottom, 0px));
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     background: var(--tg-theme-bg-color, #f2f2f7); color: var(--tg-theme-text-color, #000);
+    overscroll-behavior: none; touch-action: manipulation;
   }
   h2.section-title { font-size: 14px; font-weight: 600; opacity: .8; margin: 20px 0 8px; }
 
