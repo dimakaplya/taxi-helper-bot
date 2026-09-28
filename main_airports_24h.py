@@ -32961,11 +32961,19 @@ async def create_tinkoff_payment(user_id: int, sub_group=None):
     return data.get('PaymentURL')
 
 
-def subscription_paywall_keyboard(pay_url, user_id=None):
+def subscription_paywall_keyboard(pay_url, user_id=None, app_url=None):
+    """app_url - ДОБАВЛЕНО 28.09.2026 (см. комментарий у
+    _subscription_app_url выше): когда email для чека ещё не собран,
+    pay_url создать нельзя (create_tinkoff_payment вернёт None) - вместо
+    того чтобы вообще не показывать кнопку "ОПЛАТИТЬ" (как было раньше,
+    пока email не спросят ОТДЕЛЬНЫМ сообщением), кнопка ведёт web_app'ом
+    прямо в приложение - оно само спросит email и продолжит оплату."""
     buttons = []
+    price_rub = get_subscription_price_rub(user_id) if user_id is not None else SUBSCRIPTION_PRICE_RUB
     if pay_url:
-        price_rub = get_subscription_price_rub(user_id) if user_id is not None else SUBSCRIPTION_PRICE_RUB
         buttons.append([InlineKeyboardButton(text=f"💳 ОПЛАТИТЬ {price_rub}₽", url=pay_url)])
+    elif app_url:
+        buttons.append([InlineKeyboardButton(text=f"💳 ОПЛАТИТЬ {price_rub}₽", web_app=WebAppInfo(url=app_url))])
     buttons.append([InlineKeyboardButton(text="🔄 Я ОПЛАТИЛ(А), ПРОВЕРИТЬ", callback_data="sub_pay_check")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -32989,44 +32997,35 @@ def subscription_paywall_text(user_id):
     )
 
 
-# ИЗМЕНЕНО 28.09.2026 (прямая просьба пользователя - "имейл нужно вводить
-# когда человека оплачивают подписку... и когда человек вводит e-mail...
-# это сообщение тоже перенеси пожалуйста в приложение не оставляй его в
-# боте") - раньше здесь просили email ТЕКСТОМ прямо в чате (см. удалённые
-# SUBSCRIPTION_EMAIL_PROMPT/subscription_email_flow - ловили ЛЮБОЙ
-# следующий текст, отдельным хендлером выше остальных). Email уже давно
-# умеет собираться и в самом мини-приложении - и на экране "💳 Подписка"
-# (renderSubscriptionDetail/subEmailBtn), и на экране "🏢 Юридическое лицо"
-# внутри "Реферальная программа" (renderReferralLegalDetail/refLegalEmailBtn) -
-# оба шлют email через тот же SUBSCRIPTION_STATUS_API_PATH/set_receipt_email,
-# что и раньше собирал чат. Теперь вместо текстового вопроса в чате -
-# просто кнопка, открывающая нужный экран приложения (?svc=... - см.
-# initialSvc в unified_app_html()).
-async def request_subscription_email(event, context):
-    """context: 'legal_entity_paywall' - открыть "Реферальная программа"
-    (там уже есть "🏢 Юридическое лицо" с полем email), 'paywall'/'status' -
-    открыть "💳 Подписка"."""
-    user_id = event.from_user.id
+# ИЗМЕНЕНО 28.09.2026 (прямая просьба пользователя - "открывается
+# предложение ввести какой-то имейл для чека и открывается это опять меню -
+# этого быть не должно, email вводить только в приложении, это меню не
+# должно открываться, оно больше никак не должно приходить push
+# уведомлением в бот, только в приложении, и вводить его нужно исключительно
+# если происходит оплата подписки, и больше нигде") - раньше (см. историю
+# правок 28.09.2026 ниже, версия ДО этой) при отсутствии email отправлялось
+# ОТДЕЛЬНОЕ сообщение-меню в чат ("💳 Для оплаты нужен email...") с кнопкой
+# "ОТКРЫТЬ ПРИЛОЖЕНИЕ" - пользователь пожаловался, что это отдельное
+# сообщение само по себе лишнее/навязчивое (по сути push-уведомление в чат
+# ради того, что должно происходить только внутри приложения). Теперь
+# ОТДЕЛЬНОГО сообщения нет вообще: экран оплаты (paywall) показывается ОДНИМ
+# сообщением, как и раньше, просто кнопка "ОПЛАТИТЬ" ведёт не на внешнюю
+# ссылку Тинькофф (той ещё нет - создать её без email нельзя, см.
+# create_tinkoff_payment), а web_app-кнопкой в приложение - оно уже умеет
+# само спросить email (renderSubscriptionDetail/subEmailBtn,
+# renderReferralLegalDetail/refLegalEmailBtn) и сразу продолжить оплату,
+# без дополнительного шага/сообщения в чате. См. _subscription_app_url/
+# subscription_paywall_keyboard ниже.
+def _subscription_app_url(user_id, svc):
+    """svc: 'referral' - откроет "Реферальная программа" (там "🏢 Юридическое
+    лицо" с полем email), 'subscription' - откроет "💳 Подписка"."""
     state = user_state.get(user_id, {})
-    svc = 'referral' if context == 'legal_entity_paywall' else 'subscription'
-    app_url = (
+    return (
         f"{PUBLIC_URL}{UNIFIED_APP_WEBAPP_PATH}"
         f"?city={urllib.parse.quote(state.get('city') or '')}"
         f"&category={urllib.parse.quote(state.get('category') or '')}"
         f"&svc={svc}"
     )
-    markup = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📱 ОТКРЫТЬ ПРИЛОЖЕНИЕ", web_app=WebAppInfo(url=app_url))]
-    ])
-    text = "💳 Для оплаты нужен email (на него придёт электронный чек, обязательное требование 54-ФЗ) - введи его в приложении:"
-    if isinstance(event, types.CallbackQuery):
-        try:
-            await event.answer()
-        except Exception:
-            pass
-        await event.message.answer(text, reply_markup=markup)
-    else:
-        await event.answer(text, reply_markup=markup)
 
 
 # ДОБАВЛЕНО 26.09.2026 (перенос "💳 ОПЛАТИТЬ ПОДПИСКУ" в единое приложение,
@@ -33129,16 +33128,25 @@ async def handle_subscription_status_api(request):
 
 async def send_subscription_paywall(event):
     """event - types.Message или types.CallbackQuery. Показывает экран
-    оплаты вместо обычного ответа бота (см. SubscriptionMiddleware)."""
+    оплаты вместо обычного ответа бота (см. SubscriptionMiddleware).
+
+    ИЗМЕНЕНО 28.09.2026 (см. _subscription_app_url выше) - раньше при
+    отсутствии email сначала отправлялось ОТДЕЛЬНОЕ сообщение с просьбой
+    ввести его в приложении, и только ПОСЛЕ этого (при следующем триггере
+    paywall'а) показывался сам экран оплаты. Теперь один и тот же экран
+    показывается сразу - просто кнопка "ОПЛАТИТЬ" ведёт в приложение вместо
+    прямой ссылки Тинькофф, пока email не собран."""
     user_id = event.from_user.id
-    if not get_receipt_email(user_id):
-        await request_subscription_email(event, 'paywall')
-        return
-    pay_url = await create_tinkoff_payment(user_id)
+    pay_url = None
+    app_url = None
+    if get_receipt_email(user_id):
+        pay_url = await create_tinkoff_payment(user_id)
+    else:
+        app_url = _subscription_app_url(user_id, 'subscription')
     text = subscription_paywall_text(user_id)
-    if not pay_url:
+    if not pay_url and not app_url:
         text += "\n\n⚠️ Не получилось создать ссылку на оплату, попробуй ещё раз чуть позже."
-    markup = subscription_paywall_keyboard(pay_url, user_id)
+    markup = subscription_paywall_keyboard(pay_url, user_id, app_url=app_url)
     if isinstance(event, types.CallbackQuery):
         try:
             await event.answer()
@@ -33159,9 +33167,6 @@ async def send_subscription_paywall(event):
 @router.message(lambda message: message.text == SUBSCRIPTION_MENU_BUTTON_DEFAULT_TEXT or (message.text or '').startswith("✅ Подписка до "))
 async def show_subscription_status(message: types.Message):
     user_id = message.from_user.id
-    if not get_receipt_email(user_id):
-        await request_subscription_email(message, 'status')
-        return
     active_until = subscription_active_until(user_id)
     sub = get_subscription(user_id)
     if active_until and sub and sub['paid_until'] and _sub_parse(sub['paid_until']) >= active_until:
@@ -33171,16 +33176,25 @@ async def show_subscription_status(message: types.Message):
         status_line = f"🎁 Пробный период, осталось *{days_left} дн.*"
     else:
         status_line = "Статус подписки пока не определён."
-    pay_url = await create_tinkoff_payment(user_id)
+    # ИЗМЕНЕНО 28.09.2026 (см. _subscription_app_url выше) - без email
+    # раньше сюда вообще не доходили (отдельное сообщение-просьба). Теперь
+    # статус показывается сразу, кнопка "ОПЛАТИТЬ" сама откроет приложение.
+    pay_url = None
+    app_url = None
+    if get_receipt_email(user_id):
+        pay_url = await create_tinkoff_payment(user_id)
+    else:
+        app_url = _subscription_app_url(user_id, 'subscription')
     text = (
         "💳 *Подписка*\n\n"
         f"{status_line}\n\n"
         f"Стоимость: *{get_subscription_price_rub(user_id)}₽/мес*. Оплата продлевает подписку на "
         f"{SUBSCRIPTION_PERIOD_DAYS} дней от текущей даты окончания (даже если она ещё активна)."
     )
-    if not pay_url:
+    if not pay_url and not app_url:
         text += "\n\n⚠️ Не получилось создать ссылку на оплату, попробуй ещё раз чуть позже."
-    await message.answer(text, reply_markup=subscription_paywall_keyboard(pay_url, user_id), parse_mode='Markdown')
+    markup = subscription_paywall_keyboard(pay_url, user_id, app_url=app_url)
+    await message.answer(text, reply_markup=markup, parse_mode='Markdown')
 
 
 # ==================== ПОДПИСКА НА РЕФЕРАЛЬНУЮ СИСТЕМУ ЮРЛИЦ ====================
@@ -33222,15 +33236,22 @@ async def send_legal_entity_referral_paywall(event):
     кнопке "🏢 ЮРЛИЦО" в реферальном меню, пока эта подписка не оплачена
     (см. referral_category_legal_start)."""
     user_id = event.from_user.id
-    if not get_receipt_email(user_id):
-        await request_subscription_email(event, 'legal_entity_paywall')
-        return
     ensure_subscription(user_id, SUBSCRIPTION_GROUP_LEGAL_ENTITY_REFERRAL)
-    pay_url = await create_tinkoff_payment(user_id, sub_group=SUBSCRIPTION_GROUP_LEGAL_ENTITY_REFERRAL)
+    # ИЗМЕНЕНО 28.09.2026 (см. _subscription_app_url выше) - раньше при
+    # отсутствии email отправлялось ОТДЕЛЬНОЕ сообщение-просьба ввести его в
+    # приложении. Теперь экран оплаты юрлица показывается сразу, кнопка
+    # "ОПЛАТИТЬ" сама откроет приложение (экран "🏢 Юридическое лицо" внутри
+    # "Реферальная программа"), если email ещё не собран.
+    pay_url = None
+    app_url = None
+    if get_receipt_email(user_id):
+        pay_url = await create_tinkoff_payment(user_id, sub_group=SUBSCRIPTION_GROUP_LEGAL_ENTITY_REFERRAL)
+    else:
+        app_url = _subscription_app_url(user_id, 'referral')
     sub = get_subscription(user_id, SUBSCRIPTION_GROUP_LEGAL_ENTITY_REFERRAL)
     active_until = _sub_parse(sub['paid_until']) if sub and sub['paid_until'] else None
     text = legal_entity_referral_paywall_text(active_until if active_until and _sub_now() < active_until else None)
-    if not pay_url:
+    if not pay_url and not app_url:
         text += "\n\n⚠️ Не получилось создать ссылку на оплату, попробуй ещё раз чуть позже."
     # ВАЖНО: своя клавиатура (не subscription_paywall_keyboard) - у той
     # кнопка "Проверить" всегда ведёт на callback_data="sub_pay_check"
@@ -33239,6 +33260,8 @@ async def send_legal_entity_referral_paywall(event):
     buttons = []
     if pay_url:
         buttons.append([InlineKeyboardButton(text=f"💳 ОПЛАТИТЬ {REFERRAL_LEGAL_ENTITY_SUBSCRIPTION_PRICE_RUB}₽", url=pay_url)])
+    elif app_url:
+        buttons.append([InlineKeyboardButton(text=f"💳 ОПЛАТИТЬ {REFERRAL_LEGAL_ENTITY_SUBSCRIPTION_PRICE_RUB}₽", web_app=WebAppInfo(url=app_url))])
     buttons.append([InlineKeyboardButton(text="🔄 Я ОПЛАТИЛ(А), ПРОВЕРИТЬ", callback_data="legal_entity_sub_pay_check")])
     markup = InlineKeyboardMarkup(inline_keyboard=buttons)
     if isinstance(event, types.CallbackQuery):
@@ -35161,6 +35184,18 @@ def referral_menu_keyboard(referral_link, current_type=REFERRAL_DEFAULT_TYPE, us
     # ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя - "по кнопке юрлицо
     # его надо с большими буквами сделать ЮРЛИЦО") - заглавные буквы.
     legal_label = ("✅ " if current_type == 'legal_entity' else "") + "🏢 ЮРЛИЦО"
+    # ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "по одному паролю
+    # доступна только одна реферальная программа... но на тех у кого есть
+    # доступ к админской реферальной программе это не распространяется - те
+    # у кого есть админская реферальная программа автоматически открыты все
+    # реферальные программы для просмотра, но основной являются
+    # исключительно только админская") - у 'admin' кнопки "Обычная"/
+    # "ЮРЛИЦО" НЕ переключают схему начислений (в отличие от обычных
+    # пользователей), а открывают ТОЛЬКО просмотр условий этой схемы
+    # (referral_view_individual/referral_view_legal ниже) - реальная схема
+    # начислений (и реальные деньги) у админа всегда остаются 'admin'.
+    is_admin_scheme = current_type == 'admin'
+    individual_callback = "referral_view_individual" if is_admin_scheme else "referral_category_individual"
     # ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя - "убери личный
     # кабинет в кнопку юрлицо"): раньше "🏛 ЛИЧНЫЙ КАБИНЕТ ЮРЛИЦА" была
     # ОТДЕЛЬНОЙ строкой под "🏢 ЮРЛИЦО" - теперь это ОДНА кнопка. Если
@@ -35186,9 +35221,16 @@ def referral_menu_keyboard(referral_link, current_type=REFERRAL_DEFAULT_TYPE, us
         cabinet_url = f"{PUBLIC_URL}{LEGAL_CABINET_WEBAPP_PATH}"
         legal_button = InlineKeyboardButton(text=legal_label, web_app=WebAppInfo(url=cabinet_url))
     else:
-        legal_button = InlineKeyboardButton(text=legal_label, callback_data="referral_category_legal_start")
+        # У 'admin' без своего кабинета юрлица - тоже просмотр (см.
+        # is_admin_scheme выше), а не ввод пароля компании: раньше кнопка
+        # вела на referral_category_legal_start и вводом ЛЮБОГО чужого
+        # пароля компании админа молча переключало на схему 'legal_entity'
+        # (apply_legal_entity_password), теряя доступ ко всем деньгам по
+        # админской ставке 40/30/20/10% - см. правку 28.09.2026 выше.
+        legal_callback = "referral_view_legal" if is_admin_scheme else "referral_category_legal_start"
+        legal_button = InlineKeyboardButton(text=legal_label, callback_data=legal_callback)
     rows = [
-        [InlineKeyboardButton(text=individual_label, callback_data="referral_category_individual")],
+        [InlineKeyboardButton(text=individual_label, callback_data=individual_callback)],
         [legal_button],
     ]
     # ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "там появляется
@@ -35237,6 +35279,16 @@ def referral_menu_keyboard(referral_link, current_type=REFERRAL_DEFAULT_TYPE, us
         # выдавала бы саму возможность существования админки, больше нет.
         [InlineKeyboardButton(text="👻 ФАНТОМ", callback_data="phantom_start")],
     ]
+    # ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "давай сделаем в
+    # конце кнопку выйти из реферальной программы") - только на схеме
+    # 'legal_entity' (переключиться обратно на 'individual' - базовую
+    # схему - есть смысл; у 'individual' и так уже база, выходить некуда, а
+    # у 'admin' основная схема ВСЕГДА остаётся 'admin' - см. is_admin_scheme
+    # выше, там вместо переключения теперь просмотр). Владение компанией в
+    # legal_entities (owner_user_id) при выходе НЕ снимается - см.
+    # referral_exit_legal.
+    if current_type == 'legal_entity':
+        rows.append([InlineKeyboardButton(text="🚪 Выйти из реферальной программы", callback_data="referral_exit_legal")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -35554,13 +35606,93 @@ async def _refresh_referral_menu_message(message, user_id):
         await message.answer(text, reply_markup=markup, parse_mode='Markdown')
 
 
+# ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "те у кого есть
+# админская реферальная программа автоматически открыты все реферальные
+# программы для просмотра, но основной являются исключительно только
+# админской реферальная программа") - "просмотр" условий схемы 'individual'/
+# 'legal_entity' для admin/Фантом-пользователей: показывает ставки и текст
+# "как это работает", НЕ трогая referrer_type (в отличие от
+# referral_category_individual/referral_category_legal_start, которые
+# реально переключают схему начислений у обычных пользователей). Обычная
+# (недекорированная) функция, а не хендлер - переиспользуется и из
+# referral_category_individual/referral_category_legal_start (защита от
+# СТАРОЙ клавиатуры у уже открытых сообщений, см. ниже), и из своих же
+# callback-хендлеров - вызывать друг друга напрямую декорированные
+# @router.callback_query-функции в этом файле нигде больше не принято.
+async def _send_referral_scheme_view(callback_query: types.CallbackQuery, scheme):
+    try:
+        await callback_query.answer()
+    except Exception:
+        pass
+    rates = REFERRAL_RATES_PERCENT[scheme]
+    label = "👤 Обычная схема (просмотр)" if scheme == 'individual' else "🏢 Юрлицо (просмотр)"
+    extra = (
+        "" if scheme == 'individual' else
+        "Чтобы открыть кабинет КОНКРЕТНОГО юрлица - войди в него паролем компании (/add_legal_entity).\n\n"
+    )
+    text = (
+        f"{label}\n"
+        f"{WHERE_TO_GO_DIVIDER}\n\n"
+        f"_Как это работает:_ {referral_how_it_works_text(rates)}\n\n"
+        f"{extra}"
+        "ℹ️ Это просмотр условий схемы - твоя реальная схема начислений остаётся «Админ» "
+        f"({'/'.join(str(r) for r in REFERRAL_RATES_PERCENT['admin'])}%), переключаться на неё не нужно."
+    )
+    await callback_query.message.answer(text, parse_mode='Markdown')
+
+
 @router.callback_query(lambda c: c.data == "referral_category_individual")
 async def referral_category_individual(callback_query: types.CallbackQuery):
     user_id = callback_query.from_user.id
+    # ЗАЩИТА 28.09.2026 (см. is_admin_scheme в referral_menu_keyboard) - у
+    # 'admin' эта кнопка больше не должна вести сюда вообще (клавиатура
+    # отправляет их на referral_view_individual), но если у кого-то открыто
+    # СТАРОЕ сообщение с клавиатурой до этого обновления - не даём молча
+    # потерять админскую схему начислений, просто показываем тот же
+    # просмотр, что и через новую кнопку.
+    if get_referrer_type(user_id) == 'admin':
+        await _send_referral_scheme_view(callback_query, 'individual')
+        return
     set_referrer_type(user_id, 'individual')
     user_state.get(user_id, {}).pop('awaiting_referral_legal_password', None)
     try:
         await callback_query.answer("Схема: обычная (30/15/5%)")
+    except Exception:
+        pass
+    await _refresh_referral_menu_message(callback_query.message, user_id)
+
+
+@router.callback_query(lambda c: c.data == "referral_view_individual")
+async def referral_view_individual(callback_query: types.CallbackQuery):
+    await _send_referral_scheme_view(callback_query, 'individual')
+
+
+@router.callback_query(lambda c: c.data == "referral_view_legal")
+async def referral_view_legal(callback_query: types.CallbackQuery):
+    """Тот же просмотр, что и referral_view_individual, только для схемы
+    «Юрлицо» - показывается admin/Фантом-пользователям, у которых ЕЩЁ НЕТ
+    своего кабинета юрлица (иначе кнопка "ЮРЛИЦО" уже ведёт прямой
+    web_app-ссылкой на кабинет, см. referral_menu_keyboard)."""
+    await _send_referral_scheme_view(callback_query, 'legal_entity')
+
+
+# ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "давай сделаем в
+# конце кнопку выйти из реферальной программы... тем самым будет выход из
+# реферальной программы но вход в какую-то активную... это либо водитель
+# курьер либо юрлицо") - кнопка на экране схемы «Юрлицо» (см.
+# referral_menu_keyboard), переключает обратно на «Водитель/курьер»
+# (базовая схема 'individual'). Владение компанией в legal_entities
+# (owner_user_id, claim_legal_entity_ownership) НЕ снимается - уточнено у
+# пользователя ("её не делай, нет в этом смысла" про доп. "открепление") -
+# при повторном вводе того же пароля владелец сразу попадёт обратно в свой
+# кабинет, а не будет считаться новым/чужим входом.
+@router.callback_query(lambda c: c.data == "referral_exit_legal")
+async def referral_exit_legal(callback_query: types.CallbackQuery):
+    user_id = callback_query.from_user.id
+    set_referrer_type(user_id, 'individual')
+    user_state.get(user_id, {}).pop('awaiting_referral_legal_password', None)
+    try:
+        await callback_query.answer("Вышел из схемы «Юрлицо» - активна «Водитель/курьер» (30/15/5%)")
     except Exception:
         pass
     await _refresh_referral_menu_message(callback_query.message, user_id)
@@ -35604,6 +35736,19 @@ async def referral_category_legal_start(callback_query: types.CallbackQuery):
     1890₽, хотя у него схема 'admin', а не 'legal_entity'. Теперь
     пропускаем проверку подписки для 'admin'."""
     user_id = callback_query.from_user.id
+    # ЗАЩИТА 28.09.2026 (см. is_admin_scheme в referral_menu_keyboard) - у
+    # 'admin' без своего кабинета юрлица эта кнопка больше не должна вести
+    # сюда вообще (клавиатура отправляет их на referral_view_legal), но
+    # если у кого-то открыто СТАРОЕ сообщение с клавиатурой до этого
+    # обновления - не даём молча ввести пароль ЧУЖОЙ компании и потерять
+    # админскую схему начислений (apply_legal_entity_password ниже
+    # безусловно переключает на 'legal_entity') - просто показываем тот же
+    # просмотр, что и через новую кнопку. Владеющих своим кабинетом это не
+    # касается - у них кнопка вообще не callback, а прямая web_app-ссылка
+    # (см. referral_menu_keyboard), сюда не попадают.
+    if get_referrer_type(user_id) == 'admin' and not get_legal_entity_owned_by(user_id):
+        await _send_referral_scheme_view(callback_query, 'legal_entity')
+        return
     if get_referrer_type(user_id) != 'admin' and not is_legal_entity_referral_subscription_active(user_id):
         try:
             await callback_query.answer()
