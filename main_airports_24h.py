@@ -25743,7 +25743,19 @@ def cabinet_webapp_html():
   }
   .profile-info { min-width: 0; flex: 1; }
   .profile-name { font-size: 16.5px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .profile-sub { font-size: 12.5px; opacity: .9; margin-top: 2px; display: flex; gap: 8px; flex-wrap: wrap; }
+  /* ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "рейтинг очень
+     близко к другим кнопкам нужно разнести на одинаковое расстояние
+     сделать одного их размера") - раньше #ratingBox (пилюля рейтинга) и
+     .profile-sub (теги тарифа/машины/номера/заказов) были ДВУМЯ разными
+     блоками с разными отступами (margin: 4px 0 2px у ratingBox, margin-top
+     2px у profile-sub - итоговый зазор между ними отличался от зазора
+     МЕЖДУ самими тегами внутри profile-sub, 8px) - визуально рейтинг
+     "прилипал" к тегам под ним. .profile-chips - общий флекс-контейнер на
+     ratingBox+profile-sub с ЕДИНЫМ gap (8px) - тем же, что и у тегов
+     ВНУТРИ profile-sub, так что рейтинг и все теги теперь на одинаковом
+     расстоянии друг от друга по всему ряду. */
+  .profile-chips { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
+  .profile-sub { font-size: 12.5px; opacity: .9; display: flex; gap: 8px; flex-wrap: wrap; }
   .profile-sub span { background: rgba(255,255,255,.18); border-radius: 8px; padding: 2px 7px; }
   .edit-btn {
     background: linear-gradient(180deg, rgba(255,255,255,.28), rgba(255,255,255,.14)); border: none; color: #fff; border-radius: 10px;
@@ -25955,9 +25967,17 @@ def cabinet_webapp_html():
   }
   .hero-earn-sub { position: relative; font-size: 12.5px; color: rgba(255,255,255,.55); margin-top: 3px; }
 
-  /* Рейтинг - тап-редактируемая "пилюля" в шапке профиля */
+  /* Рейтинг - тап-редактируемая "пилюля" в шапке профиля. ИЗМЕНЕНО
+     28.09.2026 (см. .profile-chips выше - та же просьба пользователя
+     "сделать одного их размера") - раньше border-radius:999px (полная
+     капсула) и padding 3px 10px 3px 8px заметно отличались от тегов
+     .profile-sub span (border-radius:8px, padding:2px 7px) прямо в
+     соседнем ряду - рейтинг выглядел крупнее и другой формы. Теперь
+     одинаковые border-radius/padding/font-size - рейтинг отличается от
+     тегов только золотым цветом (это и есть акцент "на него можно
+     тапнуть"), а не размером. */
   .rating-pill {
-    border: none; border-radius: 999px; padding: 3px 10px 3px 8px; font-size: 12.5px; font-weight: 800;
+    border: none; border-radius: 8px; padding: 2px 7px; font-size: 12.5px; font-weight: 800;
     background: linear-gradient(135deg, #FFC400, #FFE47a); color: #000; display: inline-flex; align-items: center;
     gap: 4px; animation: ratingPulse 2.6s ease-in-out infinite; font-variant-numeric: tabular-nums;
   }
@@ -26040,9 +26060,16 @@ def cabinet_webapp_html():
            него стоит") - тап открывает инлайн-редактор (см. initRating/
            startRatingEdit ниже), значение - то, что водитель сам вписал
            (например то, что показывает его Яндекс/Ситимобил), бот его
-           не считает и не проверяет. -->
-      <div id="ratingBox" style="margin: 4px 0 2px;"></div>
-      <div class="profile-sub" id="profileSub"></div>
+           не считает и не проверяет.
+           ИЗМЕНЕНО 28.09.2026 (прямая просьба пользователя - "рейтинг
+           очень близко к другим кнопкам нужно разнести на одинаковое
+           расстояние сделать одного их размера") - ratingBox и profileSub
+           теперь в общей .profile-chips (см. CSS выше) с единым gap, а не
+           двумя блоками с разными собственными отступами. -->
+      <div class="profile-chips">
+        <div id="ratingBox"></div>
+        <div class="profile-sub" id="profileSub"></div>
+      </div>
     </div>
     <button class="edit-btn" id="editBtn">✏️ Изменить</button>
   </div>
