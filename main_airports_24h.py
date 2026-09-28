@@ -12308,8 +12308,14 @@ async def nearby_drivers_checker():
 # не 300 и не 500 - зона слишком большая"): было 300 м (0.3 км) - слишком
 # широкий радиус срабатывал на водителях, которые просто проезжали мимо или
 # стояли у соседнего здания, а не реально были на самой заправке.
-FUEL_REMINDER_RADIUS_KM = 0.075
-FUEL_REMINDER_MINUTES = 7
+# ИЗМЕНЕНО 28.09.2026 (жалоба пользователя - "приехал на заправку, стою уже
+# больше 5 минут, push не приходит"; 75 м/7 минут оказались слишком строгими -
+# GPS на заправке часто "гуляет" на 75-100 м, реальный водитель мог не
+# попасть в радиус, плюс 7 минут - долгое ожидание): радиус увеличен до 100 м,
+# порог снижен до 4 минут (прямая просьба пользователя - "уменьшать до 4
+# минут радиус 100 метров").
+FUEL_REMINDER_RADIUS_KM = 0.1
+FUEL_REMINDER_MINUTES = 4
 FUEL_REMINDER_CHECK_INTERVAL_MINUTES = 1
 
 # In-memory (тот же принцип, что _nearby_pairs_since/_nearby_pairs_notified -
@@ -12369,10 +12375,13 @@ async def check_fuel_reminder_pushes():
         _fuel_reminder_notified.discard(uid)
 
 def fuel_reminder_keyboard(station_id):
-    """По кнопке на каждый вид топлива (см. FUEL_TYPES/FUEL_TYPE_LABELS) -
-    "есть"/"нет" сразу пишут отметку (см. handle_fuel_reminder_mark), без
-    открытия карты/WebApp. station_id (вида 'node/12345') не содержит '|' -
-    используем его разделителем в callback_data вместе с fuel_type/available."""
+    """Старая клавиатура (кнопка на каждый вид топлива - "есть"/"нет" сразу
+    пишут отметку, см. handle_fuel_reminder_mark) - ОСТАВЛЕНА как запасной
+    путь в _send_fuel_reminder_push ниже на случай, если ссылку на карту
+    построить нельзя (PUBLIC_URL не настроен - редкий случай локального/
+    тестового запуска, см. fuel_reminder_keyboard_v2). station_id (вида
+    'node/12345') не содержит '|' - используем его разделителем в
+    callback_data вместе с fuel_type/available."""
     rows = []
     for ft in FUEL_TYPES:
         label = FUEL_TYPE_LABELS[ft]
@@ -12382,6 +12391,21 @@ def fuel_reminder_keyboard(station_id):
         ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
+def fuel_reminder_keyboard_v2(station_id, map_url):
+    """ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "должно быть две
+    кнопки я не на заправке и второе я на заправке отметить наличие...
+    отметить наличие открывало карту с фильтром заправки и конкретной
+    заправкой") - вместо 8 кнопок по видам топлива прямо в чате теперь 2:
+    WebApp-кнопка сразу открывает карту в приложении на ЭТОЙ заправке
+    (map_url уже содержит ?layer=fuel&station=<id> - см.
+    _send_fuel_reminder_push ниже и обработку params.get('station') в
+    map_webapp_html), а "Я не на заправке" - на случай, если геолокация
+    ошиблась (см. handle_fuel_reminder_not_here)."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⛽ Я на заправке, отметить наличие", web_app=WebAppInfo(url=map_url))],
+        [InlineKeyboardButton(text="❌ Я не на заправке", callback_data=f"fdis_{station_id}")],
+    ])
+
 async def _send_fuel_reminder_push(user_id, station):
     name = station.get('name') or 'заправка рядом'
     text = (
@@ -12390,10 +12414,29 @@ async def _send_fuel_reminder_push(user_id, station):
         f"не забудь отметить, какое топливо сейчас есть в наличии. Это поможет "
         f"другим водителям на карте."
     )
+    # ИЗМЕНЕНО 28.09.2026 - см. fuel_reminder_keyboard_v2 выше: если можно
+    # построить ссылку на карту (PUBLIC_URL настроен и у водителя есть
+    # город/категория в профиле, тот же принцип, что и у show_fuel_bot) -
+    # отметка наличия открывается прямо в приложении на этой заправке, без
+    # похода в чат. Если нет - остаётся старая клавиатура прямо в чате как
+    # запасной путь, чтобы функция не переставала работать вовсе.
+    state = user_state.get(user_id) or {}
+    city = state.get('city')
+    category = state.get('category')
+    keyboard = None
+    if PUBLIC_URL and city and category:
+        map_url = (
+            f"{PUBLIC_URL}{MAP_WEBAPP_PATH}?city={urllib.parse.quote(city)}"
+            f"&category={urllib.parse.quote(category)}&layer=fuel"
+            f"&station={urllib.parse.quote(str(station['id']))}"
+        ) + map_webapp_tariffs_param(state)
+        keyboard = fuel_reminder_keyboard_v2(station['id'], map_url)
+    if keyboard is None:
+        keyboard = fuel_reminder_keyboard(station['id'])
     try:
         await bot.send_message(
             user_id, text, parse_mode='Markdown',
-            reply_markup=fuel_reminder_keyboard(station['id']),
+            reply_markup=keyboard,
         )
     except Exception:
         logger.warning(f"⚠️ Не удалось отправить пуш-напоминание о заправке user_id={user_id}")
@@ -12452,6 +12495,30 @@ async def handle_fuel_reminder_mark_noop(callback_query: types.CallbackQuery):
         await callback_query.answer()
     except Exception:
         pass
+
+async def _handle_fuel_reminder_not_here(callback_query):
+    """Логика кнопки "❌ Я не на заправке" под пушем-напоминанием (см.
+    fuel_reminder_keyboard_v2) - геолокация на радиусе FUEL_REMINDER_RADIUS_KM
+    иногда ошибается, водитель может стоять рядом, но не на самой заправке.
+    Ничего не пишем в БД - просто убираем клавиатуру, чтобы не отвлекала.
+    Повторной отправки push для этой же остановки и так не будет (см.
+    _fuel_reminder_notified в check_fuel_reminder_pushes выше - user_id
+    добавляется туда ДО отправки push, до нажатия любой из кнопок). Вынесена
+    в отдельную недекорированную функцию (тот же приём, что и у
+    _phantom_password_flow и т.п. выше по файлу) - callback_query напрямую
+    вызывается в тестах, минуя @router.callback_query."""
+    try:
+        await callback_query.answer("Хорошо, не буду напоминать про эту остановку")
+    except Exception:
+        pass
+    try:
+        await callback_query.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+@router.callback_query(lambda c: c.data.startswith("fdis_"))
+async def handle_fuel_reminder_not_here(callback_query: types.CallbackQuery):
+    await _handle_fuel_reminder_not_here(callback_query)
 
 async def fuel_reminder_checker():
     while True:
@@ -17431,7 +17498,24 @@ def map_webapp_html():
   if (params.get('layer') === 'fuel') {{
     fuelCheckbox.checked = true;
     layerToggleRow.classList.remove('collapsed');
-    loadFuelStations();
+    // ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - push-напоминание
+    // "отметить наличие на заправке" должно открывать карту СРАЗУ на ТОЙ
+    // заправке, у которой водитель стоит, а не просто со включённым слоем
+    // заправок вообще - см. ?station=<id> у fuel_reminder_keyboard_v2/
+    // _send_fuel_reminder_push в main.py). loadFuelStations() - async
+    // функция, .then() ждёт, пока станции и их маркеры (fuelMarkerById)
+    // реально загрузятся, прежде чем пытаться найти нужный маркер.
+    // zoomToShowLayer - метод Leaflet.markercluster: маркер может быть
+    // "внутри" кластера на текущем зуме, этот метод сам приближает карту
+    // ровно настолько, чтобы маркер стал отдельным и видимым, и только
+    // потом вызывает callback (открываем его попап).
+    loadFuelStations().then(() => {{
+      const focusStationId = params.get('station');
+      if (!focusStationId) return;
+      const marker = fuelMarkerById[focusStationId];
+      if (!marker) return;
+      fuelCluster.zoomToShowLayer(marker, () => {{ marker.openPopup(); }});
+    }});
   }}
   chargingCheckbox.addEventListener('change', () => {{
     if (chargingCheckbox.checked) loadChargingStations(); else clearChargingStations();
