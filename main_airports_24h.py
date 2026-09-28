@@ -12927,9 +12927,9 @@ MAP_CHROME_CSS = """
   .map-ticker.hidden-empty { display: none; }
   .map-ticker.dimmed { opacity: 0; pointer-events: none; }
   /* ИЗМЕНЕНО 28.09.2026 (прямая просьба пользователя - "уменьши, не успевают
-     прочитать") - было 26s на полный проход, не хватало времени прочитать
-     каждую строку до того, как она уезжает. Увеличено почти вдвое. */
-  .map-ticker-track { display: flex; white-space: nowrap; will-change: transform; animation: mapTickerScroll 48s linear infinite; }
+     прочитать", затем повторно "ещё медленнее") - было 26s -> 48s -> 75s на
+     полный проход ленты. */
+  .map-ticker-track { display: flex; white-space: nowrap; will-change: transform; animation: mapTickerScroll 75s linear infinite; }
   .map-ticker-item { display: inline-block; padding: 0 26px; font-family: 'Silkscreen', monospace; font-weight: 700; font-size: 13px; letter-spacing: .05em; color: #FFC400; text-shadow: 0 0 4px rgba(255,196,0,.75), 0 0 1px rgba(255,196,0,.9); }
   @keyframes mapTickerScroll { 0% { transform: translateX(0); } 100% { transform: translateX(-50%); } }
   @media (prefers-reduced-motion: reduce) { .map-ticker-track { animation: none; } }
