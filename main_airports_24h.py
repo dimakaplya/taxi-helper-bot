@@ -35,6 +35,7 @@ import fetch_trains_data  # поезда дальнего следования (
 import fetch_favt_notices  # логика сбора уведомлений Росавиации (@favt_info), тоже фоново
 import fetch_road_events   # ДТП по городам (Москва: @dtp777+@DtOperativno слиты в одну ленту, СПб: @dtp_spb78) - тем же способом, фоново
 import fetch_concert_events  # афиша концертов из Telegram-каналов (Москва: @concerts_moscow, СПб: @spb_conc) - второй источник для "🎭 СОБЫТИЯ ГОРОДА", тем же способом, фоново
+import fetch_city_ticker    # новости/афиша для бегущей строки на карте (Москва: @moscowmap+@moscowsee, Краснодар: @krd_tipich_ru) - тем же способом, фоново
 import fetch_mos_road_data  # официальный API data.mos.ru (доп. источник для Москвы) - см. MOS_DATA_API_KEY ниже
 import fetch_timepad_data  # афиша города (TimePad) для кнопки "🎭 СОБЫТИЯ ГОРОДА" - используется
                             # только для TIMEPAD_CITY_MAP; timepad_data.json обновляется ЛОКАЛЬНО
@@ -241,6 +242,13 @@ FAVT_UPDATE_INTERVAL_MINUTES = 3
 # map_webapp_html). Уменьшено до 2 минут.
 ROAD_EVENTS_DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'road_events_data.json')
 ROAD_EVENTS_UPDATE_INTERVAL_MINUTES = 2
+
+# ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - бегущая строка над
+# картой, новости/афиша @moscowmap+@moscowsee (Москва), @krd_tipich_ru
+# (Краснодар), см. fetch_city_ticker.py). Новости не так критичны по
+# времени, как ДТП - обновляем реже.
+TICKER_NEWS_DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'city_ticker_news.json')
+TICKER_NEWS_UPDATE_INTERVAL_MINUTES = 10
 
 # Афиша концертов из Telegram-каналов (Москва: @concerts_moscow, СПб:
 # @spb_conc) - второй источник для "🎭 СОБЫТИЯ ГОРОДА" вместе с TimePad, тот
@@ -1029,6 +1037,31 @@ def traffic_level_notice(traffic_level):
     if not label:
         return None
     return f"🚦 Пробки сейчас: {label} ({traffic_level}/10)"
+
+# ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "баллы пробок с
+# рекомендациями" для бегущей строки на карте) - короткий совет водителю по
+# уровню пробок, та же шкала 1-10, что и TRAFFIC_LEVEL_LABELS выше. Не
+# новый источник данных - уровень уже приходит с карты (reportTrafficLevel
+# в JS -> /map/traffic_level), просто добавляем вторую строку к уже
+# известному баллу. См. build_ticker_items ниже.
+TICKER_TRAFFIC_RECOMMENDATION = {
+    1: "хорошее время для дальних заказов", 2: "хорошее время для дальних заказов",
+    3: "в целом норм, местами тормозит", 4: "в целом норм, местами тормозит",
+    5: "закладывай запас времени в пути", 6: "закладывай запас времени в пути",
+    7: "лучше короткие заказы рядом", 8: "лучше короткие заказы рядом",
+    9: "дальние заказы не бери - не успеешь", 10: "дальние заказы не бери - не успеешь",
+}
+
+def traffic_ticker_item(city):
+    """Строка для бегущей строки на карте с баллом пробок и рекомендацией,
+    либо None, если свежего балла по городу нет (см. get_city_traffic_level -
+    тот же кэш, что у "Куда ехать")."""
+    level = get_city_traffic_level(city)
+    if level is None:
+        return None
+    label = TRAFFIC_LEVEL_LABELS.get(level, '')
+    advice = TICKER_TRAFFIC_RECOMMENDATION.get(level, '')
+    return f"🚦 Пробки {level}/10 - {label.lower()}, {advice}" if label else None
 
 def is_city_holiday_today(city):
     """True, если СЕГОДНЯ (по местному времени города) идёт праздник -
@@ -2221,6 +2254,83 @@ def count_active_road_closures(city):
     (см. format_where_to_go_text). ИЗМЕНЕНО 24.09.2026 - см.
     _road_events_chat_window (то же окно 6ч, что у "Дороги"/"События")."""
     return sum(1 for e in _road_events_chat_window(city) if e.get('is_closure'))
+
+_ticker_news_cache = None
+_ticker_news_mtime = None
+
+def load_ticker_news():
+    """Загружает city_ticker_news.json (новости/афиша @moscowmap+@moscowsee/
+    @krd_tipich_ru для бегущей строки на карте, см. fetch_city_ticker.py)."""
+    global _ticker_news_cache, _ticker_news_mtime
+    try:
+        mtime = os.path.getmtime(TICKER_NEWS_DATA_FILE)
+        if _ticker_news_cache is not None and mtime == _ticker_news_mtime:
+            return _ticker_news_cache
+        with open(TICKER_NEWS_DATA_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        _ticker_news_cache = data
+        _ticker_news_mtime = mtime
+        return data
+    except FileNotFoundError:
+        return None
+    except Exception as e:
+        logger.error(f"❌ Ошибка чтения city_ticker_news.json: {e}")
+        return None
+
+def get_ticker_news_for_city(city):
+    """Последние новости/афиша для бегущей строки - пусто, если для города
+    новостной канал не настроен (см. fetch_city_ticker.TICKER_NEWS_CHANNELS)
+    или файл ещё не собран."""
+    data = load_ticker_news()
+    if not data:
+        return []
+    return data.get('cities', {}).get(city, [])
+
+def get_ticker_ads(city):
+    """Реклама для бегущей строки на карте - по прямой просьбе пользователя
+    ("рекламу отдельно будем грузить") загружается НЕ автоматическим
+    сборщиком, а отдельно (администратором) - пока список всегда пустой,
+    механизм ручного добавления подключим, когда пользователь определится,
+    как именно хочет её вносить (заглушка, а не баг - бегущая строка просто
+    не показывает рекламный блок, пока сюда ничего не добавлено)."""
+    return []
+
+def build_ticker_items(city):
+    """Собирает содержимое бегущей строки над картой для города бота: балл
+    пробок с рекомендацией + активные перекрытия/крупные ДТП (то же окно 6ч,
+    что у "Дороги"/"События", см. _road_events_chat_window) + новости/афиша
+    + реклама (см. get_ticker_ads). Порядок - от самого практически важного
+    водителю к менее срочному. Если по городу вообще ничего нет ни в одном
+    источнике - возвращает пустой список (бегущая строка на карте должна
+    аккуратно скрыться, а не показывать пустую плашку - см. JS в
+    map_webapp_html)."""
+    items = []
+
+    traffic_item = traffic_ticker_item(city)
+    if traffic_item:
+        items.append(traffic_item)
+
+    for e in _road_events_chat_window(city):
+        text = e.get('text', '')
+        if not text:
+            continue
+        short = text if len(text) <= 100 else text[:100].rsplit(' ', 1)[0].rstrip(' ,.-') + '…'
+        if e.get('is_closure'):
+            items.append(f"🚧 {short}")
+        elif e.get('is_severe'):
+            items.append(f"🚨 {short}")
+
+    for n in get_ticker_news_for_city(city):
+        text = n.get('text', '')
+        if text:
+            items.append(f"📰 {text}")
+
+    for ad in get_ticker_ads(city):
+        text = ad.get('text') if isinstance(ad, dict) else ad
+        if text:
+            items.append(f"💛 {text}")
+
+    return items
 
 _concert_events_cache = None
 _concert_events_mtime = None
@@ -12782,6 +12892,44 @@ MAP_CHROME_CSS = """
     0%, 100% { filter: drop-shadow(0 0 2px rgba(255,196,0,.35)); }
     50% { filter: drop-shadow(0 0 7px rgba(255,196,0,.85)); }
   }
+  /* ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - бегущая строка над
+     картой: "реклама, дорожные перекрытия дтп краткие новости баллы пробок
+     с рекомендациями... овальным объёмный красивый... буквы как из точек
+     жёлтых") - визуал согласован заранее по мокапу (3 варианта шрифта),
+     выбран вариант 1 (Silkscreen). Высота/верхний отступ СТРОГО равны
+     .shift-radar-indicator (56px, тот же top с var(--tg-chrome-top)) - по
+     прямой более поздней просьбе пользователя "чтобы бар по высоте не
+     выходил границами кнопки смены" - вместо интерполяции 44px из мокапа
+     здесь взята РЕАЛЬНАЯ высота актуальной кнопки-индикатора на карте.
+     Начинается в left:80px - ровно там же, где начинается .map-toggles-row
+     (Тарифы/Слои/Пробки/Спрос), т.к. это соседняя, а не одна и та же
+     строка - см. .map-ticker.dimmed ниже и mapMenuToggleBtn.addEventListener
+     в JS: пока раскрыт ряд тарифов/слоёв, бегущая строка на время прячется,
+     чтобы они не перекрывались друг с другом (обе живут в одной полосе
+     верха экрана, но ряд тарифов раскрыт лишь временно, по тапу). */
+  .map-ticker {
+    /* box-sizing:border-box + height РОВНО как итоговая (с рамкой) высота
+       .shift-radar-indicator (56px контент + 3px рамка с каждой стороны =
+       62px итого, см. её box-sizing:content-box по умолчанию) - иначе при
+       разной толщине рамки (у кнопки 3px, здесь 1px) getBoundingClientRect
+       даёт разную ИТОГОВУЮ высоту при одинаковом height, хотя top совпадает
+       (сам top не зависит от box-sizing). Проверено тестом (см.
+       /tmp/test_map_ticker.py) - высоты теперь совпадают пиксель в пиксель. */
+    position: absolute; top: calc(14px + var(--tg-chrome-top, 0px)); left: 80px; right: 10px; height: 62px;
+    box-sizing: border-box;
+    z-index: 900; border-radius: 999px; overflow: hidden;
+    background: linear-gradient(180deg, rgba(40,40,42,.95), rgba(14,14,16,.95));
+    border: 1px solid rgba(255,196,0,.4);
+    box-shadow: 0 3px 10px rgba(0,0,0,.45), inset 0 1px 0 rgba(255,255,255,.14);
+    display: flex; align-items: center;
+    transition: opacity .2s;
+  }
+  .map-ticker.hidden-empty { display: none; }
+  .map-ticker.dimmed { opacity: 0; pointer-events: none; }
+  .map-ticker-track { display: flex; white-space: nowrap; will-change: transform; animation: mapTickerScroll 26s linear infinite; }
+  .map-ticker-item { display: inline-block; padding: 0 26px; font-family: 'Silkscreen', monospace; font-weight: 700; font-size: 13px; letter-spacing: .05em; color: #FFC400; text-shadow: 0 0 4px rgba(255,196,0,.75), 0 0 1px rgba(255,196,0,.9); }
+  @keyframes mapTickerScroll { 0% { transform: translateX(0); } 100% { transform: translateX(-50%); } }
+  @media (prefers-reduced-motion: reduce) { .map-ticker-track { animation: none; } }
   .fuel-popup, .charging-popup { font-family: -apple-system, sans-serif; font-size: 12.5px; max-width: 230px; color: #000; }
   .fuel-popup h4, .charging-popup h4 { margin: 0 0 6px; font-size: 13.5px; }
   .fuel-popup .sub, .charging-popup .sub { color: #666; font-size: 11.5px; margin-bottom: 6px; }
@@ -12935,6 +13083,11 @@ def map_webapp_html():
 <link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
 {map_preconnect_hints}
 <script src="{TG_WEBAPP_JS_PROXY_PATH}"></script>
+<!-- ДОБАВЛЕНО 28.09.2026 (бегущая строка над картой, буквы жёлтым "точечным"
+     шрифтом - согласованный мокап, вариант 1) -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Silkscreen:wght@400;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
 <!-- УБРАНО 23.09.2026 (прямая просьба пользователя - "вообще убери
      слежение и на север", после жалобы "херня получилась") - фича
@@ -13088,6 +13241,14 @@ def map_webapp_html():
   <svg class="power-icon" viewBox="0 0 24 24" fill="#fff">
     <path d="M13 3h-2v10h2V3zm4.83 2.17-1.42 1.42A6.92 6.92 0 0 1 19 12c0 3.87-3.13 7-7 7s-7-3.13-7-7c0-2.24 1.06-4.32 2.83-5.65L6.41 5.17A8.936 8.936 0 0 0 3 12c0 4.97 4.03 9 9 9s9-4.03 9-9c0-2.78-1.28-5.3-3.17-6.83z"/>
   </svg>
+</div>
+<!-- ДОБАВЛЕНО 28.09.2026 (бегущая строка над картой - пробки/ДТП/перекрытия/
+     новости/реклама, см. .map-ticker в CSS выше и loadMapTicker в JS ниже).
+     Пустой .map-ticker-track заполняется JS'ом при первом же loadMapTicker()
+     - до первого ответа сервера тег просто пустой (не мигает "пустой
+     плашкой" за счёт hidden-empty, см. JS). -->
+<div class="map-ticker hidden-empty" id="mapTicker">
+  <div class="map-ticker-track" id="mapTickerTrack"></div>
 </div>
 <!-- ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - "сделай выбор
      тарифа с карты прям") - см. .tariff-picker-overlay в CSS выше и
@@ -16340,6 +16501,42 @@ def map_webapp_html():
       }});
     }} catch (e) {{ /* тихо */ }}
   }}
+  // ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - бегущая строка над
+  // картой: пробки/ДТП/перекрытия/новости/реклама одной лентой, см.
+  // build_ticker_items в main.py и MAP_TICKER_API_PATH). Каждый элемент -
+  // готовая строка с эмодзи внутри (сервер уже всё собрал/сжал/отсортировал
+  // по важности) - клиенту остаётся только отрисовать и прокрутить.
+  // Список дублируется (items+items) в самой ленте - анимация
+  // translateX(-50%) на .map-ticker-track тогда прокручивает БЕСШОВНО
+  // (конец первой копии точно совпадает с началом второй).
+  function renderMapTicker(items) {{
+    const tickerEl = document.getElementById('mapTicker');
+    const trackEl = document.getElementById('mapTickerTrack');
+    if (!tickerEl || !trackEl) return;
+    if (!items || !items.length) {{
+      tickerEl.classList.add('hidden-empty');
+      trackEl.innerHTML = '';
+      return;
+    }}
+    trackEl.innerHTML = '';
+    for (let copy = 0; copy < 2; copy++) {{
+      items.forEach(text => {{
+        const span = document.createElement('span');
+        span.className = 'map-ticker-item';
+        span.textContent = text;
+        trackEl.appendChild(span);
+      }});
+    }}
+    tickerEl.classList.remove('hidden-empty');
+  }}
+  async function loadMapTicker() {{
+    try {{
+      const resp = await fetch(`/map/ticker?city=${{encodeURIComponent(city)}}`);
+      if (!resp.ok) return;
+      const data = await resp.json();
+      renderMapTicker(data.items || []);
+    }} catch (e) {{ /* тихо */ }}
+  }}
   // Афиша (концерты/мероприятия) с геокодированной площадкой - по просьбе
   // пользователя (22.09.2026): "Афишу тоже выноси". Как и дорожные события,
   // события без распознанного/геокодированного места сюда не попадают (см.
@@ -16655,6 +16852,13 @@ def map_webapp_html():
       mapTogglesRow.classList.toggle('collapsed');
       const isOpen = !mapTogglesRow.classList.contains('collapsed');
       mapMenuToggleBtn.classList.toggle('active', isOpen);
+      // ДОБАВЛЕНО 28.09.2026 (см. .map-ticker.dimmed в CSS выше) - ряд
+      // Тарифы/Слои/Пробки/Спрос и бегущая строка живут в одной верхней
+      // полосе экрана (обе начинаются в left:80px, сразу после кнопки
+      // смены) - ряд раскрыт лишь временно по тапу, поэтому на это время
+      // бегущую строку прячем, а не двигаем макет.
+      const mapTickerEl = document.getElementById('mapTicker');
+      if (mapTickerEl) mapTickerEl.classList.toggle('dimmed', isOpen);
       if (!isOpen) {{
         const tariffPanelEl = document.getElementById('tariffToggle');
         const layerToggleRowEl = document.getElementById('layerToggle');
@@ -16862,6 +17066,7 @@ def map_webapp_html():
   if (demandShownState) loadDemandCloud();
   loadRoadEvents();
   loadCityEvents();
+  loadMapTicker();
   setInterval(loadPositions, 15000);
   // ДОБАВЛЕНО 25.09.2026 (жалоба пользователя - "кнопка смены не отображает
   // реальную ситуацию, включена ли смена или нет"): loadMyProfile() раньше
@@ -16882,6 +17087,10 @@ def map_webapp_html():
   // (ROAD_EVENTS_UPDATE_INTERVAL_MINUTES 10->2 мин, см. main.py) свежее
   // событие теперь доходит до карты за секунды-минуты, а не до ~12 минут.
   setInterval(loadRoadEvents, 30000);
+  // Бегущая строка обновляется на сервере не чаще раза в TICKER_NEWS_UPDATE_
+  // INTERVAL_MINUTES (новости) - опрос раз в минуту с клиента более чем
+  // достаточен, не тяжелее остальных 30-60-секундных опросов рядом.
+  setInterval(loadMapTicker, 60000);
   // ИЗМЕНЕНО 24.09.2026 (прямая просьба пользователя - оптимизация тормозов
   // карты) - раньше все четыре 60-секундных опроса стартовали сразу друг за
   // другом синхронно, поэтому КАЖДУЮ минуту они срабатывали одним пиком в
@@ -22225,6 +22434,21 @@ async def handle_map_road_events_api(request):
         logger.exception("❌ Ошибка при получении дорожных событий для карты водителей")
         result = []
     return web.json_response({'events': result})
+
+# ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - бегущая строка над
+# картой: "рекламу, дорожные перекрытия дтп краткие новости баллы пробок с
+# рекомендациями") - см. build_ticker_items выше, отдаёт готовый список
+# строк (эмодзи уже внутри каждой строки) для .map-ticker в map_webapp_html.
+MAP_TICKER_API_PATH = '/map/ticker'
+
+async def handle_map_ticker_api(request):
+    city = request.query.get('city', '')
+    try:
+        items = build_ticker_items(city)
+    except Exception:
+        logger.exception("❌ Ошибка при сборке бегущей строки карты")
+        items = []
+    return web.json_response({'items': items})
 
 MAP_CITY_EVENTS_API_PATH = '/map/city_events'
 
@@ -32677,6 +32901,7 @@ async def start_subscription_webhook_server():
     app.router.add_post(MAP_GAS_QUEUE_REPORT_API_PATH, handle_map_gas_queue_report_api)
     app.router.add_post(MAP_CHARGING_REPORT_API_PATH, handle_map_charging_report_api)
     app.router.add_get(MAP_ROAD_EVENTS_API_PATH, handle_map_road_events_api)
+    app.router.add_get(MAP_TICKER_API_PATH, handle_map_ticker_api)
     app.router.add_get(MAP_CITY_EVENTS_API_PATH, handle_map_city_events_api)
     # Локальная раздача telegram-web-app.js (21.09.2026, см. блок "ЛОКАЛЬНАЯ
     # РАЗДАЧА telegram-web-app.js" выше) - используется и картой, и кабинетом.
@@ -36339,6 +36564,21 @@ async def road_events_updater():
             logger.error(f"❌ Ошибка фонового обновления road_events_data.json: {e}")
         await asyncio.sleep(ROAD_EVENTS_UPDATE_INTERVAL_MINUTES * 60)
 
+async def ticker_news_updater():
+    """Фоновая задача: раз в TICKER_NEWS_UPDATE_INTERVAL_MINUTES минут читает
+    публичные веб-версии новостных/афишных каналов (см.
+    fetch_city_ticker.TICKER_NEWS_CHANNELS) и обновляет city_ticker_news.json -
+    тот же способ сбора, что и road_events_updater выше, только без пуш-
+    уведомлений (новости в бегущей строке не критичны по времени)."""
+    while True:
+        try:
+            logger.info("🔄 Обновляю city_ticker_news.json (новости для бегущей строки)...")
+            await asyncio.to_thread(fetch_city_ticker.main)
+            logger.info("✅ city_ticker_news.json обновлён")
+        except Exception as e:
+            logger.error(f"❌ Ошибка фонового обновления city_ticker_news.json: {e}")
+        await asyncio.sleep(TICKER_NEWS_UPDATE_INTERVAL_MINUTES * 60)
+
 async def concert_events_updater():
     """Фоновая задача: раз в CONCERT_EVENTS_UPDATE_INTERVAL_MINUTES минут
     читает публичные веб-версии каналов @concerts_moscow (Москва) и
@@ -36508,6 +36748,7 @@ async def main():
         logger.warning("⚠️ YANDEX_RASP_API_KEY не задан в переменных окружения Railway - flights_data.json и trains_data.json не будут обновляться автоматически")
     asyncio.create_task(favt_notices_updater())
     asyncio.create_task(road_events_updater())
+    asyncio.create_task(ticker_news_updater())
     asyncio.create_task(concert_events_updater())
     # mos_road_data_updater() ОТКЛЮЧЁН - apidata.mos.ru не резолвится даже с
     # серверов Railway (NameResolutionError на 'apidata.mos.ru' в логах),
