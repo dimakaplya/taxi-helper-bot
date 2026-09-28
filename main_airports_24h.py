@@ -33334,7 +33334,28 @@ async def phantom_password_flow(message: types.Message):
     месяц подписки, а не сразу тут) и "Админ панель" (свой пароль
     ADMIN_PANEL_PASSWORD, см. admin_panel_password_confirm_flow). Прежняя
     "двойная верификация" админ-панели (ввод пароля дважды) больше не
-    нужна - кнопка сама по себе уже отдельный шаг."""
+    нужна - кнопка сама по себе уже отдельный шаг.
+
+    ИЗМЕНЕНО 28.09.2026 (прямая просьба пользователя - "1 кнопка создать
+    новую кампанию ввод название и пароль 2. Посмотреть список кампаний
+    3. Удалить кампанию" сразу "после кнопки фантом") - добавлены ещё 3
+    пункта ПРЯМО в это меню (без второго пароля админ-панели): создать
+    новую компанию/юр.лицо, посмотреть список компаний, удалить компанию.
+    Раньше это было доступно только за ВТОРЫМ паролем через "🔐 АДМИН
+    ПАНЕЛЬ" (см. admin_panel_new_legal_entity_start/admin_panel_list_
+    legal_entities_cb выше) - те кнопки там тоже остались (ничего не
+    сломано), просто теперь есть более короткий путь. Пароля "Фантома"
+    достаточно - см. phantom_new_company_start/phantom_list_companies_cb/
+    phantom_delete_company_start_cb ниже."""
+    await _phantom_password_flow(message)
+
+
+async def _phantom_password_flow(message):
+    """Реальная логика phantom_password_flow выше, вынесена в обычную
+    (недекорированную) функцию - тот же приём, что и у
+    _send_referral_scheme_view/_admin_panel_new_entity_flow (под тестовым
+    стабом aiogram @router.message-функции становятся MagicMock, не
+    вызвать напрямую)."""
     user_id = message.from_user.id
     state = user_state[user_id]
     text = (message.text or '').strip()
@@ -33347,6 +33368,9 @@ async def phantom_password_flow(message: types.Message):
     markup = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🤝 АДМИН РЕФЕРАЛЬНАЯ СИСТЕМА", callback_data="admin_referral_start")],
         [InlineKeyboardButton(text="🔐 АДМИН ПАНЕЛЬ", callback_data="admin_panel_start")],
+        [InlineKeyboardButton(text="🏢 Новая компания", callback_data="phantom_new_company")],
+        [InlineKeyboardButton(text="📋 Список компаний", callback_data="phantom_list_companies"),
+         InlineKeyboardButton(text="🗑 Удалить компанию", callback_data="phantom_delete_company")],
     ])
     await message.answer("👻 Фантом:", reply_markup=markup)
 
@@ -33465,6 +33489,159 @@ async def admin_panel_password_confirm_flow(message: types.Message):
         await message.answer("❌ Неверный пароль.")
         return
     await message.answer(format_admin_overview_text(), parse_mode='HTML', reply_markup=admin_panel_keyboard())
+
+
+# ==================== КОМПАНИИ ПРЯМО ИЗ МЕНЮ ФАНТОМА (БЕЗ ВТОРОГО ПАРОЛЯ) ====================
+# ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "1 кнопка создать
+# новую кампанию ввод название и пароль 2. Посмотреть список кампаний
+# 3. Удалить кампанию" сразу "после кнопки фантом... фантом вводишь и
+# новая компания появляется") - короткий путь к управлению юр.лицами
+# (add_legal_entity/remove_legal_entity выше), доступный уже по одному
+# паролю "Фантома" (см. phantom_password_flow выше), без второго пароля
+# админ-панели (ADMIN_PANEL_PASSWORD). Кнопки "🏢 Новое юрлицо"/"📋 Список
+# юрлиц" внутри самой "🔐 АДМИН ПАНЕЛЬ" (admin_panel_keyboard выше) никуда
+# не делись - это ДОПОЛНИТЕЛЬНЫЙ, более короткий путь, а не замена.
+@router.callback_query(lambda c: c.data == "phantom_new_company")
+async def phantom_new_company_start(callback_query: types.CallbackQuery):
+    """Переиспользует ТОТ ЖЕ awaiting-флаг и текстовый хендлер
+    (admin_panel_new_legal_entity_flow ниже), что и кнопка «🏢 Новое
+    юрлицо» админ-панели - сам флаг ни к какому конкретному экрану не
+    привязан, отличается только то, с какой кнопки на него попали."""
+    await _phantom_new_company_start(callback_query)
+
+
+async def _phantom_new_company_start(callback_query):
+    try:
+        await callback_query.answer()
+    except Exception:
+        pass
+    user_id = callback_query.from_user.id
+    state = user_state.setdefault(user_id, {})
+    state['awaiting_admin_panel_new_legal_entity'] = True
+    await callback_query.message.answer(
+        "🏢 Введи название компании и пароль ОДНИМ сообщением, через пробел "
+        "(пароль - последнее слово):\nНапример: ООО Ромашка 261194\n\nИли «❌ ОТМЕНА»:",
+        reply_markup=referral_withdraw_cancel_keyboard()
+    )
+
+
+def _format_legal_entities_list_text():
+    """Общий текст списка юр.лиц - переиспользуется кнопкой «📋 Список
+    компаний» в меню Фантома и «📋 Список юрлиц» в админ-панели (см.
+    admin_panel_list_legal_entities_cb выше/ниже)."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, name, password, owner_user_id FROM legal_entities WHERE kind != 'admin_partner' OR kind IS NULL ORDER BY id DESC")
+    rows = cursor.fetchall()
+    conn.close()
+    if not rows:
+        return "Юр.лиц пока нет - добавь кнопкой «🏢 Новая компания»."
+    lines = ["🏢 *Компании:*"]
+    for r in rows:
+        owner = f"владелец: {r[3]}" if r[3] else "владелец: — (никто ещё не вошёл)"
+        lines.append(f"#{r[0]} «{r[1]}» / пароль: `{r[2]}` / {owner}")
+    return "\n".join(lines)
+
+
+@router.callback_query(lambda c: c.data == "phantom_list_companies")
+async def phantom_list_companies_cb(callback_query: types.CallbackQuery):
+    await _phantom_list_companies(callback_query)
+
+
+async def _phantom_list_companies(callback_query):
+    try:
+        await callback_query.answer()
+    except Exception:
+        pass
+    await callback_query.message.answer(_format_legal_entities_list_text(), parse_mode='Markdown')
+
+
+@router.callback_query(lambda c: c.data == "phantom_delete_company")
+async def phantom_delete_company_start_cb(callback_query: types.CallbackQuery):
+    """Показывает список компаний кнопками - тап по компании ведёт на
+    подтверждение (phantom_del_ent_ask_<id> ниже), а не сразу удаляет,
+    чтобы нельзя было случайно снести чужой кабинет одним тапом."""
+    await _phantom_delete_company_start(callback_query)
+
+
+async def _phantom_delete_company_start(callback_query):
+    try:
+        await callback_query.answer()
+    except Exception:
+        pass
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, name FROM legal_entities WHERE kind != 'admin_partner' OR kind IS NULL ORDER BY id DESC")
+    rows = cursor.fetchall()
+    conn.close()
+    if not rows:
+        await callback_query.message.answer("Юр.лиц пока нет - удалять нечего.")
+        return
+    buttons = [
+        [InlineKeyboardButton(text=f"🗑 #{r[0]} {r[1]}", callback_data=f"phantom_del_ent_ask_{r[0]}")]
+        for r in rows
+    ]
+    await callback_query.message.answer(
+        "🗑 Какую компанию удалить?",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+    )
+
+
+@router.callback_query(lambda c: c.data.startswith("phantom_del_ent_ask_"))
+async def phantom_delete_company_ask_cb(callback_query: types.CallbackQuery):
+    await _phantom_delete_company_ask(callback_query)
+
+
+async def _phantom_delete_company_ask(callback_query):
+    try:
+        await callback_query.answer()
+    except Exception:
+        pass
+    entity_id = callback_query.data[len("phantom_del_ent_ask_"):]
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT id, name, password FROM legal_entities WHERE id = ?', (entity_id,))
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        await callback_query.message.answer("Не найдено - возможно, уже удалено.")
+        return
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❗ Да, удалить", callback_data=f"phantom_del_ent_do_{row[0]}")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="phantom_del_ent_cancel")],
+    ])
+    await callback_query.message.answer(
+        f"❗ Точно удалить «{row[1]}» (пароль: {row[2]})?\n\n"
+        f"Удалятся также все машины и начисления аренды этой компании. "
+        f"Владелец потеряет доступ к личному кабинету.",
+        reply_markup=markup
+    )
+
+
+@router.callback_query(lambda c: c.data.startswith("phantom_del_ent_do_"))
+async def phantom_delete_company_do_cb(callback_query: types.CallbackQuery):
+    await _phantom_delete_company_do(callback_query)
+
+
+async def _phantom_delete_company_do(callback_query):
+    try:
+        await callback_query.answer()
+    except Exception:
+        pass
+    entity_id = callback_query.data[len("phantom_del_ent_do_"):]
+    deleted = remove_legal_entity(entity_id)
+    if not deleted:
+        await callback_query.message.answer("Не найдено - возможно, уже удалено.")
+        return
+    await callback_query.message.answer(f"✅ «{deleted['name']}» удалено.")
+
+
+@router.callback_query(lambda c: c.data == "phantom_del_ent_cancel")
+async def phantom_delete_company_cancel_cb(callback_query: types.CallbackQuery):
+    try:
+        await callback_query.answer("Отменено")
+    except Exception:
+        pass
 
 
 # ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - жалоба: "когда другой
@@ -34401,6 +34578,37 @@ def add_legal_entity(name, password, kind='legal_entity'):
         new_id = None
     conn.close()
     return new_id
+
+
+# ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "3. Удалить кампанию",
+# кнопка "🗑 Удалить компанию" в меню Фантома, см. phantom_delete_company_*
+# ниже) - удаляет юр.лицо/админ-партнёра (та же таблица legal_entities,
+# работает для обоих kind) ВМЕСТЕ с его машинами и начислениями аренды
+# (legal_entity_cars/legal_entity_car_rent_payments), чтобы не оставлять
+# осиротевшие строки, ссылающиеся на несуществующий entity_id. Владелец
+# (owner_user_id) при этом НЕ трогается - у него просто исчезает кабинет
+# (get_legal_entity_owned_by(user_id) снова вернёт None), это ожидаемое
+# поведение удаления компании. Возвращает удалённую запись (name/password)
+# или None, если такого id не было - вызывающий код использует это для
+# текста подтверждения.
+def remove_legal_entity(entity_id):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT id, name, password FROM legal_entities WHERE id = ?', (entity_id,))
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        return None
+    cursor.execute(
+        'DELETE FROM legal_entity_car_rent_payments WHERE car_id IN '
+        '(SELECT id FROM legal_entity_cars WHERE entity_id = ?)',
+        (entity_id,)
+    )
+    cursor.execute('DELETE FROM legal_entity_cars WHERE entity_id = ?', (entity_id,))
+    cursor.execute('DELETE FROM legal_entities WHERE id = ?', (entity_id,))
+    conn.commit()
+    conn.close()
+    return {'id': row[0], 'name': row[1], 'password': row[2]}
 
 
 # ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - "ввод паролей сделать
