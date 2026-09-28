@@ -7516,6 +7516,19 @@ def share_order_webapp_html(category=None):
   const tg = window.Telegram && window.Telegram.WebApp;
   if (tg) {
     tg.ready(); tg.expand();
+    // ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "ограничим
+    // ориентацию экрана только вертикально, переворачивать нельзя") -
+    // Telegram Mini Apps API (Bot API 8.0+) блокирует РЕАЛЬНЫЙ поворот
+    // экрана средствами самого Telegram (CSS/Screen Orientation API на
+    // iOS в WebView не работает вовсе). lockOrientation() фиксирует
+    // ТЕКУЩУЮ ориентацию на момент вызова - приложение почти всегда
+    // открывается в портретной (обычный хват телефона), проверяем это
+    // перед вызовом, чтобы случайно не зафиксировать боком, если открыли
+    // уже повёрнутым. У старых клиентов Telegram просто нет этого метода
+    // (tg.lockOrientation будет undefined) - тогда ничего не делаем.
+    if (tg.lockOrientation && window.innerHeight >= window.innerWidth) {
+      try { tg.lockOrientation(); } catch (e) {}
+    }
     // ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - "жёстко
     // привязать чтобы открытие миниаппс было только на полный экран и её
     // нельзя было смахивать вверх вниз") - requestFullscreen (Bot API
@@ -7876,6 +7889,15 @@ def platform_probe_webapp_html():
 <script>
   var tg = window.Telegram ? window.Telegram.WebApp : null;
   if (tg) { tg.ready(); }
+  // ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "ограничим
+  // ориентацию экрана только вертикально, переворачивать нельзя") -
+  // см. подробный комментарий у tg.lockOrientation в других
+  // *_webapp_html выше по файлу - тот же приём, эта страница
+  // короткоживущая (проба геолокации), но тоже может провернуться
+  // при повороте телефона.
+  if (tg && tg.lockOrientation && window.innerHeight >= window.innerWidth) {
+    try { tg.lockOrientation(); } catch (e) {}
+  }
   function done() { try { if (tg) tg.close(); } catch (e) {} }
   if (tg && tg.platform) {
     fetch('/platform/report', {
@@ -13967,6 +13989,19 @@ def map_webapp_html():
   }}
   if (tg) {{
     tg.ready(); tg.expand();
+    // ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "ограничим
+    // ориентацию экрана только вертикально, переворачивать нельзя") -
+    // Telegram Mini Apps API (Bot API 8.0+) блокирует РЕАЛЬНЫЙ поворот
+    // экрана средствами самого Telegram (CSS/Screen Orientation API на
+    // iOS в WebView не работает вовсе). lockOrientation() фиксирует
+    // ТЕКУЩУЮ ориентацию на момент вызова - приложение почти всегда
+    // открывается в портретной (обычный хват телефона), проверяем это
+    // перед вызовом, чтобы случайно не зафиксировать боком, если открыли
+    // уже повёрнутым. У старых клиентов Telegram просто нет этого метода
+    // (tg.lockOrientation будет undefined) - тогда ничего не делаем.
+    if (tg.lockOrientation && window.innerHeight >= window.innerWidth) {{
+      try {{ tg.lockOrientation(); }} catch (e) {{}}
+    }}
     // ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - "жёстко
     // привязать чтобы открытие миниаппс было только на полный экран и её
     // нельзя было смахивать вверх вниз") - см. подробный комментарий у той
@@ -18138,6 +18173,19 @@ def weather_webapp_html():
   const tg = window.Telegram && window.Telegram.WebApp;
   if (tg) {
     tg.ready(); tg.expand();
+    // ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "ограничим
+    // ориентацию экрана только вертикально, переворачивать нельзя") -
+    // Telegram Mini Apps API (Bot API 8.0+) блокирует РЕАЛЬНЫЙ поворот
+    // экрана средствами самого Telegram (CSS/Screen Orientation API на
+    // iOS в WebView не работает вовсе). lockOrientation() фиксирует
+    // ТЕКУЩУЮ ориентацию на момент вызова - приложение почти всегда
+    // открывается в портретной (обычный хват телефона), проверяем это
+    // перед вызовом, чтобы случайно не зафиксировать боком, если открыли
+    // уже повёрнутым. У старых клиентов Telegram просто нет этого метода
+    // (tg.lockOrientation будет undefined) - тогда ничего не делаем.
+    if (tg.lockOrientation && window.innerHeight >= window.innerWidth) {
+      try { tg.lockOrientation(); } catch (e) {}
+    }
     // ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - "жёстко
     // привязать чтобы открытие миниаппс было только на полный экран и её
     // нельзя было смахивать вверх вниз") - requestFullscreen (Bot API
@@ -18781,6 +18829,19 @@ def where_to_go_webapp_html():
   const tg = window.Telegram && window.Telegram.WebApp;
   if (tg) {
     tg.ready(); tg.expand();
+    // ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "ограничим
+    // ориентацию экрана только вертикально, переворачивать нельзя") -
+    // Telegram Mini Apps API (Bot API 8.0+) блокирует РЕАЛЬНЫЙ поворот
+    // экрана средствами самого Telegram (CSS/Screen Orientation API на
+    // iOS в WebView не работает вовсе). lockOrientation() фиксирует
+    // ТЕКУЩУЮ ориентацию на момент вызова - приложение почти всегда
+    // открывается в портретной (обычный хват телефона), проверяем это
+    // перед вызовом, чтобы случайно не зафиксировать боком, если открыли
+    // уже повёрнутым. У старых клиентов Telegram просто нет этого метода
+    // (tg.lockOrientation будет undefined) - тогда ничего не делаем.
+    if (tg.lockOrientation && window.innerHeight >= window.innerWidth) {
+      try { tg.lockOrientation(); } catch (e) {}
+    }
     // ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - "жёстко
     // привязать чтобы открытие миниаппс было только на полный экран и её
     // нельзя было смахивать вверх вниз") - requestFullscreen (Bot API
@@ -19680,6 +19741,19 @@ def unified_app_html():
   const tg = window.Telegram && window.Telegram.WebApp;
   if (tg) {
     tg.ready(); tg.expand();
+    // ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "ограничим
+    // ориентацию экрана только вертикально, переворачивать нельзя") -
+    // Telegram Mini Apps API (Bot API 8.0+) блокирует РЕАЛЬНЫЙ поворот
+    // экрана средствами самого Telegram (CSS/Screen Orientation API на
+    // iOS в WebView не работает вовсе). lockOrientation() фиксирует
+    // ТЕКУЩУЮ ориентацию на момент вызова - приложение почти всегда
+    // открывается в портретной (обычный хват телефона), проверяем это
+    // перед вызовом, чтобы случайно не зафиксировать боком, если открыли
+    // уже повёрнутым. У старых клиентов Telegram просто нет этого метода
+    // (tg.lockOrientation будет undefined) - тогда ничего не делаем.
+    if (tg.lockOrientation && window.innerHeight >= window.innerWidth) {
+      try { tg.lockOrientation(); } catch (e) {}
+    }
     // ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - "жёстко
     // привязать чтобы открытие миниаппс было только на полный экран и её
     // нельзя было смахивать вверх вниз") - requestFullscreen (Bot API
@@ -24351,6 +24425,19 @@ def events_webapp_html():
   const tg = window.Telegram && window.Telegram.WebApp;
   if (tg) {
     tg.ready(); tg.expand();
+    // ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "ограничим
+    // ориентацию экрана только вертикально, переворачивать нельзя") -
+    // Telegram Mini Apps API (Bot API 8.0+) блокирует РЕАЛЬНЫЙ поворот
+    // экрана средствами самого Telegram (CSS/Screen Orientation API на
+    // iOS в WebView не работает вовсе). lockOrientation() фиксирует
+    // ТЕКУЩУЮ ориентацию на момент вызова - приложение почти всегда
+    // открывается в портретной (обычный хват телефона), проверяем это
+    // перед вызовом, чтобы случайно не зафиксировать боком, если открыли
+    // уже повёрнутым. У старых клиентов Telegram просто нет этого метода
+    // (tg.lockOrientation будет undefined) - тогда ничего не делаем.
+    if (tg.lockOrientation && window.innerHeight >= window.innerWidth) {
+      try { tg.lockOrientation(); } catch (e) {}
+    }
     // ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - "жёстко
     // привязать чтобы открытие миниаппс было только на полный экран и её
     // нельзя было смахивать вверх вниз") - requestFullscreen (Bot API
@@ -24818,6 +24905,19 @@ def transport_webapp_html():
   const tg = window.Telegram && window.Telegram.WebApp;
   if (tg) {
     tg.ready(); tg.expand();
+    // ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "ограничим
+    // ориентацию экрана только вертикально, переворачивать нельзя") -
+    // Telegram Mini Apps API (Bot API 8.0+) блокирует РЕАЛЬНЫЙ поворот
+    // экрана средствами самого Telegram (CSS/Screen Orientation API на
+    // iOS в WebView не работает вовсе). lockOrientation() фиксирует
+    // ТЕКУЩУЮ ориентацию на момент вызова - приложение почти всегда
+    // открывается в портретной (обычный хват телефона), проверяем это
+    // перед вызовом, чтобы случайно не зафиксировать боком, если открыли
+    // уже повёрнутым. У старых клиентов Telegram просто нет этого метода
+    // (tg.lockOrientation будет undefined) - тогда ничего не делаем.
+    if (tg.lockOrientation && window.innerHeight >= window.innerWidth) {
+      try { tg.lockOrientation(); } catch (e) {}
+    }
     // ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - "жёстко
     // привязать чтобы открытие миниаппс было только на полный экран и её
     // нельзя было смахивать вверх вниз") - requestFullscreen (Bot API
@@ -26569,6 +26669,19 @@ def legal_cabinet_webapp_html():
 const tg = window.Telegram && window.Telegram.WebApp;
 if (tg) {
   tg.ready(); tg.expand();
+  // ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "ограничим
+  // ориентацию экрана только вертикально, переворачивать нельзя") -
+  // Telegram Mini Apps API (Bot API 8.0+) блокирует РЕАЛЬНЫЙ поворот
+  // экрана средствами самого Telegram (CSS/Screen Orientation API на
+  // iOS в WebView не работает вовсе). lockOrientation() фиксирует
+  // ТЕКУЩУЮ ориентацию на момент вызова - приложение почти всегда
+  // открывается в портретной (обычный хват телефона), проверяем это
+  // перед вызовом, чтобы случайно не зафиксировать боком, если открыли
+  // уже повёрнутым. У старых клиентов Telegram просто нет этого метода
+  // (tg.lockOrientation будет undefined) - тогда ничего не делаем.
+  if (tg.lockOrientation && window.innerHeight >= window.innerWidth) {
+    try { tg.lockOrientation(); } catch (e) {}
+  }
   // ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - "жёстко привязать
   // чтобы открытие миниаппс было только на полный экран и её нельзя было
   // смахивать вверх вниз") - см. подробный комментарий у той же пары
@@ -27578,6 +27691,19 @@ def cabinet_webapp_html():
   const tg = window.Telegram && window.Telegram.WebApp;
   if (tg) {
     tg.ready(); tg.expand();
+    // ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "ограничим
+    // ориентацию экрана только вертикально, переворачивать нельзя") -
+    // Telegram Mini Apps API (Bot API 8.0+) блокирует РЕАЛЬНЫЙ поворот
+    // экрана средствами самого Telegram (CSS/Screen Orientation API на
+    // iOS в WebView не работает вовсе). lockOrientation() фиксирует
+    // ТЕКУЩУЮ ориентацию на момент вызова - приложение почти всегда
+    // открывается в портретной (обычный хват телефона), проверяем это
+    // перед вызовом, чтобы случайно не зафиксировать боком, если открыли
+    // уже повёрнутым. У старых клиентов Telegram просто нет этого метода
+    // (tg.lockOrientation будет undefined) - тогда ничего не делаем.
+    if (tg.lockOrientation && window.innerHeight >= window.innerWidth) {
+      try { tg.lockOrientation(); } catch (e) {}
+    }
     // ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - "жёстко
     // привязать чтобы открытие миниаппс было только на полный экран и её
     // нельзя было смахивать вверх вниз") - requestFullscreen (Bot API
