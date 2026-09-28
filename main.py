@@ -3224,6 +3224,17 @@ def init_db():
     # get_driver_profile/save_driver_rating/CABINET_RATING_API_PATH.
     if 'rating' not in existing_columns:
         cursor.execute('ALTER TABLE driver_profiles ADD COLUMN rating REAL')
+    # ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя, скриншот кабинета -
+    # "сделай чтоб можно было загрузить фото сюда на аватарку") - фото
+    # аватарки хранится прямо в БД как data-URL (JPEG, ужатый и уменьшенный
+    # ДО отправки на клиенте, см. compressAvatarFile в cabinet_webapp_html) -
+    # без этого пришлось бы поднимать отдельное файловое хранилище, а
+    # Railway Volume в этом проекте и так не подключён (см. предупреждения
+    # при старте про flights_data.json/taxi_queue.db) - хранить файл на
+    # диске контейнера означало бы терять его при каждом редеплое так же,
+    # как БД. NULL, пока не загружено - тогда в кабинете просто буква имени.
+    if 'avatar_photo' not in existing_columns:
+        cursor.execute('ALTER TABLE driver_profiles ADD COLUMN avatar_photo TEXT')
     # Миграция (20.09.2026): на уже существующей БД таблица shift_history
     # могла быть создана раньше без этой колонки - CREATE TABLE IF NOT
     # EXISTS её не добавит, поэтому добавляем отдельно, игнорируя ошибку
@@ -3817,14 +3828,14 @@ def get_driver_profile(user_id):
         init_db()
         conn = get_db_connection()
         cursor = conn.execute(
-            'SELECT full_name, tariff, car_model, car_plate, completed_orders_count, rating FROM driver_profiles WHERE user_id = ?', (user_id,)
+            'SELECT full_name, tariff, car_model, car_plate, completed_orders_count, rating, avatar_photo FROM driver_profiles WHERE user_id = ?', (user_id,)
         )
         row = cursor.fetchone()
         conn.close()
         if not row:
             return None
         return {'full_name': row[0] or '', 'tariff': row[1] or '', 'car_model': row[2] or '', 'car_plate': row[3] or '',
-                'completed_orders_count': row[4] or 0, 'rating': row[5]}
+                'completed_orders_count': row[4] or 0, 'rating': row[5], 'avatar_photo': row[6] or None}
     except Exception as e:
         logger.error(f"❌ Не удалось прочитать профиль водителя {user_id}: {e}")
         return None
@@ -3866,6 +3877,27 @@ def save_driver_rating(user_id, rating):
         return True
     except Exception as e:
         logger.error(f"❌ Не удалось сохранить рейтинг водителя {user_id}: {e}")
+        return False
+
+# ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - фото на аватарку в
+# кабинете, см. CREATE TABLE driver_profiles/avatar_photo выше) - та же
+# схема, что и у save_driver_rating: отдельное точечное сохранение одного
+# поля, INSERT..ON CONFLICT создаёт строку, даже если анкета ещё пустая.
+# avatar_data_url - None, чтобы удалить фото (вернуться к букве имени).
+def save_driver_avatar(user_id, avatar_data_url):
+    try:
+        init_db()
+        conn = get_db_connection()
+        conn.execute(
+            'INSERT INTO driver_profiles (user_id, avatar_photo, updated_at) VALUES (?, ?, ?) '
+            'ON CONFLICT(user_id) DO UPDATE SET avatar_photo = excluded.avatar_photo, updated_at = excluded.updated_at',
+            (user_id, avatar_data_url, datetime.now(ZoneInfo('UTC')).strftime('%Y-%m-%d %H:%M:%S'))
+        )
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"❌ Не удалось сохранить аватарку водителя {user_id}: {e}")
         return False
 
 # ==================== ТО (ТЕХОБСЛУЖИВАНИЕ) - ДОБАВЛЕНО 22.09.2026 ====================
@@ -4620,6 +4652,15 @@ def queue_latest_report_for_category(city, airport_icao, category, zone_key=None
     return row if row else (None, None)
 
 bot = None
+# ДОБАВЛЕНО 28.09.2026 (см. initialize_bot ниже) - username бота,
+# закэшированный один раз при старте, для deep-link кнопок в мини-приложении
+# (например renderTipsDetail в unified_app_html), которым нужен
+# t.me/<username>?start=..., но нет под рукой реферальной ссылки, из
+# которой обычно достаётся botUsernameFromLink(data.link). Пусто до
+# первого успешного initialize_bot() - в этот момент HTTP-сервер ещё не
+# принимает запросы, так что пустая строка сюда попасть в реальности не
+# должна, но f-строка ниже не упадёт, если всё же попадёт.
+BOT_USERNAME = ''
 dp = Dispatcher()
 router = Router()
 
@@ -4975,12 +5016,20 @@ class ChatCleanupIncomingMiddleware(BaseMiddleware):
         return await handler(event, data)
 
 async def initialize_bot():
-    global bot
+    global bot, BOT_USERNAME
     try:
         logger.info("📡 Инициализирую бота...")
         bot = Bot(token=BOT_TOKEN)
         bot.session.middleware(SingleMessageMiddleware())
         me = await bot.get_me()
+        # ДОБАВЛЕНО 28.09.2026 (нужен для кнопок "Загрузить/показать QR
+        # чаевых" в мини-приложении, см. renderTipsDetail в
+        # unified_app_html) - раньше username бота нигде не кэшировался
+        # глобально, только добывался заново на лету там, где уже была
+        # реферальная ссылка (botUsernameFromLink(data.link)) - на экране
+        # "Чаевые" такой ссылки нет. Кэшируем один раз при старте, а не
+        # дёргаем bot.get_me() ещё раз откуда-то ещё.
+        BOT_USERNAME = me.username or ''
         logger.info(f"✅ Бот: @{me.username}")
         # На боте где-то раньше (вручную или другим запуском) был включён
         # webhook - Telegram не даёт одновременно webhook и getUpdates
@@ -6594,6 +6643,31 @@ async def start(message: types.Message):
                 "🔒 Введи пароль компании (юр.лица) - он же откроет «Кабинет автопарка»:",
                 reply_markup=referral_withdraw_cancel_keyboard()
             )
+    # ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "чтобы определить
+    # андройд/айфон, чтобы не было двух кнопок... далее было загрузить QR
+    # код уже готовый и показать QR код если уже загружен" на экране
+    # "Получить чаевые" мини-приложения) - тот же приём deep-link'а, что и у
+    # refphantom/reflegal выше: плитка "Чаевые" в мини-приложении (см.
+    # renderTipsDetail в unified_app_html) не может ни показать выбор
+    # фото, ни поймать file_id сама (загрузка фото возможна только через
+    # обычный чат с ботом) - поэтому кнопки "Загрузить QR"/"Показать QR" в
+    # мини-приложении просто открывают чат с этими же start-параметрами,
+    # запускающими ТЕ ЖЕ первые шаги, что и одноимённые callback-кнопки в
+    # чате (tip_qr_upload_start/tip_qr_show) - хранилище (tip_qr_codes)
+    # и вся логика ни разу не дублируются.
+    elif start_param == 'tipqrupload':
+        state = user_state.setdefault(user_id, {})
+        state['awaiting_tip_qr_photo'] = True
+        await message.answer(
+            "📷 Пришли фото своего QR-кода для приёма чаевых (из приложения банка, СБП, «Яндекс Чаевые» - любой) - "
+            "сохраню его, и дальше сможешь показывать по кнопке, не открывая сторонние приложения."
+        )
+    elif start_param == 'tipqrshow':
+        file_id = get_tip_qr_file_id(user_id)
+        if not file_id:
+            await message.answer("QR ещё не загружен.", reply_markup=build_tips_keyboard(user_id))
+        else:
+            await message.answer_photo(file_id, caption="📷 Твой QR для чаевых - покажи экран пассажиру.")
 
 # ДОБАВЛЕНО 23.09.2026 (см. MAIN_MENU_INLINE_BUTTON_TEXT/_with_main_menu_button
 # выше) - хендлер инлайн-кнопки "🚕 МЕНЮ TAXI HELPER", которая висит почти на
@@ -7273,6 +7347,28 @@ async def handle_platform_report_api(request):
     if platform:
         user_state.setdefault(user_id, {})['tg_platform'] = platform
     return web.json_response({'ok': True})
+
+# ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - экран "Получить
+# чаевые" в мини-приложении должен показывать "Загрузить QR"/"Показать QR"
+# в зависимости от того, загружен ли он уже) - лёгкий GET-статус поверх
+# уже существующего get_tip_qr_file_id (см. блок "чаевые" выше, тот же
+# tip_qr_codes, что использует чат-версия tip_qr_show/build_tips_keyboard -
+# здесь НИЧЕГО не хранится заново, только читается).
+TIPS_QR_STATUS_API_PATH = '/tips/qr_status'
+
+async def handle_tips_qr_status_api(request):
+    init_data = request.headers.get('X-Telegram-Init-Data', '')
+    parsed = validate_telegram_webapp_init_data(init_data, BOT_TOKEN) if BOT_TOKEN else None
+    if not parsed:
+        return web.json_response({'error': 'invalid_init_data'}, status=401)
+    try:
+        tg_user = json.loads(parsed.get('user', '{}'))
+        user_id = tg_user.get('id')
+    except Exception:
+        user_id = None
+    if not user_id:
+        return web.json_response({'error': 'invalid_init_data'}, status=401)
+    return web.json_response({'has_qr': bool(get_tip_qr_file_id(user_id))})
 
 PLATFORM_PROBE_WEBAPP_PATH = '/platform/probe'
 
@@ -12035,7 +12131,14 @@ MAP_CHROME_CSS = """
      УВЕЛИЧЕНО 27.09.2026→28.09.2026 (доп. просьба пользователя - "края
      больше скругли карты") - было 16px, стало 28px, скругление заметно
      сильнее на глаз. */
-  #map { border-radius: 28px; overflow: hidden; }
+  #map { border-radius: 28px; overflow: hidden; transform: translateZ(0); }
+  /* transform:translateZ(0) выше - принудительно переводим #map на свой
+     GPU-слой композитинга (та же техника, что и .leaflet-tile ниже, для
+     той же серой "палки" на скруглении) - Chrome/WebKit иногда рисует
+     тонкий шов ровно по дуге border-radius, когда внутри overflow:hidden
+     лежат анимированные/сдвигаемые CSS-transform'ом слои (тайлы Leaflet
+     двигаются именно так при панорамировании) без своего слоя - отдельный
+     композитный слой у самого #map убирает этот шов. */
   /* ДОБАВЛЕНО 28.09.2026 (жалоба пользователя со скриншотом - "убери так
      чтобы был только фон без черточки, чтобы прям красиво было") - у Leaflet
      по умолчанию .leaflet-container имеет свой собственный светло-серый
@@ -12046,6 +12149,22 @@ MAP_CHROME_CSS = """
      фон самого leaflet-контейнера в тот же #000, что и html/body - шов
      пропадает, виден только сплошной фон. */
   .leaflet-container { background: #000; }
+  /* ДОБАВЛЕНО 28.09.2026 (жалоба пользователя со скриншотами-приближениями
+     сверху и снизу скруглённого угла - "видишь какая-то серая палка идёт,
+     её убери, чтобы скруглению не мешать") - это ДРУГОЙ баг, не тот же
+     светлый фон leaflet-контейнера (см. комментарий выше, там фон уже
+     перекрашен в #000). Серая диагональная полоска - классический
+     артефакт Leaflet: соседние тайлы карты кладутся встык через
+     CSS-transform, и при дробном масштабировании браузер округляет их
+     границы по-разному, оставляя щели в 1 физический пиксель между
+     плитками - обычно незаметно, но именно на скруглённом углу (после
+     border-radius+overflow:hidden на #map выше) такая щель попадает в
+     кадр и выглядит как отдельная "палка", мешающая дуге. Стандартное
+     решение самого Leaflet (описано в его собственных issues про "tile
+     seams/grid lines") - прозрачный outline на каждой тайловой плитке:
+     он не рисуется сам по себе, но заставляет браузер округлять пиксели
+     соседних тайлов к одной и той же сетке, и щель исчезает. */
+  .leaflet-tile { outline: 1px solid transparent; }
   /* ДОБАВЛЕНО 27.09.2026 (жалоба пользователя - "сма вверх сма вниз
      появляются белый фон подложкой... отключи чтобы два раза тапать на
      экран чтобы он не увеличивал") - overscroll-behavior:none на html/body
@@ -12651,6 +12770,18 @@ MAP_CHROME_CSS = """
      повороте heading). */
   .self-icon-wrap { position: relative; width: 42px; height: 42px; }
   .self-icon-rotate { position: absolute; inset: 0; transform-origin: 50% 50%; }
+  /* ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "сделай у стрелки
+     когда на линии лёгкое мерцание её жёлтым") - класс .on-shift ставится
+     на сам маркер (см. selfIconHtml/updateSelfMarker/updateShiftToggleBtnUI
+     в JS ниже) ТОЛЬКО пока смена активна. У SVG-треугольника нет
+     text-shadow, поэтому свечение - через filter:drop-shadow (тот же
+     смысл, что text-shadow у logoShimmer шапки выше), лёгкое и плавное,
+     не мигание строба, а именно мерцание. */
+  .self-icon.on-shift .self-icon-wrap { animation: selfArrowGlow 2.6s ease-in-out infinite; }
+  @keyframes selfArrowGlow {
+    0%, 100% { filter: drop-shadow(0 0 2px rgba(255,196,0,.35)); }
+    50% { filter: drop-shadow(0 0 7px rgba(255,196,0,.85)); }
+  }
   .fuel-popup, .charging-popup { font-family: -apple-system, sans-serif; font-size: 12.5px; max-width: 230px; color: #000; }
   .fuel-popup h4, .charging-popup h4 { margin: 0 0 6px; font-size: 13.5px; }
   .fuel-popup .sub, .charging-popup .sub { color: #666; font-size: 11.5px; margin-bottom: 6px; }
@@ -13853,7 +13984,7 @@ def map_webapp_html():
     // сама только когда браузер отдаст новую точку, а это может быть не
     // сразу после свайпа).
     if (selfMarker) {{
-      selfMarker.setIcon(L.divIcon({{ className: 'self-icon', html: selfIconHtml(selfHeading), iconSize: [42, 42], iconAnchor: [21, 21] }}));
+      selfMarker.setIcon(L.divIcon({{ className: 'self-icon' + (myShiftActive ? ' on-shift' : ''), html: selfIconHtml(selfHeading), iconSize: [42, 42], iconAnchor: [21, 21] }}));
     }}
   }}
   async function loadMyProfile() {{
@@ -14270,7 +14401,14 @@ def map_webapp_html():
     selfHeadingFromLat = lat;
     selfHeadingFromLon = lon;
     selfHeading = h;
-    const icon = L.divIcon({{ className: 'self-icon', html: selfIconHtml(h), iconSize: [42, 42], iconAnchor: [21, 21] }});
+    // ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "сделай у стрелки
+    // когда на линии лёгкое мерцание её жёлтым") - класс 'on-shift'
+    // добавляется на сам L.divIcon ТОЛЬКО пока смена активна - см.
+    // @keyframes selfArrowGlow/.self-icon.on-shift в CSS выше (пульсирующий
+    // drop-shadow жёлтым поверх SVG-треугольника, тот же принцип, что и
+    // logoShimmer у названия HELPER в шапке, только через filter, а не
+    // text-shadow - у SVG нет text-shadow).
+    const icon = L.divIcon({{ className: 'self-icon' + (myShiftActive ? ' on-shift' : ''), html: selfIconHtml(h), iconSize: [42, 42], iconAnchor: [21, 21] }});
     if (selfMarker) {{
       selfMarker.setLatLng([lat, lon]);
       selfMarker.setIcon(icon);
@@ -18084,6 +18222,40 @@ def unified_app_html():
      (.ref-tile.active чуть ниже переиспользует тот же @keyframes selPulse -
      здесь он уже объявлен один раз на файл, второй раз не заводим). */
   .tile.highlight { border-color: #FFC400; background: rgba(255,196,0,.10); animation: selPulse 2.6s ease-in-out infinite; }
+  /* ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя со скриншотом -
+     "кнопка Подписка жёлтым, сама кнопка чёрный текст в ней, и с
+     мерцанием более сильным чем остальные") - в отличие от .highlight
+     выше (просто подсвеченная РАМКА у Реферальной программы/VPN), у
+     "Подписки" вся плитка залита жёлтым градиентом ("объёмный" приём,
+     тот же что и у кнопок карты) + чёрный текст/иконка, а мерцание -
+     отдельный, более выраженный keyframe (короче цикл, шире и ярче
+     кольцо тени), чем обычный selPulse, чтобы "Подписка" выделялась
+     заметнее всех остальных плиток. */
+  .tile.cta {
+    background: linear-gradient(180deg, #FFD43D, #FFB800); border-color: transparent;
+    box-shadow: 0 3px 10px rgba(0,0,0,.4), inset 0 1px 0 rgba(255,255,255,.3);
+    animation: ctaPulseStrong 1.5s ease-in-out infinite;
+  }
+  .tile.cta .ic, .tile.cta .lbl, .tile.cta .sub { color: #000; }
+  @keyframes ctaPulseStrong {
+    0%, 100% { box-shadow: 0 3px 10px rgba(0,0,0,.4), inset 0 1px 0 rgba(255,255,255,.3), 0 0 0 0 rgba(255,196,0,.7); }
+    50% { box-shadow: 0 3px 10px rgba(0,0,0,.4), inset 0 1px 0 rgba(255,255,255,.3), 0 0 0 8px rgba(255,196,0,0); }
+  }
+  /* ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "кнопка Поддержка
+     будет красной с чёрным текстом внутри, свечение тоже будет") - тот же
+     принцип, что .tile.cta выше (сплошная заливка + сильная пульсация),
+     только в красной гамме - отдельный keyframes (redCtaPulse), т.к. цвет
+     кольца тени другой (красный, а не жёлтый), сам механизм тот же. */
+  .tile.red-cta {
+    background: linear-gradient(180deg, #FF6B5B, #E5342A); border-color: transparent;
+    box-shadow: 0 3px 10px rgba(0,0,0,.4), inset 0 1px 0 rgba(255,255,255,.3);
+    animation: redCtaPulse 1.5s ease-in-out infinite;
+  }
+  .tile.red-cta .ic, .tile.red-cta .lbl, .tile.red-cta .sub { color: #000; }
+  @keyframes redCtaPulse {
+    0%, 100% { box-shadow: 0 3px 10px rgba(0,0,0,.4), inset 0 1px 0 rgba(255,255,255,.3), 0 0 0 0 rgba(229,52,42,.7); }
+    50% { box-shadow: 0 3px 10px rgba(0,0,0,.4), inset 0 1px 0 rgba(255,255,255,.3), 0 0 0 8px rgba(229,52,42,0); }
+  }
   .tile .soon-badge {
     position: absolute; top: 10px; right: 10px; font-size: 9.5px; color: #FFC400;
     background: rgba(255,196,0,.12); border-radius: 999px; padding: 2px 7px; letter-spacing: .03em;
@@ -18132,14 +18304,32 @@ def unified_app_html():
     font-size: 12.5px; color: #ccc; background: #0a0a0a; border: 1px solid rgba(255,255,255,.1);
     border-radius: 8px; padding: 9px 11px; word-break: break-all; margin-bottom: 8px;
   }
+  /* ИЗМЕНЕНО 28.09.2026 (прямая просьба пользователя - "все кнопки сделай
+     объёмными и с градиентом, чтобы чувствовался вес кнопок во всём
+     проекте, сервисы личного кабинета и куда поехать") - тот же приём
+     "объёмности", что уже применён на карте (см. .leaflet-control-zoom a/
+     .map-menu-toggle-btn и т.д. в MAP_CHROME_CSS выше - линейный градиент
+     вместо плоской заливки + внешняя тень и внутренняя подсветка сверху),
+     теперь и на всех кнопках раздела "Сервисы" (svc-btn - основные жёлтые
+     кнопки И их .ghost-вариант). */
   .svc-btn {
     display: block; width: 100%; text-align: center; text-decoration: none; box-sizing: border-box;
-    background: #FFC400; color: #000; font-weight: 700; font-size: 13.5px; border: none;
+    background: linear-gradient(180deg, #FFD43D, #FFB800); color: #000; font-weight: 700; font-size: 13.5px; border: none;
     border-radius: 10px; padding: 12px; cursor: pointer; font-family: 'Golos Text', sans-serif;
-    text-transform: uppercase;
+    text-transform: uppercase; box-shadow: 0 3px 8px rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.3);
+    transition: transform .12s;
   }
-  .svc-btn.ghost { background: #1c1c1c; color: #FFC400; border: 1px solid rgba(255,196,0,.4); }
+  .svc-btn:active { transform: scale(.97); }
+  .svc-btn.ghost { background: linear-gradient(180deg, #232323, #141414); color: #FFC400; border: 1px solid rgba(255,196,0,.4); box-shadow: 0 2px 6px rgba(0,0,0,.4), inset 0 1px 0 rgba(255,255,255,.06); }
   .svc-btn + .svc-btn { margin-top: 8px; }
+  /* ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "добавь кнопку
+     вывод средств, пока в разработке сделай заглушку") - неактивная
+     кнопка-заглушка (disabled - не кликабельна, приглушённая прозрачность)
+     с бейджем "скоро", вывод по-прежнему только через бота в чате (см.
+     .svc-note ниже) - реальный вывод из мини-приложения ещё не сделан. */
+  .svc-btn.disabled { opacity: .5; cursor: not-allowed; display: flex; align-items: center; justify-content: center; gap: 8px; }
+  .svc-btn.disabled:active { transform: none; }
+  .svc-soon { font-size: 10px; font-weight: 800; background: rgba(0,0,0,.35); color: #fff; border-radius: 999px; padding: 2px 7px; text-transform: uppercase; letter-spacing: .03em; }
   /* ДОБАВЛЕНО 26.09.2026 (прямая просьба пользователя - "четыре больших
      квадратных кнопки чтобы они на экране поместились... как бы Аля
      личного кабинета реферального") - вход в раздел "Реферальная
@@ -18449,6 +18639,11 @@ def unified_app_html():
   const DRIVER_CHAT_LINKS = """ + json.dumps(DRIVER_CHAT_LINKS, ensure_ascii=False) + """;
   const TIPS_APP_URL_IOS = """ + json.dumps(TIPS_APP_URL_IOS) + """;
   const TIPS_APP_URL_ANDROID = """ + json.dumps(TIPS_APP_URL_ANDROID) + """;
+  // ДОБАВЛЕНО 28.09.2026 (см. BOT_USERNAME/initialize_bot в main.py) - для
+  // deep-link кнопок "Загрузить/Показать QR" на экране "Чаевые"
+  // (renderTipsDetail ниже), где нет под рукой реферальной ссылки.
+  const BOT_USERNAME = """ + json.dumps(BOT_USERNAME) + """;
+  const TIPS_QR_STATUS_API_PATH = """ + json.dumps(TIPS_QR_STATUS_API_PATH) + """;
   const CATEGORIES_WITHOUT_EVENTS_OR_AIRPORTS = ['courier', 'cargo']; // см. CATEGORIES_WITHOUT_EVENTS/CATEGORIES_WITHOUT_AIRPORTS в main.py - в Python это одно и то же множество
 
   // ДОБАВЛЕНО 26.09.2026 (прямая просьба пользователя - "выровняй и иконки
@@ -18933,9 +19128,15 @@ def unified_app_html():
       { href: chatUrl, ic: TILE_ICONS.chat, lbl: 'Чаты водителей' },
       { detail: 'tips', ic: TILE_ICONS.tips, lbl: 'Чаевые' },
       { detail: 'referral', ic: TILE_ICONS.referral, lbl: 'Реферальная программа', highlight: true },
-      { detail: 'subscription', ic: TILE_ICONS.subscription, lbl: 'Подписка' },
+      { detail: 'subscription', ic: TILE_ICONS.subscription, lbl: 'Подписка', cta: true },
       { href: '""" + VPN_BOT_URL + """', ic: TILE_ICONS.vpn, lbl: 'Бесплатный VPN', highlight: true },
-      { detail: 'support', ic: TILE_ICONS.support, lbl: 'Поддержка' },
+      // ИЗМЕНЕНО 28.09.2026 (прямая просьба пользователя - "кнопка Поддержка
+      // будет красной с чёрным текстом внутри, свечение тоже будет, назовём
+      // её ПОДДЕРЖКА | ДОКУМЕНТЫ") - подпись расширена, плитка получила
+      // отдельный класс red-cta (см. .tile.red-cta/@keyframes redCtaPulse
+      // в CSS ниже - тот же "объёмный" приём + пульсация, что у .tile.cta
+      // "Подписки", только в красной, а не жёлтой гамме).
+      { detail: 'support', ic: TILE_ICONS.support, lbl: 'Поддержка | Документы', redCta: true },
       // ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя, скриншот раздела
       // "Сервисы" - "место автопарк сделай кнопку ШТРАФЫ заглушку в
       // разработке") - плитка-заглушка в конце сетки. Открывает тот же
@@ -18997,6 +19198,16 @@ def unified_app_html():
       // конкретным плиткам сервисов (t.highlight, см. tiles-массив выше),
       // чтобы обратить на них внимание.
       if (el && t.highlight) el.classList.add('highlight');
+      // ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя со скриншотом -
+      // "кнопка Подписка жёлтым, сама кнопка чёрный текст в ней, и с
+      // мерцанием более сильным чем остальные") - отдельный от .highlight
+      // класс (см. t.cta в tiles-массиве выше и .tile.cta/@keyframes
+      // ctaPulseStrong в CSS ниже): не просто подсвеченная рамка, а
+      // ПОЛНАЯ заливка плитки жёлтым градиентом + чёрный текст + более
+      // заметное/частое мерцание, чем у .highlight (Реферальная
+      // программа/VPN) - именно "Подписка" должна выделяться сильнее всех.
+      if (el && t.cta) el.classList.add('cta');
+      if (el && t.redCta) el.classList.add('red-cta');
     });
 
     // УБРАНО 27.09.2026 (прямая просьба пользователя со скриншотом - "удали
@@ -19073,12 +19284,52 @@ def unified_app_html():
       '<div class="svc-card">Этот раздел в разработке 🚧 — скоро будет.</div>';
   }
 
-  function renderTipsDetail(box) {
+  // ИЗМЕНЕНО 28.09.2026 (прямая просьба пользователя со скриншотом - "во
+  // первых чтобы определить андройд/айфон, чтобы не было двух кнопок,
+  // приложение определяет; далее было загрузить QR-код уже готовый и
+  // показать QR-код, если уже загружен") - раньше здесь ВСЕГДА показывались
+  // ОБЕ кнопки (iPhone/Android) независимо от платформы. tg.platform
+  // доступен прямо в мини-приложении (те же значения, что уже репортятся
+  // на /platform/report - см. чуть выше в этом файле), поэтому платформу
+  // можно определить БЕЗ похода на сервер: показываем только релевантную
+  // кнопку, а если платформа не ios/android (десктоп/веб - тестируем сами)
+  // - обе, как безопасный дефолт (тот же принцип, что и у
+  // driver_platform_hint/build_tips_keyboard в чате).
+  // Кнопки "Загрузить свой QR"/"Показать мой QR" - deep-link в чат (та же
+  // причина, что у Фантома/юрлица выше: мини-приложение не может ни принять
+  // фото, ни показать его само) - переиспользуют ТЕ ЖЕ tip_qr_upload_start/
+  // tip_qr_show, что и одноимённые кнопки в чате (см. start_param
+  // 'tipqrupload'/'tipqrshow' в /start, main.py) - хранилище (tip_qr_codes)
+  // не дублируется, только читается его наличие через TIPS_QR_STATUS_API_PATH.
+  async function renderTipsDetail(box) {
+    const platform = ((tg && tg.platform) || '').toLowerCase();
+    const showIos = !platform || platform.indexOf('ios') !== -1;
+    const showAndroid = !platform || platform.indexOf('android') !== -1;
+    let appButtonsHtml = '';
+    if (showIos) appButtonsHtml += '<a class="svc-btn" href="' + TIPS_APP_URL_IOS + '" target="_blank" rel="noopener">🍎 Получить чаевые на iPhone</a>';
+    if (showAndroid) appButtonsHtml += '<a class="svc-btn' + (showIos ? ' ghost' : '') + '" href="' + TIPS_APP_URL_ANDROID + '" target="_blank" rel="noopener">🤖 Получить чаевые на Android</a>';
     box.innerHTML =
       '<div class="svc-h">💳 Получить чаевые</div>' +
       '<div class="svc-card">Приложение «Яндекс Чаевые: на карту по QR» - покажи QR-код пассажиру, он сканирует и переводит чаевые тебе на карту.</div>' +
-      '<a class="svc-btn" href="' + TIPS_APP_URL_IOS + '" target="_blank" rel="noopener">🍎 Получить чаевые на iPhone</a>' +
-      '<a class="svc-btn ghost" href="' + TIPS_APP_URL_ANDROID + '" target="_blank" rel="noopener">🤖 Получить чаевые на Android</a>';
+      appButtonsHtml +
+      '<div id="tipsQrBox" class="svc-note">Загружаю…</div>';
+    const qrBox = document.getElementById('tipsQrBox');
+    let hasQr = false;
+    try {
+      const resp = await fetch(TIPS_QR_STATUS_API_PATH, { headers: { 'X-Telegram-Init-Data': (tg && tg.initData) || '' } });
+      if (resp.ok) { const data = await resp.json(); hasQr = !!data.has_qr; }
+    } catch (e) { /* сеть недоступна - покажем как будто QR ещё не загружен, кнопка "Загрузить" всё равно рабочая */ }
+    if (!qrBox) return; // экран мог смениться, пока шёл fetch
+    if (hasQr) {
+      qrBox.outerHTML =
+        '<button type="button" class="svc-btn ghost" id="tipsQrShowBtn">📷 Показать мой QR</button>' +
+        '<button type="button" class="svc-btn ghost" id="tipsQrReplaceBtn">🔁 Заменить QR</button>';
+      document.getElementById('tipsQrShowBtn').addEventListener('click', function () { openBotDeepLink(BOT_USERNAME, 'tipqrshow'); });
+      document.getElementById('tipsQrReplaceBtn').addEventListener('click', function () { openBotDeepLink(BOT_USERNAME, 'tipqrupload'); });
+    } else {
+      qrBox.outerHTML = '<button type="button" class="svc-btn ghost" id="tipsQrUploadBtn">📷 Загрузить свой QR</button>';
+      document.getElementById('tipsQrUploadBtn').addEventListener('click', function () { openBotDeepLink(BOT_USERNAME, 'tipqrupload'); });
+    }
   }
 
   // ДОБАВЛЕНО 26.09.2026 (прямая просьба пользователя - "делаем рефералку
@@ -19296,6 +19547,7 @@ def unified_app_html():
       '<button type="button" class="svc-btn ghost" id="refQrBtn">📱 QR-код ссылки</button>' +
       '<div id="refQrBox"></div>' +
       '<a class="svc-btn ghost" href="' + PRESENTATION_PDF_WEBAPP_PATH + '" target="_blank" rel="noopener">📥 Скачать презентацию</a>' +
+      '<button type="button" class="svc-btn disabled" disabled>💸 Вывод средств <span class="svc-soon">скоро</span></button>' +
       '<div class="svc-note">Комиссия за вывод: ' + data.withdrawal_fee_percent + '%. Минимальная сумма вывода: ' + data.min_withdrawal_rub + ' ₽. Вывод средств - как и раньше, через бота в чате.</div>'
     );
   }
@@ -23376,7 +23628,7 @@ async def handle_cabinet_data_api(request):
         hours_series = [round(shifts_by_day.get(d, {}).get('minutes', 0) / 60, 1) for d in days_axis]
 
         result = {
-            'profile': get_driver_profile(user_id) or {'full_name': '', 'tariff': '', 'car_model': '', 'car_plate': '', 'completed_orders_count': 0, 'rating': None},
+            'profile': get_driver_profile(user_id) or {'full_name': '', 'tariff': '', 'car_model': '', 'car_plate': '', 'completed_orders_count': 0, 'rating': None, 'avatar_photo': None},
             'totals': {
                 'today_hours': round(today_minutes / 60, 1), 'today_km': round(today_km),
                 'today_net_profit': round(today_net_profit),
@@ -23491,6 +23743,51 @@ async def handle_cabinet_rating_api(request):
     if not ok:
         return web.json_response({'error': 'save_failed'}, status=500)
     return web.json_response({'ok': True, 'rating': rating})
+
+# ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя со скриншотом кабинета -
+# "сделай чтоб можно было загрузить фото сюда на аватарку") - тап по
+# аватарке в кабинете открывает системный выбор фото, картинка уменьшается
+# и сжимается ДО отправки прямо в браузере (см. compressAvatarFile в
+# cabinet_webapp_html) - сюда прилетает уже готовый маленький data-URL, а
+# не оригинал в полный рост. CABINET_AVATAR_MAX_LEN - защита от абьюза
+# (кто-то подсунет body мимо клиентского сжатия) - разумный запас поверх
+# ожидаемого размера сжатой картинки (~150х150 JPEG ~ 15-25 КБ base64).
+CABINET_AVATAR_API_PATH = '/cabinet/avatar'
+CABINET_AVATAR_MAX_LEN = 400_000  # символов в data-URL (~300 КБ бинарных данных) - с большим запасом над реальным размером сжатой аватарки
+
+async def handle_cabinet_avatar_api(request):
+    """Сохраняет (или удаляет, если avatar=null/пусто) фото аватарки водителя
+    из личного кабинета - POST с телом {avatar: "data:image/jpeg;base64,..."
+    | null}. Та же проверка initData, что и у остальных /cabinet/* эндпоинтов
+    записи персональных данных выше."""
+    init_data = request.headers.get('X-Telegram-Init-Data', '')
+    parsed = validate_telegram_webapp_init_data(init_data, BOT_TOKEN) if BOT_TOKEN else None
+    if not parsed:
+        return web.json_response({'error': 'invalid_init_data'}, status=401)
+    try:
+        tg_user = json.loads(parsed.get('user', '{}'))
+        user_id = tg_user.get('id')
+    except Exception:
+        user_id = None
+    if not user_id:
+        return web.json_response({'error': 'invalid_init_data'}, status=401)
+
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({'error': 'invalid_body'}, status=400)
+
+    avatar = body.get('avatar')
+    if avatar is not None:
+        if not isinstance(avatar, str) or not avatar.startswith('data:image/'):
+            return web.json_response({'error': 'invalid_avatar'}, status=400)
+        if len(avatar) > CABINET_AVATAR_MAX_LEN:
+            return web.json_response({'error': 'avatar_too_large'}, status=400)
+
+    ok = save_driver_avatar(user_id, avatar)
+    if not ok:
+        return web.json_response({'error': 'save_failed'}, status=500)
+    return web.json_response({'ok': True})
 
 # ==================== ЛИЧНЫЙ КАБИНЕТ - РАСШИРЕНИЕ (21.09.2026) ====================
 # По прямой просьбе пользователя: "надо обьеденить кнопки инструменты
@@ -24871,9 +25168,21 @@ def cabinet_webapp_html():
   }
 
   /* Карточка профиля - градиентная "визитка" вверху страницы */
+  /* ИЗМЕНЕНО 28.09.2026 (прямая просьба пользователя со скриншотом -
+     "где рейтинг посмотри как криво все там сделай ровно"): было
+     align-items:center - когда в .profile-info становится больше одной
+     строки тегов (тариф/машина/номер/счётчик заказов заворачиваются в
+     несколько строк flex-wrap), аватарка и кнопка "Изменить" вертикально
+     центрировались относительно ВСЕЙ этой переменной высоты колонки и
+     "плавали" где-то в середине карточки, а не рядом с именем сверху -
+     из-за этого карточка и выглядела "кривой"/неровной. align-items:
+     flex-start прижимает аватарку к тому же верхнему краю, что и имя,
+     независимо от того, сколько строк тегов ниже - кнопку "Изменить"
+     возвращаем к прежнему визуальному центрированию через align-self
+     отдельно (ей самой "плавать" по центру нормально, это просто кнопка). */
   .profile-card {
     position: relative; overflow: hidden;
-    display: flex; align-items: center; gap: 12px; border-radius: 18px; padding: 16px;
+    display: flex; align-items: flex-start; gap: 12px; border-radius: 18px; padding: 16px;
     background: linear-gradient(135deg, #1c1c1c, #000); color: #fff; margin-bottom: 16px;
     box-shadow: 0 6px 20px rgba(0,0,0,.4); border: 1px solid rgba(255,196,0,.35);
     animation: tabIn .35s ease both;
@@ -24883,18 +25192,34 @@ def cabinet_webapp_html():
     background: radial-gradient(circle, rgba(255,196,0,.35), transparent 65%);
     animation: heroSheen 9s ease-in-out infinite;
   }
+  /* ИЗМЕНЕНО 28.09.2026 (прямая просьба пользователя - "сделай где Д чтоб
+     можно было загрузить фото сюда на аватарку") - аватарка теперь
+     кликабельна (cursor:pointer, тап открывает системный выбор фото, см.
+     #avatarFileInput/wireAvatarUpload в JS ниже) и умеет показывать
+     загруженное фото как background-image (background-size:cover) вместо
+     буквы имени - background-image ставится инлайн-стилем в JS
+     (renderProfile), когда у профиля есть avatar_photo. Маленький значок
+     камеры в углу (.avatar-cam-badge) - визуальная подсказка, что по
+     кругу можно тапнуть, тот же приём, что и пилюля рейтинга с карандашом. */
   .avatar {
     position: relative; width: 52px; height: 52px; border-radius: 50%; background: rgba(255,255,255,.22);
+    background-size: cover; background-position: center;
     display: flex; align-items: center; justify-content: center; font-size: 22px; font-weight: 700;
-    flex-shrink: 0;
+    flex-shrink: 0; cursor: pointer;
+  }
+  .avatar-cam-badge {
+    position: absolute; right: -2px; bottom: -2px; width: 20px; height: 20px; border-radius: 50%;
+    background: #FFC400; border: 2px solid #1c1c1c; display: flex; align-items: center; justify-content: center;
+    font-size: 10px; pointer-events: none;
   }
   .profile-info { min-width: 0; flex: 1; }
   .profile-name { font-size: 16.5px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .profile-sub { font-size: 12.5px; opacity: .9; margin-top: 2px; display: flex; gap: 8px; flex-wrap: wrap; }
   .profile-sub span { background: rgba(255,255,255,.18); border-radius: 8px; padding: 2px 7px; }
   .edit-btn {
-    background: rgba(255,255,255,.2); border: none; color: #fff; border-radius: 10px;
+    background: linear-gradient(180deg, rgba(255,255,255,.28), rgba(255,255,255,.14)); border: none; color: #fff; border-radius: 10px;
     padding: 7px 10px; font-size: 12.5px; font-weight: 600; flex-shrink: 0; text-transform: uppercase;
+    align-self: center; box-shadow: 0 2px 6px rgba(0,0,0,.3), inset 0 1px 0 rgba(255,255,255,.2);
   }
 
   /* Форма анкеты */
@@ -24910,8 +25235,8 @@ def cabinet_webapp_html():
   }
   .profile-form .save-btn {
     width: 100%; margin-top: 14px; padding: 11px; border: none; border-radius: 10px;
-    background: #FFC400; color: #000; font-size: 14.5px; font-weight: 700; text-transform: uppercase;
-    transition: transform .12s;
+    background: linear-gradient(180deg, #FFD43D, #FFB800); color: #000; font-size: 14.5px; font-weight: 700; text-transform: uppercase;
+    transition: transform .12s; box-shadow: 0 3px 8px rgba(0,0,0,.25), inset 0 1px 0 rgba(255,255,255,.3);
   }
   .profile-form .save-btn:active { transform: scale(.96); }
   .profile-form .save-msg { text-align: center; font-size: 12.5px; margin-top: 8px; min-height: 16px; }
@@ -24954,7 +25279,10 @@ def cabinet_webapp_html():
      на всех кнопках с фиксацией выбора, как у плашки рейтинга) - тут
      переиспользуем уже существующий keyframe ratingPulse (см. ниже в этом
      же <style>, у .rating-pill), а не заводим ещё один такой же. */
-  .nav-pill.active { background: #FFC400; color: #000; opacity: 1; animation: ratingPulse 2.6s ease-in-out infinite; }
+  .nav-pill.active {
+    background: linear-gradient(180deg, #FFD43D, #FFB800); color: #000; opacity: 1;
+    animation: ratingPulse 2.6s ease-in-out infinite; box-shadow: 0 2px 6px rgba(0,0,0,.25), inset 0 1px 0 rgba(255,255,255,.3);
+  }
   .nav-pill:active { transform: scale(.94); }
   .tab-pane { display: none; }
   .tab-pane.active { display: block; animation: tabIn .28s ease both; }
@@ -24971,17 +25299,24 @@ def cabinet_webapp_html():
     width: 100%; padding: 10px 11px; border-radius: 10px; border: 1px solid rgba(127,127,127,.3);
     background: var(--tg-theme-bg-color, #f2f2f7); color: var(--tg-theme-text-color, #000); font-size: 14.5px;
   }
+  /* ИЗМЕНЕНО 28.09.2026 (прямая просьба пользователя - "все кнопки сделай
+     объёмными и с градиентом, чтобы чувствовался вес кнопок, во всём
+     проекте - сервисы, личный кабинет, куда поехать") - тот же приём, что
+     и у кнопок карты (линейный градиент вместо плоской заливки + внешняя
+     тень/внутренняя подсветка сверху), теперь на всех основных кнопках
+     личного кабинета водителя (.btn/.link-btn/.pill-btn.active). */
   .btn {
-    width: 100%; padding: 11px; border: none; border-radius: 10px; background: #FFC400;
+    width: 100%; padding: 11px; border: none; border-radius: 10px;
+    background: linear-gradient(180deg, #FFD43D, #FFB800);
     color: #000; font-size: 14.5px; font-weight: 700; margin-top: 4px; text-transform: uppercase;
-    transition: transform .12s;
+    transition: transform .12s; box-shadow: 0 3px 8px rgba(0,0,0,.25), inset 0 1px 0 rgba(255,255,255,.3);
   }
   .btn:active, .link-btn:active, .edit-btn:active, .pc-go:active, .mo-btn:active { transform: scale(.96); }
-  .btn.secondary { background: rgba(127,127,127,.18); color: var(--tg-theme-text-color, #000); }
+  .btn.secondary { background: linear-gradient(180deg, rgba(127,127,127,.24), rgba(127,127,127,.14)); color: var(--tg-theme-text-color, #000); box-shadow: 0 2px 6px rgba(0,0,0,.12); }
   .link-btn {
     display: block; text-decoration: none; text-align: center; padding: 12px; border-radius: 10px;
-    background: #FFC400; color: #000 !important; font-weight: 700; font-size: 14.5px; margin-bottom: 8px;
-    text-transform: uppercase; transition: transform .12s;
+    background: linear-gradient(180deg, #FFD43D, #FFB800); color: #000 !important; font-weight: 700; font-size: 14.5px; margin-bottom: 8px;
+    text-transform: uppercase; transition: transform .12s; box-shadow: 0 3px 8px rgba(0,0,0,.25), inset 0 1px 0 rgba(255,255,255,.3);
   }
   .pill-row { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
   .pill-btn {
@@ -24991,7 +25326,10 @@ def cabinet_webapp_html():
   }
   /* ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - пульсирующий ореол
      на всех кнопках с фиксацией выбора) - переиспользуем ratingPulse. */
-  .pill-btn.active { background: #FFC400; color: #000; opacity: 1; animation: ratingPulse 2.6s ease-in-out infinite; }
+  .pill-btn.active {
+    background: linear-gradient(180deg, #FFD43D, #FFB800); color: #000; opacity: 1;
+    animation: ratingPulse 2.6s ease-in-out infinite; box-shadow: 0 2px 6px rgba(0,0,0,.25), inset 0 1px 0 rgba(255,255,255,.3);
+  }
   .pill-btn:active { transform: scale(.94); }
   .point-card {
     background: var(--tg-theme-secondary-bg-color, #fff); border-radius: 12px; padding: 11px 12px; margin-bottom: 8px;
@@ -25000,8 +25338,9 @@ def cabinet_webapp_html():
   .point-card .pc-title { font-size: 14px; font-weight: 700; margin-bottom: 3px; }
   .point-card .pc-sub { font-size: 12px; opacity: .65; margin-bottom: 8px; }
   .point-card .pc-go {
-    display: inline-block; text-decoration: none; background: #FFC400; color: #000 !important;
+    display: inline-block; text-decoration: none; background: linear-gradient(180deg, #FFD43D, #FFB800); color: #000 !important;
     padding: 7px 12px; border-radius: 8px; font-size: 12.5px; font-weight: 700; text-transform: uppercase;
+    box-shadow: 0 2px 6px rgba(0,0,0,.25), inset 0 1px 0 rgba(255,255,255,.3);
   }
   .switch-row {
     display: flex; align-items: center; justify-content: space-between; padding: 11px 0;
@@ -25033,7 +25372,8 @@ def cabinet_webapp_html():
   .mo-item .mo-sub { font-size: 11.5px; opacity: .6; margin-top: 2px; }
   .mo-item .mo-btn {
     flex-shrink: 0; border: none; border-radius: 8px; padding: 8px 12px; font-size: 12px; font-weight: 700;
-    background: rgba(255,196,0,.15); color: #FFC400; text-transform: uppercase;
+    background: linear-gradient(180deg, rgba(255,196,0,.22), rgba(255,196,0,.1)); color: #FFC400; text-transform: uppercase;
+    box-shadow: 0 1px 4px rgba(0,0,0,.2);
   }
 
   /* ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - "личный кабинет
@@ -32355,12 +32695,14 @@ async def start_subscription_webhook_server():
     app.router.add_get(SHARE_ORDER_WEBAPP_PATH, handle_share_order_webapp)
     app.router.add_post(SHARE_ORDER_SUBMIT_API_PATH, handle_share_order_submit_api)
     app.router.add_post(PLATFORM_REPORT_API_PATH, handle_platform_report_api)
+    app.router.add_get(TIPS_QR_STATUS_API_PATH, handle_tips_qr_status_api)
     app.router.add_get(PLATFORM_PROBE_WEBAPP_PATH, handle_platform_probe_webapp)
     # Личный кабинет (см. блок "ЛИЧНЫЙ КАБИНЕТ (WebApp)" выше)
     app.router.add_get(CABINET_WEBAPP_PATH, handle_cabinet_webapp)
     app.router.add_get(CABINET_DATA_API_PATH, handle_cabinet_data_api)
     app.router.add_post(CABINET_PROFILE_API_PATH, handle_cabinet_profile_api)
     app.router.add_post(CABINET_RATING_API_PATH, handle_cabinet_rating_api)
+    app.router.add_post(CABINET_AVATAR_API_PATH, handle_cabinet_avatar_api)
     # Расширение личного кабинета (21.09.2026, объединение "Инструменты
     # водителя" + "Настройки" -> "👤 ЛИЧНЫЙ КАБИНЕТ", см. блок "ЛИЧНЫЙ КАБИНЕТ
     # - РАСШИРЕНИЕ" выше) - новые разделы WebApp: Финансы/Спрос сейчас/Часы
