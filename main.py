@@ -7005,25 +7005,25 @@ async def start(message: types.Message):
     if is_new_user:
         await send_welcome_pitch(message)
     await send_start_screen(message)
-    # ДОБАВЛЕНО 26.09.2026 (плитки "Юр. лицо"/"Фантом" в реферальном разделе
+    # ДОБАВЛЕНО 26.09.2026 (плитка "Юр. лицо" в реферальном разделе
     # мини-приложения - "по кнопкам по паролям всё как бы тоже самое
-    # переноси делай") - у этих двух пунктов пароль по-прежнему вводится
-    # ТОЛЬКО текстом прямо в чате (та же механика, ничего в самой логике
-    # паролей не переписано - см. referral_legal_password_flow/
-    # phantom_password_flow ниже): мини-приложение не может ни показать поле
-    # ввода пароля внутри WebView-панели, ни поймать текстовый ответ.
-    # Поэтому плитка в приложении - обычная ссылка t.me/<бот>?start=reflegal
-    # /refphantom (открывается через Telegram.WebApp.openTelegramLink в JS,
-    # см. renderReferralLegalDetail/renderReferralPhantomDetail в
-    # unified_app_html()), а здесь она просто запускает ТОТ ЖЕ самый первый
-    # шаг, что и кнопка в чате (referral_category_legal_start/phantom_start)
-    # - только вызванный из /start (Message), а не из callback_query.
+    # переноси делай") - пароль компании по-прежнему можно ввести ТОЛЬКО
+    # текстом в чате как запасной путь (та же механика, ничего не
+    # переписано - см. referral_legal_password_flow ниже): основной путь -
+    # прямо в мини-приложении (см. renderReferralLegalDetail в
+    # unified_app_html()), а этот deep-link - запасной, на случай проблем с
+    # WebApp-полем.
+    #
+    # УБРАНО 28.09.2026 (прямая просьба пользователя - "надо всё в
+    # приложении перенести... с бота всё убери") - ветка 'refphantom' здесь
+    # запускала awaiting_phantom_password (см. историю main.py -
+    # phantom_password_flow) - весь "👻 Фантом" (админ реферальная
+    # программа + 3 кнопки компаний + админ-панель) теперь ЦЕЛИКОМ в
+    # мини-приложении (см. renderReferralPhantomDetail/PHANTOM_UNLOCK_API_PATH/
+    # ADMIN_PANEL_UNLOCK_API_PATH выше), без чата вообще - deep-link и
+    # состояние, которое он запускал, удалены как мёртвый код.
     user_id = message.from_user.id
-    if start_param == 'refphantom':
-        state = user_state.setdefault(user_id, {})
-        state['awaiting_phantom_password'] = True
-        await message.answer("👻 Введи пароль:")
-    elif start_param == 'reflegal':
+    if start_param == 'reflegal':
         if get_referrer_type(user_id) != 'admin' and not is_legal_entity_referral_subscription_active(user_id):
             await send_legal_entity_referral_paywall(message)
         elif get_referrer_type(user_id) == 'legal_entity' and get_legal_entity_owned_by(user_id):
@@ -19295,6 +19295,16 @@ def unified_app_html():
   // ниже), а не только в чате - см. handle_admin_partner_password_api в
   // main.py, зеркало LEGAL_CABINET_PASSWORD_API_PATH выше.
   const ADMIN_PARTNER_PASSWORD_API_PATH = '""" + ADMIN_PARTNER_PASSWORD_API_PATH + """';
+  // ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "надо всё в
+  // приложении перенести... с бота всё убери") - вся "🔐 АДМИН ПАНЕЛЬ" из
+  // чата (сводка + создание/список/удаление юрлиц и админ-партнёров)
+  // теперь прямо здесь, в мини-приложении - см.
+  // renderAdminPanelSection/handle_admin_panel_*_api в main.py.
+  const PHANTOM_UNLOCK_API_PATH = '""" + PHANTOM_UNLOCK_API_PATH + """';
+  const ADMIN_PANEL_UNLOCK_API_PATH = '""" + ADMIN_PANEL_UNLOCK_API_PATH + """';
+  const ADMIN_PANEL_OVERVIEW_API_PATH = '""" + ADMIN_PANEL_OVERVIEW_API_PATH + """';
+  const ADMIN_PANEL_ENTITIES_API_PATH = '""" + ADMIN_PANEL_ENTITIES_API_PATH + """';
+  const ADMIN_PANEL_ENTITY_DELETE_API_PATH = '""" + ADMIN_PANEL_ENTITY_DELETE_API_PATH + """';
   // ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - у каждой из трёх
   // реферальных схем (Водитель/Курьер = individual, Юридическое лицо =
   // legal_entity, Админ = admin) должно быть своё описание/ставки на своём
@@ -20397,30 +20407,86 @@ def unified_app_html():
       '<a class="svc-btn ghost" href="' + PRESENTATION_PDF_WEBAPP_PATH + '" target="_blank" rel="noopener">📥 Скачать презентацию</a>';
   }
 
-  // "Фантом" - вход в схему "Админ реферальная система". ИЗМЕНЕНО
-  // 28.09.2026 (прямая просьба пользователя - "чтобы у них тоже был свой
-  // пароль... как у юрлица... так и по админ реферальная система") -
-  // раньше пароль принимался ТОЛЬКО в чате (phantom_start/
-  // admin_referral_password_flow в main.py); теперь, по образцу
-  // renderReferralLegalDetail выше, пароль можно ввести прямо здесь, в
-  // мини-приложении (см. ADMIN_PARTNER_PASSWORD_API_PATH/
-  // handle_admin_partner_password_api в main.py) - ввод в чате оставлен
-  // запасным путём (кнопка "Ввести пароль в чате" ниже).
+  // "Фантом" - точка входа во ВЕСЬ административный функционал. ПЕРЕПИСАНО
+  // 28.09.2026 (прямая просьба пользователя - "надо всё в приложении
+  // перенести... с бота всё убери"; уточнение - "по кнопке фантом должно
+  // быть 5 кнопок: Админ реферальная программа, 3 кнопки компании юрлиц,
+  // Админ панель") - раньше это было чат-меню ("👻 ФАНТОМ" ->
+  // phantom_password_flow -> 5 кнопок, см. историю main.py); теперь ТО ЖЕ
+  // самое меню из 5 кнопок целиком здесь, в мини-приложении, никакого
+  // чата. Два разных секрета, как и было: PHANTOM_SUBSCRIPTION_PASSWORD
+  // открывает само меню (см. PHANTOM_UNLOCK_API_PATH в main.py) -
+  // ЗДЕСЬ ЖЕ, без доп. пароля, работают кнопки 2-4 (создать/посмотреть/
+  // удалить компанию); ADMIN_PANEL_PASSWORD - отдельный, вложенный пароль
+  // ТОЛЬКО для кнопки 5 "Админ панель" (см. ADMIN_PANEL_UNLOCK_API_PATH).
+  let phantomUnlocked = false; // на время сессии мини-приложения (сбрасывается при новом открытии, как и остальные ref*-состояния на этом экране)
+
   function renderReferralPhantomDetail(box, data) {
-    svcBackAction = function () { renderReferralMenu(box, data); }; // ИЗМЕНЕНО 27.09.2026 - "Назад" отсюда ведёт в меню реферальной программы, на один шаг назад
-    const botUsername = botUsernameFromLink(data.link);
-    // ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - "админ
-    // реферальную систему" тоже должна иметь свой личный кабинет со своим
-    // описанием) - если у пользователя УЖЕ активна схема 'admin' (пароль
-    // был введён ранее, в чате или прямо тут) - показываем ТОТ ЖЕ общий
-    // блок статистики (см. referralStatsBlockHtml выше), что и у остальных
-    // схем, ПЛЮС (ДОБАВЛЕНО 28.09.2026, зеркало renderReferralLegalDetail)
-    // ссылку на открытие своего личного кабинета, если этот пользователь -
-    // владелец (см. LEGAL_CABINET_ACCESS_API_PATH/get_legal_entity_owned_by
-    // в main.py - тот же механизм, что и у юрлиц, владение не зависит от
-    // kind). Если схема НЕ 'admin' - экран остаётся ТЕМ ЖЕ секретным
-    // входом, что и был - никаких новых подсказок о самом существовании
-    // админского бэкдора не добавляется никому, кроме тех, кто уже внутри.
+    svcBackAction = function () { renderReferralMenu(box, data); }; // "Назад" отсюда ведёт в меню реферальной программы, на один шаг назад
+    if (!phantomUnlocked) {
+      renderPhantomGate(box, data);
+      return;
+    }
+    renderPhantomMenu(box, data);
+  }
+
+  function renderPhantomGate(box, data) {
+    box.innerHTML =
+      '<div class="svc-h">👻 Фантом</div>' +
+      '<input type="text" class="svc-input" id="phantomGatePassword" placeholder="Пароль">' +
+      '<button type="button" class="svc-btn" id="phantomGateBtn">Подтвердить</button>' +
+      '<div class="svc-note" id="phantomGateNote"></div>';
+    const btn = document.getElementById('phantomGateBtn');
+    btn.addEventListener('click', async function () {
+      const pwInput = document.getElementById('phantomGatePassword');
+      const password = (pwInput.value || '').trim();
+      const note = document.getElementById('phantomGateNote');
+      if (!password) return;
+      btn.disabled = true;
+      if (note) note.textContent = '';
+      try {
+        const resp = await fetch(PHANTOM_UNLOCK_API_PATH, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': (tg && tg.initData) || '' },
+          body: JSON.stringify({ password: password })
+        });
+        if (!resp.ok) {
+          if (note) note.textContent = 'Неверный пароль.';
+          btn.disabled = false;
+          return;
+        }
+        phantomUnlocked = true;
+        renderReferralPhantomDetail(box, data);
+      } catch (e) {
+        if (note) note.textContent = 'Не получилось отправить - попробуй ещё раз.';
+        btn.disabled = false;
+      }
+    });
+  }
+
+  function renderPhantomMenu(box, data) {
+    box.innerHTML =
+      '<div class="svc-h">👻 Фантом</div>' +
+      '<button type="button" class="svc-btn" id="phantomMenuAdminRef">🤝 Админ реферальная программа</button>' +
+      '<button type="button" class="svc-btn" id="phantomMenuNewCompany" style="margin-top:8px;">🏢 Новая компания</button>' +
+      '<button type="button" class="svc-btn ghost" id="phantomMenuListCompanies" style="margin-top:8px;">📋 Список компаний</button>' +
+      '<button type="button" class="svc-btn ghost" id="phantomMenuDeleteCompany" style="margin-top:8px;">🗑 Удалить компанию</button>' +
+      '<button type="button" class="svc-btn" id="phantomMenuAdminPanel" style="margin-top:8px;">🔐 Админ панель</button>' +
+      '<div id="phantomMenuSubBox" style="margin-top:8px;"></div>';
+    const subBox = document.getElementById('phantomMenuSubBox');
+    document.getElementById('phantomMenuAdminRef').addEventListener('click', function () { renderPhantomAdminReferral(subBox, data); });
+    document.getElementById('phantomMenuNewCompany').addEventListener('click', function () { renderAdminPanelCreateForm(subBox, 'legal_entity'); });
+    document.getElementById('phantomMenuListCompanies').addEventListener('click', function () { renderAdminPanelList(subBox, 'legal_entity'); });
+    document.getElementById('phantomMenuDeleteCompany').addEventListener('click', function () { renderAdminPanelDeleteList(subBox, 'legal_entity'); });
+    document.getElementById('phantomMenuAdminPanel').addEventListener('click', function () { renderAdminPanelSection(subBox); });
+  }
+
+  // Кнопка 1 "🤝 Админ реферальная программа" - вход в схему 'admin' (тот
+  // же apply_admin_partner_password/handle_admin_partner_password_api, что
+  // и раньше), плюс статистика/личный кабинет, если пользователь уже
+  // внутри. Рендерится в подблок меню Фантома (subBox) - кнопки 2-5 меню
+  // остаются на экране, "Назад" из этого подблока отдельно не нужен.
+  function renderPhantomAdminReferral(subBox, data) {
     if (data.referrer_type === 'admin') {
       const adminRates = REFERRAL_RATES_PERCENT.admin;
       const adminDescription = 'Админская схема начислений - ' + adminRates.join('/') + '% с платежей 1-' + adminRates.length + ' уровня (доступ выдаётся вручную по паролю).';
@@ -20430,9 +20496,8 @@ def unified_app_html():
       // (entity_name, задаётся через /add_admin_partner), чтобы два разных
       // админ-партнёра видели, в каком именно кабинете они находятся.
       const partnerNote = data.entity_name ? ('<div class="svc-card">🏷 Партнёр: ' + data.entity_name + '</div>') : '';
-      let html = '<div class="svc-h">👻 Админ реферальная система</div>' + partnerNote + referralStatsBlockHtml(data, adminRates, adminDescription);
-      box.innerHTML = html;
-      wireReferralStatsBlock(box, data);
+      subBox.innerHTML = '<div class="svc-h">🤝 Админ реферальная программа</div>' + partnerNote + referralStatsBlockHtml(data, adminRates, adminDescription);
+      wireReferralStatsBlock(subBox, data);
       (async function () {
         try {
           const resp = await fetch(LEGAL_CABINET_ACCESS_API_PATH, { headers: { 'X-Telegram-Init-Data': (tg && tg.initData) || '' } });
@@ -20442,19 +20507,17 @@ def unified_app_html():
             const cabinetBox = document.createElement('div');
             cabinetBox.innerHTML = '<div class="svc-card">У тебя есть свой личный кабинет.</div>' +
               '<a class="svc-btn" href="' + LEGAL_CABINET_WEBAPP_PATH + '?tgInitData=' + encodeURIComponent((tg && tg.initData) || '') + '">🏛 Открыть личный кабинет</a>';
-            box.appendChild(cabinetBox);
+            subBox.appendChild(cabinetBox);
           }
         } catch (e) { /* тихо - кабинет не обязателен для показа статистики выше */ }
       })();
       return;
     }
-    box.innerHTML =
-      '<div class="svc-h">👻 Фантом</div>' +
+    subBox.innerHTML =
+      '<div class="svc-h">🤝 Админ реферальная программа</div>' +
       '<input type="text" class="svc-input" id="refPhantomPassword" placeholder="Пароль">' +
       '<button type="button" class="svc-btn" id="refPhantomPasswordBtn">Подтвердить</button>' +
-      '<div class="svc-note" id="refPhantomPasswordNote"></div>' +
-      '<button type="button" class="svc-btn ghost" id="refPhantomOpenChat" style="margin-top:8px;">Ввести пароль в чате</button>';
-    document.getElementById('refPhantomOpenChat').addEventListener('click', function () { openBotDeepLink(botUsername, 'refphantom'); });
+      '<div class="svc-note" id="refPhantomPasswordNote"></div>';
     const pwBtn = document.getElementById('refPhantomPasswordBtn');
     pwBtn.addEventListener('click', async function () {
       const pwInput = document.getElementById('refPhantomPassword');
@@ -20477,21 +20540,204 @@ def unified_app_html():
         // Локально помечаем схему активной, не дожидаясь перезагрузки
         // /referral/data - тот же приём, что используют кнопки
         // переключения схемы в остальном меню реферальной программы.
-        // ДОБАВЛЕНО 28.09.2026 - handle_admin_partner_password_api уже
-        // отдаёт entity_name (имя/ник партнёра) в теле ответа, раньше оно
-        // здесь просто отбрасывалось - забираем его, чтобы сразу показать
-        // на экране статистики (см. partnerNote выше), без лишней
-        // перезагрузки /referral/data.
         let json = null;
         try { json = await resp.json(); } catch (e) { json = null; }
         data.referrer_type = 'admin';
         if (json && json.entity_name) data.entity_name = json.entity_name;
-        renderReferralPhantomDetail(box, data);
+        renderPhantomAdminReferral(subBox, data);
       } catch (e) {
         if (note) note.textContent = 'Не получилось отправить - попробуй ещё раз.';
         pwBtn.disabled = false;
       }
     });
+  }
+
+  // Кнопка 2 "🏢 Новая компания" - создать юр.лицо/админ-партнёра (см.
+  // ADMIN_PANEL_ENTITIES_API_PATH/handle_admin_panel_entities_api в
+  // main.py - тот же add_legal_entity/add_admin_partner, что и раньше в
+  // чате). Не требует отдельного пароля сверх уже открытого меню Фантома.
+  function renderAdminPanelCreateForm(subBox, kind) {
+    const label = kind === 'admin_partner' ? 'админ-партнёра' : 'компании';
+    const namePlaceholder = kind === 'admin_partner' ? 'Имя партнёра' : 'Название компании';
+    subBox.innerHTML =
+      '<div class="svc-h">🏢 Новая ' + (kind === 'admin_partner' ? 'запись' : 'компания') + '</div>' +
+      '<input type="text" class="svc-input" id="apNewName" placeholder="' + namePlaceholder + '">' +
+      '<input type="text" class="svc-input" id="apNewPassword" placeholder="Пароль">' +
+      '<button type="button" class="svc-btn" id="apNewBtn">Создать</button>' +
+      '<div class="svc-note" id="apNewNote"></div>';
+    const btn = document.getElementById('apNewBtn');
+    btn.addEventListener('click', async function () {
+      const name = (document.getElementById('apNewName').value || '').trim();
+      const password = (document.getElementById('apNewPassword').value || '').trim();
+      const note = document.getElementById('apNewNote');
+      if (!name || !password) {
+        if (note) note.textContent = 'Нужны и название, и пароль.';
+        return;
+      }
+      btn.disabled = true;
+      if (note) note.textContent = '';
+      try {
+        const resp = await fetch(ADMIN_PANEL_ENTITIES_API_PATH, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': (tg && tg.initData) || '' },
+          body: JSON.stringify({ kind: kind, name: name, password: password })
+        });
+        if (resp.status === 409) {
+          if (note) note.textContent = 'Этот пароль уже занят - выбери другой.';
+          btn.disabled = false;
+          return;
+        }
+        if (!resp.ok) {
+          if (note) note.textContent = 'Не получилось создать - попробуй ещё раз.';
+          btn.disabled = false;
+          return;
+        }
+        const json = await resp.json();
+        subBox.innerHTML = '<div class="svc-h">✅ Готово</div>' +
+          '<div class="svc-card">«' + json.name + '» добавлен(а), пароль: ' + json.password + '</div>';
+      } catch (e) {
+        if (note) note.textContent = 'Не получилось отправить - попробуй ещё раз.';
+        btn.disabled = false;
+      }
+    });
+  }
+
+  // Кнопка 3 "📋 Список компаний" - список записей (юр.лица или
+  // админ-партнёры, см. ADMIN_PANEL_ENTITIES_API_PATH GET выше).
+  async function renderAdminPanelList(subBox, kind) {
+    subBox.innerHTML = '<div class="svc-h">📋 Список</div><div class="svc-note">Загружаю…</div>';
+    try {
+      const resp = await fetch(ADMIN_PANEL_ENTITIES_API_PATH + '?kind=' + encodeURIComponent(kind), { headers: { 'X-Telegram-Init-Data': (tg && tg.initData) || '' } });
+      if (!resp.ok) throw new Error('http_' + resp.status);
+      const json = await resp.json();
+      const entities = json.entities || [];
+      if (!entities.length) {
+        subBox.innerHTML = '<div class="svc-h">📋 Список</div><div class="svc-note">Пока пусто.</div>';
+        return;
+      }
+      let html = '<div class="svc-h">📋 Список</div>';
+      entities.forEach(function (ent) {
+        const owner = ent.owner_user_id ? ('владелец: ' + ent.owner_user_id) : 'владелец: — (никто ещё не вошёл)';
+        html += '<div class="svc-card">#' + ent.id + ' «' + ent.name + '»<br>пароль: ' + ent.password + '<br>' + owner + '</div>';
+      });
+      subBox.innerHTML = html;
+    } catch (e) {
+      subBox.innerHTML = '<div class="svc-h">📋 Список</div><div class="svc-note">Не получилось загрузить - попробуй ещё раз.</div>';
+    }
+  }
+
+  // Кнопка 4 "🗑 Удалить компанию" - выбор из списка, потом подтверждение
+  // (тот же приём, что был в чате - phantom_del_ent_ask/phantom_del_ent_do -
+  // нельзя удалить одним тапом без подтверждения).
+  async function renderAdminPanelDeleteList(subBox, kind) {
+    subBox.innerHTML = '<div class="svc-h">🗑 Удалить</div><div class="svc-note">Загружаю…</div>';
+    try {
+      const resp = await fetch(ADMIN_PANEL_ENTITIES_API_PATH + '?kind=' + encodeURIComponent(kind), { headers: { 'X-Telegram-Init-Data': (tg && tg.initData) || '' } });
+      if (!resp.ok) throw new Error('http_' + resp.status);
+      const json = await resp.json();
+      const entities = json.entities || [];
+      if (!entities.length) {
+        subBox.innerHTML = '<div class="svc-h">🗑 Удалить</div><div class="svc-note">Пока нечего удалять.</div>';
+        return;
+      }
+      let html = '<div class="svc-h">🗑 Какую удалить?</div>';
+      entities.forEach(function (ent) {
+        html += '<button type="button" class="svc-btn ghost ap-del-btn" data-id="' + ent.id + '" data-name="' + ent.name.replace(/"/g, '&quot;') + '" style="margin-top:6px;">🗑 #' + ent.id + ' ' + ent.name + '</button>';
+      });
+      html += '<div id="apDeleteConfirmBox" style="margin-top:8px;"></div>';
+      subBox.innerHTML = html;
+      const confirmBox = document.getElementById('apDeleteConfirmBox');
+      Array.prototype.forEach.call(subBox.querySelectorAll('.ap-del-btn'), function (delBtn) {
+        delBtn.addEventListener('click', function () {
+          const id = delBtn.getAttribute('data-id');
+          const name = delBtn.getAttribute('data-name');
+          confirmBox.innerHTML =
+            '<div class="svc-card">❗ Точно удалить «' + name + '»? Удалятся также все её машины и начисления аренды.</div>' +
+            '<button type="button" class="svc-btn" id="apDeleteYesBtn">❗ Да, удалить</button>' +
+            '<button type="button" class="svc-btn ghost" id="apDeleteNoBtn" style="margin-top:6px;">❌ Отмена</button>';
+          document.getElementById('apDeleteNoBtn').addEventListener('click', function () { confirmBox.innerHTML = ''; });
+          document.getElementById('apDeleteYesBtn').addEventListener('click', async function () {
+            const yesBtn = document.getElementById('apDeleteYesBtn');
+            yesBtn.disabled = true;
+            try {
+              const delResp = await fetch(ADMIN_PANEL_ENTITY_DELETE_API_PATH, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': (tg && tg.initData) || '' },
+                body: JSON.stringify({ id: id })
+              });
+              if (!delResp.ok) {
+                confirmBox.innerHTML = '<div class="svc-note">Не получилось удалить - попробуй ещё раз.</div>';
+                return;
+              }
+              renderAdminPanelDeleteList(subBox, kind);
+            } catch (e) {
+              confirmBox.innerHTML = '<div class="svc-note">Не получилось отправить - попробуй ещё раз.</div>';
+            }
+          });
+        });
+      });
+    } catch (e) {
+      subBox.innerHTML = '<div class="svc-h">🗑 Удалить</div><div class="svc-note">Не получилось загрузить - попробуй ещё раз.</div>';
+    }
+  }
+
+  // Кнопка 5 "🔐 Админ панель" - ОТДЕЛЬНЫЙ, вложенный пароль
+  // (ADMIN_PANEL_PASSWORD, см. ADMIN_PANEL_UNLOCK_API_PATH/
+  // handle_admin_panel_unlock_api в main.py) поверх уже открытого меню
+  // Фантома - точно так же, как в чате "🔐 АДМИН ПАНЕЛЬ" спрашивала свой
+  // пароль отдельно. После разблокировки показывает ту же сводку, что
+  // была в чате (пользователи на линии/подписки/финансовый отчёт).
+  let adminPanelUnlocked = false;
+
+  function renderAdminPanelSection(subBox) {
+    if (!adminPanelUnlocked) {
+      subBox.innerHTML =
+        '<div class="svc-h">🔐 Админ панель</div>' +
+        '<input type="text" class="svc-input" id="apGatePassword" placeholder="Пароль админ-панели">' +
+        '<button type="button" class="svc-btn" id="apGateBtn">Войти</button>' +
+        '<div class="svc-note" id="apGateNote"></div>';
+      const btn = document.getElementById('apGateBtn');
+      btn.addEventListener('click', async function () {
+        const password = (document.getElementById('apGatePassword').value || '').trim();
+        const note = document.getElementById('apGateNote');
+        if (!password) return;
+        btn.disabled = true;
+        if (note) note.textContent = '';
+        try {
+          const resp = await fetch(ADMIN_PANEL_UNLOCK_API_PATH, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': (tg && tg.initData) || '' },
+            body: JSON.stringify({ password: password })
+          });
+          if (!resp.ok) {
+            if (note) note.textContent = 'Неверный пароль.';
+            btn.disabled = false;
+            return;
+          }
+          adminPanelUnlocked = true;
+          renderAdminPanelSection(subBox);
+        } catch (e) {
+          if (note) note.textContent = 'Не получилось отправить - попробуй ещё раз.';
+          btn.disabled = false;
+        }
+      });
+      return;
+    }
+    subBox.innerHTML = '<div class="svc-h">🔐 Админ панель</div><div class="svc-note">Загружаю…</div>';
+    (async function () {
+      try {
+        const resp = await fetch(ADMIN_PANEL_OVERVIEW_API_PATH, { headers: { 'X-Telegram-Init-Data': (tg && tg.initData) || '' } });
+        if (!resp.ok) throw new Error('http_' + resp.status);
+        const json = await resp.json();
+        subBox.innerHTML =
+          '<div class="svc-h">🔐 Админ панель</div>' +
+          '<pre class="svc-card" style="white-space:pre-wrap;font-family:inherit;">' + (json.overview_text || '') + '</pre>' +
+          '<button type="button" class="svc-btn ghost" id="apRefreshBtn">🔄 Обновить</button>';
+        document.getElementById('apRefreshBtn').addEventListener('click', function () { renderAdminPanelSection(subBox); });
+      } catch (e) {
+        subBox.innerHTML = '<div class="svc-h">🔐 Админ панель</div><div class="svc-note">Не получилось загрузить - попробуй ещё раз.</div>';
+      }
+    })();
   }
 
   // "Мои рефералы" - ТЕ ЖЕ данные, что и у кнопки "📋 МОИ РЕФЕРАЛЫ" в чате
@@ -33301,349 +33547,6 @@ async def legal_entity_sub_status(callback_query: types.CallbackQuery):
     await send_legal_entity_referral_paywall(callback_query)
 
 
-@router.callback_query(lambda c: c.data == "phantom_start")
-async def phantom_start(callback_query: types.CallbackQuery):
-    """См. PHANTOM_SUBSCRIPTION_PASSWORD выше - просит пароль текстом (тот
-    же паттерн ожидания текста, что и у referral_category_legal_start/
-    referral_legal_password_flow). Работает даже на экране-блокировке - см.
-    исключение в SubscriptionMiddleware.
-
-    ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя - переработка "Фантома"):
-    правильный пароль Фантома больше НЕ выдаёт подписку напрямую - открывает
-    меню с двумя пунктами (см. phantom_password_flow ниже)."""
-    user_id = callback_query.from_user.id
-    try:
-        await callback_query.answer()
-    except Exception:
-        pass
-    state = user_state.setdefault(user_id, {})
-    state['awaiting_phantom_password'] = True
-    await callback_query.message.answer("👻 Введи пароль:")
-
-
-@router.message(lambda message: user_state.get(message.from_user.id, {}).get('awaiting_phantom_password'))
-async def phantom_password_flow(message: types.Message):
-    """Ловит ЛЮБОЙ текст, пока ждём пароль "Фантома" - должен стоять РАНЬШЕ
-    остальных текстовых хендлеров (тот же приём, что и
-    referral_legal_password_flow/referral_withdraw_flow).
-
-    ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя): по верному паролю
-    Фантома теперь открывается МЕНЮ с двумя пунктами - "Админ реферальная
-    система" (свой пароль REFERRAL_ADMIN_PASSWORD, см.
-    admin_referral_password_flow - именно ТАМ теперь выдаётся бесплатный
-    месяц подписки, а не сразу тут) и "Админ панель" (свой пароль
-    ADMIN_PANEL_PASSWORD, см. admin_panel_password_confirm_flow). Прежняя
-    "двойная верификация" админ-панели (ввод пароля дважды) больше не
-    нужна - кнопка сама по себе уже отдельный шаг.
-
-    ИЗМЕНЕНО 28.09.2026 (прямая просьба пользователя - "1 кнопка создать
-    новую кампанию ввод название и пароль 2. Посмотреть список кампаний
-    3. Удалить кампанию" сразу "после кнопки фантом") - добавлены ещё 3
-    пункта ПРЯМО в это меню (без второго пароля админ-панели): создать
-    новую компанию/юр.лицо, посмотреть список компаний, удалить компанию.
-    Раньше это было доступно только за ВТОРЫМ паролем через "🔐 АДМИН
-    ПАНЕЛЬ" (см. admin_panel_new_legal_entity_start/admin_panel_list_
-    legal_entities_cb выше) - те кнопки там тоже остались (ничего не
-    сломано), просто теперь есть более короткий путь. Пароля "Фантома"
-    достаточно - см. phantom_new_company_start/phantom_list_companies_cb/
-    phantom_delete_company_start_cb ниже."""
-    await _phantom_password_flow(message)
-
-
-async def _phantom_password_flow(message):
-    """Реальная логика phantom_password_flow выше, вынесена в обычную
-    (недекорированную) функцию - тот же приём, что и у
-    _send_referral_scheme_view/_admin_panel_new_entity_flow (под тестовым
-    стабом aiogram @router.message-функции становятся MagicMock, не
-    вызвать напрямую)."""
-    user_id = message.from_user.id
-    state = user_state[user_id]
-    text = (message.text or '').strip()
-    state.pop('awaiting_phantom_password', None)
-
-    if text != PHANTOM_SUBSCRIPTION_PASSWORD:
-        await message.answer("❌ Неверный пароль.")
-        return
-
-    markup = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🤝 АДМИН РЕФЕРАЛЬНАЯ СИСТЕМА", callback_data="admin_referral_start")],
-        [InlineKeyboardButton(text="🔐 АДМИН ПАНЕЛЬ", callback_data="admin_panel_start")],
-        [InlineKeyboardButton(text="🏢 Новая компания", callback_data="phantom_new_company")],
-        [InlineKeyboardButton(text="📋 Список компаний", callback_data="phantom_list_companies"),
-         InlineKeyboardButton(text="🗑 Удалить компанию", callback_data="phantom_delete_company")],
-    ])
-    await message.answer("👻 Фантом:", reply_markup=markup)
-
-
-@router.callback_query(lambda c: c.data == "admin_panel_start")
-async def admin_panel_start(callback_query: types.CallbackQuery):
-    """Кнопка "🔐 АДМИН ПАНЕЛЬ" в меню Фантома (см. phantom_password_flow
-    выше) - просит пароль ADMIN_PANEL_PASSWORD (см.
-    admin_panel_password_confirm_flow ниже, хендлер переиспользован как
-    есть, только теперь это единственный шаг, а не второй из двух)."""
-    user_id = callback_query.from_user.id
-    try:
-        await callback_query.answer()
-    except Exception:
-        pass
-    state = user_state.setdefault(user_id, {})
-    state['awaiting_admin_panel_password_confirm'] = True
-    await callback_query.message.answer("🔐 Введи пароль:")
-
-
-@router.callback_query(lambda c: c.data == "admin_referral_start")
-async def admin_referral_start(callback_query: types.CallbackQuery):
-    """Кнопка "🤝 АДМИН РЕФЕРАЛЬНАЯ СИСТЕМА" в меню Фантома (см.
-    phantom_password_flow выше) - просит пароль REFERRAL_ADMIN_PASSWORD (см.
-    admin_referral_password_flow ниже)."""
-    user_id = callback_query.from_user.id
-    try:
-        await callback_query.answer()
-    except Exception:
-        pass
-    state = user_state.setdefault(user_id, {})
-    state['awaiting_admin_referral_password'] = True
-    await callback_query.message.answer("🔑 Введи пароль:")
-
-
-@router.message(lambda message: user_state.get(message.from_user.id, {}).get('awaiting_admin_referral_password'))
-async def admin_referral_password_flow(message: types.Message):
-    """Пароль "Админ реферальной системы" (см. admin_referral_start выше) -
-    ловит ЛЮБОЙ текст, должен стоять РАНЬШЕ остальных текстовых хендлеров
-    (тот же приём, что и у phantom_password_flow). ДОБАВЛЕНО 23.09.2026
-    (прямая просьба пользователя). ИЗМЕНЕНО 28.09.2026 (прямая просьба
-    пользователя - "чтобы у них тоже был свой пароль... как у юрлица") -
-    раньше принимался ТОЛЬКО один зашитый REFERRAL_ADMIN_PASSWORD; теперь
-    вся проверка/применение пароля вынесена в apply_admin_partner_password
-    (см. выше, рядом с add_admin_partner) - принимает пароль ЛЮБОГО
-    заведённого через /add_admin_partner админ-партнёра (плюс
-    REFERRAL_ADMIN_PASSWORD как legacy-пароль по умолчанию), даёт (1)
-    бесплатный месяц подписки, (2) схему начислений 'admin' (40/30/20/10%,
-    см. REFERRAL_RATES_PERCENT), (3) владение СВОИМ собственным
-    кабинетом (если этот пароль вводится первым) - тот же механизм, что и
-    у обычных юр.лиц, просто с отдельным пространством паролей."""
-    user_id = message.from_user.id
-    state = user_state[user_id]
-    text = (message.text or '').strip()
-    state.pop('awaiting_admin_referral_password', None)
-
-    result = apply_admin_partner_password(user_id, text)
-    if not result['ok']:
-        await message.answer("❌ Неверный пароль.")
-        return
-    new_paid_until = result['paid_until']
-    my_rates = REFERRAL_RATES_PERCENT['admin']
-    rates_str = '/'.join(str(r) for r in my_rates) + '%'
-
-    # ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "чтобы у них было
-    # различие чтобы два этих юзера... могли как бы различать у себя") -
-    # раньше подтверждение и экран статистики были ОДИНАКОВЫМИ у ЛЮБОГО
-    # админ-партнёра (никак не показывали, чей именно это пароль/кабинет) -
-    # теперь везде, где есть result['entity_name'] (название, заданное
-    # командой /add_admin_partner), оно показывается явно.
-    partner_note = f" Партнёр: «{result['entity_name']}»." if result['entity_name'] else ""
-    owner_note = " Ты первый ввёл этот пароль - тебе открыт «🏛 Личный кабинет»." \
-        if result['is_owner'] else ""
-    await message.answer(
-        f"✅ Схема начислений: «Админ» ({rates_str}).{partner_note} Подписка активирована бесплатно на "
-        f"{SUBSCRIPTION_PERIOD_DAYS} дней, до *{new_paid_until.strftime('%d.%m.%Y')}*.{owner_note}",
-        parse_mode='Markdown',
-        reply_markup=services_keyboard(state.get('category'), state.get('city'), user_id)
-    )
-    me = await bot.get_me()
-    link = get_referral_link(me.username, user_id)
-    stats = get_referral_stats(user_id)
-    partner_line = f"🏷 Партнёр: {result['entity_name']}\n" if result['entity_name'] else ""
-    admin_text = (
-        "🤝 *Реферальная программа - Админ*\n"
-        f"{WHERE_TO_GO_DIVIDER}\n\n"
-        f"{partner_line}"
-        f"🔗 Твоя ссылка:\n`{link}`\n\n"
-        f"{referral_level_counts_lines(stats, len(my_rates))}"
-        f"{WHERE_TO_GO_DIVIDER}\n\n"
-        f"💰 Баланс: {stats['balance'] / 100:.0f}₽\n"
-        f"📈 Всего заработано: {stats['total_earned'] / 100:.0f}₽\n"
-        f"{WHERE_TO_GO_DIVIDER}\n\n"
-        f"_Ставка:_ {rates_str} по {len(my_rates)} уровням."
-    )
-    await message.answer(
-        admin_text,
-        reply_markup=referral_menu_keyboard(link, get_referrer_type(user_id), user_id),
-        parse_mode='Markdown'
-    )
-
-
-@router.message(lambda message: user_state.get(message.from_user.id, {}).get('awaiting_admin_panel_password_confirm'))
-async def admin_panel_password_confirm_flow(message: types.Message):
-    """Пароль "🔐 АДМИН ПАНЕЛЬ" в меню Фантома (см. admin_panel_start выше) -
-    должен стоять РАНЬШЕ остальных текстовых хендлеров, тем же приёмом.
-    Ловит ЛЮБОЙ текст, пока ждём пароль. ИЗМЕНЕНО 23.09.2026 - раньше это
-    был второй шаг "двойной верификации" (пароль вводился дважды), теперь
-    единственный шаг: отдельная кнопка в меню Фантома сама по себе служит
-    первым фактором."""
-    user_id = message.from_user.id
-    state = user_state[user_id]
-    text = (message.text or '').strip()
-    state.pop('awaiting_admin_panel_password_confirm', None)
-    if text != ADMIN_PANEL_PASSWORD:
-        await message.answer("❌ Неверный пароль.")
-        return
-    await message.answer(format_admin_overview_text(), parse_mode='HTML', reply_markup=admin_panel_keyboard())
-
-
-# ==================== КОМПАНИИ ПРЯМО ИЗ МЕНЮ ФАНТОМА (БЕЗ ВТОРОГО ПАРОЛЯ) ====================
-# ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "1 кнопка создать
-# новую кампанию ввод название и пароль 2. Посмотреть список кампаний
-# 3. Удалить кампанию" сразу "после кнопки фантом... фантом вводишь и
-# новая компания появляется") - короткий путь к управлению юр.лицами
-# (add_legal_entity/remove_legal_entity выше), доступный уже по одному
-# паролю "Фантома" (см. phantom_password_flow выше), без второго пароля
-# админ-панели (ADMIN_PANEL_PASSWORD). Кнопки "🏢 Новое юрлицо"/"📋 Список
-# юрлиц" внутри самой "🔐 АДМИН ПАНЕЛЬ" (admin_panel_keyboard выше) никуда
-# не делись - это ДОПОЛНИТЕЛЬНЫЙ, более короткий путь, а не замена.
-@router.callback_query(lambda c: c.data == "phantom_new_company")
-async def phantom_new_company_start(callback_query: types.CallbackQuery):
-    """Переиспользует ТОТ ЖЕ awaiting-флаг и текстовый хендлер
-    (admin_panel_new_legal_entity_flow ниже), что и кнопка «🏢 Новое
-    юрлицо» админ-панели - сам флаг ни к какому конкретному экрану не
-    привязан, отличается только то, с какой кнопки на него попали."""
-    await _phantom_new_company_start(callback_query)
-
-
-async def _phantom_new_company_start(callback_query):
-    try:
-        await callback_query.answer()
-    except Exception:
-        pass
-    user_id = callback_query.from_user.id
-    state = user_state.setdefault(user_id, {})
-    state['awaiting_admin_panel_new_legal_entity'] = True
-    await callback_query.message.answer(
-        "🏢 Введи название компании и пароль ОДНИМ сообщением, через пробел "
-        "(пароль - последнее слово):\nНапример: ООО Ромашка 261194\n\nИли «❌ ОТМЕНА»:",
-        reply_markup=referral_withdraw_cancel_keyboard()
-    )
-
-
-def _format_legal_entities_list_text():
-    """Общий текст списка юр.лиц - переиспользуется кнопкой «📋 Список
-    компаний» в меню Фантома и «📋 Список юрлиц» в админ-панели (см.
-    admin_panel_list_legal_entities_cb выше/ниже)."""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, name, password, owner_user_id FROM legal_entities WHERE kind != 'admin_partner' OR kind IS NULL ORDER BY id DESC")
-    rows = cursor.fetchall()
-    conn.close()
-    if not rows:
-        return "Юр.лиц пока нет - добавь кнопкой «🏢 Новая компания»."
-    lines = ["🏢 *Компании:*"]
-    for r in rows:
-        owner = f"владелец: {r[3]}" if r[3] else "владелец: — (никто ещё не вошёл)"
-        lines.append(f"#{r[0]} «{r[1]}» / пароль: `{r[2]}` / {owner}")
-    return "\n".join(lines)
-
-
-@router.callback_query(lambda c: c.data == "phantom_list_companies")
-async def phantom_list_companies_cb(callback_query: types.CallbackQuery):
-    await _phantom_list_companies(callback_query)
-
-
-async def _phantom_list_companies(callback_query):
-    try:
-        await callback_query.answer()
-    except Exception:
-        pass
-    await callback_query.message.answer(_format_legal_entities_list_text(), parse_mode='Markdown')
-
-
-@router.callback_query(lambda c: c.data == "phantom_delete_company")
-async def phantom_delete_company_start_cb(callback_query: types.CallbackQuery):
-    """Показывает список компаний кнопками - тап по компании ведёт на
-    подтверждение (phantom_del_ent_ask_<id> ниже), а не сразу удаляет,
-    чтобы нельзя было случайно снести чужой кабинет одним тапом."""
-    await _phantom_delete_company_start(callback_query)
-
-
-async def _phantom_delete_company_start(callback_query):
-    try:
-        await callback_query.answer()
-    except Exception:
-        pass
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, name FROM legal_entities WHERE kind != 'admin_partner' OR kind IS NULL ORDER BY id DESC")
-    rows = cursor.fetchall()
-    conn.close()
-    if not rows:
-        await callback_query.message.answer("Юр.лиц пока нет - удалять нечего.")
-        return
-    buttons = [
-        [InlineKeyboardButton(text=f"🗑 #{r[0]} {r[1]}", callback_data=f"phantom_del_ent_ask_{r[0]}")]
-        for r in rows
-    ]
-    await callback_query.message.answer(
-        "🗑 Какую компанию удалить?",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
-    )
-
-
-@router.callback_query(lambda c: c.data.startswith("phantom_del_ent_ask_"))
-async def phantom_delete_company_ask_cb(callback_query: types.CallbackQuery):
-    await _phantom_delete_company_ask(callback_query)
-
-
-async def _phantom_delete_company_ask(callback_query):
-    try:
-        await callback_query.answer()
-    except Exception:
-        pass
-    entity_id = callback_query.data[len("phantom_del_ent_ask_"):]
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute('SELECT id, name, password FROM legal_entities WHERE id = ?', (entity_id,))
-    row = cursor.fetchone()
-    conn.close()
-    if not row:
-        await callback_query.message.answer("Не найдено - возможно, уже удалено.")
-        return
-    markup = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="❗ Да, удалить", callback_data=f"phantom_del_ent_do_{row[0]}")],
-        [InlineKeyboardButton(text="❌ Отмена", callback_data="phantom_del_ent_cancel")],
-    ])
-    await callback_query.message.answer(
-        f"❗ Точно удалить «{row[1]}» (пароль: {row[2]})?\n\n"
-        f"Удалятся также все машины и начисления аренды этой компании. "
-        f"Владелец потеряет доступ к личному кабинету.",
-        reply_markup=markup
-    )
-
-
-@router.callback_query(lambda c: c.data.startswith("phantom_del_ent_do_"))
-async def phantom_delete_company_do_cb(callback_query: types.CallbackQuery):
-    await _phantom_delete_company_do(callback_query)
-
-
-async def _phantom_delete_company_do(callback_query):
-    try:
-        await callback_query.answer()
-    except Exception:
-        pass
-    entity_id = callback_query.data[len("phantom_del_ent_do_"):]
-    deleted = remove_legal_entity(entity_id)
-    if not deleted:
-        await callback_query.message.answer("Не найдено - возможно, уже удалено.")
-        return
-    await callback_query.message.answer(f"✅ «{deleted['name']}» удалено.")
-
-
-@router.callback_query(lambda c: c.data == "phantom_del_ent_cancel")
-async def phantom_delete_company_cancel_cb(callback_query: types.CallbackQuery):
-    try:
-        await callback_query.answer("Отменено")
-    except Exception:
-        pass
-
-
 # ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - жалоба: "когда другой
 # юзер нажимает на реферальную программу ему реферальная программа не
 # открывается и бот просит ввести имейл... имейл не нужно вводить... когда
@@ -33684,27 +33587,15 @@ class SubscriptionMiddleware(BaseMiddleware):
             return await handler(event, data)
         if isinstance(event, types.CallbackQuery) and event.data == 'sub_pay_check':
             return await handler(event, data)
-        # "👻 ФАНТОМ" (см. PHANTOM_SUBSCRIPTION_PASSWORD/phantom_start/
-        # phantom_password_flow выше) должен работать даже на экране-
-        # блокировке - иначе кнопка/ввод пароля сами попадали бы под
-        # блокировку и подменялись бы повторным экраном оплаты.
-        if isinstance(event, types.CallbackQuery) and event.data == 'phantom_start':
-            return await handler(event, data)
-        if isinstance(event, types.Message) and user_state.get(user_id, {}).get('awaiting_phantom_password'):
-            return await handler(event, data)
-        # ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - переработка
-        # "Фантома" в меню с двумя пунктами) - те же исключения нужны и для
-        # ДАЛЬНЕЙШИХ шагов внутри Фантома (кнопки "Админ реферальная
-        # система"/"Админ панель" и ввод их паролей), иначе после верного
-        # пароля Фантома (excepted выше) следующий тап уже попадал бы под
-        # блокировку - Фантом переставал бы работать как обход блокировки
-        # ровно в том сценарии, для которого он и сделан.
-        if isinstance(event, types.CallbackQuery) and event.data in ('admin_referral_start', 'admin_panel_start'):
-            return await handler(event, data)
-        if isinstance(event, types.Message) and user_state.get(user_id, {}).get('awaiting_admin_referral_password'):
-            return await handler(event, data)
-        if isinstance(event, types.Message) and user_state.get(user_id, {}).get('awaiting_admin_panel_password_confirm'):
-            return await handler(event, data)
+        # УБРАНО 28.09.2026 (прямая просьба пользователя - "надо всё в
+        # приложении перенести... с бота всё убери") - тут раньше были
+        # исключения для чат-флоу "👻 ФАНТОМ" (phantom_start/
+        # awaiting_phantom_password/admin_referral_start/admin_panel_start/
+        # awaiting_admin_referral_password/awaiting_admin_panel_password_confirm) -
+        # весь этот чат-флоу удалён (см. renderReferralPhantomDetail в
+        # unified_app_html() - теперь только в мини-приложении, которое
+        # ходит через отдельные aiohttp-эндпоинты /admin_panel/*, не через
+        # эту мидлварь), поэтому исключения стали мёртвым кодом и удалены.
         # ДОБАВЛЕНО 28.09.2026 (см. REFERRAL_MENU_EXEMPT_CALLBACKS выше) -
         # вся реферальная программа открывается свободно, независимо от
         # статуса основной подписки.
@@ -33910,6 +33801,12 @@ async def start_subscription_webhook_server():
     app.router.add_get(LEGAL_CABINET_ACCESS_API_PATH, handle_legal_cabinet_access_api)
     app.router.add_post(LEGAL_CABINET_PASSWORD_API_PATH, handle_legal_cabinet_password_api)
     app.router.add_post(ADMIN_PARTNER_PASSWORD_API_PATH, handle_admin_partner_password_api)
+    app.router.add_post(PHANTOM_UNLOCK_API_PATH, handle_phantom_unlock_api)
+    app.router.add_post(ADMIN_PANEL_UNLOCK_API_PATH, handle_admin_panel_unlock_api)
+    app.router.add_get(ADMIN_PANEL_OVERVIEW_API_PATH, handle_admin_panel_overview_api)
+    app.router.add_get(ADMIN_PANEL_ENTITIES_API_PATH, handle_admin_panel_entities_api)
+    app.router.add_post(ADMIN_PANEL_ENTITIES_API_PATH, handle_admin_panel_entities_api)
+    app.router.add_post(ADMIN_PANEL_ENTITY_DELETE_API_PATH, handle_admin_panel_entity_delete_api)
     app.router.add_get(SUBSCRIPTION_STATUS_API_PATH, handle_subscription_status_api)
     app.router.add_post(SUBSCRIPTION_STATUS_API_PATH, handle_subscription_status_api)
     app.router.add_get(MAP_WEBAPP_PATH, handle_map_webapp)
@@ -35470,22 +35367,15 @@ def referral_menu_keyboard(referral_link, current_type=REFERRAL_DEFAULT_TYPE, us
         [InlineKeyboardButton(text="📤 ПОДЕЛИТЬСЯ ССЫЛКОЙ", switch_inline_query=share_text)],
         [InlineKeyboardButton(text="📋 МОИ РЕФЕРАЛЫ", callback_data="referral_list")],
         [InlineKeyboardButton(text="💸 ВЫВЕСТИ СРЕДСТВА", callback_data="referral_withdraw_start")],
-        # ПЕРЕНЕСЕНО 23.09.2026 (прямая просьба пользователя - "фантом
-        # перенеси в рефералов кнопку") - раньше "👻 ФАНТОМ" была на экранах
-        # подписки (subscription_paywall_keyboard), теперь здесь, в меню
-        # реферальной программы. Сама логика (PHANTOM_SUBSCRIPTION_PASSWORD/
-        # phantom_start/phantom_password_flow, см. блок "ПЛАТНАЯ ПОДПИСКА"
-        # выше) не менялась - только расположение кнопки, callback_data тот
-        # же ("phantom_start"), поэтому хендлер трогать не нужно.
-        # ПЕРЕНЕСЕНО 23.09.2026 (прямая просьба пользователя - "занеси кнопку
-        # админ в фантом будет с двойной верефикацией") - отдельная кнопка
-        # "🔐 АДМИН" убрана, доступ в админ-панель теперь спрятан ВНУТРИ
-        # "👻 ФАНТОМ" (см. phantom_password_flow ниже): если ввести
-        # ADMIN_PANEL_PASSWORD вместо обычного пароля Фантома, бот просит
-        # ввести его ЕЩЁ РАЗ (двойная верификация) и только после второго
-        # совпадения показывает админ-панель - отдельной кнопки, которая
-        # выдавала бы саму возможность существования админки, больше нет.
-        [InlineKeyboardButton(text="👻 ФАНТОМ", callback_data="phantom_start")],
+        # УБРАНО 28.09.2026 (прямая просьба пользователя - "надо всё в
+        # приложении перенести... с бота всё убери") - кнопка "👻 ФАНТОМ"
+        # (callback "phantom_start") вела в чат-флоу phantom_password_flow,
+        # который целиком удалён - весь функционал (админ реферальная
+        # программа + создание/список/удаление компаний + админ-панель)
+        # теперь ТОЛЬКО в мини-приложении, на плитке "Фантом" в разделе
+        # реферальной программы (см. renderReferralPhantomDetail в
+        # unified_app_html() - работает независимо от этой inline-клавиатуры
+        # в чате).
     ]
     # ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "давай сделаем в
     # конце кнопку выйти из реферальной программы") - только на схеме
@@ -35732,6 +35622,193 @@ async def handle_admin_partner_password_api(request):
         'entity_name': result['entity_name'],
         'is_owner': result['is_owner'],
     })
+
+
+# ==================== ФАНТОМ В ПРИЛОЖЕНИИ (БЕЗ ЧАТА) ====================
+# ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "надо всё в приложении
+# перенести... с бота всё убери"; уточнение - "по кнопке фантом должно быть
+# 5 кнопок: Админ реферальная программа, 3 кнопки компании юрлиц, Админ
+# панель") - WebApp-версия ВСЕГО, что раньше было в чате за "👻 ФАНТОМ"
+# (phantom_start/phantom_password_flow/admin_panel_keyboard и её кнопок в
+# main.py) - та же логика (apply_admin_partner_password/add_legal_entity/
+# remove_legal_entity/format_admin_overview_text), просто без чата.
+#
+# ДВА РАЗНЫХ секрета, ДВА РАЗНЫХ уровня разблокировки, точь-в-точь как было
+# в чате:
+# 1) PHANTOM_SUBSCRIPTION_PASSWORD (см. выше) - внешний "вход в Фантом".
+#    Открывает меню из 5 кнопок (renderReferralPhantomDetail в
+#    unified_app_html), в ТОМ ЧИСЛЕ напрямую создание/список/удаление
+#    компаний (кнопки 2-4) - БЕЗ дополнительного пароля, тот же "короткий
+#    путь", что пользователь попросил добавить в чат прямым сообщением
+#    ранее ("надо ввод новой компании после кнопки фантом... фантом
+#    вводишь и новая компания появляется"). См. PHANTOM_UNLOCKED_USER_IDS/
+#    _phantom_require_unlocked ниже.
+# 2) ADMIN_PANEL_PASSWORD (см. ниже) - ОТДЕЛЬНЫЙ, вложенный секрет ТОЛЬКО
+#    для кнопки 5 "🔐 Админ панель" (общая сводка - пользователи на
+#    линии/подписки/финансовый отчёт) - как и в чате, доступ в саму сводку
+#    защищён своим паролем поверх внешнего входа в Фантом.
+#
+# Ни один из паролей не привязан к referrer_type/владению кабинетом (в
+# отличие от apply_admin_partner_password/apply_legal_entity_password) -
+# поэтому их нельзя "запомнить" в постоянном поле БД пользователя. Вместо
+# этого - лёгкая разблокировка в памяти процесса (наборы user_id ниже):
+# один раз ввёл верный пароль в приложении - дальше остальные кнопки этого
+# уровня не спрашивают пароль заново, точно так же, как в чате пароль
+# спрашивался один раз при открытии, а не на каждую кнопку под ней.
+# Сбрасывается при перезапуске процесса (редеплое) - это ожидаемо и не
+# страшно, тот же уровень постоянства, что и у остальных user_state-флагов
+# в этом файле.
+PHANTOM_UNLOCKED_USER_IDS = set()
+
+PHANTOM_UNLOCK_API_PATH = '/admin_panel/phantom_unlock'
+
+
+async def handle_phantom_unlock_api(request):
+    """POST {password} -> разблокировать меню "Фантома" (5 кнопок) для
+    этого user_id в приложении. Тот же PHANTOM_SUBSCRIPTION_PASSWORD, что
+    раньше проверял phantom_password_flow в чате."""
+    user_id = _cabinet_require_user(request)
+    if not user_id:
+        return web.json_response({'error': 'invalid_init_data'}, status=401)
+    try:
+        body = await request.json()
+        password = (body.get('password') or '').strip()
+    except Exception:
+        return web.json_response({'error': 'invalid_body'}, status=400)
+    if password != PHANTOM_SUBSCRIPTION_PASSWORD:
+        return web.json_response({'error': 'wrong_password'}, status=400)
+    PHANTOM_UNLOCKED_USER_IDS.add(user_id)
+    return web.json_response({'ok': True})
+
+
+def _phantom_require_unlocked(request):
+    """Общая проверка для эндпоинтов управления компаниями ниже - валидный
+    initData И этот user_id уже ввёл верный PHANTOM_SUBSCRIPTION_PASSWORD в
+    этом запуске бота (см. PHANTOM_UNLOCKED_USER_IDS выше). Возвращает
+    user_id или None - вызывающий код тогда отвечает 403."""
+    user_id = _cabinet_require_user(request)
+    if not user_id or user_id not in PHANTOM_UNLOCKED_USER_IDS:
+        return None
+    return user_id
+
+
+ADMIN_PANEL_UNLOCKED_USER_IDS = set()
+
+ADMIN_PANEL_UNLOCK_API_PATH = '/admin_panel/unlock'
+
+
+async def handle_admin_panel_unlock_api(request):
+    """POST {password} -> разблокировать кнопку 5 "🔐 Админ панель" (сводка)
+    для этого user_id в приложении (см. ADMIN_PANEL_UNLOCKED_USER_IDS
+    выше). Тот же ADMIN_PANEL_PASSWORD, что и в чате
+    (admin_panel_password_confirm_flow) - ОТДЕЛЬНЫЙ секрет от
+    PHANTOM_SUBSCRIPTION_PASSWORD выше, эта проверка НЕ требует
+    предварительной разблокировки Фантома (тот же принцип, что и в чате -
+    пароль админ-панели проверялся сам по себе, второй раз)."""
+    user_id = _cabinet_require_user(request)
+    if not user_id:
+        return web.json_response({'error': 'invalid_init_data'}, status=401)
+    try:
+        body = await request.json()
+        password = (body.get('password') or '').strip()
+    except Exception:
+        return web.json_response({'error': 'invalid_body'}, status=400)
+    if password != ADMIN_PANEL_PASSWORD:
+        return web.json_response({'error': 'wrong_password'}, status=400)
+    ADMIN_PANEL_UNLOCKED_USER_IDS.add(user_id)
+    return web.json_response({'ok': True})
+
+
+def _admin_panel_require_unlocked(request):
+    """Общая проверка для /admin_panel/overview ниже - валидный initData И
+    этот user_id уже разблокировал ИМЕННО админ-панель (кнопка 5) верным
+    ADMIN_PANEL_PASSWORD. Возвращает user_id или None - вызывающий код
+    тогда отвечает 403."""
+    user_id = _cabinet_require_user(request)
+    if not user_id or user_id not in ADMIN_PANEL_UNLOCKED_USER_IDS:
+        return None
+    return user_id
+
+
+ADMIN_PANEL_OVERVIEW_API_PATH = '/admin_panel/overview'
+
+
+async def handle_admin_panel_overview_api(request):
+    """Та же сводка, что в чате собирает format_admin_overview_text (кнопка
+    "🔄 Обновить" под админ-панелью) - тут просто текстом в JSON, без
+    HTML-тегов (format_admin_overview_plain_text уже их снимает - своя
+    вёрстка в приложении, не Telegram parse_mode)."""
+    if not _admin_panel_require_unlocked(request):
+        return web.json_response({'error': 'forbidden'}, status=403)
+    return web.json_response({'overview_text': format_admin_overview_plain_text()})
+
+
+ADMIN_PANEL_ENTITIES_API_PATH = '/admin_panel/entities'
+
+
+async def handle_admin_panel_entities_api(request):
+    """GET ?kind=legal_entity|admin_partner -> список (то же самое, что в
+    чате показывали кнопки списка компаний). POST {kind, name, password} ->
+    создать новую запись (то же, что в чате делали "🏢 Новая
+    компания"/"Новый админ-партнёр" - см. add_legal_entity/add_admin_partner
+    выше). Требует ТОЛЬКО разблокировки Фантома (кнопка 1 уровня) - НЕ
+    требует отдельного пароля админ-панели, тот же "короткий путь", что
+    пользователь попросил."""
+    user_id = _phantom_require_unlocked(request)
+    if not user_id:
+        return web.json_response({'error': 'forbidden'}, status=403)
+    if request.method == 'GET':
+        kind = request.query.get('kind') or 'legal_entity'
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        if kind == 'admin_partner':
+            cursor.execute("SELECT id, name, password, owner_user_id FROM legal_entities WHERE kind = 'admin_partner' ORDER BY id DESC")
+        else:
+            cursor.execute("SELECT id, name, password, owner_user_id FROM legal_entities WHERE kind != 'admin_partner' OR kind IS NULL ORDER BY id DESC")
+        rows = cursor.fetchall()
+        conn.close()
+        entities = [
+            {'id': r[0], 'name': r[1], 'password': r[2], 'owner_user_id': r[3]}
+            for r in rows
+        ]
+        return web.json_response({'entities': entities})
+    try:
+        body = await request.json()
+        kind = body.get('kind') or 'legal_entity'
+        name = (body.get('name') or '').strip()
+        password = (body.get('password') or '').strip()
+    except Exception:
+        return web.json_response({'error': 'invalid_body'}, status=400)
+    if not name or not password:
+        return web.json_response({'error': 'invalid_body'}, status=400)
+    create_fn = add_admin_partner if kind == 'admin_partner' else add_legal_entity
+    new_id = create_fn(name, password)
+    if new_id is None:
+        return web.json_response({'error': 'password_taken'}, status=409)
+    return web.json_response({'ok': True, 'id': new_id, 'name': name, 'password': password})
+
+
+ADMIN_PANEL_ENTITY_DELETE_API_PATH = '/admin_panel/entity_delete'
+
+
+async def handle_admin_panel_entity_delete_api(request):
+    """POST {id} -> удалить юр.лицо/админ-партнёра, вместе с его машинами и
+    начислениями аренды (см. remove_legal_entity выше). То же самое, что в
+    чате делала кнопка "🗑 Удалить компанию" - тот же "короткий путь"
+    (только разблокировка Фантома, без отдельного пароля админ-панели)."""
+    if not _phantom_require_unlocked(request):
+        return web.json_response({'error': 'forbidden'}, status=403)
+    try:
+        body = await request.json()
+        entity_id = body.get('id')
+    except Exception:
+        return web.json_response({'error': 'invalid_body'}, status=400)
+    if not entity_id:
+        return web.json_response({'error': 'invalid_body'}, status=400)
+    deleted = remove_legal_entity(entity_id)
+    if not deleted:
+        return web.json_response({'error': 'not_found'}, status=404)
+    return web.json_response({'ok': True, 'deleted': deleted})
 
 
 def referral_withdraw_cancel_keyboard():
@@ -36895,234 +36972,21 @@ def format_admin_overview_text():
     return '\n'.join(lines) + '\n' + format_campaign_profit_text()
 
 
-def admin_panel_keyboard():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔄 Обновить", callback_data="admin_panel_refresh")],
-        [InlineKeyboardButton(text="📄 Отчёт в файл (.txt)", callback_data="admin_panel_export_txt")],
-        # ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "есть два
-        # человека, у которых есть доступ к админ реферальной программе...
-        # компания у нас сейчас внесена, и пароли есть только от одной...
-        # когда я захожу, то другой пользователь эту компанию уже не сможет
-        # зайти, потому что она уже введена под паролем... нужно создать
-        # ещё одну компанию юр.лица со своим паролем, чтобы пользователь
-        # мог зайти") - те же действия, что и у команд /add_legal_entity,
-        # /list_legal_entities, /add_admin_partner, /list_admin_partners
-        # (см. ниже), но кнопками, а НЕ слэш-командами - специально
-        # добавлено, чтобы не зависеть от ADMIN_TELEGRAM_ID (которая на
-        # Railway сейчас не задана) и от бага, из-за которого слэш-команды
-        # временно не отвечают (см. /myid). Доступ сюда уже защищён
-        # ADMIN_PANEL_PASSWORD (см. admin_panel_password_confirm_flow) -
-        # этого достаточно, дополнительных проверок не нужно.
-        [InlineKeyboardButton(text="🏢 Новое юрлицо", callback_data="admin_panel_new_legal_entity"),
-         InlineKeyboardButton(text="📋 Список юрлиц", callback_data="admin_panel_list_legal_entities")],
-        [InlineKeyboardButton(text="🤝 Новый админ-партнёр", callback_data="admin_panel_new_admin_partner"),
-         InlineKeyboardButton(text="📋 Список админ-партнёров", callback_data="admin_panel_list_admin_partners")],
-    ])
-
-
-# ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "надо ещё чтобы бот по
-# кнопке в админке готовил отчёт в файле тхт по нажатию формировал") -
-# простой html.unescape + regex-снятие тегов: format_admin_overview_text
-# собирает разметку под parse_mode='HTML' (<b>...</b> и т.п.), для .txt
-# файла эти теги не нужны - убираем их, оставляя только читаемый текст с
-# теми же переносами строк.
-_HTML_TAG_RE = re.compile(r'<[^>]+>')
+# ДОБАВЛЕНО 28.09.2026 (перенос "🔐 Админ панель" из чата в мини-приложение,
+# см. handle_admin_panel_overview_api выше) - format_admin_overview_text()
+# собирает текст с Telegram HTML-тегами (<b>...</b>), которые нужны только
+# для parse_mode='HTML' в чате; в мини-приложении своя вёрстка (<pre> в
+# unified_app_html), поэтому теги нужно снять - простая регулярка, без
+# сторонних библиотек (текст полностью свой, генерируется тут же выше, так
+# что произвольного/недоверенного HTML тут не бывает).
+_ADMIN_OVERVIEW_HTML_TAG_RE = re.compile(r'</?[a-zA-Z][^>]*>')
 
 
 def format_admin_overview_plain_text():
-    html_text = format_admin_overview_text()
-    return html.unescape(_HTML_TAG_RE.sub('', html_text))
-
-
-@router.callback_query(lambda c: c.data == "admin_panel_export_txt")
-async def admin_panel_export_txt(callback_query: types.CallbackQuery):
-    """Кнопка "📄 Отчёт в файл (.txt)" под админ-панелью - формирует ТЕ ЖЕ
-    данные (format_admin_overview_text), что и сама панель на экране, но как
-    .txt-файл, который можно переслать/сохранить/открыть в другом
-    приложении. Пароль уже проверен при открытии панели (это кнопка ПОД уже
-    показанным сообщением), повторно не спрашиваем."""
-    try:
-        await callback_query.answer()
-    except Exception:
-        pass
-    plain_text = format_admin_overview_plain_text()
-    filename = f"admin_report_{_sub_now().strftime('%Y-%m-%d_%H-%M')}.txt"
-    document = BufferedInputFile(plain_text.encode('utf-8'), filename=filename)
-    try:
-        await callback_query.message.answer_document(document, caption="🔐 Админ-отчёт")
-    except Exception:
-        logger.exception("❌ Не удалось сформировать .txt-отчёт админ-панели")
-        await callback_query.message.answer("❌ Не получилось сформировать файл, попробуй ещё раз.")
-
-
-# ПЕРЕНЕСЕНО 23.09.2026 (прямая просьба пользователя - "занеси кнопку админ
-# в фантом будет с двойной верефикацией") - отдельная точка входа
-# admin_panel_start/admin_panel_password_flow убрана; доступ теперь только
-# через "👻 ФАНТОМ" с двойным вводом пароля (см. phantom_password_flow/
-# admin_panel_password_confirm_flow в блоке "ПЛАТНАЯ ПОДПИСКА" выше).
-@router.callback_query(lambda c: c.data == "admin_panel_refresh")
-async def admin_panel_refresh(callback_query: types.CallbackQuery):
-    """Кнопка "🔄 Обновить" под уже показанной админ-панелью - пароль уже
-    проверен при открытии этого самого сообщения, повторно не спрашиваем
-    (тот же принцип, что и у "🔄 Обновить отчёт" campaign_profit)."""
-    fresh_text = format_admin_overview_text()
-    try:
-        await callback_query.message.edit_text(fresh_text, parse_mode='HTML', reply_markup=admin_panel_keyboard())
-        await callback_query.answer("Обновлено")
-    except Exception as e:
-        if 'message is not modified' in str(e):
-            await callback_query.answer("Данные не изменились")
-        else:
-            logger.error(f"❌ Не удалось обновить админ-панель: {e}")
-            await callback_query.answer("Ошибка обновления")
-
-
-# ==================== ДОБАВЛЕНИЕ ЮР.ЛИЦ/АДМИН-ПАРТНЁРОВ КНОПКАМИ ====================
-# ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "есть два человека, у
-# которых есть доступ к админ реферальной программе... компания у нас
-# сейчас внесена, и пароли есть только от одной... когда я захожу, то
-# другой пользователь эту компанию уже не сможет зайти, потому что она уже
-# введена под паролем... нужно создать ещё одну компанию юр.лица со своим
-# паролем, чтобы пользователь мог зайти") - ТА ЖЕ логика, что у команд
-# /add_legal_entity, /list_legal_entities, /add_admin_partner,
-# /list_admin_partners (см. ниже, ADMIN_TELEGRAM_ID-only), но через кнопки
-# админ-панели - специально, чтобы НЕ зависеть от ADMIN_TELEGRAM_ID
-# (переменной, которой сейчас нет в Variables на Railway) и от
-# (независимого от этого) бага с молчащими слэш-командами (см. /myid).
-# Доступ в саму админ-панель уже защищён ADMIN_PANEL_PASSWORD (см.
-# admin_panel_password_confirm_flow) - этого достаточно.
-@router.callback_query(lambda c: c.data == "admin_panel_new_legal_entity")
-async def admin_panel_new_legal_entity_start(callback_query: types.CallbackQuery):
-    try:
-        await callback_query.answer()
-    except Exception:
-        pass
-    user_id = callback_query.from_user.id
-    state = user_state.setdefault(user_id, {})
-    state['awaiting_admin_panel_new_legal_entity'] = True
-    await callback_query.message.answer(
-        "🏢 Введи название компании и пароль ОДНИМ сообщением, через пробел "
-        "(пароль - последнее слово):\nНапример: ООО Ромашка 261194\n\nИли «❌ ОТМЕНА»:",
-        reply_markup=referral_withdraw_cancel_keyboard()
-    )
-
-
-async def _admin_panel_new_entity_flow(message, flag_name, cancel_text, usage_example, create_fn, already_taken_text, success_extra_text):
-    """Общая логика для admin_panel_new_legal_entity_flow/
-    admin_panel_new_admin_partner_flow - обычная (недекорированная) функция,
-    чтобы её можно было и переиспользовать, и вызывать напрямую в тестах
-    (декорированные @router.message-функции под тестовым стабом aiogram
-    становятся MagicMock, см. комментарии у _send_referral_scheme_view
-    выше)."""
-    user_id = message.from_user.id
-    state = user_state[user_id]
-    text = (message.text or '').strip()
-    if text == "❌ ОТМЕНА":
-        state.pop(flag_name, None)
-        await message.answer("Отменено.", reply_markup=types.ReplyKeyboardRemove())
-        return
-    name, _, password = text.rpartition(' ')
-    name = name.strip()
-    password = password.strip()
-    if not name or not password:
-        await message.answer(f"{usage_example}\nПопробуй ещё раз или нажми «❌ ОТМЕНА»:")
-        return
-    state.pop(flag_name, None)
-    new_id = create_fn(name, password)
-    if new_id is None:
-        await message.answer(already_taken_text.format(password=password), reply_markup=types.ReplyKeyboardRemove())
-        return
-    await message.answer(
-        f"✅ «{name}» добавлен(о) (id={new_id}), пароль: {password}\n\n{success_extra_text}",
-        reply_markup=types.ReplyKeyboardRemove()
-    )
-
-
-@router.message(lambda message: user_state.get(message.from_user.id, {}).get('awaiting_admin_panel_new_legal_entity'))
-async def admin_panel_new_legal_entity_flow(message: types.Message):
-    """Ловит ЛЮБОЙ текст, пока ждём "название + пароль" нового юр.лица -
-    тот же приём, что и у остальных awaiting_*-хендлеров (referral_legal_
-    password_flow и т.п.)."""
-    await _admin_panel_new_entity_flow(
-        message,
-        flag_name='awaiting_admin_panel_new_legal_entity',
-        cancel_text="Отменено.",
-        usage_example="Нужно название И пароль через пробел, например: ООО Ромашка 261194",
-        create_fn=add_legal_entity,
-        already_taken_text="❌ Пароль «{password}» уже занят другим юр.лицом или админ-партнёром. Открой «🔐 АДМИН ПАНЕЛЬ» заново и попробуй с другим паролем.",
-        success_extra_text="Этот пароль вводится на экране «🏢 ЮРЛИЦО» реферальной программы - кто введёт его первым, станет владельцем «Кабинета автопарка».",
-    )
-
-
-@router.callback_query(lambda c: c.data == "admin_panel_new_admin_partner")
-async def admin_panel_new_admin_partner_start(callback_query: types.CallbackQuery):
-    try:
-        await callback_query.answer()
-    except Exception:
-        pass
-    user_id = callback_query.from_user.id
-    state = user_state.setdefault(user_id, {})
-    state['awaiting_admin_panel_new_admin_partner'] = True
-    await callback_query.message.answer(
-        "🤝 Введи имя партнёра и пароль ОДНИМ сообщением, через пробел "
-        "(пароль - последнее слово):\nНапример: Иван Петров admin2026\n\nИли «❌ ОТМЕНА»:",
-        reply_markup=referral_withdraw_cancel_keyboard()
-    )
-
-
-@router.message(lambda message: user_state.get(message.from_user.id, {}).get('awaiting_admin_panel_new_admin_partner'))
-async def admin_panel_new_admin_partner_flow(message: types.Message):
-    await _admin_panel_new_entity_flow(
-        message,
-        flag_name='awaiting_admin_panel_new_admin_partner',
-        cancel_text="Отменено.",
-        usage_example="Нужно имя И пароль через пробел, например: Иван Петров admin2026",
-        create_fn=add_admin_partner,
-        already_taken_text="❌ Пароль «{password}» уже занят (другим юр.лицом или админ-партнёром). Открой «🔐 АДМИН ПАНЕЛЬ» заново и попробуй с другим паролем.",
-        success_extra_text="Этот пароль вводится через «👻 ФАНТОМ» → «🤝 АДМИН РЕФЕРАЛЬНАЯ СИСТЕМА» - кто введёт его первым, станет владельцем своего личного кабинета.",
-    )
-
-
-@router.callback_query(lambda c: c.data == "admin_panel_list_legal_entities")
-async def admin_panel_list_legal_entities_cb(callback_query: types.CallbackQuery):
-    try:
-        await callback_query.answer()
-    except Exception:
-        pass
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, name, password, owner_user_id FROM legal_entities WHERE kind != 'admin_partner' OR kind IS NULL ORDER BY id DESC")
-    rows = cursor.fetchall()
-    conn.close()
-    if not rows:
-        await callback_query.message.answer("Юр.лиц пока нет - добавь кнопкой «🏢 Новое юрлицо».")
-        return
-    lines = ["🏢 *Юр.лица:*"]
-    for r in rows:
-        owner = f"владелец: {r[3]}" if r[3] else "владелец: — (никто ещё не вошёл)"
-        lines.append(f"#{r[0]} «{r[1]}» / пароль: `{r[2]}` / {owner}")
-    await callback_query.message.answer("\n".join(lines), parse_mode='Markdown')
-
-
-@router.callback_query(lambda c: c.data == "admin_panel_list_admin_partners")
-async def admin_panel_list_admin_partners_cb(callback_query: types.CallbackQuery):
-    try:
-        await callback_query.answer()
-    except Exception:
-        pass
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, name, password, owner_user_id FROM legal_entities WHERE kind = 'admin_partner' ORDER BY id DESC")
-    rows = cursor.fetchall()
-    conn.close()
-    if not rows:
-        await callback_query.message.answer("Админ-партнёров пока нет - добавь кнопкой «🤝 Новый админ-партнёр».")
-        return
-    lines = ["🤝 *Админ-партнёры:*"]
-    for r in rows:
-        owner = f"владелец: {r[3]}" if r[3] else "владелец: — (никто ещё не вошёл)"
-        lines.append(f"#{r[0]} «{r[1]}» / пароль: `{r[2]}` / {owner}")
-    await callback_query.message.answer("\n".join(lines), parse_mode='Markdown')
+    """То же самое, что format_admin_overview_text(), но без HTML-тегов -
+    для показа в мини-приложении (JSON -> обычный текстовый блок), а не в
+    Telegram-сообщении с parse_mode='HTML'."""
+    return _ADMIN_OVERVIEW_HTML_TAG_RE.sub('', format_admin_overview_text())
 
 
 # По просьбе пользователя (20.09.2026): "делай пуши перекрытий... и крупные
