@@ -1078,6 +1078,22 @@ def is_city_holiday_today(city):
             return True
     return False
 
+# ДОБАВЛЕНО 28.09.2026 (дашборд "Куда ехать" - объединённый экран, прямая
+# просьба пользователя - "сегоднящние государственные или городские
+# праздники") - как is_city_holiday_today выше, но возвращает САМ праздник
+# (dict с name/emoji), а не просто True/False: дашборду нужно показать
+# название праздника текстом, а не только использовать его как множитель
+# спроса (см. HOLIDAY_DEMAND_BOOST). Тот же список HOLIDAYS, та же проверка.
+def get_city_holiday_today(city):
+    today = get_city_now(city).date()
+    for holiday in HOLIDAYS:
+        y, m, d = holiday['date']
+        if (y, m, d) != (today.year, today.month, today.day):
+            continue
+        if holiday.get('is_national') or holiday.get('city') == city:
+            return holiday
+    return None
+
 # Экстремальная температура (очень холодно ИЛИ очень жарко) увеличивает
 # спрос на такси - люди меньше ходят пешком/ездят на самокатах и т.п.
 # Пороги в °C, множитель - тот же принцип, что у праздника/погоды выше.
@@ -8535,7 +8551,7 @@ async def score_airport_candidate(city, airport, category, user_lat=None, user_l
 
     status, _notice = get_airport_status(icao)
     if airport.get('closed') or status == 'closed':
-        return {'label': airport['name'], 'score': -1000, 'reasons': ['аэропорт закрыт'], 'closed': True, 'advice': None}
+        return {'label': airport['name'], 'score': -1000, 'reasons': ['аэропорт закрыт'], 'closed': True, 'advice': None, 'kind': 'airport'}
 
     avail = compute_current_availability(icao, relevant_class, zone_key=zone_key)
     score = avail['load']  # базовый балл - % загрузки прилётов на текущий час
@@ -8639,6 +8655,7 @@ async def score_airport_candidate(city, airport, category, user_lat=None, user_l
         'label': airport['name'], 'score': score, 'reasons': reasons, 'closed': False, 'advice': None,
         'lat': airport_coords[0] if airport_coords else None,
         'lon': airport_coords[1] if airport_coords else None,
+        'kind': 'airport',
     }
 
 # Развёрнутая рекомендация по типам заведений для "Город/центр" - по
@@ -9339,7 +9356,7 @@ def score_concert_event_candidates(city, category, limit=3):
         label = f"🎤 {post.get('title') or 'Мероприятие'}"
         candidates.append({
             'label': label, 'score': score, 'reasons': reasons, 'closed': False, 'advice': None,
-            'lat': post.get('lat'), 'lon': post.get('lon'),
+            'lat': post.get('lat'), 'lon': post.get('lon'), 'kind': 'event',
         })
     candidates.sort(key=lambda c: c['score'], reverse=True)
     return candidates[:limit]
@@ -9525,6 +9542,21 @@ async def compute_where_to_go(city, category, user_lat=None, user_lon=None, sele
 # дальше нейтральная точка. WHERE_TO_GO_RANK_EMOJI - медали 2 и 3 места
 # (1 место уже показано отдельным блоком "Сейчас лучше всего" с 🏆).
 WHERE_TO_GO_RANK_EMOJI = ['🥈', '🥉']
+
+# ДОБАВЛЕНО 28.09.2026 (дашборд "Куда ехать" - карусель рекомендаций,
+# прямая просьба пользователя - "рекомендации по районам с учетом
+# расстояние до 30 км от текущей позиции") - районы дальше этого радиуса от
+# водителя вообще не попадают в карусель (не просто штрафуются баллом, как
+# districtDistancePenalty - жёсткий потолок, тот же принцип, что уже есть у
+# аэропортов, см. AIRPORT_DISTANCE_PENALTY_FREE_KM выше, только там это
+# "штраф начинается после", а не "обрезаем совсем").
+WHERE_TO_GO_DISTRICT_MAX_KM = 30
+
+# Сколько карточек максимум показываем в карусели "Куда ехать" (дашборд) -
+# после топ-3 призовых мест (data.podium) ещё немного сильных районов в
+# пределах WHERE_TO_GO_DISTRICT_MAX_KM. Больше 8-9 карточек в горизонтальном
+# свайпе неудобно пролистывать на телефоне.
+WHERE_TO_GO_CAROUSEL_MAX_CARDS = 8
 
 def _where_to_go_score_bar(score):
     """Условная визуальная шкала загрузки под score (0-100%+) - просто
@@ -17809,6 +17841,8 @@ def where_to_go_webapp_html():
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Куда ехать</title>
 <script src=\"""" + TG_WEBAPP_JS_PROXY_PATH + """\"></script>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Unbounded:wght@600;700;800&family=Golos+Text:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
   :root { color-scheme: light dark; }
   * { box-sizing: border-box; }
@@ -17817,27 +17851,21 @@ def where_to_go_webapp_html():
     margin: 0; padding: 16px;
     padding-top: max(16px, calc(env(safe-area-inset-top, 0px) + var(--tg-chrome-top, 0px)));
     padding-bottom: max(16px, env(safe-area-inset-bottom, 0px));
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-family: 'Golos Text', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     background: #000; color: #fff; overscroll-behavior: none; touch-action: manipulation;
   }
-  h1 { font-size: 17px; margin: 0 0 2px; }
-  .sub { font-size: 12.5px; color: #9a9a9a; margin-bottom: 14px; }
+  h1 { font-family: 'Unbounded', sans-serif; font-size: 16px; font-weight: 700; margin: 0 0 12px; letter-spacing: .01em; }
   #state { text-align: center; padding: 60px 16px; opacity: .7; font-size: 14px; }
   .warn {
     background: #1c1c1c; border: 1px solid rgba(255,196,0,.35); border-radius: 12px;
     padding: 14px; font-size: 13.5px; line-height: 1.5; color: #ddd;
   }
-  .best {
-    background: linear-gradient(135deg, #1c1c1c, #000); border: 1.5px solid #FFC400;
-    border-radius: 16px; padding: 16px; margin-bottom: 16px; box-shadow: 0 4px 16px rgba(255,196,0,.15);
-    animation: wtgIn .35s ease both;
-  }
   @keyframes wtgIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
   @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after { animation-duration: .001ms !important; transition-duration: .001ms !important; }
   }
-  .best .tag { font-size: 12px; font-weight: 700; color: #FFC400; letter-spacing: .04em; text-transform: uppercase; }
-  .best .label { font-size: 19px; font-weight: 700; margin: 4px 0 8px; }
+  .tag { font-size: 12px; font-weight: 700; color: #FFC400; letter-spacing: .04em; text-transform: uppercase; }
+  .label { font-size: 19px; font-weight: 700; margin: 4px 0 8px; }
   .bar { font-size: 15px; letter-spacing: 2px; color: #FFC400; margin-bottom: 6px; }
   .bar .off { color: #555; }
   .reasons { font-size: 13.5px; color: #ccc; line-height: 1.45; }
@@ -17845,57 +17873,80 @@ def where_to_go_webapp_html():
     margin-top: 10px; background: rgba(255,196,0,.12); border-radius: 10px; padding: 9px 11px;
     font-size: 13px; color: #FFC400; line-height: 1.45;
   }
-  .list-title { font-size: 12.5px; font-weight: 700; color: #9a9a9a; text-transform: uppercase; letter-spacing: .04em; margin: 4px 0 8px; }
-  .banner {
-    font-size: 13.5px; color: #FFC400; background: rgba(255,196,0,.1);
-    border: 1px solid rgba(255,196,0,.25); border-radius: 10px; padding: 10px 12px;
-    margin-bottom: 14px; line-height: 1.45;
-  }
-  /* ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "перенеси
-     перекрытия наверх повыше, чтобы было видно, что это перекрытие") -
-     заметный красноватый блок сразу под шапкой, вместо мелкой серой строки
-     внизу экрана (см. .footnote). */
-  .closures-notice {
-    font-size: 13px; color: #ff8a80; background: rgba(255,82,82,.1);
-    border: 1px solid rgba(255,82,82,.3); border-radius: 10px; padding: 9px 12px;
-    margin-bottom: 12px; line-height: 1.4;
-  }
-  /* ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "по другому
-     аэропорту тоже нужна краткая информация - статус, количество
-     прилётов") - строка под датой/погодой с коротким статусом КАЖДОГО
-     аэропорта города, не только рекомендованного. */
-  .weather-line { font-size: 12.5px; color: #9a9a9a; margin-bottom: 10px; }
-  .airports-mini {
-    display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px;
-  }
-  .airports-mini .chip {
-    font-size: 11.5px; color: #ccc; background: #131313; border: 1px solid rgba(255,255,255,.08);
-    border-radius: 999px; padding: 5px 10px; white-space: nowrap;
-  }
-  .cand {
-    background: #131313; border: 1px solid rgba(255,255,255,.08); border-radius: 12px;
-    padding: 12px 13px; margin-bottom: 8px; display: flex; gap: 10px; align-items: flex-start;
-    animation: wtgIn .35s ease both;
-  }
-  .cand .rank { font-size: 18px; flex-shrink: 0; width: 22px; text-align: center; }
-  .cand .body { min-width: 0; flex: 1; }
-  .cand .label { font-size: 14.5px; font-weight: 700; }
-  .cand .bar { font-size: 13px; margin: 3px 0; }
-  .cand .reasons { font-size: 12.5px; color: #aaa; }
-  .cand .advice { margin-top: 6px; font-size: 12px; padding: 7px 9px; }
+  .list-title { font-size: 12.5px; font-weight: 700; color: #9a9a9a; text-transform: uppercase; letter-spacing: .04em; margin: 18px 0 8px; }
+  .list-title:first-child { margin-top: 0; }
   .go-btn {
     display: block; text-align: center; margin-top: 10px; padding: 10px 12px;
     background: #FFC400; color: #000; font-weight: 700; font-size: 13.5px;
     border-radius: 10px; text-decoration: none; transition: transform .12s;
   }
   .go-btn:active { transform: scale(.96); }
-  .cand .go-btn { margin-top: 8px; padding: 8px 10px; font-size: 12.5px; }
   .closed-box {
     margin-top: 14px; font-size: 12.5px; color: #999; background: #131313;
     border: 1px solid rgba(255,255,255,.08); border-radius: 10px; padding: 10px 12px;
   }
   .closed-box b { color: #ddd; }
   .footnote { font-size: 11.5px; color: #777; margin-top: 16px; line-height: 1.4; }
+
+  /* ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "сделать красивый
+     читабельный дашборд... обьеденить это все в дашборд" - дата/время/день
+     недели/погода/пробки/перекрытия/дождь/праздники/афиша/спрос по тарифам
+     сведены в ОДНУ карточку вместо стопки отдельных блоков, см. renderDashboard). */
+  .dashboard {
+    background: #131313; border: 1px solid rgba(255,255,255,.08); border-radius: 16px;
+    padding: 16px; margin-bottom: 18px; display: flex; flex-direction: column; gap: 12px;
+    animation: wtgIn .35s ease both;
+  }
+  .dash-time { font-family: 'Unbounded', sans-serif; font-size: 15px; font-weight: 700; letter-spacing: .01em; }
+  .dash-weather { font-size: 13px; color: #ccc; display: flex; flex-wrap: wrap; gap: 8px 14px; }
+  .dash-weather span { white-space: nowrap; }
+  .dash-alert {
+    font-size: 12.5px; border-radius: 10px; padding: 9px 11px; line-height: 1.4;
+  }
+  .dash-alert.danger { color: #ff8a80; background: rgba(255,82,82,.1); border: 1px solid rgba(255,82,82,.3); }
+  .dash-alert.gold { color: #FFC400; background: rgba(255,196,0,.1); border: 1px solid rgba(255,196,0,.25); }
+  .dash-alert.info { color: #9fd3ff; background: rgba(90,170,255,.1); border: 1px solid rgba(90,170,255,.25); }
+  .dash-section-label {
+    font-size: 10.5px; font-weight: 700; color: #777; text-transform: uppercase;
+    letter-spacing: .05em; margin-bottom: 6px;
+  }
+  .dash-tariffs { display: flex; flex-wrap: wrap; gap: 6px; }
+  .tariff-chip {
+    font-size: 11.5px; border-radius: 999px; padding: 5px 10px; white-space: nowrap; border: 1px solid;
+  }
+  .tariff-chip.low { color: #888; background: #1a1a1a; border-color: rgba(255,255,255,.08); }
+  .tariff-chip.normal { color: #ccc; background: #1c1c1c; border-color: rgba(255,255,255,.14); }
+  .tariff-chip.high { color: #FFC400; background: rgba(255,196,0,.12); border-color: rgba(255,196,0,.4); }
+  .dash-events { display: flex; flex-direction: column; gap: 5px; }
+  .dash-event { font-size: 12px; color: #ccc; line-height: 1.4; }
+  .dash-event b { color: #fff; }
+  .airports-mini { display: flex; flex-wrap: wrap; gap: 6px; }
+  .airports-mini .chip {
+    font-size: 11.5px; color: #ccc; background: #1c1c1c; border: 1px solid rgba(255,255,255,.1);
+    border-radius: 999px; padding: 5px 10px; white-space: nowrap;
+  }
+
+  /* ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "карточки
+     рекомендаций районов куда ехать сделать чтобы можно было смахивать в
+     сторону, сделать каруселью под дашбордом") - горизонтальная свайп-
+     карусель со scroll-snap вместо стопки карточек друг под другом. */
+  .carousel-hint { font-size: 11px; color: #777; margin: -2px 0 10px; }
+  .carousel {
+    display: flex; gap: 10px; overflow-x: auto; scroll-snap-type: x mandatory;
+    padding: 2px 2px 6px; margin: 0 -2px 4px; -webkit-overflow-scrolling: touch;
+  }
+  .carousel::-webkit-scrollbar { height: 0; }
+  .carousel .card {
+    flex: 0 0 84%; scroll-snap-align: center; min-width: 0;
+    background: #131313; border: 1px solid rgba(255,255,255,.08); border-radius: 16px;
+    padding: 15px; animation: wtgIn .35s ease both;
+  }
+  .carousel .card.is-best {
+    background: linear-gradient(135deg, #1c1c1c, #000); border: 1.5px solid #FFC400;
+    box-shadow: 0 4px 16px rgba(255,196,0,.15);
+  }
+  .carousel .card .kind-tag { font-size: 11.5px; color: #888; margin-bottom: 4px; }
+  .carousel .card .dist { color: #666; }
 </style>
 </head>
 <body>
@@ -17912,7 +17963,6 @@ def where_to_go_webapp_html():
 <div id="state">📍 Определяю твою локацию…</div>
 <div id="app" style="display:none">
   <h1 id="cityTitle">🧭 Куда ехать</h1>
-  <div class="sub" id="timeSub"></div>
   <div id="content"></div>
 </div>
 <script>
@@ -17949,10 +17999,6 @@ def where_to_go_webapp_html():
   const params = new URLSearchParams(window.location.search);
   const city = params.get('city') || '';
   const category = params.get('category') || '';
-
-  // Ранговые эмодзи для 2/3 места - тот же принцип, что WHERE_TO_GO_RANK_EMOJI
-  // в Python (format_where_to_go_text) - держать в синхроне при правках там.
-  const RANK_EMOJI = ['🥈', '🥉'];
 
   function scoreBar(score) {
     const filled = Math.min(5, Math.max(0, Math.round(score / 20)));
@@ -18020,6 +18066,111 @@ def where_to_go_webapp_html():
     });
   }
 
+  // ДОБАВЛЕНО 28.09.2026 (дашборд "Куда ехать" - объединённый экран, прямая
+  // просьба пользователя - карусель карточек по типу кандидата). Держать в
+  // синхроне с 'kind' в Python (score_district_candidates/score_airport_
+  // candidate/score_concert_event_candidates/score_city_candidate).
+  const KIND_ICON = { district: '🏘', center: '🏙', airport: '✈️', event: '🎤' };
+  const KIND_LABEL = { district: 'Район', center: 'Центр города', airport: 'Аэропорт', event: 'Событие по афише' };
+  const TARIFF_LEVEL_LABEL = { high: 'повышенный', normal: 'обычный', low: 'низкий' };
+
+  // ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "обьеденить это все
+  // в дашборд": дата/время/день недели/погода/дождь/праздники/пробки/
+  // перекрытия/афиша/спрос по тарифам/аэропорты - ОДНОЙ карточкой сразу под
+  // шапкой, вместо стопки отдельных блоков, как было раньше).
+  function renderDashboard(data) {
+    const dash = document.getElementById('dashboard');
+    let html = '<div class="dash-time">' + (data.time_label || '') + '</div>';
+
+    const weatherParts = [];
+    if (data.weather_label) weatherParts.push('<span>' + data.weather_label + '</span>');
+    if (data.rain_label) weatherParts.push('<span>🌧 Дождь ' + data.rain_label + '</span>');
+    if (weatherParts.length) html += '<div class="dash-weather">' + weatherParts.join('') + '</div>';
+
+    if (data.holiday_label) {
+      html += '<div class="dash-alert gold">' + data.holiday_label + ' - спрос по городу выше обычного.</div>';
+    }
+    if (data.traffic_notice) {
+      html += '<div class="dash-alert danger">' + data.traffic_notice + '</div>';
+    }
+    if (data.closures_notice) {
+      html += '<div class="dash-alert danger">' + data.closures_notice + '</div>';
+    }
+    if (data.banner) {
+      html += '<div class="dash-alert info">' + data.banner + '</div>';
+    }
+
+    if (data.tariff_demand && data.tariff_demand.length) {
+      html += '<div><div class="dash-section-label">Спрос по тарифам сейчас</div><div class="dash-tariffs">';
+      data.tariff_demand.forEach(t => {
+        html += '<span class="tariff-chip ' + t.level + '">' + t.tariff + ' · ' + (TARIFF_LEVEL_LABEL[t.level] || t.level) + '</span>';
+      });
+      html += '</div></div>';
+    }
+
+    if (data.top_events && data.top_events.length) {
+      html += '<div><div class="dash-section-label">🎤 Афиша на сегодня</div><div class="dash-events">';
+      data.top_events.forEach(ev => {
+        const place = ev.place ? ' · ' + ev.place : '';
+        html += '<div class="dash-event"><b>' + ev.time_label + '</b> · ' + ev.title + place + '</div>';
+      });
+      html += '</div></div>';
+    }
+
+    if (data.airports_summary && data.airports_summary.length) {
+      html += '<div><div class="dash-section-label">Аэропорты</div><div class="airports-mini">';
+      data.airports_summary.forEach(a => {
+        const flightsText = a.flights > 0 ? (a.flights + ' ' + (a.flights === 1 ? 'рейс' : (a.flights < 5 ? 'рейса' : 'рейсов'))) : 'рейсов нет';
+        html += '<div class="chip">✈️ ' + a.name + ' · ' + flightsText + ' · ' + a.status_emoji + ' ' + a.status_label.toLowerCase() + '</div>';
+      });
+      html += '</div></div>';
+    }
+
+    dash.innerHTML = html;
+  }
+
+  function renderCarouselCard(c) {
+    const kindIcon = KIND_ICON[c.kind] || '📍';
+    const kindLabel = KIND_LABEL[c.kind] || '';
+    const distText = (c.dist_km !== null && c.dist_km !== undefined) ? ' · ~' + c.dist_km.toFixed(1) + ' км' : '';
+    const card = document.createElement('div');
+    card.className = 'card' + (c.is_best ? ' is-best' : '');
+    card.innerHTML =
+      (c.is_best ? '<div class="tag">🏆 Сейчас лучше всего</div>' : '') +
+      '<div class="kind-tag">' + kindIcon + ' ' + kindLabel + '<span class="dist">' + distText + '</span></div>' +
+      '<div class="label">' + c.label + '</div>' +
+      '<div class="bar">' + scoreBar(c.score) + '</div>' +
+      '<div class="reasons">' + c.reasons.join(', ') + '</div>' +
+      renderAdvice(c.advice) +
+      renderGoButton(c);
+    return card;
+  }
+
+  // ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "карточки
+  // рекомендаций районов куда ехать сделать чтобы можно было смахивать в
+  // сторону, сделать каруселью под дашбордом") - карусель строится из
+  // ГОТОВОГО списка data.carousel (первое место + сильные районы в пределах
+  // 30 км, порядок и дедуп уже посчитаны сервером, см. handle_where_to_go_data_api).
+  function renderCarousel(data) {
+    const wrap = document.getElementById('carouselWrap');
+    const list = data.carousel || [];
+    if (!list.length) { wrap.style.display = 'none'; return; }
+    wrap.style.display = 'block';
+    const title = document.createElement('div');
+    title.className = 'list-title';
+    title.textContent = '🚕 Куда лучше поехать';
+    const hint = document.createElement('div');
+    hint.className = 'carousel-hint';
+    hint.textContent = '👉 листай карточки в сторону';
+    const track = document.createElement('div');
+    track.className = 'carousel';
+    list.forEach(c => track.appendChild(renderCarouselCard(c)));
+    wrap.innerHTML = '';
+    wrap.appendChild(title);
+    wrap.appendChild(hint);
+    wrap.appendChild(track);
+  }
+
   async function load() {
     if (!city || !category) {
       document.getElementById('state').textContent = 'Город или категория не выбраны.';
@@ -18047,144 +18198,25 @@ def where_to_go_webapp_html():
       if (!resp.ok) throw new Error('http_' + resp.status);
       const data = await resp.json();
 
+      // ДОБАВЛЕНО 24.09.2026 (прямая просьба пользователя - "куда поехать
+      // показывает относительно чекбоксов что выбрал на старте смены" - и в
+      // целом данные всегда для ГОРОДА СМЕНЫ, см. city/category выше и
+      // handle_where_to_go_data_api: город берётся из query-параметра,
+      // выбранного при старте смены/city-бейджем наверху, НЕ из текущей
+      // физической геолокации - lat/lon ниже влияют только на расстояние
+      // ВНУТРИ этого города, не на выбор самого города).
       document.getElementById('cityTitle').textContent = '🧭 Куда ехать AI · ' + (data.city_name || '');
-      document.getElementById('timeSub').textContent = data.time_label || '';
 
       const content = document.getElementById('content');
-      content.innerHTML = '';
+      content.innerHTML = '<div class="dashboard" id="dashboard"></div><div id="carouselWrap"></div>';
+      renderDashboard(data);
+      renderCarousel(data);
 
-      // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "вверху где
-      // пишешь время дату надо писать... температуру с осадками") - строка
-      // погоды сразу под шапкой (data.weather_label из
-      // handle_where_to_go_data_api, тот же снепшот, что у "🌤 ПОГОДА").
-      if (data.weather_label) {
-        const weatherLine = document.createElement('div');
-        weatherLine.className = 'weather-line';
-        weatherLine.textContent = data.weather_label;
-        content.appendChild(weatherLine);
-      }
-
-      // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "перенеси
-      // перекрытия наверх повыше, чтобы было видно, что это перекрытие") -
-      // раньше это было приклеено к footnote внизу экрана мелким серым
-      // текстом, теперь заметный блок сразу под шапкой/погодой.
-      if (data.closures_notice) {
-        const closuresBox = document.createElement('div');
-        closuresBox.className = 'closures-notice';
-        closuresBox.textContent = data.closures_notice;
-        content.appendChild(closuresBox);
-      }
-
-      // ДОБАВЛЕНО 26.09.2026 (прямая просьба пользователя - "обязательным
-      // информированием водителя" о пробках) - уровень пробок ВСЕГДА
-      // показываем отдельной строкой, если он известен (data.traffic_notice
-      // из handle_where_to_go_data_api/get_city_traffic_level).
-      if (data.traffic_notice) {
-        const trafficBox = document.createElement('div');
-        trafficBox.className = 'closures-notice';
-        trafficBox.textContent = data.traffic_notice;
-        content.appendChild(trafficBox);
-      }
-
-      // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "по другому
-      // аэропорту тоже нужна краткая информация") - чипы со статусом/
-      // числом прилётов КАЖДОГО аэропорта города (data.airports_summary),
-      // не только рекомендованного в карточке ниже.
-      if (data.airports_summary && data.airports_summary.length) {
-        const airportsRow = document.createElement('div');
-        airportsRow.className = 'airports-mini';
-        data.airports_summary.forEach(a => {
-          const chip = document.createElement('div');
-          chip.className = 'chip';
-          const flightsText = a.flights > 0 ? (a.flights + ' ' + (a.flights === 1 ? 'рейс' : (a.flights < 5 ? 'рейса' : 'рейсов'))) : 'рейсов нет';
-          chip.textContent = '✈️ ' + a.name + ' · ' + flightsText + ' · ' + a.status_emoji + ' ' + a.status_label.toLowerCase();
-          airportsRow.appendChild(chip);
-        });
-        content.appendChild(airportsRow);
-      }
-
-      // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "рекомендации
-      // для водителя на ближайший день сверху") - короткий совет-баннер
-      // ПЕРЕД призовыми местами (см. banner в handle_where_to_go_data_api).
-      if (data.banner) {
-        const bannerBox = document.createElement('div');
-        bannerBox.className = 'banner';
-        bannerBox.textContent = data.banner;
-        content.appendChild(bannerBox);
-      }
-
-      const podium = data.podium || [];
-      if (!podium.length) {
+      if (!data.carousel || !data.carousel.length) {
         const warn = document.createElement('div');
         warn.className = 'warn';
         warn.textContent = '⛔ Все аэропорты города сейчас закрыты - ориентируйся на центр города и часы пика.';
         content.appendChild(warn);
-      } else {
-        // ИЗМЕНЕНО 22.09.2026 (та же просьба - "первое, второе, третье
-        // место, дальше рекомендуемые районы") - призовые места теперь
-        // СТРОГО топ-3 по баллу (data.podium с сервера), а не весь список.
-        const best = podium[0];
-        const bestBox = document.createElement('div');
-        bestBox.className = 'best';
-        bestBox.innerHTML =
-          '<div class="tag">🏆 Сейчас лучше всего</div>' +
-          '<div class="label">' + best.label + '</div>' +
-          '<div class="bar">' + scoreBar(best.score) + '</div>' +
-          '<div class="reasons">' + best.reasons.join(', ') + '</div>' +
-          renderAdvice(best.advice) +
-          renderGoButton(best);
-        content.appendChild(bestBox);
-
-        const rest = podium.slice(1);
-        if (rest.length) {
-          const title = document.createElement('div');
-          title.className = 'list-title';
-          title.textContent = 'Остальные варианты';
-          content.appendChild(title);
-          rest.forEach((c, i) => {
-            const rank = i < RANK_EMOJI.length ? RANK_EMOJI[i] : '▫️';
-            const row = document.createElement('div');
-            row.className = 'cand';
-            row.innerHTML =
-              '<div class="rank">' + rank + '</div>' +
-              '<div class="body">' +
-                '<div class="label">' + c.label + '</div>' +
-                '<div class="bar">' + scoreBar(c.score) + '</div>' +
-                '<div class="reasons">' + c.reasons.join(', ') + '</div>' +
-                renderAdvice(c.advice) +
-                renderGoButton(c) +
-              '</div>';
-            content.appendChild(row);
-          });
-        }
-      }
-
-      // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "дальше идут
-      // рекомендуемые районы, сортировать по удалённости - чем ближе, тем
-      // выше") - отдельный блок ПОД призовыми местами, районы уже
-      // отсортированы по удалённости сервером (см. data.districts в
-      // handle_where_to_go_data_api - НЕ по баллу спроса, в отличие от
-      // призовых мест выше). Район может повториться и в призовых местах,
-      // и здесь - это осознанно (разные вопросы: "что выгоднее" и "что
-      // ближе").
-      if (data.districts && data.districts.length) {
-        const districtsTitle = document.createElement('div');
-        districtsTitle.className = 'list-title';
-        districtsTitle.textContent = '🏘 Рекомендуемые районы (по удалённости)';
-        content.appendChild(districtsTitle);
-        data.districts.forEach((c) => {
-          const row = document.createElement('div');
-          row.className = 'cand';
-          row.innerHTML =
-            '<div class="rank">🏘</div>' +
-            '<div class="body">' +
-              '<div class="label">' + c.label + '</div>' +
-              '<div class="bar">' + scoreBar(c.score) + '</div>' +
-              '<div class="reasons">' + c.reasons.join(', ') + '</div>' +
-              renderGoButton(c) +
-            '</div>';
-          content.appendChild(row);
-        });
       }
 
       if (data.closed && data.closed.length) {
@@ -18379,34 +18411,67 @@ def unified_app_html():
   .soon-box p { font-size: 13px; line-height: 1.5; margin: 0; max-width: 260px; }
 
   #wtg-state { text-align: center; padding: 60px 16px; opacity: .7; font-size: 14px; }
-  .best {
-    background: linear-gradient(135deg, #1c1c1c, #000); border: 1.5px solid #FFC400;
-    border-radius: 16px; padding: 16px; margin-bottom: 16px; box-shadow: 0 4px 16px rgba(255,196,0,.15);
-  }
-  .best .tag { font-size: 12px; font-weight: 700; color: #FFC400; letter-spacing: .04em; text-transform: uppercase; }
-  .best .label { font-size: 19px; font-weight: 700; margin: 4px 0 8px; }
+  .tag { font-size: 12px; font-weight: 700; color: #FFC400; letter-spacing: .04em; text-transform: uppercase; }
+  .label { font-size: 19px; font-weight: 700; margin: 4px 0 8px; }
   .bar { font-size: 15px; letter-spacing: 2px; color: #FFC400; margin-bottom: 6px; }
   .bar .off { color: #555; }
   .reasons { font-size: 13.5px; color: #ccc; line-height: 1.45; }
   .advice { margin-top: 10px; background: rgba(255,196,0,.12); border-radius: 10px; padding: 9px 11px; font-size: 13px; color: #FFC400; line-height: 1.45; }
-  .list-title { font-size: 12.5px; font-weight: 700; color: #9a9a9a; text-transform: uppercase; letter-spacing: .04em; margin: 14px 0 8px; }
-  .banner { font-size: 13.5px; color: #FFC400; background: rgba(255,196,0,.1); border: 1px solid rgba(255,196,0,.25); border-radius: 10px; padding: 10px 12px; margin-bottom: 14px; line-height: 1.45; }
-  .closures-notice { font-size: 13px; color: #ff8a80; background: rgba(255,82,82,.1); border: 1px solid rgba(255,82,82,.3); border-radius: 10px; padding: 9px 12px; margin-bottom: 12px; line-height: 1.4; }
-  .weather-line { font-size: 12.5px; color: #9a9a9a; margin-bottom: 10px; }
-  .airports-mini { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }
-  .airports-mini .chip { font-size: 11.5px; color: #ccc; background: #131313; border: 1px solid rgba(255,255,255,.08); border-radius: 999px; padding: 5px 10px; white-space: nowrap; }
-  .cand { background: #131313; border: 1px solid rgba(255,255,255,.08); border-radius: 12px; padding: 12px 13px; margin-bottom: 8px; display: flex; gap: 10px; align-items: flex-start; }
-  .cand .rank { font-size: 18px; flex-shrink: 0; width: 22px; text-align: center; }
-  .cand .body { min-width: 0; flex: 1; }
-  .cand .label { font-size: 14.5px; font-weight: 700; }
-  .cand .bar { font-size: 13px; margin: 3px 0; }
-  .cand .reasons { font-size: 12.5px; color: #aaa; }
-  .cand .advice { margin-top: 6px; font-size: 12px; padding: 7px 9px; }
+  .list-title { font-size: 12.5px; font-weight: 700; color: #9a9a9a; text-transform: uppercase; letter-spacing: .04em; margin: 18px 0 8px; }
+  .list-title:first-child { margin-top: 0; }
   .go-btn { display: block; text-align: center; margin-top: 10px; padding: 10px 12px; background: #FFC400; color: #000; font-weight: 700; font-size: 13.5px; border-radius: 10px; text-decoration: none; }
-  .cand .go-btn { margin-top: 8px; padding: 8px 10px; font-size: 12.5px; }
   .closed-box { margin-top: 14px; font-size: 12.5px; color: #999; background: #131313; border: 1px solid rgba(255,255,255,.08); border-radius: 10px; padding: 10px 12px; }
   .closed-box b { color: #ddd; }
   .footnote { font-size: 11.5px; color: #777; margin-top: 16px; line-height: 1.4; }
+
+  /* ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "сделать красивый
+     читабельный дашборд... обьеденить это все в дашборд" - вкладка "Куда
+     ехать" внутри единого приложения, та же карточка-дашборд + карусель,
+     что и у отдельной страницы where_to_go_webapp_html(), см. её комментарии). */
+  @keyframes wtgIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+  @media (prefers-reduced-motion: reduce) {
+    #panel-whereto *, #panel-whereto *::before, #panel-whereto *::after { animation-duration: .001ms !important; }
+  }
+  .dashboard {
+    background: #131313; border: 1px solid rgba(255,255,255,.08); border-radius: 16px;
+    padding: 16px; margin-bottom: 18px; display: flex; flex-direction: column; gap: 12px;
+    animation: wtgIn .35s ease both;
+  }
+  .dash-time { font-family: 'Unbounded', sans-serif; font-size: 15px; font-weight: 700; letter-spacing: .01em; }
+  .dash-weather { font-size: 13px; color: #ccc; display: flex; flex-wrap: wrap; gap: 8px 14px; }
+  .dash-weather span { white-space: nowrap; }
+  .dash-alert { font-size: 12.5px; border-radius: 10px; padding: 9px 11px; line-height: 1.4; }
+  .dash-alert.danger { color: #ff8a80; background: rgba(255,82,82,.1); border: 1px solid rgba(255,82,82,.3); }
+  .dash-alert.gold { color: #FFC400; background: rgba(255,196,0,.1); border: 1px solid rgba(255,196,0,.25); }
+  .dash-alert.info { color: #9fd3ff; background: rgba(90,170,255,.1); border: 1px solid rgba(90,170,255,.25); }
+  .dash-section-label { font-size: 10.5px; font-weight: 700; color: #777; text-transform: uppercase; letter-spacing: .05em; margin-bottom: 6px; }
+  .dash-tariffs { display: flex; flex-wrap: wrap; gap: 6px; }
+  .tariff-chip { font-size: 11.5px; border-radius: 999px; padding: 5px 10px; white-space: nowrap; border: 1px solid; }
+  .tariff-chip.low { color: #888; background: #1a1a1a; border-color: rgba(255,255,255,.08); }
+  .tariff-chip.normal { color: #ccc; background: #1c1c1c; border-color: rgba(255,255,255,.14); }
+  .tariff-chip.high { color: #FFC400; background: rgba(255,196,0,.12); border-color: rgba(255,196,0,.4); }
+  .dash-events { display: flex; flex-direction: column; gap: 5px; }
+  .dash-event { font-size: 12px; color: #ccc; line-height: 1.4; }
+  .dash-event b { color: #fff; }
+  .airports-mini { display: flex; flex-wrap: wrap; gap: 6px; }
+  .airports-mini .chip { font-size: 11.5px; color: #ccc; background: #1c1c1c; border: 1px solid rgba(255,255,255,.1); border-radius: 999px; padding: 5px 10px; white-space: nowrap; }
+  .carousel-hint { font-size: 11px; color: #777; margin: -2px 0 10px; }
+  .carousel {
+    display: flex; gap: 10px; overflow-x: auto; scroll-snap-type: x mandatory;
+    padding: 2px 2px 6px; margin: 0 -2px 4px; -webkit-overflow-scrolling: touch;
+  }
+  .carousel::-webkit-scrollbar { height: 0; }
+  .carousel .card {
+    flex: 0 0 84%; scroll-snap-align: center; min-width: 0;
+    background: #131313; border: 1px solid rgba(255,255,255,.08); border-radius: 16px;
+    padding: 15px; animation: wtgIn .35s ease both;
+  }
+  .carousel .card.is-best {
+    background: linear-gradient(135deg, #1c1c1c, #000); border: 1.5px solid #FFC400;
+    box-shadow: 0 4px 16px rgba(255,196,0,.15);
+  }
+  .carousel .card .kind-tag { font-size: 11.5px; color: #888; margin-bottom: 4px; }
+  .carousel .card .dist { color: #666; }
 
   .svc-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
   /* ИЗМЕНЕНО 27.09.2026 (прямая просьба пользователя со скриншотом -
@@ -18732,7 +18797,8 @@ def unified_app_html():
     <div class="panel" id="panel-whereto" hidden>
       <div id="wtg-state">📍 Определяю твою локацию…</div>
       <div id="wtg-app" hidden>
-        <div class="weather-line" id="wtgTimeSub"></div>
+        <div class="dashboard" id="wtg-dashboard"></div>
+        <div id="wtg-carouselWrap"></div>
         <div id="wtg-content"></div>
       </div>
     </div>
@@ -19160,7 +19226,6 @@ def unified_app_html():
     if (name === 'cabinet' && !loaded.cabinet) { loaded.cabinet = true; loadCabinetFrame(); }
   }
 
-  const RANK_EMOJI = ['🥈', '🥉'];
   function scoreBar(score) {
     const filled = Math.min(5, Math.max(0, Math.round(score / 20)));
     let s = '';
@@ -19180,6 +19245,97 @@ def unified_app_html():
     return '<a class="go-btn" href="' + url + '" target="_blank" rel="noopener">🚗 ПОЕХАЛИ</a>';
   }
 
+  // ДОБАВЛЕНО 28.09.2026 (дашборд "Куда ехать" - объединённый экран, прямая
+  // просьба пользователя - "сделать красивый читабельный дашборд... это все
+  // объеденить в дашборд, и только карточки рекомендаций районов сделать
+  // каруселью под дашбордом"). Буквальная копия одноимённых функций из
+  // where_to_go_webapp_html() - держать в синхроне при правках там.
+  const KIND_ICON = { district: '🏘', center: '🏙', airport: '✈️', event: '🎤' };
+  const KIND_LABEL = { district: 'Район', center: 'Центр города', airport: 'Аэропорт', event: 'Событие по афише' };
+  const TARIFF_LEVEL_LABEL = { high: 'повышенный', normal: 'обычный', low: 'низкий' };
+
+  function renderWtgDashboard(data) {
+    const dash = document.getElementById('wtg-dashboard');
+    let html = '<div class="dash-time">' + (data.time_label || '') + '</div>';
+
+    const weatherParts = [];
+    if (data.weather_label) weatherParts.push('<span>' + data.weather_label + '</span>');
+    if (data.rain_label) weatherParts.push('<span>🌧 Дождь ' + data.rain_label + '</span>');
+    if (weatherParts.length) html += '<div class="dash-weather">' + weatherParts.join('') + '</div>';
+
+    if (data.holiday_label) {
+      html += '<div class="dash-alert gold">' + data.holiday_label + ' - спрос по городу выше обычного.</div>';
+    }
+    if (data.traffic_notice) {
+      html += '<div class="dash-alert danger">' + data.traffic_notice + '</div>';
+    }
+    if (data.closures_notice) {
+      html += '<div class="dash-alert danger">' + data.closures_notice + '</div>';
+    }
+    if (data.banner) {
+      html += '<div class="dash-alert info">' + data.banner + '</div>';
+    }
+
+    if (data.tariff_demand && data.tariff_demand.length) {
+      html += '<div><div class="dash-section-label">Спрос по тарифам сейчас</div><div class="dash-tariffs">';
+      data.tariff_demand.forEach(function (t) {
+        html += '<span class="tariff-chip ' + t.level + '">' + t.tariff + ' · ' + (TARIFF_LEVEL_LABEL[t.level] || t.level) + '</span>';
+      });
+      html += '</div></div>';
+    }
+
+    if (data.top_events && data.top_events.length) {
+      html += '<div><div class="dash-section-label">🎤 Афиша на сегодня</div><div class="dash-events">';
+      data.top_events.forEach(function (ev) {
+        const place = ev.place ? ' · ' + ev.place : '';
+        html += '<div class="dash-event"><b>' + ev.time_label + '</b> · ' + ev.title + place + '</div>';
+      });
+      html += '</div></div>';
+    }
+
+    if (data.airports_summary && data.airports_summary.length) {
+      html += '<div><div class="dash-section-label">Аэропорты</div><div class="airports-mini">';
+      data.airports_summary.forEach(function (a) {
+        const flightsText = a.flights > 0 ? (a.flights + ' ' + (a.flights === 1 ? 'рейс' : (a.flights < 5 ? 'рейса' : 'рейсов'))) : 'рейсов нет';
+        html += '<div class="chip">✈️ ' + a.name + ' · ' + flightsText + ' · ' + a.status_emoji + ' ' + a.status_label.toLowerCase() + '</div>';
+      });
+      html += '</div></div>';
+    }
+
+    dash.innerHTML = html;
+  }
+
+  function renderWtgCarouselCard(c) {
+    const kindIcon = KIND_ICON[c.kind] || '📍';
+    const kindLabel = KIND_LABEL[c.kind] || '';
+    const distText = (c.dist_km !== null && c.dist_km !== undefined) ? ' · ~' + c.dist_km.toFixed(1) + ' км' : '';
+    const card = document.createElement('div');
+    card.className = 'card' + (c.is_best ? ' is-best' : '');
+    card.innerHTML =
+      (c.is_best ? '<div class="tag">🏆 Сейчас лучше всего</div>' : '') +
+      '<div class="kind-tag">' + kindIcon + ' ' + kindLabel + '<span class="dist">' + distText + '</span></div>' +
+      '<div class="label">' + c.label + '</div>' +
+      '<div class="bar">' + scoreBar(c.score) + '</div>' +
+      '<div class="reasons">' + c.reasons.join(', ') + '</div>' +
+      renderAdvice(c.advice) + renderGoButton(c);
+    return card;
+  }
+
+  function renderWtgCarousel(data) {
+    const wrap = document.getElementById('wtg-carouselWrap');
+    const list = data.carousel || [];
+    if (!list.length) { wrap.style.display = 'none'; return; }
+    wrap.style.display = 'block';
+    const title = document.createElement('div'); title.className = 'list-title'; title.textContent = '🚕 Куда лучше поехать';
+    const hint = document.createElement('div'); hint.className = 'carousel-hint'; hint.textContent = '👉 листай карточки в сторону';
+    const track = document.createElement('div'); track.className = 'carousel';
+    list.forEach(function (c) { track.appendChild(renderWtgCarouselCard(c)); });
+    wrap.innerHTML = '';
+    wrap.appendChild(title);
+    wrap.appendChild(hint);
+    wrap.appendChild(track);
+  }
+
   async function loadWhereToGo() {
     const stateEl = document.getElementById('wtg-state');
     if (!city || !category) {
@@ -19194,83 +19350,21 @@ def unified_app_html():
       if (!resp.ok) throw new Error('http_' + resp.status);
       const data = await resp.json();
 
+      // Город берётся из ГОРОДА СМЕНЫ (city/category выше, тот же выбор, что
+      // и у остальных вкладок единого приложения), НЕ из текущей физической
+      // геолокации - driverPos влияет только на расстояние внутри этого
+      // города (см. тот же комментарий в where_to_go_webapp_html()).
       updateCityBadge(data.city_name);
-      document.getElementById('wtgTimeSub').textContent = [data.time_label, data.weather_label].filter(Boolean).join(' · ');
 
       const content = document.getElementById('wtg-content');
       content.innerHTML = '';
+      renderWtgDashboard(data);
+      renderWtgCarousel(data);
 
-      if (data.closures_notice) {
-        const box = document.createElement('div'); box.className = 'closures-notice'; box.textContent = data.closures_notice; content.appendChild(box);
-      }
-      if (data.traffic_notice) {
-        const box = document.createElement('div'); box.className = 'closures-notice'; box.textContent = data.traffic_notice; content.appendChild(box);
-      }
-      if (data.airports_summary && data.airports_summary.length) {
-        const row = document.createElement('div'); row.className = 'airports-mini';
-        data.airports_summary.forEach(function (a) {
-          const chip = document.createElement('div'); chip.className = 'chip';
-          const flightsText = a.flights > 0 ? (a.flights + ' ' + (a.flights === 1 ? 'рейс' : (a.flights < 5 ? 'рейса' : 'рейсов'))) : 'рейсов нет';
-          chip.textContent = '✈️ ' + a.name + ' · ' + flightsText + ' · ' + a.status_emoji + ' ' + a.status_label.toLowerCase();
-          row.appendChild(chip);
-        });
-        content.appendChild(row);
-      }
-      if (data.banner) {
-        const box = document.createElement('div'); box.className = 'banner'; box.textContent = data.banner; content.appendChild(box);
-      }
-
-      const podium = data.podium || [];
-      if (!podium.length) {
+      if (!data.carousel || !data.carousel.length) {
         const warn = document.createElement('div'); warn.className = 'closed-box';
         warn.textContent = '⛔ Все аэропорты города сейчас закрыты - ориентируйся на центр города и часы пика.';
         content.appendChild(warn);
-      } else {
-        const best = podium[0];
-        const bestBox = document.createElement('div'); bestBox.className = 'best';
-        bestBox.innerHTML =
-          '<div class="tag">🏆 Сейчас лучше всего</div>' +
-          '<div class="label">' + best.label + '</div>' +
-          '<div class="bar">' + scoreBar(best.score) + '</div>' +
-          '<div class="reasons">' + best.reasons.join(', ') + '</div>' +
-          renderAdvice(best.advice) + renderGoButton(best);
-        content.appendChild(bestBox);
-
-        const rest = podium.slice(1);
-        if (rest.length) {
-          const title = document.createElement('div'); title.className = 'list-title'; title.textContent = 'Остальные варианты';
-          content.appendChild(title);
-          rest.forEach(function (c, i) {
-            const rank = i < RANK_EMOJI.length ? RANK_EMOJI[i] : '▫️';
-            const row = document.createElement('div'); row.className = 'cand';
-            row.innerHTML =
-              '<div class="rank">' + rank + '</div>' +
-              '<div class="body">' +
-                '<div class="label">' + c.label + '</div>' +
-                '<div class="bar">' + scoreBar(c.score) + '</div>' +
-                '<div class="reasons">' + c.reasons.join(', ') + '</div>' +
-                renderAdvice(c.advice) + renderGoButton(c) +
-              '</div>';
-            content.appendChild(row);
-          });
-        }
-      }
-
-      if (data.districts && data.districts.length) {
-        const t = document.createElement('div'); t.className = 'list-title'; t.textContent = '🏘 Рекомендуемые районы (по удалённости)';
-        content.appendChild(t);
-        data.districts.forEach(function (c) {
-          const row = document.createElement('div'); row.className = 'cand';
-          row.innerHTML =
-            '<div class="rank">🏘</div>' +
-            '<div class="body">' +
-              '<div class="label">' + c.label + '</div>' +
-              '<div class="bar">' + scoreBar(c.score) + '</div>' +
-              '<div class="reasons">' + c.reasons.join(', ') + '</div>' +
-              renderGoButton(c) +
-            '</div>';
-          content.appendChild(row);
-        });
       }
 
       if (data.closed && data.closed.length) {
@@ -20347,6 +20441,13 @@ async def handle_where_to_go_data_api(request):
     date_label = f"{now.day} {RU_MONTHS_GENITIVE[now.month - 1]}"
     time_label = f"{now.strftime('%H:%M')} · {WEEKDAY_NAMES[now.weekday()]} · {date_label}"
     weather_label = None
+    # ИЗМЕНЕНО 28.09.2026 (дашборд "Куда ехать" - объединённый экран, прямая
+    # просьба пользователя - "через скока дождь сегоднящние" отдельной
+    # строкой) - окно осадков (precip_window_label/today_rain_forecast_label)
+    # больше НЕ приклеивается к строке погоды - оно теперь отдельное поле
+    # rain_label ниже (дашборд показывает его своей строкой с иконкой дождя),
+    # weather_label остался только "эмодзи + температура + мм осадков".
+    rain_label = None
     try:
         forecast = get_cached_weather_forecast(city)
         current = (forecast or {}).get('current', {})
@@ -20356,14 +20457,49 @@ async def handle_where_to_go_data_api(request):
             _name, _lvl, emoji = describe_weathercode(cur_code) if cur_code is not None else (None, None, '🌤')
             cur_precip = current.get('precipitation')
             precip_part = f" · {cur_precip:.1f} мм осадков" if cur_precip else ""
-            # ДОБАВЛЕНО 24.09.2026 (прямая просьба пользователя, скриншот -
-            # "где погода указывай там если дождь или снег со скольки и до
-            # скольки он продлится") - см. precip_window_label.
-            window = precip_window_label(city, forecast)
-            window_part = f" · {window}" if window else ""
-            weather_label = f"{emoji} {round(cur_temp)}°C{precip_part}{window_part}"
+            weather_label = f"{emoji} {round(cur_temp)}°C{precip_part}"
+        rain_label = today_rain_forecast_label(city, forecast)
     except Exception:
         weather_label = None
+        rain_label = None
+
+    # ДОБАВЛЕНО 28.09.2026 (дашборд "Куда ехать" - объединённый экран, прямая
+    # просьба пользователя - "сегоднящние государственные или городские
+    # праздники") - см. get_city_holiday_today.
+    holiday = get_city_holiday_today(city)
+    holiday_label = f"{holiday['emoji']} Сегодня {holiday['name']}" if holiday else None
+
+    # ДОБАВЛЕНО 28.09.2026 (дашборд "Куда ехать" - "топовые событие города из
+    # афиши") - до 3 ближайших сегодняшних событий города (та же афиша, что
+    # уже участвует в ранжировании кандидатов - см. score_concert_event_candidates
+    # выше), отдельным коротким списком для дашборда (курьер/грузовое такси
+    # афишу не видят вообще, см. CATEGORIES_WITHOUT_EVENTS).
+    top_events = []
+    if category not in CATEGORIES_WITHOUT_EVENTS:
+        try:
+            tz = ZoneInfo(EVENT_CITY_TIMEZONE.get(city, 'Europe/Moscow'))
+            for post in get_upcoming_concert_events_for_category(city, category, limit=3):
+                try:
+                    start_local = datetime.fromisoformat(post['start']).astimezone(tz)
+                    time_part = start_local.strftime('%H:%M') if post.get('start_has_explicit_time') else 'время не указано'
+                except Exception:
+                    time_part = 'время не указано'
+                top_events.append({
+                    'title': post.get('title') or 'Мероприятие',
+                    'time_label': time_part,
+                    'place': post.get('place'),
+                })
+        except Exception:
+            logger.exception(f"❌ Не удалось собрать топ событий афиши для дашборда 'Куда ехать' ({city}/{category})")
+            top_events = []
+
+    # ДОБАВЛЕНО 28.09.2026 (дашборд "Куда ехать" - "реальный спрос на тарифы
+    # в городе все тарифы ultima и тд") - см. city_tariff_demand_summary.
+    try:
+        tariff_demand = city_tariff_demand_summary(city, category)
+    except Exception:
+        logger.exception(f"❌ Не удалось посчитать спрос по тарифам для дашборда 'Куда ехать' ({city}/{category})")
+        tariff_demand = []
 
     open_candidates = [c for c in candidates if not c['closed']]
     closed_candidates = [c for c in candidates if c['closed']]
@@ -20410,6 +20546,11 @@ async def handle_where_to_go_data_api(request):
             'label': c['label'], 'score': c['score'], 'reasons': c['reasons'], 'advice': c.get('advice'),
             'lat': c.get('lat'), 'lon': c.get('lon'),
             'nav_lat': nav_lat, 'nav_lon': nav_lon,
+            # ДОБАВЛЕНО 28.09.2026 (карусель дашборда "Куда ехать") - kind/
+            # dist_km нужны фронтенду, чтобы нарисовать иконку типа карточки
+            # (🏘 район/✈️ аэропорт/🎤 событие/🏙 центр) и расстояние без
+            # повторного гадания по содержимому reasons.
+            'kind': c.get('kind'), 'dist_km': c.get('dist_km'),
         }
 
     # ИЗМЕНЕНО 22.09.2026 (прямая просьба пользователя - "рекомендации на
@@ -20421,8 +20562,22 @@ async def handle_where_to_go_data_api(request):
     # (полный список) - для обратной совместимости и на случай, если
     # где-то ещё используется старый формат.
     podium = open_candidates[:3]
-    district_candidates = [c for c in open_candidates if c.get('kind') == 'district' and c.get('dist_km') is not None]
-    district_candidates.sort(key=lambda c: c['dist_km'])
+    # ИЗМЕНЕНО 28.09.2026 (дашборд "Куда ехать" - объединённый экран, прямая
+    # просьба пользователя - "рекомендации по районам с учетом расстояние до
+    # 30 км от текущей позиции более лучшие варианты") - раньше этот список
+    # был отсортирован ПО УДАЛЁННОСТИ (ближе - выше). Теперь районы дальше
+    # WHERE_TO_GO_DISTRICT_MAX_KM отбрасываются совсем, а оставшиеся
+    # сортируются ПО БАЛЛУ (лучший вариант - выше) - смысл сместился с "что
+    # ближе" на "что лучше в пределах разумного плеча подачи" (см. 'carousel'
+    # ниже, который из него строится вместе с podium). Текстовая версия
+    # (format_where_to_go_text) НЕ трогалась - там пользователь ранее прямо
+    # просил именно сортировку по удалённости, это отдельный интерфейс
+    # (обычное текстовое сообщение в чате, не дашборд WebApp).
+    district_candidates = [
+        c for c in open_candidates
+        if c.get('kind') == 'district' and c.get('dist_km') is not None and c['dist_km'] <= WHERE_TO_GO_DISTRICT_MAX_KM
+    ]
+    district_candidates.sort(key=lambda c: c['score'], reverse=True)
     # ДОБАВЛЕНО 26.09.2026 (прямая просьба пользователя - "а верхняя
     # рекомендация включать доп тариф или нет") - ТОЛЬКО у самой верхней
     # карточки ("🏆 Сейчас лучше всего", т.е. podium[0]) и ТОЛЬКО когда это
@@ -20464,14 +20619,48 @@ async def handle_where_to_go_data_api(request):
             best['reasons'] = list(best.get('reasons') or []) + [extra_advice]
     banner = where_to_go_banner(city, category)
 
+    # ДОБАВЛЕНО 28.09.2026 (дашборд "Куда ехать" - объединённый экран, прямая
+    # просьба пользователя - "карточки рекомендаций районов куда ехать
+    # сделать чтобы можно было смахивать в сторону, но сделать каруселью под
+    # дашбордом") - ЕДИНЫЙ готовый список карточек для горизонтальной
+    # карусели, вместо того чтобы фронтенд сам собирал её из podium+districts
+    # (проще держать порядок/дедуп в одном месте). Первая карточка (podium[0],
+    # "🏆 Сейчас лучше всего") помечена is_best=True - фронтенд красит её
+    # золотой рамкой, остальные - обычные. Дальше идут podium[1]/podium[2]
+    # (уже совсем другого типа - могут быть аэропорт/событие/центр), затем
+    # сильные районы в пределах WHERE_TO_GO_DISTRICT_MAX_KM (по баллу, см.
+    # district_candidates выше) - без повторов (район мог уже попасть в
+    # podium), с потолком WHERE_TO_GO_CAROUSEL_MAX_CARDS карточек всего.
+    carousel = []
+    seen_labels = set()
+    for i, c in enumerate(podium):
+        packed = _pack(c)
+        packed['is_best'] = (i == 0)
+        carousel.append(packed)
+        seen_labels.add(c['label'])
+    for c in district_candidates:
+        if len(carousel) >= WHERE_TO_GO_CAROUSEL_MAX_CARDS:
+            break
+        if c['label'] in seen_labels:
+            continue
+        packed = _pack(c)
+        packed['is_best'] = False
+        carousel.append(packed)
+        seen_labels.add(c['label'])
+
     return web.json_response({
         'city_name': city_name,
         'time_label': time_label,
         'weather_label': weather_label,
+        'rain_label': rain_label,
+        'holiday_label': holiday_label,
         'closures_notice': closures_notice,
         'traffic_notice': traffic_level_notice(traffic_level),
         'airports_summary': airports_summary,
+        'top_events': top_events,
+        'tariff_demand': tariff_demand,
         'banner': banner,
+        'carousel': carousel,
         'podium': [_pack(c) for c in podium],
         'districts': [_pack(c) for c in district_candidates],
         'open': [_pack(c) for c in open_candidates],
@@ -21956,6 +22145,65 @@ def district_has_real_demand_at_hour(city, district_name, category, tariffs, wee
         if thresholds and value >= thresholds[0]:
             return True
     return False
+
+# ДОБАВЛЕНО 28.09.2026 (дашборд "Куда ехать" - объединённый экран, прямая
+# просьба пользователя - "реальный спрос на тарифы в городе все тарифы
+# ultima и тд") - одна строка дашборда с уровнем спроса СРАЗУ по всем
+# тарифам категории (Эконом/Комфорт/Комфорт+ у такси, Business/Premier/
+# Elite у Ultima - Cruise пропускаем, своей колонки в матрице у него нет,
+# см. SHIFT_TARIFF_TO_DEMAND_INDEX), а не по одному конкретному району, как
+# остальная логика "Куда ехать" (score_district_candidates и т.д.). Для
+# каждого тарифа берётся МАКСИМУМ текущего значения матрицы спроса по ВСЕМ
+# районам города (лучший район для ЭТОГО тарифа прямо сейчас) и
+# сравнивается с уже откалиброванным порогом district_premium_threshold
+# (тем же, что красит облака спроса на карте) - никакой новой калибровки,
+# переиспользуем существующую, откалиброванную отдельно под каждый
+# город/тариф.
+# Возвращает [{'tariff': 'Эконом', 'level': 'high'|'normal'|'low'}, ...] в
+# порядке тарифов категории (CATEGORIES[category]['tariffs']), либо [] если
+# для города нет матрицы спроса вовсе (DISTRICT_DEMAND_FILES) или категория
+# не таксомоторная (courier/cargo используют другую матрицу и сюда не
+# заходят - у них нет "тарифов" в этом смысле для дашборда).
+def city_tariff_demand_summary(city, category):
+    table = get_district_demand(city)
+    if not table:
+        return []
+    indices = MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES.get(category)
+    if not indices:
+        return []
+    tariff_display_names = CATEGORIES.get(category, {}).get('tariffs', [])
+    now = get_city_now(city)
+    weekday = str(now.weekday())
+    districts = table.get('districts') or {}
+    result = []
+    for pos, idx in enumerate(indices):
+        field = _DISTRICT_DEMAND_INDEX_TO_FIELD.get(idx)
+        best_value = None
+        best_lat = best_lon = None
+        for entry in districts.values():
+            slots = entry.get('weekday', {}).get(weekday, [])
+            value = _district_slot_value(slots, now.hour, (idx,))
+            if value is None:
+                continue
+            if best_value is None or value > best_value:
+                best_value = value
+                best_lat, best_lon = entry.get('lat'), entry.get('lon')
+        if best_value is None:
+            continue  # тарифа нет в матрице этого города (напр. Элит у Краснодара/Сочи)
+        thresholds = district_premium_threshold(city, field, best_lat, best_lon)
+        show_threshold = thresholds[0] if thresholds else None
+        if show_threshold:
+            if best_value >= show_threshold:
+                level = 'high'
+            elif best_value >= show_threshold * 0.7:
+                level = 'normal'
+            else:
+                level = 'low'
+        else:
+            level = 'normal'
+        tariff_name = tariff_display_names[pos] if pos < len(tariff_display_names) else field
+        result.append({'tariff': tariff_name, 'level': level})
+    return result
 
 async def handle_map_district_demand_api(request):
     """JSON API для районных облаков спроса (см. loadDistrictDemandClouds
@@ -30009,6 +30257,47 @@ def precip_window_label(city, forecast):
     else:
         end_hour = f"{(int(times[end_idx][11:13]) + 1) % 24:02d}"
     return f"с {start_hour}:00 до {end_hour}:00"
+
+# ДОБАВЛЕНО 28.09.2026 (дашборд "Куда ехать" - объединённый экран, прямая
+# просьба пользователя - "через скока дождь сегоднящние") - отдельная
+# строка дашборда: КОГДА сегодня ожидаются осадки, не только когда закончится
+# уже идущий дождь (см. precip_window_label выше - тот сообщает только конец
+# уже идущего СЕЙЧАС дождя). Сканирует часовой прогноз целиком (в пределах
+# RAIN_FORECAST_HOURS вперёд), в отличие от find_upcoming_precip_event -
+# та функция создана для пуш-предупреждений и смотрит только на ближайшие
+# RAIN_LEAD_MINUTES (30 мин), этого мало для дашборда "что будет сегодня".
+# Возвращает строку "с ЧЧ:00 до ЧЧ:00" (текущий/ближайший дождь этого дня)
+# либо None, если во всём доступном прогнозе осадков нет вообще.
+def today_rain_forecast_label(city, forecast):
+    if not forecast:
+        return None
+    hourly = forecast.get('hourly', {})
+    times = hourly.get('time', [])
+    codes = hourly.get('weathercode', [])
+    if not times or not codes:
+        return None
+    base = _current_hour_index(forecast, city)
+    current = forecast.get('current', {})
+    if current.get('weathercode') in PRECIP_WEATHERCODES:
+        start_idx = base
+    else:
+        start_idx = None
+        for i in range(base, min(len(times), len(codes))):
+            if codes[i] in PRECIP_WEATHERCODES:
+                start_idx = i
+                break
+        if start_idx is None:
+            return None
+    start_hour = times[start_idx][11:13]
+    duration = find_precip_event_end(forecast, start_idx)
+    if duration:
+        end_idx = start_idx + duration
+        if end_idx < len(times):
+            end_hour = times[end_idx][11:13]
+        else:
+            end_hour = f"{(int(times[-1][11:13]) + 1) % 24:02d}"
+        return f"с {start_hour}:00 до {end_hour}:00"
+    return f"с {start_hour}:00"
 
 def find_upcoming_precip_event(forecast, city):
     """Ищет ближайшее почасовое окно с осадками в пределах RAIN_LEAD_MINUTES
