@@ -7321,6 +7321,12 @@ def share_order_webapp_html(category=None):
 <title>Отдать заказ</title>
 <script src=\"""" + TG_WEBAPP_JS_PROXY_PATH + """\"></script>
 <style>
+  /* ДОБАВЛЕНО 28.09.2026 (жалоба пользователя - при повороте экрана
+     (ротации) текст в приложении самопроизвольно увеличивался) -
+     WebKit/Telegram WebView по умолчанию может увеличивать шрифт при
+     смене ориентации (text-size-adjust: auto) - фиксируем 100%, чтобы
+     размер текста никогда не менялся сам по себе. */
+  html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
   :root { color-scheme: light dark; }
   * { box-sizing: border-box; }
   html { background: #000; overscroll-behavior: none; }
@@ -7334,7 +7340,7 @@ def share_order_webapp_html(category=None):
   label { display: block; font-size: 12.5px; color: #9a9a9a; margin: 14px 0 6px; }
   input[type=text], input[type=number], input[type=tel] {
     width: 100%; padding: 11px 12px; border-radius: 12px; border: 1px solid rgba(255,255,255,.14);
-    background: #141414; color: #fff; font-size: 15px; transition: border-color .15s;
+    background: #141414; color: #fff; font-size: 16px; transition: border-color .15s;
   }
   input:focus { outline: none; border-color: rgba(255,196,0,.55); }
   input::placeholder { color: #666; }
@@ -7790,6 +7796,12 @@ def platform_probe_webapp_html():
 <title>Настройка</title>
 <script src=\"""" + TG_WEBAPP_JS_PROXY_PATH + """\"></script>
 <style>
+  /* ДОБАВЛЕНО 28.09.2026 (жалоба пользователя - при повороте экрана
+     (ротации) текст в приложении самопроизвольно увеличивался) -
+     WebKit/Telegram WebView по умолчанию может увеличивать шрифт при
+     смене ориентации (text-size-adjust: auto) - фиксируем 100%, чтобы
+     размер текста никогда не менялся сам по себе. */
+  html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
   :root { color-scheme: light dark; }
   body { margin: 0; padding: 24px; font: 15px -apple-system, sans-serif; background: #111; color: #ccc; }
 </style>
@@ -12528,6 +12540,12 @@ def validate_telegram_webapp_init_data(init_data, bot_token):
 # #2e7d32) - они несут смысловую нагрузку (открыт/по согласованию/закрыт,
 # повышенный спрос) и её ломать нельзя, рескин только "рамки" карты.
 MAP_CHROME_CSS = """
+  /* ДОБАВЛЕНО 28.09.2026 (жалоба пользователя - при повороте экрана
+     (ротации) текст в приложении самопроизвольно увеличивался) -
+     WebKit/Telegram WebView по умолчанию может увеличивать шрифт при
+     смене ориентации (text-size-adjust: auto) - фиксируем 100%, чтобы
+     размер текста никогда не менялся сам по себе. */
+  html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
   html, body, #map { height: 100%; margin: 0; padding: 0; }
   /* ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя со скриншотом -
      "округлённые края на карте, чтобы со всех четырёх углов они были
@@ -14621,6 +14639,32 @@ def map_webapp_html():
   if (shiftSummaryFinanceBtn) {{
     shiftSummaryFinanceBtn.addEventListener('click', async () => {{
       if (shiftSummaryFinanceBtn.disabled) return;
+      // ИЗМЕНЕНО 28.09.2026 (прямая жалоба пользователя со скриншотом -
+      // "уходишь с линии в приложении... нажимаешь указать и он переводит
+      // опять в бот, нужно сделать чтобы все было в приложении") - раньше
+      // кнопка ВСЕГДА звала /map/start_finance (см. подробный комментарий у
+      // MAP_START_FINANCE_API_PATH/handle_map_start_finance_api в main.py -
+      // там же более раннее решение "Минимально" переносить сам визард), что
+      // отправляло сообщение в ЧАТ бота и требовало переключиться туда. В
+      // Кабинете уже давно есть ПОЛНЫЙ эквивалент того же расчёта - форма
+      // "💰 Финансы" (CABINET_FINANCE_API_PATH/handle_cabinet_finance_api,
+      // тот же calculate_finance_result/save_finance_result, что и в чате) -
+      // просто раньше на неё не было прямого перехода отсюда.
+      //
+      // Карта почти всегда открыта ВЛОЖЕННОЙ внутрь единого приложения (см.
+      // unified_app_html, вкладка "Карта") - в этом случае остаёмся
+      // полностью в приложении: сигналим родителю через postMessage
+      // переключиться на вкладку "Кабинет" и сразу открыть в ней раздел
+      // "Финансы" (см. openCabinetFinance()/addEventListener('message', ...)
+      // в unified_app_html). Редкий случай, когда карта открыта САМОСТОЯТЕЛЬНО
+      // (прямая WebApp-кнопка в чате, без вложения - вокруг нет вкладки
+      // "Кабинет", переключаться некуда) - оставляем старое поведение
+      // (переход в чат) как запасной путь, старый эндпоинт никуда не делся.
+      if (window.self !== window.top) {{
+        closeShiftSummaryOverlay();
+        window.parent.postMessage({{ taxiHelperOpenFinance: true }}, '*');
+        return;
+      }}
       const initData = _mapInitData();
       if (!initData) return;
       shiftSummaryFinanceBtn.disabled = true;
@@ -17514,6 +17558,12 @@ def weather_webapp_html():
 <title>Погода</title>
 <script src=\"""" + TG_WEBAPP_JS_PROXY_PATH + """\"></script>
 <style>
+  /* ДОБАВЛЕНО 28.09.2026 (жалоба пользователя - при повороте экрана
+     (ротации) текст в приложении самопроизвольно увеличивался) -
+     WebKit/Telegram WebView по умолчанию может увеличивать шрифт при
+     смене ориентации (text-size-adjust: auto) - фиксируем 100%, чтобы
+     размер текста никогда не менялся сам по себе. */
+  html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
   :root { color-scheme: light dark; }
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; overscroll-behavior: none; }
@@ -18149,6 +18199,12 @@ def where_to_go_webapp_html():
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Unbounded:wght@600;700;800&family=Golos+Text:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
+  /* ДОБАВЛЕНО 28.09.2026 (жалоба пользователя - при повороте экрана
+     (ротации) текст в приложении самопроизвольно увеличивался) -
+     WebKit/Telegram WebView по умолчанию может увеличивать шрифт при
+     смене ориентации (text-size-adjust: auto) - фиксируем 100%, чтобы
+     размер текста никогда не менялся сам по себе. */
+  html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
   :root { color-scheme: light dark; }
   * { box-sizing: border-box; }
   html { background: #000; overscroll-behavior: none; }
@@ -18617,6 +18673,12 @@ def unified_app_html():
 <link href="https://fonts.googleapis.com/css2?family=Unbounded:wght@600;700;800&family=Golos+Text:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script src=\"""" + TG_WEBAPP_JS_PROXY_PATH + """\"></script>
 <style>
+  /* ДОБАВЛЕНО 28.09.2026 (жалоба пользователя - при повороте экрана
+     (ротации) текст в приложении самопроизвольно увеличивался) -
+     WebKit/Telegram WebView по умолчанию может увеличивать шрифт при
+     смене ориентации (text-size-adjust: auto) - фиксируем 100%, чтобы
+     размер текста никогда не менялся сам по себе. */
+  html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
   :root { color-scheme: dark; }
   * { box-sizing: border-box; }
   html, body { height: 100%; background: #000; overscroll-behavior: none; }
@@ -19059,15 +19121,29 @@ def unified_app_html():
   .ref-back { background: none; border: none; color: #FFC400; font-size: 13px; font-weight: 600; padding: 0 0 10px; cursor: pointer; font-family: 'Golos Text', sans-serif; animation: backGlowPulse 2.6s ease-in-out infinite; text-transform: uppercase; }
   .svc-input {
     width: 100%; box-sizing: border-box; background: #0a0a0a; border: 1px solid rgba(255,255,255,.15);
-    border-radius: 10px; padding: 11px 12px; color: #fff; font-size: 13.5px; margin-bottom: 8px;
+    border-radius: 10px; padding: 11px 12px; color: #fff; font-size: 16px; margin-bottom: 8px;
     font-family: 'Golos Text', sans-serif;
   }
   .svc-select {
     width: 100%; box-sizing: border-box; background: #131313; border: 1px solid rgba(255,255,255,.15);
-    border-radius: 10px; padding: 11px 12px; color: #fff; font-size: 13.5px; margin-bottom: 10px;
+    border-radius: 10px; padding: 11px 12px; color: #fff; font-size: 16px; margin-bottom: 10px;
     font-family: 'Golos Text', sans-serif;
   }
   .svc-note { font-size: 12px; color: #9a9a9a; line-height: 1.4; margin-top: 6px; }
+  /* ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - увидел экран
+     "Нужна геолокация" (#gate) со спиннером и попросил "сделай такую на
+     всех вкладках", если страница долго грузится) - тот же визуальный
+     язык (крутящееся золотое кольцо + текст), что и у #gate .spin выше, но
+     компактнее и без полноэкранной подложки - для локальных состояний
+     загрузки внутри вкладок/экранов сервисов (loadingBlockHtml() ниже в
+     <script>), вместо голого текста "Загружаю…". @keyframes spin уже
+     объявлен выше (у #gate) - переиспользуем то же имя анимации. */
+  .mini-spin {
+    width: 22px; height: 22px; border-radius: 50%; border: 3px solid rgba(255,196,0,.22);
+    border-top-color: #FFC400; animation: spin .8s linear infinite; margin: 0 auto 12px;
+  }
+  @media (prefers-reduced-motion: reduce) { .mini-spin { animation: none; } }
+  .loading-block { text-align: center; padding: 40px 16px; opacity: .85; font-size: 13.5px; color: #aaa; }
   #svcDetailContent details {
     background: #131313; border: 1px solid rgba(255,255,255,.08); border-radius: 12px;
     padding: 4px 14px; margin-bottom: 8px;
@@ -19100,7 +19176,7 @@ def unified_app_html():
       <iframe id="mapFrame" allow="geolocation" style="width:100%;height:100%;border:0;display:block;background:#000;"></iframe>
     </div>
     <div class="panel" id="panel-whereto" hidden>
-      <div id="wtg-state">📍 Определяю твою локацию…</div>
+      <div id="wtg-state"><div class="mini-spin"></div><div>📍 Определяю твою локацию…</div></div>
       <div id="wtg-app" hidden>
         <div class="dashboard" id="wtg-dashboard"></div>
         <div id="wtg-carouselWrap"></div>
@@ -19140,6 +19216,16 @@ def unified_app_html():
   </nav>
 </div>
 <script>
+  // ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - увидел экран
+  // "Нужна геолокация" (#gate, со спиннером) и попросил "сделай такую на
+  // всех вкладках", если страница/раздел долго грузится) - общий шаблон
+  // состояния загрузки (крутящееся кольцо + текст, см. .mini-spin/
+  // .loading-block в <style> выше) для всех мест ниже, где раньше был
+  // голый текст "Загружаю…" без анимации (реферальная программа, чаевые,
+  // юр.лицо, список/удаление компаний, админ-панель и т.д.).
+  function loadingBlockHtml(text) {
+    return '<div class="loading-block"><div class="mini-spin"></div><div>' + (text || 'Загружаю…') + '</div></div>';
+  }
   const tg = window.Telegram && window.Telegram.WebApp;
   if (tg) {
     tg.ready(); tg.expand();
@@ -19535,7 +19621,18 @@ def unified_app_html():
   // никакого нового экрана не рисуем - просто на время подменяем текст и
   // прячем #shell целиком, как в самом начале, до startApp()).
   window.addEventListener('message', function (e) {
-    if (!e.data || typeof e.data !== 'object' || !('taxiHelperGeoWait' in e.data)) return;
+    if (!e.data || typeof e.data !== 'object') return;
+    // ДОБАВЛЕНО 28.09.2026 (прямая жалоба пользователя - "уходишь с линии в
+    // приложении... нажимаешь указать доход и он переводит опять в бот") -
+    // сигнал от вложенной карты (map_webapp_html, кнопка "💰 Указать доход" в
+    // карточке итогов смены) - переключиться на вкладку "Кабинет" и сразу
+    // открыть в ней раздел "Финансы" (см. openCabinetFinance() ниже), вместо
+    // перехода в чат бота.
+    if ('taxiHelperOpenFinance' in e.data) {
+      if (e.data.taxiHelperOpenFinance) openCabinetFinance();
+      return;
+    }
+    if (!('taxiHelperGeoWait' in e.data)) return;
     if (e.data.taxiHelperGeoWait) {
       document.getElementById('gateSpin').hidden = false;
       document.getElementById('gatePin').hidden = true;
@@ -19569,6 +19666,20 @@ def unified_app_html():
     if (name === 'whereto' && !loaded.whereto) { loaded.whereto = true; loadWhereToGo(); }
     if (name === 'services' && !loaded.services) { loaded.services = true; renderServices(); }
     if (name === 'cabinet' && !loaded.cabinet) { loaded.cabinet = true; loadCabinetFrame(); }
+  }
+
+  // ДОБАВЛЕНО 28.09.2026 (прямая жалоба пользователя - см. addEventListener('message', ...)
+  // выше) - переключиться на вкладку "Кабинет" и заставить её сразу открыть
+  // раздел "💰 Финансы" (data-tab="finance" в cabinet_webapp_html, тот же
+  // механизм, что и у ?tab=roads в events_webapp_html - см. initialTab там).
+  // Если Кабинет уже был открыт раньше в этой сессии (loaded.cabinet === true),
+  // iframe пересоздаётся заново с новым параметром - раздел "Финансы" и так
+  // всегда актуален (профильные поля подставляются из /cabinet/finance/defaults
+  // при каждом открытии), терять тут нечего.
+  function openCabinetFinance() {
+    loaded.cabinet = true;
+    loadCabinetFrame('finance');
+    showTab('cabinet');
   }
 
   function scoreBar(score) {
@@ -19688,7 +19799,7 @@ def unified_app_html():
       return;
     }
     try {
-      stateEl.textContent = '🧭 Считаю варианты…';
+      stateEl.innerHTML = loadingBlockHtml('🧭 Считаю варианты…');
       let url = '""" + WHERE_TO_GO_DATA_API_PATH + """?city=' + encodeURIComponent(city) + '&category=' + encodeURIComponent(category);
       if (driverPos) { url += '&lat=' + driverPos.lat + '&lon=' + driverPos.lon; }
       const resp = await fetch(url, { headers: { 'X-Telegram-Init-Data': (tg && tg.initData) || '' } });
@@ -19738,9 +19849,15 @@ def unified_app_html():
   // (CATEGORY_TARIFFS - тот же список тарифов категории, что и в Python).
   // initData - тот же приём, что и у карты (см. loadMapFrame/_mapInitData/
   // cabinet_webapp_html) - откат на URL-параметр tgInitData внутри iframe.
-  function loadCabinetFrame() {
+  function loadCabinetFrame(tabOverride) {
     const tariffs = CATEGORY_TARIFFS[category] || '';
-    let src = '""" + CABINET_WEBAPP_PATH + """?tariffs=' + encodeURIComponent(tariffs) + tgInitDataParam();
+    let src = '""" + CABINET_WEBAPP_PATH + """?tariffs=' + encodeURIComponent(tariffs);
+    // ДОБАВЛЕНО 28.09.2026 (см. openCabinetFinance() выше) - необязательный
+    // tabOverride пробрасывается как ?tab=..., который cabinet_webapp_html
+    // уже умеет читать при загрузке (initialTab, тот же приём, что и у
+    // ?tab=roads в events_webapp_html) и сразу открывает нужный data-tab.
+    if (tabOverride) src += '&tab=' + encodeURIComponent(tabOverride);
+    src += tgInitDataParam();
     document.getElementById('cabinetFrame').src = src;
   }
 
@@ -19926,7 +20043,7 @@ def unified_app_html():
 
   function openServiceDetail(kind) {
     const box = document.getElementById('svcDetailContent');
-    box.innerHTML = '<div style="text-align:center;padding:40px 16px;opacity:.7;font-size:13.5px;">Загружаю…</div>';
+    box.innerHTML = loadingBlockHtml();
     svcBackAction = svcShowGrid; // ИЗМЕНЕНО 27.09.2026 - см. комментарий у svcShowGrid выше: из любого раздела сервисов "Назад" по умолчанию ведёт в сетку сервисов, на один шаг назад
     svcShowDetail();
     if (kind === 'tips') return renderTipsDetail(box);
@@ -19975,7 +20092,7 @@ def unified_app_html():
       '<div class="svc-h">💳 Получить чаевые</div>' +
       '<div class="svc-card">Приложение «Яндекс Чаевые: на карту по QR» - покажи QR-код пассажиру, он сканирует и переводит чаевые тебе на карту.</div>' +
       appButtonsHtml +
-      '<div id="tipsQrBox" class="svc-note">Загружаю…</div>';
+      '<div id="tipsQrBox">' + loadingBlockHtml() + '</div>';
     const qrBox = document.getElementById('tipsQrBox');
     let hasQr = false;
     try {
@@ -20006,7 +20123,7 @@ def unified_app_html():
   // только в чате - те же самые причины/защита, что и раньше, здесь не
   // трогались.
   async function loadReferralDetail(box) {
-    box.innerHTML = '<div class="svc-h">🤝 Реферальная программа</div><div class="svc-note">Загружаю…</div>';
+    box.innerHTML = '<div class="svc-h">🤝 Реферальная программа</div>' + loadingBlockHtml();
     let data;
     try {
       const resp = await fetch('""" + REFERRAL_DATA_API_PATH + """', { headers: { 'X-Telegram-Init-Data': (tg && tg.initData) || '' } });
@@ -20291,7 +20408,7 @@ def unified_app_html():
   // оставлен ниже как запасной путь на случай проблем с WebApp-полем.
   async function renderReferralLegalDetail(box, data) {
     svcBackAction = function () { renderReferralMenu(box, data); }; // ИЗМЕНЕНО 27.09.2026 - "Назад" отсюда ведёт в меню реферальной программы, на один шаг назад
-    box.innerHTML = '<div class="svc-h">🏢 Юридическое лицо</div><div class="svc-note">Загружаю…</div>';
+    box.innerHTML = '<div class="svc-h">🏢 Юридическое лицо</div>' + loadingBlockHtml();
     let access = null;
     try {
       const resp = await fetch(LEGAL_CABINET_ACCESS_API_PATH, { headers: { 'X-Telegram-Init-Data': (tg && tg.initData) || '' } });
@@ -20605,7 +20722,7 @@ def unified_app_html():
   // Кнопка 3 "📋 Список компаний" - список записей (юр.лица или
   // админ-партнёры, см. ADMIN_PANEL_ENTITIES_API_PATH GET выше).
   async function renderAdminPanelList(subBox, kind) {
-    subBox.innerHTML = '<div class="svc-h">📋 Список</div><div class="svc-note">Загружаю…</div>';
+    subBox.innerHTML = '<div class="svc-h">📋 Список</div>' + loadingBlockHtml();
     try {
       const resp = await fetch(ADMIN_PANEL_ENTITIES_API_PATH + '?kind=' + encodeURIComponent(kind), { headers: { 'X-Telegram-Init-Data': (tg && tg.initData) || '' } });
       if (!resp.ok) throw new Error('http_' + resp.status);
@@ -20630,7 +20747,7 @@ def unified_app_html():
   // (тот же приём, что был в чате - phantom_del_ent_ask/phantom_del_ent_do -
   // нельзя удалить одним тапом без подтверждения).
   async function renderAdminPanelDeleteList(subBox, kind) {
-    subBox.innerHTML = '<div class="svc-h">🗑 Удалить</div><div class="svc-note">Загружаю…</div>';
+    subBox.innerHTML = '<div class="svc-h">🗑 Удалить</div>' + loadingBlockHtml();
     try {
       const resp = await fetch(ADMIN_PANEL_ENTITIES_API_PATH + '?kind=' + encodeURIComponent(kind), { headers: { 'X-Telegram-Init-Data': (tg && tg.initData) || '' } });
       if (!resp.ok) throw new Error('http_' + resp.status);
@@ -20723,7 +20840,7 @@ def unified_app_html():
       });
       return;
     }
-    subBox.innerHTML = '<div class="svc-h">🔐 Админ панель</div><div class="svc-note">Загружаю…</div>';
+    subBox.innerHTML = '<div class="svc-h">🔐 Админ панель</div>' + loadingBlockHtml();
     (async function () {
       try {
         const resp = await fetch(ADMIN_PANEL_OVERVIEW_API_PATH, { headers: { 'X-Telegram-Init-Data': (tg && tg.initData) || '' } });
@@ -20747,7 +20864,7 @@ def unified_app_html():
   async function loadReferralList(btn, box) {
     if (box.dataset.loaded === '1') { box.hidden = !box.hidden; return; }
     btn.disabled = true;
-    box.innerHTML = '<div class="svc-note">Загружаю…</div>';
+    box.innerHTML = loadingBlockHtml();
     try {
       const resp = await fetch(REFERRAL_LIST_API_PATH, { headers: { 'X-Telegram-Init-Data': (tg && tg.initData) || '' } });
       if (!resp.ok) throw new Error('http_' + resp.status);
@@ -20776,7 +20893,7 @@ def unified_app_html():
   async function loadReferralQr(btn, box) {
     if (box.dataset.loaded === '1') { box.hidden = !box.hidden; return; }
     btn.disabled = true;
-    box.innerHTML = '<div class="svc-note">Загружаю…</div>';
+    box.innerHTML = loadingBlockHtml();
     try {
       const resp = await fetch(REFERRAL_QR_PNG_PATH, { headers: { 'X-Telegram-Init-Data': (tg && tg.initData) || '' } });
       if (!resp.ok) throw new Error('http_' + resp.status);
@@ -23677,6 +23794,12 @@ def events_webapp_html():
 <title>События города</title>
 <script src=\"""" + TG_WEBAPP_JS_PROXY_PATH + """\"></script>
 <style>
+  /* ДОБАВЛЕНО 28.09.2026 (жалоба пользователя - при повороте экрана
+     (ротации) текст в приложении самопроизвольно увеличивался) -
+     WebKit/Telegram WebView по умолчанию может увеличивать шрифт при
+     смене ориентации (text-size-adjust: auto) - фиксируем 100%, чтобы
+     размер текста никогда не менялся сам по себе. */
+  html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
   :root { color-scheme: light dark; }
   * { box-sizing: border-box; }
   html { background: #000; overscroll-behavior: none; }
@@ -24107,6 +24230,12 @@ def transport_webapp_html():
 <title>Авиа/ЖД</title>
 <script src=\"""" + TG_WEBAPP_JS_PROXY_PATH + """\"></script>
 <style>
+  /* ДОБАВЛЕНО 28.09.2026 (жалоба пользователя - при повороте экрана
+     (ротации) текст в приложении самопроизвольно увеличивался) -
+     WebKit/Telegram WebView по умолчанию может увеличивать шрифт при
+     смене ориентации (text-size-adjust: auto) - фиксируем 100%, чтобы
+     размер текста никогда не менялся сам по себе. */
+  html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
   :root { color-scheme: light dark; }
   * { box-sizing: border-box; }
   html { background: #000; overscroll-behavior: none; }
@@ -25726,6 +25855,12 @@ def legal_cabinet_webapp_html():
 <title>Кабинет автопарка</title>
 <script src=\"""" + TG_WEBAPP_JS_PROXY_PATH + """\"></script>
 <style>
+  /* ДОБАВЛЕНО 28.09.2026 (жалоба пользователя - при повороте экрана
+     (ротации) текст в приложении самопроизвольно увеличивался) -
+     WebKit/Telegram WebView по умолчанию может увеличивать шрифт при
+     смене ориентации (text-size-adjust: auto) - фиксируем 100%, чтобы
+     размер текста никогда не менялся сам по себе. */
+  html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
   :root { color-scheme: light dark; }
   * { box-sizing: border-box; }
   html { background: var(--tg-theme-bg-color, #f2f2f7); overscroll-behavior: none; }
@@ -25807,7 +25942,7 @@ def legal_cabinet_webapp_html():
   .field-row label { display: block; font-size: 12px; opacity: .6; margin-bottom: 4px; }
   .field-row input, .field-row select, .field-row textarea {
     width: 100%; padding: 10px 11px; border-radius: 10px; border: 1px solid rgba(127,127,127,.3);
-    background: var(--tg-theme-bg-color, #f2f2f7); color: var(--tg-theme-text-color, #000); font-size: 14.5px;
+    background: var(--tg-theme-bg-color, #f2f2f7); color: var(--tg-theme-text-color, #000); font-size: 16px;
     font-family: inherit; transition: border-color .15s, box-shadow .15s;
   }
   .field-row input:focus, .field-row select:focus, .field-row textarea:focus {
@@ -26333,6 +26468,12 @@ def cabinet_webapp_html():
 <script src=\"""" + TG_WEBAPP_JS_PROXY_PATH + """\"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <style>
+  /* ДОБАВЛЕНО 28.09.2026 (жалоба пользователя - при повороте экрана
+     (ротации) текст в приложении самопроизвольно увеличивался) -
+     WebKit/Telegram WebView по умолчанию может увеличивать шрифт при
+     смене ориентации (text-size-adjust: auto) - фиксируем 100%, чтобы
+     размер текста никогда не менялся сам по себе. */
+  html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
   :root { color-scheme: light dark; }
   * { box-sizing: border-box; }
   html { background: var(--tg-theme-bg-color, #f2f2f7); overscroll-behavior: none; }
@@ -26475,7 +26616,7 @@ def cabinet_webapp_html():
   .profile-form label:first-child { margin-top: 0; }
   .profile-form input, .profile-form select {
     width: 100%; padding: 10px 11px; border-radius: 10px; border: 1px solid rgba(127,127,127,.3);
-    background: var(--tg-theme-bg-color, #f2f2f7); color: var(--tg-theme-text-color, #000); font-size: 14.5px;
+    background: var(--tg-theme-bg-color, #f2f2f7); color: var(--tg-theme-text-color, #000); font-size: 16px;
   }
   .profile-form .save-btn {
     width: 100%; margin-top: 14px; padding: 11px; border: none; border-radius: 10px;
@@ -26541,7 +26682,7 @@ def cabinet_webapp_html():
   .field-row label { display: block; font-size: 12px; opacity: .6; margin-bottom: 4px; }
   .field-row input, .field-row select {
     width: 100%; padding: 10px 11px; border-radius: 10px; border: 1px solid rgba(127,127,127,.3);
-    background: var(--tg-theme-bg-color, #f2f2f7); color: var(--tg-theme-text-color, #000); font-size: 14.5px;
+    background: var(--tg-theme-bg-color, #f2f2f7); color: var(--tg-theme-text-color, #000); font-size: 16px;
   }
   /* ИЗМЕНЕНО 28.09.2026 (прямая просьба пользователя - "все кнопки сделай
      объёмными и с градиентом, чтобы чувствовался вес кнопок, во всём
@@ -26604,6 +26745,21 @@ def cabinet_webapp_html():
   .peak-line { font-size: 13.5px; padding: 6px 0; border-bottom: 1px solid rgba(127,127,127,.12); }
   .peak-line:last-child { border-bottom: none; }
   .muted { opacity: .6; font-size: 13px; }
+  /* ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - увидел экран
+     "Нужна геолокация" со спиннером в приложении и попросил "сделай такую
+     на всех вкладках", если раздел долго грузится) - тот же визуальный
+     язык (крутящееся золотое кольцо + текст), что и в unified_app_html
+     (.mini-spin/.loading-block там же), для состояний загрузки внутри
+     вкладки "Кабинет" (loadingBlockHtml() в <script> ниже), вместо голого
+     текста "Загружаю…". В отличие от unified_app_html, тут @keyframes spin
+     ещё не был объявлен - объявляем здесь. */
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .mini-spin {
+    width: 22px; height: 22px; border-radius: 50%; border: 3px solid rgba(255,196,0,.22);
+    border-top-color: #FFC400; animation: spin .8s linear infinite; margin: 0 auto 12px;
+  }
+  @media (prefers-reduced-motion: reduce) { .mini-spin { animation: none; } }
+  .loading-block { text-align: center; padding: 40px 16px; opacity: .85; font-size: 13.5px; }
   /* ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - раздел "🛠 ТО":
      марка/пробег машины, пункты обслуживания с кнопкой "Заменил",
      уведомление о замене масла с выбором интервала). */
@@ -26691,8 +26847,17 @@ def cabinet_webapp_html():
   }
   .rating-edit-wrap { display: inline-flex; align-items: center; gap: 4px; }
   .rating-edit-wrap input {
-    width: 52px; padding: 3px 6px; border-radius: 8px; border: 1px solid rgba(255,196,0,.6);
-    background: #000; color: #fff; font-size: 12.5px; font-weight: 700; font-variant-numeric: tabular-nums;
+    /* ИЗМЕНЕНО 28.09.2026 (жалоба пользователя - при фокусе на поле ввода
+       приложение "увеличивается"/зумится) - font-size ниже 16px на любом
+       текстовом input/select/textarea заставляет iOS/WKWebView (Telegram
+       WebView использует тот же движок) автоматически зумить страницу при
+       фокусе на поле - это системное поведение движка, а не баг вёрстки.
+       Подняли до 16px здесь и во всех остальных текстовых полях приложения
+       (.svc-input/.svc-select, .field-row, .profile-form и т.д.) - ширина
+       чуть увеличена (52 -> 58px), чтобы двузначное число с точкой
+       по-прежнему помещалось без обрезки при более крупном шрифте. */
+    width: 58px; padding: 3px 6px; border-radius: 8px; border: 1px solid rgba(255,196,0,.6);
+    background: #000; color: #fff; font-size: 16px; font-weight: 700; font-variant-numeric: tabular-nums;
   }
   .rating-edit-wrap button {
     border: none; border-radius: 8px; padding: 4px 9px; font-size: 11.5px; font-weight: 800;
@@ -26892,7 +27057,7 @@ def cabinet_webapp_html():
 <!-- ==================== ЧАСЫ ПИКА ==================== -->
 <div class="tab-pane" id="tab-peak">
   <div class="pill-row" id="peakDaysRow"></div>
-  <div class="card"><div id="peakText" class="muted">Загружаю…</div></div>
+  <div class="card"><div id="peakText" class="muted"><div class="mini-spin"></div><div>Загружаю…</div></div></div>
 </div>
 
 <!-- ==================== РЯДОМ (гео) ====================
@@ -26914,7 +27079,7 @@ def cabinet_webapp_html():
   </div>
   <div class="card">
     <p><b>Обслуживание</b></p>
-    <div id="moItemsList" class="muted">Загружаю…</div>
+    <div id="moItemsList" class="muted"><div class="mini-spin"></div><div>Загружаю…</div></div>
   </div>
   <div class="card">
     <div class="switch-row"><span>🔔 Напоминать о замене масла</span>
@@ -26940,7 +27105,7 @@ def cabinet_webapp_html():
      которым водитель привязан. Отмечать оплачено/не оплачено может
      только владелец кабинета юрлица (см. LEGAL_CABINET_WEBAPP_PATH). -->
 <div class="tab-pane" id="tab-rent">
-  <div class="card" id="rentTabBody"><div class="muted">Загружаю…</div></div>
+  <div class="card" id="rentTabBody"><div class="mini-spin"></div><div class="muted">Загружаю…</div></div>
 </div>
 
 <!-- ==================== НАСТРОЙКИ ====================
@@ -26948,11 +27113,17 @@ def cabinet_webapp_html():
      (notification_settings_keyboard/toggle_notification_setting/
      toggle_airport_queue_inline) - через handle_cabinet_settings_api. -->
 <div class="tab-pane" id="tab-settings">
-  <div class="card"><div id="settingsSwitches" class="muted">Загружаю…</div></div>
+  <div class="card"><div id="settingsSwitches" class="muted"><div class="mini-spin"></div><div>Загружаю…</div></div></div>
 </div>
 
 </div><!-- /cabinetApp -->
 <script>
+  // ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - см. .loading-block/
+  // .mini-spin в <style> выше) - общий шаблон состояния загрузки для мест
+  // ниже, где раньше был голый текст "Загружаю…" без анимации.
+  function loadingBlockHtml(text) {
+    return '<div class="loading-block"><div class="mini-spin"></div><div>' + (text || 'Загружаю…') + '</div></div>';
+  }
   const tg = window.Telegram && window.Telegram.WebApp;
   if (tg) {
     tg.ready(); tg.expand();
@@ -27521,7 +27692,7 @@ def cabinet_webapp_html():
   }
   async function loadPeakDay(weekday) {
     const textEl = document.getElementById('peakText');
-    textEl.textContent = 'Загружаю…';
+    textEl.innerHTML = loadingBlockHtml();
     try {
       const url = '""" + CABINET_PEAK_API_PATH + """' + (weekday != null ? ('?weekday=' + weekday) : '');
       const resp = await fetch(url, { headers: { 'X-Telegram-Init-Data': initData } });
