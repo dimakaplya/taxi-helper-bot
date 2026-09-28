@@ -1052,16 +1052,25 @@ TICKER_TRAFFIC_RECOMMENDATION = {
     9: "дальние заказы не бери - не успеешь", 10: "дальние заказы не бери - не успеешь",
 }
 
+# ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "можно чтобы если не
+# показывают были заглушки пробок советов куда ехать дорожных событий") -
+# бегущая строка раньше просто ПРОПУСКАЛА пункт пробок, если свежего балла
+# от водителей ещё не поступало (свежий отчёт - обязательное условие
+# get_city_traffic_level, см. её докстринг) - лента в этом случае выглядела
+# "сломанной"/куце. Теперь вместо пропуска - заглушка с тем же эмодзи, чтобы
+# лента всегда показывала хоть что-то по каждому виду данных.
+TICKER_TRAFFIC_STUB = "🚦 Пробки: свежих данных пока нет - ориентируйся по своему опыту и часам пик"
+
 def traffic_ticker_item(city):
-    """Строка для бегущей строки на карте с баллом пробок и рекомендацией,
-    либо None, если свежего балла по городу нет (см. get_city_traffic_level -
-    тот же кэш, что у "Куда ехать")."""
+    """Строка для бегущей строки на карте с баллом пробок и рекомендацией -
+    либо, если свежего балла по городу нет (см. get_city_traffic_level - тот
+    же кэш, что у "Куда ехать"), заглушка TICKER_TRAFFIC_STUB вместо пустоты."""
     level = get_city_traffic_level(city)
     if level is None:
-        return None
+        return TICKER_TRAFFIC_STUB
     label = TRAFFIC_LEVEL_LABELS.get(level, '')
     advice = TICKER_TRAFFIC_RECOMMENDATION.get(level, '')
-    return f"🚦 Пробки {level}/10 - {label.lower()}, {advice}" if label else None
+    return f"🚦 Пробки {level}/10 - {label.lower()}, {advice}" if label else TICKER_TRAFFIC_STUB
 
 def is_city_holiday_today(city):
     """True, если СЕГОДНЯ (по местному времени города) идёт праздник -
@@ -2311,30 +2320,62 @@ def get_ticker_ads(city):
     не показывает рекламный блок, пока сюда ничего не добавлено)."""
     return []
 
-def build_ticker_items(city):
+TICKER_ROAD_EVENTS_STUB = "🚧 Крупных ДТП и перекрытий сейчас не зафиксировано"
+
+def build_ticker_items(city, category=None):
     """Собирает содержимое бегущей строки над картой для города бота: балл
-    пробок с рекомендацией + активные перекрытия/крупные ДТП (то же окно 6ч,
-    что у "Дороги"/"События", см. _road_events_chat_window) + новости/афиша
-    + реклама (см. get_ticker_ads). Порядок - от самого практически важного
-    водителю к менее срочному. Если по городу вообще ничего нет ни в одном
-    источнике - возвращает пустой список (бегущая строка на карте должна
-    аккуратно скрыться, а не показывать пустую плашку - см. JS в
-    map_webapp_html)."""
+    пробок с рекомендацией + совет "куда ехать" (переиспользует
+    where_to_go_banner, см. ниже) + активные перекрытия/крупные ДТП (то же
+    окно 6ч, что у "Дороги"/"События", см. _road_events_chat_window) +
+    новости/афиша + реклама (см. get_ticker_ads). Порядок - от самого
+    практически важного водителю к менее срочному.
+
+    ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "можно чтобы если
+    не показывают были заглушки пробок советов куда ехать дорожных
+    событий"): раньше пункт перекрытий/ДТП просто ПРОПУСКАЛСЯ, если за
+    последние 6ч в городе ничего не было - теперь вместо пропуска заглушка
+    TICKER_ROAD_EVENTS_STUB (лента "всегда показывает хоть что-то" по
+    каждому виду данных, тот же принцип, что у TICKER_TRAFFIC_STUB выше).
+    Совет "куда ехать" - genuine третий пункт (пользователь перечислил его
+    отдельно от пробок и дорожных событий), переиспользует
+    where_to_go_banner(city, category), которая уже сама по себе никогда
+    не возвращает пусто (см. её докстринг) - отдельной заглушки ей не
+    нужно. category опционален (карта может быть открыта без выбранной
+    категории тарифа) - в этом случае where_to_go_banner/
+    get_current_peak_level используют общую (не Ultima-специфичную)
+    логику, как и раньше при category=None.
+
+    Если по городу вообще ничего нет ни в одном источнике (пробки и
+    события теперь ВСЕГДА дают хотя бы заглушку, поэтому фактически это
+    больше не может случиться) - возвращает пустой список (бегущая строка
+    на карте должна аккуратно скрыться, а не показывать пустую плашку -
+    см. JS в map_webapp_html)."""
     items = []
+    category = category or None
 
     traffic_item = traffic_ticker_item(city)
     if traffic_item:
         items.append(traffic_item)
 
+    try:
+        advice_item = where_to_go_banner(city, category)
+    except Exception:
+        logger.exception("❌ Ошибка при получении совета «куда ехать» для бегущей строки карты")
+        advice_item = None
+    if advice_item:
+        items.append(advice_item)
+
+    road_items = []
     for e in _road_events_chat_window(city):
         text = e.get('text', '')
         if not text:
             continue
         short = text if len(text) <= 100 else text[:100].rsplit(' ', 1)[0].rstrip(' ,.-') + '…'
         if e.get('is_closure'):
-            items.append(f"🚧 {short}")
+            road_items.append(f"🚧 {short}")
         elif e.get('is_severe'):
-            items.append(f"🚨 {short}")
+            road_items.append(f"🚨 {short}")
+    items.extend(road_items if road_items else [TICKER_ROAD_EVENTS_STUB])
 
     for n in get_ticker_news_for_city(city):
         text = n.get('text', '')
@@ -16578,7 +16619,7 @@ def map_webapp_html():
   }}
   async function loadMapTicker() {{
     try {{
-      const resp = await fetch(`/map/ticker?city=${{encodeURIComponent(city)}}`);
+      const resp = await fetch(`/map/ticker?city=${{encodeURIComponent(city)}}&category=${{encodeURIComponent(myCategory)}}`);
       if (!resp.ok) return;
       const data = await resp.json();
       renderMapTicker(data.items || []);
@@ -22706,8 +22747,9 @@ MAP_TICKER_API_PATH = '/map/ticker'
 
 async def handle_map_ticker_api(request):
     city = request.query.get('city', '')
+    category = request.query.get('category', '') or None
     try:
-        items = build_ticker_items(city)
+        items = build_ticker_items(city, category=category)
     except Exception:
         logger.exception("❌ Ошибка при сборке бегущей строки карты")
         items = []
