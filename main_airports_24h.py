@@ -2311,59 +2311,138 @@ def get_ticker_news_for_city(city):
         return []
     return data.get('cities', {}).get(city, [])
 
+# ИЗМЕНЕНО 28.09.2026 (прямая просьба пользователя - "что здесь может быть
+# ваша реклама по поводу рекламы обращаться в поддержку") - раньше это была
+# ПОЛНАЯ заглушка (всегда []), пока пользователь не решит, как вносить
+# рекламу вручную. Решение принято: пока не заведено НИ ОДНОГО настоящего
+# рекламного места - показываем один дефолтный слот-приглашение, одинаковый
+# на все города. Когда появится реальный ручной механизм внесения рекламы
+# (отдельная задача), он заменит собой этот дефолт (или дополнит его).
+TICKER_AD_PLACEHOLDER_TEXT = "Здесь может быть ваша реклама - по вопросам рекламы обращайтесь в поддержку"
+
 def get_ticker_ads(city):
-    """Реклама для бегущей строки на карте - по прямой просьбе пользователя
-    ("рекламу отдельно будем грузить") загружается НЕ автоматическим
-    сборщиком, а отдельно (администратором) - пока список всегда пустой,
-    механизм ручного добавления подключим, когда пользователь определится,
-    как именно хочет её вносить (заглушка, а не баг - бегущая строка просто
-    не показывает рекламный блок, пока сюда ничего не добавлено)."""
-    return []
+    """Реклама для бегущей строки на карте. См. TICKER_AD_PLACEHOLDER_TEXT
+    выше - пока нет ни одного настоящего рекламного места, отдаём именно
+    его, а не пустой список."""
+    return [TICKER_AD_PLACEHOLDER_TEXT]
 
 TICKER_ROAD_EVENTS_STUB = "🚧 Крупных ДТП и перекрытий сейчас не зафиксировано"
 
-def build_ticker_items(city, category=None):
-    """Собирает содержимое бегущей строки над картой для города бота: балл
-    пробок с рекомендацией + совет "куда ехать" (переиспользует
-    where_to_go_banner, см. ниже) + активные перекрытия/крупные ДТП (то же
-    окно 6ч, что у "Дороги"/"События", см. _road_events_chat_window) +
-    новости/афиша + реклама (см. get_ticker_ads). Порядок - от самого
-    практически важного водителю к менее срочному.
+# ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "погода" в бегущей
+# строке) - короткая сводка из ГОТОВОГО снепшота погоды (тот же источник,
+# что у кнопки "🌤 ПОГОДА"/карты осадков - get_cached_weather_forecast/
+# describe_weathercode), без live-запроса. None, если снепшота для города
+# ещё нет (не все города бота покрыты RAIN_CITY_COORDS/weather_data.json).
+def weather_ticker_item(city):
+    forecast = get_cached_weather_forecast(city)
+    if not forecast:
+        return None
+    current = (forecast or {}).get('current') or {}
+    temp = current.get('temperature_2m')
+    if temp is None:
+        return None
+    code = current.get('weathercode')
+    desc, _intensity, emoji = describe_weathercode(code) if code is not None else ('', 0, '🌤')
+    temp_int = round(temp)
+    temp_str = f"+{temp_int}" if temp_int >= 0 else str(temp_int)
+    text = f"{emoji} Погода: {temp_str}°C"
+    if desc:
+        text += f", {desc}"
+    return text
 
-    ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "можно чтобы если
-    не показывают были заглушки пробок советов куда ехать дорожных
-    событий"): раньше пункт перекрытий/ДТП просто ПРОПУСКАЛСЯ, если за
-    последние 6ч в городе ничего не было - теперь вместо пропуска заглушка
-    TICKER_ROAD_EVENTS_STUB (лента "всегда показывает хоть что-то" по
-    каждому виду данных, тот же принцип, что у TICKER_TRAFFIC_STUB выше).
-    Совет "куда ехать" - genuine третий пункт (пользователь перечислил его
-    отдельно от пробок и дорожных событий), переиспользует
-    where_to_go_banner(city, category), которая уже сама по себе никогда
-    не возвращает пусто (см. её докстринг) - отдельной заглушки ей не
-    нужно. category опционален (карта может быть открыта без выбранной
-    категории тарифа) - в этом случае where_to_go_banner/
-    get_current_peak_level используют общую (не Ultima-специфичную)
-    логику, как и раньше при category=None.
+# ==================== ПРИЛЁТЫ (сигнал "волна прилётов") - ДОБАВЛЕНО 28.09.2026 ====================
+# По прямой просьбе пользователя ("через сколько начнётся... волна прилётов
+# в таких-то аэропортах") - зеркало departure_wave_info выше, только для
+# прилётов (get_airport_flights), которые, в отличие от вылетов, собираются
+# по ВСЕМ аэропортам города (см. AIRPORTS_INFO), а не только по списку
+# DEPARTURE_WAVE_AIRPORTS_BY_CITY (тот ограничен ради квоты Yandex Rasp).
+# Порог сознательно переиспользует DEPARTURE_WAVE_THRESHOLD_BY_CITY (как и
+# остальные пороги спроса в этом боте - ориентир, а не калиброванная
+# точность; прилётов у тех же аэропортов примерно столько же, сколько
+# вылетов).
+ARRIVAL_WAVE_LEAD_HOURS = 2
 
-    Если по городу вообще ничего нет ни в одном источнике (пробки и
-    события теперь ВСЕГДА дают хотя бы заглушку, поэтому фактически это
-    больше не может случиться) - возвращает пустой список (бегущая строка
-    на карте должна аккуратно скрыться, а не показывать пустую плашку -
-    см. JS в map_webapp_html)."""
+def arrival_wave_info(city):
+    airports = AIRPORTS_INFO.get(city)
+    if not airports:
+        return {'count': 0, 'is_wave': False}
+    threshold = DEPARTURE_WAVE_THRESHOLD_BY_CITY.get(city, DEPARTURE_WAVE_THRESHOLD)
+    now_ts = datetime.now().timestamp()
+    horizon_ts = now_ts + ARRIVAL_WAVE_LEAD_HOURS * 3600
+    count = 0
+    for airport in airports:
+        for f in get_airport_flights(airport['icao']):
+            first_seen = f.get('firstSeen')
+            if first_seen is not None and now_ts <= first_seen <= horizon_ts:
+                count += 1
+    return {'count': count, 'is_wave': count >= threshold}
+
+def flight_wave_ticker_items(city):
+    """Пункты бегущей строки про волну вылетов/прилётов (ДОБАВЛЕНО
+    28.09.2026, прямая просьба пользователя) - показываются, только если
+    реально ожидается волна (is_wave) СЕЙЧАС, а не заглушкой "волны нет" -
+    в отличие от дорожных событий, отсутствие волны - обычное, большую
+    часть суток состояние, а не что-то, о чём стоит отдельно сообщать."""
     items = []
-    category = category or None
+    dep_airports_icao = DEPARTURE_WAVE_AIRPORTS_BY_CITY.get(city)
+    if dep_airports_icao:
+        info = departure_wave_info(city)
+        if info['is_wave']:
+            names = [a['name'] for a in AIRPORTS_INFO.get(city, []) if a['icao'] in dep_airports_icao]
+            names_str = (' (' + ', '.join(dict.fromkeys(names)) + ')') if names else ''
+            items.append(f"🛫 Волна вылетов{names_str} в ближайшие {DEPARTURE_WAVE_LEAD_HOURS}ч - ~{info['count']} рейсов")
+    if AIRPORTS_INFO.get(city):
+        arr_info = arrival_wave_info(city)
+        if arr_info['is_wave']:
+            names = [a['name'] for a in AIRPORTS_INFO.get(city, [])]
+            names_str = (' (' + ', '.join(dict.fromkeys(names)) + ')') if names else ''
+            items.append(f"🛬 Волна прилётов{names_str} в ближайшие {ARRIVAL_WAVE_LEAD_HOURS}ч - ~{arr_info['count']} рейсов")
+    return items
 
-    traffic_item = traffic_ticker_item(city)
-    if traffic_item:
-        items.append(traffic_item)
+# ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "на ЖД вокзалах что
+# поднялся спрос") - те же данные/расчёт, что уже используют метки вокзалов
+# на карте (compute_current_train_period_load, см. handle_map_stations_api
+# выше) и раздел "🚆 ВОКЗАЛЫ" (get_train_load_label) - бинарная шкала:
+# показываем вокзал в ленте, только если спрос ВЫШЕ порога (load > 50,
+# та же граница, что у get_train_load_label 'ЕХАТЬ'). category берём
+# 'taxi' по умолчанию (как и у меток на карте) - лента общая на весь город,
+# не персональная под тариф конкретного водителя.
+def train_demand_ticker_items(city):
+    items = []
+    for station in STATIONS_INFO.get(city, []):
+        code = station['code']
+        try:
+            load, _trains, _ = compute_current_train_period_load(code, 'taxi')
+        except Exception:
+            continue
+        if load > 50:
+            items.append(f"🚉 {station['name']}: спрос вырос, стоит подъехать")
+    return items
 
-    try:
-        advice_item = where_to_go_banner(city, category)
-    except Exception:
-        logger.exception("❌ Ошибка при получении совета «куда ехать» для бегущей строки карты")
-        advice_item = None
-    if advice_item:
-        items.append(advice_item)
+def build_ticker_items(city, category=None):
+    """Собирает содержимое бегущей строки над картой для города бота.
+
+    ИЗМЕНЕНО 28.09.2026 (прямая просьба пользователя - "оставь только
+    новости... дорожные новости перекрытия аварии ДТП погода... через
+    сколько начнётся вылеты... волна... либо прилётов... на ЖД вокзалах
+    что поднялся спрос... реклама"): состав ленты ПОЛНОСТЬЮ пересобран под
+    этот список. Убраны балл пробок (🚦 traffic_ticker_item), совет "куда
+    ехать" (🧭 where_to_go_banner) и общие городские новости/афиша (📰
+    get_ticker_news_for_city) - остаются ТОЛЬКО: дорожные события
+    (закрытия/ДТП, с заглушкой TICKER_ROAD_EVENTS_STUB, если за последние
+    6ч ничего не было), погода (weather_ticker_item), волна вылетов/
+    прилётов (flight_wave_ticker_items - только когда волна реально есть),
+    спрос на вокзалах (train_demand_ticker_items - только когда спрос выше
+    порога) и рекламный слот (get_ticker_ads). Применяется ко ВСЕМ городам
+    бота, не только Москве - у каждого города просто показывается то, для
+    чего реально есть данные (Москва богаче остальных, т.к. для неё
+    собирается больше всего - рейсы+вокзалы+дороги+погода).
+
+    category больше не используется (совет "куда ехать" убран) - параметр
+    оставлен только ради обратной совместимости вызывающего кода
+    (handle_map_ticker_api передаёт его из URL) и старых вызовов в тестах,
+    чтобы не трогать сам API/JS ради одного этого изменения."""
+    items = []
 
     road_items = []
     for e in _road_events_chat_window(city):
@@ -2377,10 +2456,12 @@ def build_ticker_items(city, category=None):
             road_items.append(f"🚨 {short}")
     items.extend(road_items if road_items else [TICKER_ROAD_EVENTS_STUB])
 
-    for n in get_ticker_news_for_city(city):
-        text = n.get('text', '')
-        if text:
-            items.append(f"📰 {text}")
+    weather_item = weather_ticker_item(city)
+    if weather_item:
+        items.append(weather_item)
+
+    items.extend(flight_wave_ticker_items(city))
+    items.extend(train_demand_ticker_items(city))
 
     for ad in get_ticker_ads(city):
         text = ad.get('text') if isinstance(ad, dict) else ad
@@ -3629,6 +3710,16 @@ def init_db():
     for _migration_sql in (
         'ALTER TABLE referrals ADD COLUMN referred_by_level3 INTEGER',
         "ALTER TABLE referrals ADD COLUMN referrer_type TEXT DEFAULT 'individual'",
+        # ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "реферальную
+        # программу для админ реферальная программа 40 30 20:10 до
+        # четвёртого колена") - 4-й уровень предков нужен, чтобы
+        # distribute_referral_earnings вообще МОГ найти earner_id на глубине
+        # 4 (раньше запрос физически останавливался на referred_by_level3).
+        # Платит по нему пока только схема 'admin' (4 элемента в
+        # REFERRAL_RATES_PERCENT['admin']) - у individual/legal_entity
+        # (3 элемента) уровень 4 просто не будет давать начислений, см.
+        # length-guard в distribute_referral_earnings ниже.
+        'ALTER TABLE referrals ADD COLUMN referred_by_level4 INTEGER',
     ):
         try:
             cursor.execute(_migration_sql)
@@ -3637,6 +3728,7 @@ def init_db():
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_referrals_by1 ON referrals (referred_by)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_referrals_by2 ON referrals (referred_by_level2)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_referrals_by3 ON referrals (referred_by_level3)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_referrals_by4 ON referrals (referred_by_level4)')
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS referral_earnings (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -3648,6 +3740,23 @@ def init_db():
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    # ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - удержание 6% "в
+    # счёт налога на доход" с каждого реферального начисления, см.
+    # REFERRAL_TAX_WITHHOLD_PERCENT ниже) - таблица уже существует в проде,
+    # новую колонку добавляем через ALTER TABLE, тот же try/except паттерн,
+    # что у остальных миграций в этой функции (падает, если колонка уже
+    # есть - обычная ситуация при каждом рестарте). amount_kopecks в этой
+    # таблице как и раньше - сумма, реально начисленная рефералу (то есть
+    # УЖЕ за вычетом этого удержания); tax_withheld_kopecks - отдельно
+    # удержанная часть, для прозрачности и для подсчёта прибыли компании
+    # (см. compute_campaign_profit).
+    for _migration_sql in (
+        'ALTER TABLE referral_earnings ADD COLUMN tax_withheld_kopecks INTEGER DEFAULT 0',
+    ):
+        try:
+            cursor.execute(_migration_sql)
+        except Exception:
+            pass
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS referral_withdrawals (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -3768,6 +3877,34 @@ def init_db():
         )
     ''')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_legal_entities_owner ON legal_entities (owner_user_id)')
+    # ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "Админ
+    # реферальная система" переведена на мульти-пароль по образцу юрлиц, см.
+    # add_admin_partner/apply_admin_partner_password ниже) - legal_entities
+    # раньше хранила ТОЛЬКО юр.лица; теперь та же таблица используется и
+    # для админ-партнёров, kind различает пространства паролей
+    # ('legal_entity' по умолчанию - все существующие строки, 'admin_partner'
+    # - новые). Пароли всё ещё UNIQUE на всю таблицу (не могут совпасть
+    # между юрлицом и админ-партнёром). ВАЖНО: этот ALTER TABLE должен идти
+    # ПОСЛЕ CREATE TABLE IF NOT EXISTS legal_entities выше - иначе на чистой
+    # БД (таблицы ещё нет) он молча проглатывается try/except и колонка
+    # kind так и не появляется.
+    try:
+        cursor.execute("ALTER TABLE legal_entities ADD COLUMN kind TEXT DEFAULT 'legal_entity'")
+    except Exception:
+        pass
+    # Существующая ДО этой миграции запись "Админ реферальная система" (см.
+    # REFERRAL_ADMIN_PASSWORD/admin_referral_password_flow) создавалась ещё
+    # когда kind не существовал - после ALTER TABLE она получила kind
+    # 'legal_entity' по умолчанию как и все остальные строки. Перемечаем её
+    # в 'admin_partner' по паролю, иначе find_admin_partner_by_password её
+    # не найдёт и владелец потеряет доступ к уже занятому кабинету.
+    try:
+        cursor.execute(
+            "UPDATE legal_entities SET kind = 'admin_partner' WHERE password = ? AND kind = 'legal_entity'",
+            (REFERRAL_ADMIN_PASSWORD,)
+        )
+    except Exception:
+        pass
     # Машины юрлица - привязка к конкретному водителю (driver_user_id,
     # может быть NULL, если машина пока никому не привязана), пробег и
     # последняя поездка обновляются водителем через карту/личный кабинет
@@ -13012,9 +13149,10 @@ MAP_CHROME_CSS = """
   .map-ticker.hidden-empty { display: none; }
   .map-ticker.dimmed { opacity: 0; pointer-events: none; }
   /* ИЗМЕНЕНО 28.09.2026 (прямая просьба пользователя - "уменьши, не успевают
-     прочитать", затем повторно "ещё медленнее") - было 26s -> 48s -> 75s на
+     прочитать", затем повторно "ещё медленнее", затем ещё раз "ещё
+     помедленнее чтобы успевали читать") - было 26s -> 48s -> 75s -> 115s на
      полный проход ленты. */
-  .map-ticker-track { display: flex; white-space: nowrap; will-change: transform; animation: mapTickerScroll 75s linear infinite; }
+  .map-ticker-track { display: flex; white-space: nowrap; will-change: transform; animation: mapTickerScroll 115s linear infinite; }
   .map-ticker-item { display: inline-block; padding: 0 26px; font-family: 'Silkscreen', monospace; font-weight: 700; font-size: 13px; letter-spacing: .05em; color: #FFC400; text-shadow: 0 0 4px rgba(255,196,0,.75), 0 0 1px rgba(255,196,0,.9); }
   @keyframes mapTickerScroll { 0% { transform: translateX(0); } 100% { transform: translateX(-50%); } }
   @media (prefers-reduced-motion: reduce) { .map-ticker-track { animation: none; } }
@@ -18920,6 +19058,14 @@ def unified_app_html():
   let city = params.get('city') || '';
   let category = params.get('category') || '';
   let driverPos = null;
+  // ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "это сообщение
+  // тоже перенеси пожалуйста в приложение не оставляй его в боте", про
+  // ввод email для чека, см. request_subscription_email в main.py) - бот
+  // теперь вместо текстового вопроса в чате шлёт кнопку "📱 ОТКРЫТЬ
+  // ПРИЛОЖЕНИЕ" со ссылкой на /app?...&svc=subscription|referral - тот же
+  // приём, что уже использует openFuelMapTab (deep-link в конкретную
+  // вкладку/экран извне), см. initialSvc ниже в startApp().
+  const initialSvc = params.get('svc') || '';
 
   // ДОБАВЛЕНО 26.09.2026 (прямая просьба пользователя - "где ты Moscow
   // написал там убери там сделай Москва") - в URL город передаётся тем же
@@ -19017,6 +19163,12 @@ def unified_app_html():
   const LEGAL_CABINET_ACCESS_API_PATH = '""" + LEGAL_CABINET_ACCESS_API_PATH + """';
   const LEGAL_CABINET_PASSWORD_API_PATH = '""" + LEGAL_CABINET_PASSWORD_API_PATH + """';
   const LEGAL_CABINET_WEBAPP_PATH = '""" + LEGAL_CABINET_WEBAPP_PATH + """';
+  // ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "чтобы у них тоже
+  // был свой пароль... как у юрлица") - ввод пароля админ-партнёра теперь
+  // тоже можно сделать прямо в мини-приложении (renderReferralPhantomDetail
+  // ниже), а не только в чате - см. handle_admin_partner_password_api в
+  // main.py, зеркало LEGAL_CABINET_PASSWORD_API_PATH выше.
+  const ADMIN_PARTNER_PASSWORD_API_PATH = '""" + ADMIN_PARTNER_PASSWORD_API_PATH + """';
   // ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - у каждой из трёх
   // реферальных схем (Водитель/Курьер = individual, Юридическое лицо =
   // legal_entity, Админ = admin) должно быть своё описание/ставки на своём
@@ -19176,6 +19328,22 @@ def unified_app_html():
     }
     updateCityBadge();
     loadMapFrame();
+    // ДОБАВЛЕНО 28.09.2026 (см. initialSvc выше) - открыт по кнопке
+    // "📱 ОТКРЫТЬ ПРИЛОЖЕНИЕ" из чата (request_subscription_email в
+    // main.py) - сразу переключаемся на вкладку "Сервисы" и открываем
+    // нужный экран (там уже есть готовое поле email), а не просто на
+    // карту, как при обычном запуске. setTimeout(0) - startApp() может
+    // вызваться СИНХРОННО прямо из geolocation-колбэка (см. requestGeo)
+    // ещё ДО того, как остальной код скрипта ниже (в т.ч. const TAB_NAMES,
+    // от которой зависит showTab) успел выполниться - настоящий браузерный
+    // geolocation всегда асинхронный, так что это чисто защитный приём,
+    // не полагающийся на порядок объявлений ниже по файлу.
+    if (initialSvc === 'subscription' || initialSvc === 'referral') {
+      setTimeout(function () {
+        showTab('services');
+        openServiceDetail(initialSvc);
+      }, 0);
+    }
   }
 
   // ДОБАВЛЕНО 26.09.2026 (перенос настоящей карты в вкладку "Карта" -
@@ -19881,21 +20049,50 @@ def unified_app_html():
   // Админ), просто с разными rates/description - ничего из уже работавшей
   // статистики/API не пересчитано заново, только переиспользовано в трёх
   // местах вместо одного.
+  // ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "сделай пожалуйста
+  // реферальную программу для админ реферальная программа 40 30 20:10 до
+  // четвёртого колена") - раньше все три схемы (individual/legal_entity/
+  // admin) были ровно по 3 уровня, поэтому текст/строки уровней были
+  // захардкожены на 3. Теперь у admin - 4 уровня (40/30/20/10%), а у
+  // остальных схем по-прежнему 3, поэтому обе функции ниже строятся
+  // динамически по фактической длине rates (зеркало referral_how_it_works_text/
+  // referral_level_counts_lines в main.py, тот же порядок фраз/строк).
+  function referralHowItWorksText(rates) {
+    const n = rates.length;
+    if (!n) return '';
+    const clauses = [rates[0] + '% с каждого ежемесячного платежа приглашённого тобой напрямую (1 уровень)'];
+    for (let i = 1; i < n; i++) {
+      clauses.push(rates[i] + '% с платежей рефералов ' + i + '-го уровня (' + (i + 1) + ' уровень)');
+    }
+    const joined = n === 1 ? clauses[0] : clauses.slice(0, -1).join(', ') + ' и ' + clauses[clauses.length - 1];
+    return joined + ' - прямой процент от суммы платежа на каждом уровне. Начисляется каждый месяц, пока реферал платит ' +
+      'подписку. Дальше ' + n + ' уровня деньги не идут, но всю ветку целиком видно в «Мои рефералы» ниже.';
+  }
+  function referralLevelRowsHtml(data, rates) {
+    let out = '';
+    for (let i = 1; i <= (rates ? rates.length : 0); i++) {
+      out += '<div class="svc-row"><span>Уровень ' + i + '</span><span class="v">' + (data['level' + i + '_count'] || 0) + '</span></div>';
+    }
+    return out;
+  }
   function referralStatsBlockHtml(data, rates, description) {
-    const ratesNote = (rates && rates.length === 3)
-      ? ('<div class="svc-card">Как это работает: ' + rates[0] + '% с каждого ежемесячного платежа приглашённого тобой напрямую (1 уровень), ' +
-         rates[1] + '% с платежей его рефералов (2 уровень) и ' + rates[2] + '% с платежей рефералов 2 уровня (3 уровень) - прямой процент от ' +
-         'суммы платежа на каждом уровне. Начисляется каждый месяц, пока реферал платит подписку. Дальше 3 уровня деньги не идут, но всю ветку ' +
-         'целиком видно в «Мои рефералы» ниже.</div>')
+    // ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "эти 6% ... где
+    // будет написано что 6% идёт в счёт погашения налогов на доходы")
+    // - та же приписка, что и в чат-версии (см. REFERRAL_TAX_NOTE_TEXT в
+    // main.py), tax_withhold_percent приходит из handle_referral_data_api.
+    const taxNote = data && data.tax_withhold_percent
+      ? ('<div class="svc-note">ℹ️ С каждого начисления удерживается ' + data.tax_withhold_percent + '% в счёт налога на доход - ' +
+         'суммы в статистике выше уже показаны за вычетом этого удержания.</div>')
+      : '';
+    const ratesNote = (rates && rates.length)
+      ? ('<div class="svc-card">Как это работает: ' + referralHowItWorksText(rates) + '</div>' + taxNote)
       : '';
     return (
       (description ? '<div class="svc-card">' + description + '</div>' : '') +
       '<div class="svc-row"><span>Заработано в этом месяце</span><span class="v">' + (data.this_month_earned_rub || 0) + ' ₽</span></div>' +
       '<div class="svc-link-text" id="refLink">' + data.link + '</div>' +
       '<button type="button" class="svc-btn ghost" id="refCopyBtn">📋 Скопировать ссылку</button>' +
-      '<div class="svc-row"><span>Уровень 1</span><span class="v">' + data.level1_count + '</span></div>' +
-      '<div class="svc-row"><span>Уровень 2</span><span class="v">' + data.level2_count + '</span></div>' +
-      '<div class="svc-row"><span>Уровень 3</span><span class="v">' + data.level3_count + '</span></div>' +
+      referralLevelRowsHtml(data, rates) +
       '<div class="svc-row"><span>Всего приглашено</span><span class="v">' + data.downline_total + '</span></div>' +
       '<div class="svc-row"><span>Баланс</span><span class="v">' + data.balance_rub + ' ₽</span></div>' +
       '<div class="svc-row"><span>Заработано всего</span><span class="v">' + data.total_earned_rub + ' ₽</span></div>' +
@@ -19978,7 +20175,12 @@ def unified_app_html():
     const legalRates = REFERRAL_RATES_PERCENT.legal_entity;
     const legalDescription = 'Реферальная программа для юридических лиц (автопарков): те же приглашения по ссылке, но повышенный процент - ' +
       legalRates.join('/') + '% с платежей 1/2/3 уровня. Чтобы начисления шли именно по этой схеме - подтверди доступ ниже (подписка + пароль компании).';
-    let html = '<div class="svc-h">🏢 Юридическое лицо</div>' + referralStatsBlockHtml(data, legalRates, legalDescription);
+    // ДОБАВЛЕНО 28.09.2026 (см. partnerNote в renderReferralPhantomDetail
+    // выше - для единообразия) - handle_referral_data_api теперь отдаёт
+    // entity_name для ЛЮБОГО владельца кабинета (юрлицо или админ-партнёр),
+    // показываем название компании-владельца, если оно есть.
+    const legalPartnerNote = data.entity_name ? ('<div class="svc-card">🏷 Компания: ' + data.entity_name + '</div>') : '';
+    let html = '<div class="svc-h">🏢 Юридическое лицо</div>' + legalPartnerNote + referralStatsBlockHtml(data, legalRates, legalDescription);
     if (access && access.has_access) {
       html += '<div class="svc-card">У тебя уже есть доступ к кабинету автопарка.</div>' +
         '<a class="svc-btn" href="' + LEGAL_CABINET_WEBAPP_PATH + '?tgInitData=' + encodeURIComponent((tg && tg.initData) || '') + '">🏛 Открыть кабинет автопарка</a>';
@@ -20054,10 +20256,14 @@ def unified_app_html():
   function renderReferralMaterialsDetail(box, data) {
     svcBackAction = function () { renderReferralMenu(box, data); }; // ИЗМЕНЕНО 27.09.2026 - "Назад" отсюда ведёт в меню реферальной программы, на один шаг назад
     const rates = data.rates_percent || [];
-    const ratesNote = rates.length === 3
-      ? ('<div class="svc-card">Как это работает: ' + rates[0] + '% с каждого ежемесячного платежа приглашённого тобой напрямую (1 уровень), ' +
-         rates[1] + '% с платежей его рефералов (2 уровень) и ' + rates[2] + '% с платежей рефералов 2 уровня (3 уровень) - прямой процент от суммы ' +
-         'платежа на каждом уровне, каждый месяц, пока реферал платит подписку.</div>')
+    // ДОБАВЛЕНО 28.09.2026 (см. REFERRAL_TAX_NOTE_TEXT/tax_withhold_percent
+    // в main.py) - та же приписка про удержание 6%, что и в основном блоке
+    // статистики (referralStatsBlockHtml).
+    const taxNote = data && data.tax_withhold_percent
+      ? ('<div class="svc-note">ℹ️ С каждого начисления удерживается ' + data.tax_withhold_percent + '% в счёт налога на доход.</div>')
+      : '';
+    const ratesNote = rates.length
+      ? ('<div class="svc-card">Как это работает: ' + referralHowItWorksText(rates) + '</div>' + taxNote)
       : '';
     box.innerHTML =
       '<div class="svc-h">📚 Материалы реферальной системы</div>' +
@@ -20065,34 +20271,101 @@ def unified_app_html():
       '<a class="svc-btn ghost" href="' + PRESENTATION_PDF_WEBAPP_PATH + '" target="_blank" rel="noopener">📥 Скачать презентацию</a>';
   }
 
-  // "Фантом" - скрытый вход, работает ТОЧНО так же, как раньше в чате (тот
-  // же пароль, та же логика гранта - см. phantom_start/phantom_password_flow
-  // в main.py), плитка лишь открывает диалог с ботом со start-параметром
-  // "refphantom" (см. /start в main.py).
+  // "Фантом" - вход в схему "Админ реферальная система". ИЗМЕНЕНО
+  // 28.09.2026 (прямая просьба пользователя - "чтобы у них тоже был свой
+  // пароль... как у юрлица... так и по админ реферальная система") -
+  // раньше пароль принимался ТОЛЬКО в чате (phantom_start/
+  // admin_referral_password_flow в main.py); теперь, по образцу
+  // renderReferralLegalDetail выше, пароль можно ввести прямо здесь, в
+  // мини-приложении (см. ADMIN_PARTNER_PASSWORD_API_PATH/
+  // handle_admin_partner_password_api в main.py) - ввод в чате оставлен
+  // запасным путём (кнопка "Ввести пароль в чате" ниже).
   function renderReferralPhantomDetail(box, data) {
     svcBackAction = function () { renderReferralMenu(box, data); }; // ИЗМЕНЕНО 27.09.2026 - "Назад" отсюда ведёт в меню реферальной программы, на один шаг назад
     const botUsername = botUsernameFromLink(data.link);
     // ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - "админ
     // реферальную систему" тоже должна иметь свой личный кабинет со своим
-    // описанием) - если у пользователя УЖЕ активна схема 'admin' (пароль в
-    // чате был введён ранее, см. admin_referral_password_flow в main.py) -
-    // показываем ТОТ ЖЕ общий блок статистики (см. referralStatsBlockHtml
-    // выше), что и у остальных схем, вместо повторного приглашения ввести
-    // пароль. Если схема НЕ 'admin' - экран остаётся ТЕМ ЖЕ секретным
+    // описанием) - если у пользователя УЖЕ активна схема 'admin' (пароль
+    // был введён ранее, в чате или прямо тут) - показываем ТОТ ЖЕ общий
+    // блок статистики (см. referralStatsBlockHtml выше), что и у остальных
+    // схем, ПЛЮС (ДОБАВЛЕНО 28.09.2026, зеркало renderReferralLegalDetail)
+    // ссылку на открытие своего личного кабинета, если этот пользователь -
+    // владелец (см. LEGAL_CABINET_ACCESS_API_PATH/get_legal_entity_owned_by
+    // в main.py - тот же механизм, что и у юрлиц, владение не зависит от
+    // kind). Если схема НЕ 'admin' - экран остаётся ТЕМ ЖЕ секретным
     // входом, что и был - никаких новых подсказок о самом существовании
     // админского бэкдора не добавляется никому, кроме тех, кто уже внутри.
     if (data.referrer_type === 'admin') {
       const adminRates = REFERRAL_RATES_PERCENT.admin;
-      const adminDescription = 'Админская схема начислений - ' + adminRates.join('/') + '% с платежей 1/2/3 уровня (доступ выдаётся вручную по паролю).';
-      box.innerHTML = '<div class="svc-h">👻 Админ реферальная система</div>' + referralStatsBlockHtml(data, adminRates, adminDescription);
+      const adminDescription = 'Админская схема начислений - ' + adminRates.join('/') + '% с платежей 1-' + adminRates.length + ' уровня (доступ выдаётся вручную по паролю).';
+      // ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "чтобы у них
+      // было различие чтобы два этих юзера... могли как бы различать у
+      // себя") - показываем зарегистрированное имя/ник партнёра
+      // (entity_name, задаётся через /add_admin_partner), чтобы два разных
+      // админ-партнёра видели, в каком именно кабинете они находятся.
+      const partnerNote = data.entity_name ? ('<div class="svc-card">🏷 Партнёр: ' + data.entity_name + '</div>') : '';
+      let html = '<div class="svc-h">👻 Админ реферальная система</div>' + partnerNote + referralStatsBlockHtml(data, adminRates, adminDescription);
+      box.innerHTML = html;
       wireReferralStatsBlock(box, data);
+      (async function () {
+        try {
+          const resp = await fetch(LEGAL_CABINET_ACCESS_API_PATH, { headers: { 'X-Telegram-Init-Data': (tg && tg.initData) || '' } });
+          if (!resp.ok) return;
+          const access = await resp.json();
+          if (access && access.has_access) {
+            const cabinetBox = document.createElement('div');
+            cabinetBox.innerHTML = '<div class="svc-card">У тебя есть свой личный кабинет.</div>' +
+              '<a class="svc-btn" href="' + LEGAL_CABINET_WEBAPP_PATH + '?tgInitData=' + encodeURIComponent((tg && tg.initData) || '') + '">🏛 Открыть личный кабинет</a>';
+            box.appendChild(cabinetBox);
+          }
+        } catch (e) { /* тихо - кабинет не обязателен для показа статистики выше */ }
+      })();
       return;
     }
     box.innerHTML =
       '<div class="svc-h">👻 Фантом</div>' +
-      '<div class="svc-card">Пароль вводится в чате с ботом.</div>' +
-      '<button type="button" class="svc-btn" id="refPhantomOpenChat">👻 Ввести пароль в чате</button>';
+      '<input type="text" class="svc-input" id="refPhantomPassword" placeholder="Пароль">' +
+      '<button type="button" class="svc-btn" id="refPhantomPasswordBtn">Подтвердить</button>' +
+      '<div class="svc-note" id="refPhantomPasswordNote"></div>' +
+      '<button type="button" class="svc-btn ghost" id="refPhantomOpenChat" style="margin-top:8px;">Ввести пароль в чате</button>';
     document.getElementById('refPhantomOpenChat').addEventListener('click', function () { openBotDeepLink(botUsername, 'refphantom'); });
+    const pwBtn = document.getElementById('refPhantomPasswordBtn');
+    pwBtn.addEventListener('click', async function () {
+      const pwInput = document.getElementById('refPhantomPassword');
+      const password = (pwInput.value || '').trim();
+      const note = document.getElementById('refPhantomPasswordNote');
+      if (!password) return;
+      pwBtn.disabled = true;
+      if (note) note.textContent = '';
+      try {
+        const resp = await fetch(ADMIN_PARTNER_PASSWORD_API_PATH, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': (tg && tg.initData) || '' },
+          body: JSON.stringify({ password: password })
+        });
+        if (!resp.ok) {
+          if (note) note.textContent = 'Неверный пароль.';
+          pwBtn.disabled = false;
+          return;
+        }
+        // Локально помечаем схему активной, не дожидаясь перезагрузки
+        // /referral/data - тот же приём, что используют кнопки
+        // переключения схемы в остальном меню реферальной программы.
+        // ДОБАВЛЕНО 28.09.2026 - handle_admin_partner_password_api уже
+        // отдаёт entity_name (имя/ник партнёра) в теле ответа, раньше оно
+        // здесь просто отбрасывалось - забираем его, чтобы сразу показать
+        // на экране статистики (см. partnerNote выше), без лишней
+        // перезагрузки /referral/data.
+        let json = null;
+        try { json = await resp.json(); } catch (e) { json = null; }
+        data.referrer_type = 'admin';
+        if (json && json.entity_name) data.entity_name = json.entity_name;
+        renderReferralPhantomDetail(box, data);
+      } catch (e) {
+        if (note) note.textContent = 'Не получилось отправить - попробуй ещё раз.';
+        pwBtn.disabled = false;
+      }
+    });
   }
 
   // "Мои рефералы" - ТЕ ЖЕ данные, что и у кнопки "📋 МОИ РЕФЕРАЛЫ" в чате
@@ -32283,7 +32556,8 @@ def get_subscription(user_id, sub_group=None):
 # expected.receipt" - для этого терминала обязателен чек по 54-ФЗ, а в чеке
 # законодательно нужен контакт покупателя). Собираем email ОДИН раз перед
 # первой оплатой (см. show_subscription_status/send_subscription_paywall/
-# subscription_email_flow ниже) и переиспользуем для всех следующих
+# request_subscription_email ниже - email вводится В ПРИЛОЖЕНИИ, см. правку
+# 28.09.2026 там же) и переиспользуем для всех следующих
 # платежей этого пользователя. Email - ОБЩИЙ на пользователя (не зависит от
 # sub_group, это просто контакт для чека), поэтому по-прежнему хранится в
 # старой таблице subscriptions (см. _ensure_receipt_email_row ниже) -
@@ -32418,8 +32692,8 @@ async def create_tinkoff_payment(user_id: int, sub_group=None):
     ДОБАВЛЕНО 23.09.2026 (по факту - Init отказывал с ErrorCode 309
     "request.validate.expected.receipt"): для этого терминала обязателен
     фискальный чек по 54-ФЗ. Вызывающий код (show_subscription_status/
-    send_subscription_paywall) обязан СНАЧАЛА собрать email через
-    get_receipt_email/subscription_email_flow, прежде чем звать эту
+    send_subscription_paywall) обязан СНАЧАЛА собрать email - в приложении
+    (см. get_receipt_email/request_subscription_email), прежде чем звать эту
     функцию - если email всё ещё не задан, возвращаем None с предупреждением
     в лог, чтобы не отправлять в Tinkoff заведомо невалидный запрос.
 
@@ -32531,84 +32805,44 @@ def subscription_paywall_text(user_id):
     )
 
 
-SUBSCRIPTION_EMAIL_PROMPT = (
-    "💳 Для оплаты нужен email - на него Т-Банк пришлёт электронный чек (обязательное требование 54-ФЗ). "
-    "Введи свой email:"
-)
-
-
+# ИЗМЕНЕНО 28.09.2026 (прямая просьба пользователя - "имейл нужно вводить
+# когда человека оплачивают подписку... и когда человек вводит e-mail...
+# это сообщение тоже перенеси пожалуйста в приложение не оставляй его в
+# боте") - раньше здесь просили email ТЕКСТОМ прямо в чате (см. удалённые
+# SUBSCRIPTION_EMAIL_PROMPT/subscription_email_flow - ловили ЛЮБОЙ
+# следующий текст, отдельным хендлером выше остальных). Email уже давно
+# умеет собираться и в самом мини-приложении - и на экране "💳 Подписка"
+# (renderSubscriptionDetail/subEmailBtn), и на экране "🏢 Юридическое лицо"
+# внутри "Реферальная программа" (renderReferralLegalDetail/refLegalEmailBtn) -
+# оба шлют email через тот же SUBSCRIPTION_STATUS_API_PATH/set_receipt_email,
+# что и раньше собирал чат. Теперь вместо текстового вопроса в чате -
+# просто кнопка, открывающая нужный экран приложения (?svc=... - см.
+# initialSvc в unified_app_html()).
 async def request_subscription_email(event, context):
-    """См. get_receipt_email/SUBSCRIPTION_EMAIL_REGEX выше - просит email
-    текстом (тот же паттерн ожидания текста, что и у phantom_password_flow/
-    referral_legal_password_flow). context ('status' или 'paywall')
-    запоминается, чтобы после ввода email вернуться на тот же экран, откуда
-    начали - см. subscription_email_flow ниже."""
+    """context: 'legal_entity_paywall' - открыть "Реферальная программа"
+    (там уже есть "🏢 Юридическое лицо" с полем email), 'paywall'/'status' -
+    открыть "💳 Подписка"."""
     user_id = event.from_user.id
-    state = user_state.setdefault(user_id, {})
-    state['awaiting_subscription_email'] = context
+    state = user_state.get(user_id, {})
+    svc = 'referral' if context == 'legal_entity_paywall' else 'subscription'
+    app_url = (
+        f"{PUBLIC_URL}{UNIFIED_APP_WEBAPP_PATH}"
+        f"?city={urllib.parse.quote(state.get('city') or '')}"
+        f"&category={urllib.parse.quote(state.get('category') or '')}"
+        f"&svc={svc}"
+    )
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📱 ОТКРЫТЬ ПРИЛОЖЕНИЕ", web_app=WebAppInfo(url=app_url))]
+    ])
+    text = "💳 Для оплаты нужен email (на него придёт электронный чек, обязательное требование 54-ФЗ) - введи его в приложении:"
     if isinstance(event, types.CallbackQuery):
         try:
             await event.answer()
         except Exception:
             pass
-        await event.message.answer(SUBSCRIPTION_EMAIL_PROMPT)
+        await event.message.answer(text, reply_markup=markup)
     else:
-        await event.answer(SUBSCRIPTION_EMAIL_PROMPT)
-
-
-@router.message(lambda message: user_state.get(message.from_user.id, {}).get('awaiting_subscription_email'))
-async def subscription_email_flow(message: types.Message):
-    """Ловит ЛЮБОЙ текст, пока ждём email для чека - должен стоять РАНЬШЕ
-    остальных текстовых хендлеров (тот же приём, что и у
-    referral_withdraw_flow/phantom_password_flow). После валидного email
-    возвращается на экран, с которого начали (статус подписки или
-    экран-блокировка) - там create_tinkoff_payment теперь сможет собрать
-    Receipt и получить ссылку на оплату."""
-    user_id = message.from_user.id
-    state = user_state[user_id]
-    text = (message.text or '').strip()
-
-    # ДОБАВЛЕНО 23.09.2026 (баг с Android, скриншоты пользователя: любое
-    # нажатие кнопки меню, пока бот ждёт email, "проглатывалось" этим
-    # хендлером и превращалось в "Не похоже на email" - пользователь
-    # застревал без возможности выбраться, кнопки "Реферальная программа"/
-    # "Оплатить подписку" и т.п. переставали работать вообще). Подписи ВСЕХ
-    # кнопок бота - ЗАГЛАВНЫМИ БУКВАМИ (см. services_keyboard, комментарий
-    # 21.09.2026), настоящий email так не выглядит - если текст целиком в
-    # верхнем регистре (без учёта эмодзи/цифр/пунктуации) и не содержит "@",
-    # считаем это нажатием кнопки, а не попыткой ввести email: отменяем
-    # ожидание и возвращаем на экран статуса/оплаты, откуда начали, чтобы
-    # повторное нажатие уже отработало как обычно.
-    letters = [c for c in text if c.isalpha()]
-    if letters and all(c.isupper() for c in letters) and '@' not in text:
-        context = state.pop('awaiting_subscription_email', None)
-        await message.answer("Ввод email отменён - нажми на нужную кнопку ещё раз:")
-        # ДОБАВЛЕНО 23.09.2026 (подписка на реферальную систему юрлиц, см.
-        # send_legal_entity_referral_paywall) - у этого context свой экран
-        # возврата, отдельный от обычной подписки.
-        if context == 'legal_entity_paywall':
-            await send_legal_entity_referral_paywall(message)
-        elif context == 'paywall' or not is_subscription_active(user_id):
-            await send_subscription_paywall(message)
-        else:
-            await message.answer(
-                "🚕 Меню TAXI HELPER",
-                reply_markup=services_keyboard(state.get('category'), state.get('city'), user_id)
-            )
-        return
-
-    if not SUBSCRIPTION_EMAIL_REGEX.match(text):
-        await message.answer("Не похоже на email - введи в формате name@example.com:")
-        return
-
-    context = state.pop('awaiting_subscription_email')
-    set_receipt_email(user_id, text)
-    if context == 'legal_entity_paywall':
-        await send_legal_entity_referral_paywall(message)
-    elif context == 'paywall':
-        await send_subscription_paywall(message)
-    else:
-        await show_subscription_status(message)
+        await event.answer(text, reply_markup=markup)
 
 
 # ДОБАВЛЕНО 26.09.2026 (перенос "💳 ОПЛАТИТЬ ПОДПИСКУ" в единое приложение,
@@ -32946,56 +33180,60 @@ async def admin_referral_password_flow(message: types.Message):
     """Пароль "Админ реферальной системы" (см. admin_referral_start выше) -
     ловит ЛЮБОЙ текст, должен стоять РАНЬШЕ остальных текстовых хендлеров
     (тот же приём, что и у phantom_password_flow). ДОБАВЛЕНО 23.09.2026
-    (прямая просьба пользователя). При верном пароле: (1) выдаёт бесплатный
-    месяц подписки (перенесено сюда с обычного пароля Фантома), (2)
-    переключает схему начислений на 'admin' (40/30/20%, см.
-    REFERRAL_RATES_PERCENT), (3) заводит/находит "компанию"-кабинет с этим
-    же паролем в legal_entities и закрепляет владельцем - тот же механизм,
-    что и у обычных юр.лиц (см. find_legal_entity_by_password/
-    claim_legal_entity_ownership), поэтому "🏛 Личный кабинет юрлица" в
-    referral_menu_keyboard появляется автоматически и БЕЗ платной подписки
-    на юрлица (see REFERRAL_LEGAL_ENTITY_SUBSCRIPTION_PRICE_RUB) - это
-    админский бэкдор."""
+    (прямая просьба пользователя). ИЗМЕНЕНО 28.09.2026 (прямая просьба
+    пользователя - "чтобы у них тоже был свой пароль... как у юрлица") -
+    раньше принимался ТОЛЬКО один зашитый REFERRAL_ADMIN_PASSWORD; теперь
+    вся проверка/применение пароля вынесена в apply_admin_partner_password
+    (см. выше, рядом с add_admin_partner) - принимает пароль ЛЮБОГО
+    заведённого через /add_admin_partner админ-партнёра (плюс
+    REFERRAL_ADMIN_PASSWORD как legacy-пароль по умолчанию), даёт (1)
+    бесплатный месяц подписки, (2) схему начислений 'admin' (40/30/20/10%,
+    см. REFERRAL_RATES_PERCENT), (3) владение СВОИМ собственным
+    кабинетом (если этот пароль вводится первым) - тот же механизм, что и
+    у обычных юр.лиц, просто с отдельным пространством паролей."""
     user_id = message.from_user.id
     state = user_state[user_id]
     text = (message.text or '').strip()
     state.pop('awaiting_admin_referral_password', None)
 
-    if text != REFERRAL_ADMIN_PASSWORD:
+    result = apply_admin_partner_password(user_id, text)
+    if not result['ok']:
         await message.answer("❌ Неверный пароль.")
         return
+    new_paid_until = result['paid_until']
+    my_rates = REFERRAL_RATES_PERCENT['admin']
+    rates_str = '/'.join(str(r) for r in my_rates) + '%'
 
-    new_paid_until = grant_free_month(user_id)
-    set_referrer_type(user_id, 'admin')
-    entity = find_legal_entity_by_password(REFERRAL_ADMIN_PASSWORD)
-    if not entity:
-        add_legal_entity("Админ реферальная система", REFERRAL_ADMIN_PASSWORD)
-        entity = find_legal_entity_by_password(REFERRAL_ADMIN_PASSWORD)
-    if entity:
-        claim_legal_entity_ownership(entity['id'], user_id)
-
+    # ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "чтобы у них было
+    # различие чтобы два этих юзера... могли как бы различать у себя") -
+    # раньше подтверждение и экран статистики были ОДИНАКОВЫМИ у ЛЮБОГО
+    # админ-партнёра (никак не показывали, чей именно это пароль/кабинет) -
+    # теперь везде, где есть result['entity_name'] (название, заданное
+    # командой /add_admin_partner), оно показывается явно.
+    partner_note = f" Партнёр: «{result['entity_name']}»." if result['entity_name'] else ""
+    owner_note = " Ты первый ввёл этот пароль - тебе открыт «🏛 Личный кабинет»." \
+        if result['is_owner'] else ""
     await message.answer(
-        f"✅ Схема начислений: «Админ» (40/30/20%). Подписка активирована бесплатно на "
-        f"{SUBSCRIPTION_PERIOD_DAYS} дней, до *{new_paid_until.strftime('%d.%m.%Y')}*.",
+        f"✅ Схема начислений: «Админ» ({rates_str}).{partner_note} Подписка активирована бесплатно на "
+        f"{SUBSCRIPTION_PERIOD_DAYS} дней, до *{new_paid_until.strftime('%d.%m.%Y')}*.{owner_note}",
         parse_mode='Markdown',
         reply_markup=services_keyboard(state.get('category'), state.get('city'), user_id)
     )
     me = await bot.get_me()
     link = get_referral_link(me.username, user_id)
     stats = get_referral_stats(user_id)
-    my_rates = REFERRAL_RATES_PERCENT['admin']
+    partner_line = f"🏷 Партнёр: {result['entity_name']}\n" if result['entity_name'] else ""
     admin_text = (
         "🤝 *Реферальная программа - Админ*\n"
         f"{WHERE_TO_GO_DIVIDER}\n\n"
+        f"{partner_line}"
         f"🔗 Твоя ссылка:\n`{link}`\n\n"
-        f"👥 Рефералов 1-го уровня: {stats['level1_count']}\n"
-        f"👥 Рефералов 2-го уровня: {stats['level2_count']}\n"
-        f"👥 Рефералов 3-го уровня: {stats['level3_count']}\n"
+        f"{referral_level_counts_lines(stats, len(my_rates))}"
         f"{WHERE_TO_GO_DIVIDER}\n\n"
         f"💰 Баланс: {stats['balance'] / 100:.0f}₽\n"
         f"📈 Всего заработано: {stats['total_earned'] / 100:.0f}₽\n"
         f"{WHERE_TO_GO_DIVIDER}\n\n"
-        f"_Ставка:_ {my_rates[0]}% / {my_rates[1]}% / {my_rates[2]}% по трём уровням."
+        f"_Ставка:_ {rates_str} по {len(my_rates)} уровням."
     )
     await message.answer(
         admin_text,
@@ -33020,6 +33258,26 @@ async def admin_panel_password_confirm_flow(message: types.Message):
         await message.answer("❌ Неверный пароль.")
         return
     await message.answer(format_admin_overview_text(), parse_mode='HTML', reply_markup=admin_panel_keyboard())
+
+
+# ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - жалоба: "когда другой
+# юзер нажимает на реферальную программу ему реферальная программа не
+# открывается и бот просит ввести имейл... имейл не нужно вводить... когда
+# он входит в реферальную программу") - реферальная программа сама по себе
+# БЕСПЛАТНА (не требует активной подписки такси/курьер), поэтому её меню и
+# все его экраны/колбэки должны открываться ВСЕГДА, даже если у
+# пользователя истёк триал/подписка - см. исключения в
+# SubscriptionMiddleware ниже. Платной является только ОТДЕЛЬНАЯ подписка
+# "юрлица" ВНУТРИ реферальной программы (is_legal_entity_referral_subscription_active) -
+# но и она просит email только в момент реальной оплаты
+# (send_legal_entity_referral_paywall/request_subscription_email), не при
+# простом входе в меню.
+REFERRAL_MENU_EXEMPT_CALLBACKS = (
+    'referral_category_individual', 'referral_category_legal_start',
+    'referral_link_show', 'referral_qr_show', 'referral_download_presentation',
+    'referral_list', 'referral_withdraw_start', 'referral_withdraw_confirm',
+    'referral_withdraw_cancel', 'legal_entity_sub_status',
+)
 
 
 class SubscriptionMiddleware(BaseMiddleware):
@@ -33063,10 +33321,16 @@ class SubscriptionMiddleware(BaseMiddleware):
             return await handler(event, data)
         if isinstance(event, types.Message) and user_state.get(user_id, {}).get('awaiting_admin_panel_password_confirm'):
             return await handler(event, data)
-        # Ввод email для чека (см. request_subscription_email/
-        # subscription_email_flow выше) тоже должен проходить даже на
-        # экране-блокировке - это часть самого процесса оплаты.
-        if isinstance(event, types.Message) and user_state.get(user_id, {}).get('awaiting_subscription_email'):
+        # ДОБАВЛЕНО 28.09.2026 (см. REFERRAL_MENU_EXEMPT_CALLBACKS выше) -
+        # вся реферальная программа открывается свободно, независимо от
+        # статуса основной подписки.
+        if isinstance(event, types.Message) and event.text == "🤝 РЕФЕРАЛЬНАЯ ПРОГРАММА":
+            return await handler(event, data)
+        if isinstance(event, types.CallbackQuery) and event.data in REFERRAL_MENU_EXEMPT_CALLBACKS:
+            return await handler(event, data)
+        if isinstance(event, types.Message) and user_state.get(user_id, {}).get('awaiting_referral_legal_password'):
+            return await handler(event, data)
+        if isinstance(event, types.Message) and user_state.get(user_id, {}).get('referral_withdraw') is not None:
             return await handler(event, data)
         await send_subscription_paywall(event)
         return None
@@ -33216,11 +33480,20 @@ async def handle_tinkoff_webhook(request):
                 )
             except Exception:
                 logger.exception(f"❌ Не удалось уведомить user_id={user_id} об успешной оплате")
-            for earner_id, level, amount_kopecks in result.get('referral_notifications', []):
+            # ИЗМЕНЕНО 28.09.2026 (прямая просьба пользователя - удержание
+            # REFERRAL_TAX_WITHHOLD_PERCENT "в счёт налога на доход" с
+            # каждого начисления, см. distribute_referral_earnings) -
+            # amount_kopecks здесь уже ЧИСТАЯ сумма (за вычетом удержания,
+            # ровно то, что реально зачислено на баланс) - в пуш добавлена
+            # короткая приписка, сколько и зачем удержано с этого начисления,
+            # чтобы цифра в пуше не расходилась молча с тем, что реферал
+            # ожидал по своей ставке.
+            for earner_id, level, amount_kopecks, tax_kopecks in result.get('referral_notifications', []):
                 try:
+                    tax_note = f" (уже за вычетом налога {REFERRAL_TAX_WITHHOLD_PERCENT}%, -{tax_kopecks / 100:.0f}₽)" if tax_kopecks else ""
                     await bot.send_message(
                         earner_id,
-                        f"🤝 Начислено {amount_kopecks / 100:.0f}₽ по реферальной программе ({level}-й уровень) - "
+                        f"🤝 Начислено {amount_kopecks / 100:.0f}₽ по реферальной программе ({level}-й уровень){tax_note} - "
                         f"оплатил твой реферал. Посмотреть баланс: «🤝 Реферальная программа» в меню.",
                     )
                 except Exception:
@@ -33252,6 +33525,7 @@ async def start_subscription_webhook_server():
     app.router.add_get(PRESENTATION_PDF_WEBAPP_PATH, handle_presentation_pdf)
     app.router.add_get(LEGAL_CABINET_ACCESS_API_PATH, handle_legal_cabinet_access_api)
     app.router.add_post(LEGAL_CABINET_PASSWORD_API_PATH, handle_legal_cabinet_password_api)
+    app.router.add_post(ADMIN_PARTNER_PASSWORD_API_PATH, handle_admin_partner_password_api)
     app.router.add_get(SUBSCRIPTION_STATUS_API_PATH, handle_subscription_status_api)
     app.router.add_post(SUBSCRIPTION_STATUS_API_PATH, handle_subscription_status_api)
     app.router.add_get(MAP_WEBAPP_PATH, handle_map_webapp)
@@ -33545,8 +33819,39 @@ REFERRAL_ADMIN_PASSWORD = "1122334455667788"
 REFERRAL_RATES_PERCENT = {
     'individual': [30, 15, 5],
     'legal_entity': [35, 20, 10],
-    'admin': [40, 30, 20],  # ИЗМЕНЕНО 24.09.2026 (прямая просьба пользователя - было 40/20/10%)
+    # ИЗМЕНЕНО 24.09.2026 (прямая просьба пользователя - было 40/20/10%).
+    # ИЗМЕНЕНО 28.09.2026 (прямая просьба пользователя - "реферальную
+    # программу для админ реферальная программа 40 30 20:10 до четвёртого
+    # колена") - добавлен 4-й уровень (10%). Единственная схема с 4
+    # уровнями - весь текст/подсчёт уровней в этом файле теперь строится ПО
+    # ДЛИНЕ этого списка (см. referral_level_counts_lines/
+    # referral_how_it_works_text ниже и length-guard в
+    # distribute_referral_earnings), а не на захардкоженных "3" - так что
+    # individual/legal_entity (по 3 элемента) продолжают работать и
+    # отображаться ровно как раньше.
+    'admin': [40, 30, 20, 10],
 }
+# ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "заложи в каждую
+# реферальную программу к тому проценту который они получают прибыль -6% и
+# эти деньги учитывай в расчёте их прибыли... 6% идёт в счёт погашения
+# налогов на доходы... эти 6% учитывать в доходности компании не
+# реферальной системы а компанией и в целом то есть моего дохода общего"):
+# с КАЖДОГО начисления рефералу (на любом из 3 уровней, в любой из схем
+# individual/legal_entity/admin) дополнительно удерживается этот процент -
+# от суммы, которую реферал заработал по своей ставке (пример пользователя:
+# заработал 40₽ с платежа - берём 6% ИМЕННО с этих 40₽, а не с исходного
+# платежа целиком). Удержанное НЕ попадает на баланс реферала (значит, не
+# входит и в "Выплачено рефералам" при подсчёте чистой прибыли), а
+# засчитывается в прибыль КОМПАНИИ - см. distribute_referral_earnings/
+# _credit_referral_earning (tax_withheld_kopecks) и
+# compute_campaign_profit (referral_tax_withheld_kopecks) ниже. Показывается
+# рефералу прямо на экране входа в реферальную систему (см. REFERRAL_TAX_
+# NOTE_TEXT ниже) - и в чате, и в мини-приложении.
+REFERRAL_TAX_WITHHOLD_PERCENT = 6
+REFERRAL_TAX_NOTE_TEXT = (
+    f"ℹ️ С каждого начисления удерживается {REFERRAL_TAX_WITHHOLD_PERCENT}% в счёт налога на доход - "
+    "суммы в статистике выше уже показаны за вычетом этого удержания."
+)
 REFERRAL_DEFAULT_TYPE = 'individual'
 REFERRAL_WITHDRAWAL_FEE_PERCENT = 3
 REFERRAL_MIN_WITHDRAWAL_RUB = 1000  # по прямой просьбе пользователя, 20.09.2026
@@ -33559,6 +33864,39 @@ REFERRAL_MIN_WITHDRAWAL_RUB = 1000  # по прямой просьбе поль�
 # в статусах 'pending' и 'paid' (уже реально запрошенные/выплаченные
 # деньги) - отменённых заявок в этой реализации пока не бывает.
 REFERRAL_MAX_WITHDRAWAL_PER_DAY_RUB = 10000
+
+# ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "реферальную
+# программу для админ реферальная программа 40 30 20:10 до четвёртого
+# колена") - раньше "Рефералов N-го уровня: X" и "Как это работает: ..."
+# были захардкожены НА 3 УРОВНЯ в 4 разных местах (show_referral_program/
+# _refresh_referral_menu_message/admin_referral_password_flow/
+# referral_legal_password_flow) - расширить это до 4 уровней для ОДНОЙ
+# схемы ('admin'), не сломав отображение у остальных двух (по-прежнему 3
+# уровня), можно только строя текст ПО ДЛИНЕ переданного rates - вот эти
+# 2 общие функции, переиспользуемые во всех 4 местах.
+def referral_level_counts_lines(stats, num_levels):
+    return ''.join(
+        f"👥 Рефералов {i}-го уровня: {stats.get(f'level{i}_count', 0)}\n"
+        for i in range(1, num_levels + 1)
+    )
+
+
+def referral_how_it_works_text(my_rates):
+    """Возвращает ТОЛЬКО само предложение (без ведущего "_Как это
+    работает:_ " - его добавляет вызывающий код, т.к. в разных местах
+    разное markdown-оформление)."""
+    n = len(my_rates)
+    if n == 0:
+        return ''
+    clauses = [f"{my_rates[0]}% с каждого ежемесячного платежа приглашённого тобой напрямую (1 уровень)"]
+    for i in range(1, n):
+        clauses.append(f"{my_rates[i]}% с платежей рефералов {i}-го уровня ({i + 1} уровень)")
+    joined = clauses[0] if n == 1 else ', '.join(clauses[:-1]) + ' и ' + clauses[-1]
+    return (
+        f"{joined} - прямой процент от суммы платежа на каждом уровне. "
+        f"Начисляется каждый месяц, пока реферал платит подписку. "
+        f"Дальше {n} уровня деньги не идут, но всю ветку целиком видно в «📋 Мои рефералы»."
+    )
 # ЗАГЛУШКА НА БУДУЩЕЕ (по прямой просьбе пользователя - "давай настроим
 # авто перевод позже пока заглушка"): сейчас выплата по заявке делается
 # АДМИНОМ ВРУЧНУЮ (перевод на карту + команда /referral_paid, см. ниже).
@@ -33589,7 +33927,17 @@ def register_referral(user_id, referrer_id):
     ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя - 3 уровня вместо 2):
     теперь фиксируется ещё и referred_by_level3 (реферер реферера
     реферера) - тот же принцип, что и у level2: считается ОДИН раз на
-    момент регистрации, не пересчитывается задним числом."""
+    момент регистрации, не пересчитывается задним числом.
+
+    ИЗМЕНЕНО 28.09.2026 (прямая просьба пользователя - 4 уровня для схемы
+    'admin', см. REFERRAL_RATES_PERCENT/distribute_referral_earnings) -
+    аналогично фиксируется referred_by_level4 (реферер реферера реферера
+    реферера) - записывается ВСЕГДА, для ЛЮБОГО пользователя, независимо от
+    того, какая схема начислений (individual/legal_entity/admin) окажется
+    у кого-либо из его предков ПОЗЖЕ (схему можно сменить в любой момент
+    после регистрации) - иначе для admin-партнёра, ставшего таковым уже
+    ПОСЛЕ того как его реферал 4-го уровня зарегистрировался, 4-й уровень
+    был бы навсегда потерян."""
     if referrer_id == user_id:
         return
     ensure_referral_row(user_id)
@@ -33601,13 +33949,14 @@ def register_referral(user_id, referrer_id):
     if row and row[0] is not None:
         conn.close()
         return
-    cursor.execute('SELECT referred_by, referred_by_level2 FROM referrals WHERE user_id = ?', (referrer_id,))
+    cursor.execute('SELECT referred_by, referred_by_level2, referred_by_level3 FROM referrals WHERE user_id = ?', (referrer_id,))
     r = cursor.fetchone()
     level2 = r[0] if r else None
     level3 = r[1] if r else None
+    level4 = r[2] if r else None
     cursor.execute(
-        'UPDATE referrals SET referred_by = ?, referred_by_level2 = ?, referred_by_level3 = ? WHERE user_id = ?',
-        (referrer_id, level2, level3, user_id)
+        'UPDATE referrals SET referred_by = ?, referred_by_level2 = ?, referred_by_level3 = ?, referred_by_level4 = ? WHERE user_id = ?',
+        (referrer_id, level2, level3, level4, user_id)
     )
     conn.commit()
     conn.close()
@@ -33653,6 +34002,12 @@ def get_referral_stats(user_id):
     # ДОБАВЛЕНО 23.09.2026 (3 уровня вместо 2, см. REFERRAL_RATES_PERCENT)
     cursor.execute('SELECT COUNT(*) FROM referrals WHERE referred_by_level3 = ?', (user_id,))
     level3_count = cursor.fetchone()[0]
+    # ДОБАВЛЕНО 28.09.2026 (4-й уровень для схемы 'admin', см.
+    # REFERRAL_RATES_PERCENT) - считается для ВСЕХ схем одинаково (дёшево,
+    # один SELECT), но реально используется в тексте только у схем с
+    # len(rates)==4 (пока только 'admin') - см. referral_level_counts_lines.
+    cursor.execute('SELECT COUNT(*) FROM referrals WHERE referred_by_level4 = ?', (user_id,))
+    level4_count = cursor.fetchone()[0]
     conn.close()
     downline_total = get_referral_downline_count(user_id)
     return {
@@ -33662,7 +34017,8 @@ def get_referral_stats(user_id):
         'level1_count': level1_count,
         'level2_count': level2_count,
         'level3_count': level3_count,
-        'downline_total': downline_total,  # видимость на всю глубину, без денег (4+ уровень)
+        'level4_count': level4_count,
+        'downline_total': downline_total,  # видимость на всю глубину, без денег (5+ уровень)
     }
 
 
@@ -33714,15 +34070,22 @@ def get_referral_breakdown(user_id, limit=20):
     return breakdown
 
 
-def _credit_referral_earning(earner_id, source_id, level, amount_kopecks, order_id):
+def _credit_referral_earning(earner_id, source_id, level, amount_kopecks, order_id, tax_withheld_kopecks=0):
+    """amount_kopecks - сколько реально зачисляется рефералу на баланс (см.
+    REFERRAL_TAX_WITHHOLD_PERCENT в distribute_referral_earnings - это уже
+    ЧИСТАЯ сумма, ЗА ВЫЧЕТОМ удержанного налога). tax_withheld_kopecks -
+    сколько удержано с ЭТОГО конкретного начисления - записывается отдельной
+    колонкой в ту же строку referral_earnings (не добавляется к балансу
+    реферала, не входит в total_earned_kopecks - это деньги компании, см.
+    compute_campaign_profit)."""
     if amount_kopecks <= 0:
         return 0
     ensure_referral_row(earner_id)
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute(
-        'INSERT INTO referral_earnings (earner_user_id, source_user_id, level, amount_kopecks, order_id) VALUES (?, ?, ?, ?, ?)',
-        (earner_id, source_id, level, amount_kopecks, order_id)
+        'INSERT INTO referral_earnings (earner_user_id, source_user_id, level, amount_kopecks, order_id, tax_withheld_kopecks) VALUES (?, ?, ?, ?, ?, ?)',
+        (earner_id, source_id, level, amount_kopecks, order_id, tax_withheld_kopecks)
     )
     cursor.execute(
         'UPDATE referrals SET balance_kopecks = balance_kopecks + ?, total_earned_kopecks = total_earned_kopecks + ? WHERE user_id = ?',
@@ -33772,12 +34135,17 @@ def set_referrer_type(user_id, referrer_type):
 def find_legal_entity_by_password(password):
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute('SELECT id, name, password, owner_user_id FROM legal_entities WHERE password = ?', (password,))
+    # ИЗМЕНЕНО 28.09.2026 (см. миграцию kind в init_db выше) - добавлен kind
+    # в выборку, чтобы вызывающий код мог отличить юр.лицо от админ-партнёра
+    # (пароли всё ещё уникальны на ВСЮ таблицу, так что сам поиск по паролю
+    # не меняется - меняется только то, что можно узнать про найденную
+    # строку).
+    cursor.execute('SELECT id, name, password, owner_user_id, kind FROM legal_entities WHERE password = ?', (password,))
     row = cursor.fetchone()
     conn.close()
     if not row:
         return None
-    return {'id': row[0], 'name': row[1], 'password': row[2], 'owner_user_id': row[3]}
+    return {'id': row[0], 'name': row[1], 'password': row[2], 'owner_user_id': row[3], 'kind': row[4] or 'legal_entity'}
 
 
 def claim_legal_entity_ownership(entity_id, user_id):
@@ -33807,15 +34175,19 @@ def get_legal_entity_owned_by(user_id):
     return {'id': row[0], 'name': row[1], 'password': row[2], 'owner_user_id': row[3], 'created_at': row[4]}
 
 
-def add_legal_entity(name, password):
+def add_legal_entity(name, password, kind='legal_entity'):
     """Создаёт новую запись юр.лица (пока без владельца - им станет первый,
     кто введёт этот пароль). Возвращает id или None, если такой пароль уже
-    занят (UNIQUE)."""
+    занят (UNIQUE). ИЗМЕНЕНО 28.09.2026 - добавлен необязательный kind (см.
+    миграцию в init_db выше); по умолчанию 'legal_entity', как и было
+    раньше для всех вызовов этой функции - add_admin_partner ниже передаёт
+    'admin_partner' явно, остальной код (add_legal_entity напрямую) не
+    меняется."""
     init_db()
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
-        cursor.execute('INSERT INTO legal_entities (name, password) VALUES (?, ?)', (name, password))
+        cursor.execute('INSERT INTO legal_entities (name, password, kind) VALUES (?, ?, ?)', (name, password, kind))
         conn.commit()
         new_id = cursor.lastrowid
     except sqlite3.IntegrityError:
@@ -33835,6 +34207,15 @@ def add_legal_entity(name, password):
 # в referral_legal_password_flow.
 def apply_legal_entity_password(user_id, password):
     legal_entity = find_legal_entity_by_password(password)
+    # ДОБАВЛЕНО 28.09.2026 (см. миграцию kind в init_db выше) - пароли
+    # админ-партнёров (kind='admin_partner') живут в ТОЙ ЖЕ таблице, но это
+    # отдельное пространство паролей (см. apply_admin_partner_password
+    # ниже). Для схемы "юр.лицо" пароль админ-партнёра должен вести себя
+    # так, как будто его не существует - иначе кто-то, кто ввёл СВОЙ
+    # админ-партнёрский пароль в этом (не том) поле, случайно получил бы
+    # схему 'legal_entity' вместо 'admin' и чужой ценник/условия.
+    if legal_entity and legal_entity.get('kind') == 'admin_partner':
+        legal_entity = None
     is_legacy_password = password == REFERRAL_LEGAL_ENTITY_PASSWORD
     if not legal_entity and is_legacy_password:
         add_legal_entity("Юр.лицо (старый пароль)", REFERRAL_LEGAL_ENTITY_PASSWORD)
@@ -33850,6 +34231,72 @@ def apply_legal_entity_password(user_id, password):
         is_new_owner = bool(owned and owned['id'] == legal_entity['id'])
         entity_name = legal_entity['name']
     return {'ok': True, 'entity_name': entity_name, 'is_owner': is_new_owner}
+
+
+# ==================== АДМИН-ПАРТНЁРЫ (МУЛЬТИ-ПАРОЛЬ) ====================
+# ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "чтобы у них тоже был
+# свой пароль и своя реферальная система... как у юрлица... так и по админ
+# реферальная система"). Раньше вся схема начислений 'admin' держалась на
+# ОДНОМ зашитом пароле REFERRAL_ADMIN_PASSWORD: ПЕРВЫЙ человек, кто его
+# когда-либо ввёл (в чате, см. admin_referral_password_flow), становился
+# единственным владельцем ОДНОГО общего кабинета "Админ реферальная
+# система" в legal_entities - все остальные, кто знал тот же пароль, просто
+# получали ставку 40/30/20%, но БЕЗ своего личного кабинета (место уже было
+# занято первым). Теперь, по образцу юр.лиц, у каждого админ-партнёра свой
+# УНИКАЛЬНЫЙ пароль (заводится командой /add_admin_partner, см. ниже,
+# ADMIN_TELEGRAM_ID-only) и свой независимый кабинет/реферальная ветка - та
+# же таблица legal_entities и тот же механизм "первый ввёл пароль -
+# становится владельцем" (claim_legal_entity_ownership), только с
+# kind='admin_partner' (см. find_admin_partner_by_password/add_admin_partner
+# ниже), поэтому "🏛 Личный кабинет юрлица" (WebApp) открывается точно так
+# же, просто со своими данными для каждого партнёра - никакого нового
+# кабинета отдельно писать не пришлось. REFERRAL_ADMIN_PASSWORD остаётся
+# рабочим как "пароль по умолчанию" (тот же приём, что REFERRAL_LEGAL_ENTITY_PASSWORD
+# для юрлиц) - кабинет "Админ реферальная система", созданный этим паролем
+# ДО данного изменения, и его владелец не теряются (см. UPDATE в миграции
+# kind внутри init_db).
+def find_admin_partner_by_password(password):
+    entity = find_legal_entity_by_password(password)
+    if entity and entity.get('kind') == 'admin_partner':
+        return entity
+    return None
+
+
+def add_admin_partner(name, password):
+    """Тонкая обёртка над add_legal_entity (см. выше) - та же таблица
+    legal_entities и тот же механизм владения по первому входу пароля,
+    отличие только в kind='admin_partner' (см. find_admin_partner_by_password)."""
+    return add_legal_entity(name, password, kind='admin_partner')
+
+
+def apply_admin_partner_password(user_id, password):
+    """WebApp/чат-точка входа для схемы 'admin' (см. admin_referral_password_flow
+    и handle_admin_partner_password_api ниже) - полный аналог
+    apply_legal_entity_password, только для пространства паролей
+    admин-партнёров: переключает схему начислений на 'admin' (40/30/20/10%,
+    см. REFERRAL_RATES_PERCENT), выдаёт бесплатный месяц подписки (это
+    бонус именно схемы 'admin' - в отличие от платной подписки на юрлиц,
+    см. grant_free_month) и закрепляет владение персональным кабинетом за
+    первым, кто ввёл именно этот пароль. Возвращает 'paid_until' (новая
+    дата окончания бесплатного месяца) - нужна вызывающему коду для текста
+    подтверждения."""
+    admin_partner = find_admin_partner_by_password(password)
+    is_legacy_password = password == REFERRAL_ADMIN_PASSWORD
+    if not admin_partner and is_legacy_password:
+        add_admin_partner("Админ реферальная система", REFERRAL_ADMIN_PASSWORD)
+        admin_partner = find_admin_partner_by_password(password)
+    if not admin_partner and not is_legacy_password:
+        return {'ok': False}
+    paid_until = grant_free_month(user_id)
+    set_referrer_type(user_id, 'admin')
+    entity_name = None
+    is_new_owner = False
+    if admin_partner:
+        claim_legal_entity_ownership(admin_partner['id'], user_id)
+        owned = get_legal_entity_owned_by(user_id)
+        is_new_owner = bool(owned and owned['id'] == admin_partner['id'])
+        entity_name = admin_partner['name']
+    return {'ok': True, 'entity_name': entity_name, 'is_owner': is_new_owner, 'paid_until': paid_until}
 
 
 def get_referral_downline_user_ids(user_id):
@@ -34437,8 +34884,8 @@ def distribute_referral_earnings(payer_user_id, amount_kopecks, order_id):
     """Вызывается из confirm_subscription_payment при каждом подтверждённом
     платеже - начисляет 1, 2 и 3 уровню (если у плательщика есть
     реферер(ы) на этой глубине). Возвращает список (earner_id, level,
-    начислено_копеек) для рассылки уведомлений вызывающим кодом (сам ничего
-    не шлёт - синхронная функция).
+    начислено_копеек, удержано_налога_копеек) для рассылки уведомлений
+    вызывающим кодом (сам ничего не шлёт - синхронная функция).
 
     ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя - 2 схемы начислений,
     3 уровня): раньше был фиксированный процент 1 уровня + доля от него на
@@ -34446,11 +34893,30 @@ def distribute_referral_earnings(payer_user_id, amount_kopecks, order_id):
     от суммы платежа - какой именно, зависит от referrer_type КОНКРЕТНОГО
     получателя на этом уровне (см. get_referrer_type/REFERRAL_RATES_PERCENT) -
     так что юр.лицо и обычный пользователь, стоящие на одном и том же
-    уровне цепочки, получат разные суммы с одного и того же платежа."""
+    уровне цепочки, получат разные суммы с одного и того же платежа.
+
+    ИЗМЕНЕНО 28.09.2026 (прямая просьба пользователя - "заложи в каждую
+    реферальную программу... -6%... эти деньги учитывать в доходности
+    компании") - из ПОСЧИТАННОЙ по ставке суммы (gross_amount, ровно как
+    раньше) теперь дополнительно удерживается REFERRAL_TAX_WITHHOLD_PERCENT -
+    рефералу зачисляется net_amount (gross за вычетом налога), а сам налог
+    (tax_kopecks) идёт не на баланс реферала, а в прибыль компании (см.
+    _credit_referral_earning/compute_campaign_profit).
+
+    ИЗМЕНЕНО 28.09.2026 (прямая просьба пользователя - "реферальную
+    программу для админ реферальная программа 40 30 20:10 до четвёртого
+    колена") - цепочка предков расширена до 4 уровня (referred_by_level4,
+    см. register_referral), НО rates[level - 1] теперь читается только
+    когда у СХЕМЫ ЭТОГО КОНКРЕТНОГО earner_id вообще есть столько уровней
+    (len(rates) > level - 1) - это одновременно (1) позволяет admin
+    (4 элемента в REFERRAL_RATES_PERCENT) получать начисление на 4 уровне и
+    (2) не даёт IndexError и не платит 4-й уровень individual/legal_entity
+    (по 3 элемента), даже если формально в цепочке есть предок на этой
+    глубине."""
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute(
-        'SELECT referred_by, referred_by_level2, referred_by_level3 FROM referrals WHERE user_id = ?',
+        'SELECT referred_by, referred_by_level2, referred_by_level3, referred_by_level4 FROM referrals WHERE user_id = ?',
         (payer_user_id,)
     )
     row = cursor.fetchone()
@@ -34462,13 +34928,19 @@ def distribute_referral_earnings(payer_user_id, amount_kopecks, order_id):
         if not earner_id:
             continue
         rates = REFERRAL_RATES_PERCENT[get_referrer_type(earner_id)]
+        if level - 1 >= len(rates):
+            continue  # схема этого earner_id короче, чем глубина цепочки (см. докстринг выше)
         rate_percent = rates[level - 1]
         if rate_percent <= 0:
             continue
-        amount = amount_kopecks * rate_percent // 100
-        credited = _credit_referral_earning(earner_id, payer_user_id, level, amount, order_id)
+        gross_amount = amount_kopecks * rate_percent // 100
+        if gross_amount <= 0:
+            continue
+        tax_kopecks = gross_amount * REFERRAL_TAX_WITHHOLD_PERCENT // 100
+        net_amount = gross_amount - tax_kopecks
+        credited = _credit_referral_earning(earner_id, payer_user_id, level, net_amount, order_id, tax_kopecks)
         if credited:
-            notifications.append((earner_id, level, credited))
+            notifications.append((earner_id, level, credited, tax_kopecks))
     return notifications
 
 
@@ -34621,6 +35093,14 @@ async def handle_referral_data_api(request):
     # ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - "в главе личного
     # кабинета реферальной системы должна быть сумма заработанная за месяц")
     this_month_earned = get_referral_earnings_this_month(user_id)
+    # ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "чтобы у них было
+    # различие чтобы два этих юзера... могли как бы различать у себя") -
+    # название кабинета (см. /add_admin_partner//add_legal_entity), если
+    # этот пользователь - владелец какого-либо (юрлица ИЛИ админ-партнёра,
+    # get_legal_entity_owned_by не различает kind - см. main.py) - иначе
+    # None (не владелец: обычный пользователь, или не первый вошедший по
+    # общему паролю).
+    owned_entity = get_legal_entity_owned_by(user_id)
     return web.json_response({
         'live': True,
         'link': link,
@@ -34628,14 +35108,24 @@ async def handle_referral_data_api(request):
         'level1_count': stats['level1_count'],
         'level2_count': stats['level2_count'],
         'level3_count': stats['level3_count'],
+        # ДОБАВЛЕНО 28.09.2026 (4-й уровень схемы 'admin', см.
+        # REFERRAL_RATES_PERCENT) - у individual/legal_entity всегда 0 (не
+        # используется в UI, но поле есть у всех ради простоты).
+        'level4_count': stats['level4_count'],
         'downline_total': stats['downline_total'],
         'balance_rub': round(stats['balance'] / 100),
         'total_earned_rub': round(stats['total_earned'] / 100),
         'total_withdrawn_rub': round(stats['total_withdrawn'] / 100),
         'this_month_earned_rub': round(this_month_earned / 100),
         'rates_percent': rates,
+        # ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - показывать
+        # удержание 6% "в счёт налога на доход" прямо на экране входа в
+        # реферальную систему, см. REFERRAL_TAX_WITHHOLD_PERCENT) -
+        # переиспользуется в referralStatsBlockHtml/renderReferralMaterialsDetail в JS.
+        'tax_withhold_percent': REFERRAL_TAX_WITHHOLD_PERCENT,
         'withdrawal_fee_percent': REFERRAL_WITHDRAWAL_FEE_PERCENT,
         'min_withdrawal_rub': REFERRAL_MIN_WITHDRAWAL_RUB,
+        'entity_name': owned_entity['name'] if owned_entity else None,
     })
 
 
@@ -34771,6 +35261,35 @@ async def handle_legal_cabinet_password_api(request):
     return web.json_response(result)
 
 
+ADMIN_PARTNER_PASSWORD_API_PATH = '/legal_cabinet/admin_partner_password'
+
+# ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "чтобы у них тоже был
+# свой пароль... как у юрлица") - WebApp-версия admin_referral_password_flow
+# (см. выше), тот же apply_admin_partner_password, только без чата и БЕЗ
+# проверки платной подписки (см. handle_legal_cabinet_password_api выше для
+# сравнения - там подписка обязательна, здесь схема 'admin' её не требует,
+# как и раньше в чате).
+async def handle_admin_partner_password_api(request):
+    user_id = _cabinet_require_user(request)
+    if not user_id:
+        return web.json_response({'error': 'invalid_init_data'}, status=401)
+    try:
+        body = await request.json()
+        password = (body.get('password') or '').strip()
+    except Exception:
+        return web.json_response({'error': 'invalid_body'}, status=400)
+    if not password:
+        return web.json_response({'error': 'invalid_body'}, status=400)
+    result = apply_admin_partner_password(user_id, password)
+    if not result['ok']:
+        return web.json_response({'error': 'wrong_password'}, status=400)
+    return web.json_response({
+        'ok': result['ok'],
+        'entity_name': result['entity_name'],
+        'is_owner': result['is_owner'],
+    })
+
+
 def referral_withdraw_cancel_keyboard():
     return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[[KeyboardButton(text="❌ ОТМЕНА")]])
 
@@ -34805,20 +35324,15 @@ async def show_referral_program(message: types.Message):
         "🤝 *Реферальная программа*\n"
         f"{WHERE_TO_GO_DIVIDER}\n\n"
         f"🔗 Твоя ссылка (отправляй друзьям):\n`{link}`\n\n"
-        f"👥 Рефералов 1-го уровня: {stats['level1_count']}\n"
-        f"👥 Рефералов 2-го уровня: {stats['level2_count']}\n"
-        f"👥 Рефералов 3-го уровня: {stats['level3_count']}\n"
+        f"{referral_level_counts_lines(stats, len(my_rates))}"
         f"🌳 Всего людей в твоей ветке (любая глубина): {stats['downline_total']}\n"
         f"{WHERE_TO_GO_DIVIDER}\n\n"
         f"💰 Баланс: {stats['balance'] / 100:.0f}₽\n"
         f"📈 Всего заработано: {stats['total_earned'] / 100:.0f}₽\n"
         f"📤 Всего выведено: {stats['total_withdrawn'] / 100:.0f}₽\n"
         f"{WHERE_TO_GO_DIVIDER}\n\n"
-        f"_Как это работает:_ {my_rates[0]}% с каждого ежемесячного платежа приглашённого "
-        f"тобой напрямую (1 уровень), {my_rates[1]}% с платежей его рефералов (2 уровень) и "
-        f"{my_rates[2]}% с платежей рефералов 2 уровня (3 уровень) - прямой процент от суммы "
-        f"платежа на каждом уровне. Начисляется каждый месяц, пока реферал платит подписку. "
-        f"Дальше 3 уровня деньги не идут, но всю ветку целиком видно в «📋 Мои рефералы».\n\n"
+        f"_Как это работает:_ {referral_how_it_works_text(my_rates)}\n\n"
+        f"{REFERRAL_TAX_NOTE_TEXT}\n\n"
         f"Вывод - только на карту, комиссия сервиса {REFERRAL_WITHDRAWAL_FEE_PERCENT}%, "
         f"минимум {REFERRAL_MIN_WITHDRAWAL_RUB}₽."
     )
@@ -34837,20 +35351,15 @@ async def _refresh_referral_menu_message(message, user_id):
         "🤝 *Реферальная программа*\n"
         f"{WHERE_TO_GO_DIVIDER}\n\n"
         f"🔗 Твоя ссылка (отправляй друзьям):\n`{link}`\n\n"
-        f"👥 Рефералов 1-го уровня: {stats['level1_count']}\n"
-        f"👥 Рефералов 2-го уровня: {stats['level2_count']}\n"
-        f"👥 Рефералов 3-го уровня: {stats['level3_count']}\n"
+        f"{referral_level_counts_lines(stats, len(my_rates))}"
         f"🌳 Всего людей в твоей ветке (любая глубина): {stats['downline_total']}\n"
         f"{WHERE_TO_GO_DIVIDER}\n\n"
         f"💰 Баланс: {stats['balance'] / 100:.0f}₽\n"
         f"📈 Всего заработано: {stats['total_earned'] / 100:.0f}₽\n"
         f"📤 Всего выведено: {stats['total_withdrawn'] / 100:.0f}₽\n"
         f"{WHERE_TO_GO_DIVIDER}\n\n"
-        f"_Как это работает:_ {my_rates[0]}% с каждого ежемесячного платежа приглашённого "
-        f"тобой напрямую (1 уровень), {my_rates[1]}% с платежей его рефералов (2 уровень) и "
-        f"{my_rates[2]}% с платежей рефералов 2 уровня (3 уровень) - прямой процент от суммы "
-        f"платежа на каждом уровне. Начисляется каждый месяц, пока реферал платит подписку. "
-        f"Дальше 3 уровня деньги не идут, но всю ветку целиком видно в «📋 Мои рефералы».\n\n"
+        f"_Как это работает:_ {referral_how_it_works_text(my_rates)}\n\n"
+        f"{REFERRAL_TAX_NOTE_TEXT}\n\n"
         f"Вывод - только на карту, комиссия сервиса {REFERRAL_WITHDRAWAL_FEE_PERCENT}%, "
         f"минимум {REFERRAL_MIN_WITHDRAWAL_RUB}₽."
     )
@@ -34981,18 +35490,15 @@ async def referral_legal_password_flow(message: types.Message):
             "🤝 *Реферальная программа*\n"
             f"{WHERE_TO_GO_DIVIDER}\n\n"
             f"🔗 Твоя ссылка (отправляй друзьям):\n`{link}`\n\n"
-            f"👥 Рефералов 1-го уровня: {stats['level1_count']}\n"
-            f"👥 Рефералов 2-го уровня: {stats['level2_count']}\n"
-            f"👥 Рефералов 3-го уровня: {stats['level3_count']}\n"
+            f"{referral_level_counts_lines(stats, len(my_rates))}"
             f"🌳 Всего людей в твоей ветке (любая глубина): {stats['downline_total']}\n"
             f"{WHERE_TO_GO_DIVIDER}\n\n"
             f"💰 Баланс: {stats['balance'] / 100:.0f}₽\n"
             f"📈 Всего заработано: {stats['total_earned'] / 100:.0f}₽\n"
             f"📤 Всего выведено: {stats['total_withdrawn'] / 100:.0f}₽\n"
             f"{WHERE_TO_GO_DIVIDER}\n\n"
-            f"_Как это работает:_ {my_rates[0]}% с каждого ежемесячного платежа приглашённого "
-            f"тобой напрямую (1 уровень), {my_rates[1]}% с платежей его рефералов (2 уровень) и "
-            f"{my_rates[2]}% с платежей рефералов 2 уровня (3 уровень).\n\n"
+            f"_Как это работает:_ {referral_how_it_works_text(my_rates)}\n\n"
+            f"{REFERRAL_TAX_NOTE_TEXT}\n\n"
             f"Вывод - только на карту, комиссия сервиса {REFERRAL_WITHDRAWAL_FEE_PERCENT}%, "
             f"минимум {REFERRAL_MIN_WITHDRAWAL_RUB}₽."
         )
@@ -35401,12 +35907,30 @@ def compute_campaign_profit(period='all'):
     )
     withdrawal_fee_income_kopecks = cursor.fetchone()[0]
 
+    # ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "эти 6% учитывать
+    # в доходности компании... моего дохода общего") - referral_payouts_kopecks
+    # выше уже ЧИСТАЯ сумма (см. distribute_referral_earnings/
+    # _credit_referral_earning - amount_kopecks в таблице теперь за вычетом
+    # удержания), так что удержанное само по себе НЕ выходит со счёта
+    # компании - но чтобы отчёт явно показывал эту статью дохода (а не
+    # просто "растворял" её в уменьшившемся referral_payouts_kopecks),
+    # считаем и прибавляем её отдельной строкой.
+    cursor.execute(
+        f"SELECT COALESCE(SUM(tax_withheld_kopecks), 0) FROM referral_earnings WHERE 1=1 {date_filter_earnings}",
+        params
+    )
+    referral_tax_withheld_kopecks = cursor.fetchone()[0]
+
     conn.close()
-    net_profit_kopecks = subscription_revenue_kopecks - referral_payouts_kopecks + withdrawal_fee_income_kopecks
+    net_profit_kopecks = (
+        subscription_revenue_kopecks - referral_payouts_kopecks
+        + withdrawal_fee_income_kopecks + referral_tax_withheld_kopecks
+    )
     return {
         'subscription_revenue_kopecks': subscription_revenue_kopecks,
         'referral_payouts_kopecks': referral_payouts_kopecks,
         'withdrawal_fee_income_kopecks': withdrawal_fee_income_kopecks,
+        'referral_tax_withheld_kopecks': referral_tax_withheld_kopecks,
         'net_profit_kopecks': net_profit_kopecks,
     }
 
@@ -35484,6 +36008,10 @@ def format_campaign_profit_text():
             f"<b>{title}</b>\n"
             f"Доход с подписок: {stats['subscription_revenue_kopecks'] / 100:,.0f}₽\n"
             f"Выплачено рефералам: -{stats['referral_payouts_kopecks'] / 100:,.0f}₽\n"
+            # ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - 6%
+            # удержания с каждого реферального начисления считать в доход
+            # компании, см. REFERRAL_TAX_WITHHOLD_PERCENT/compute_campaign_profit)
+            f"Налог с рефералов ({REFERRAL_TAX_WITHHOLD_PERCENT}%): +{stats['referral_tax_withheld_kopecks'] / 100:,.0f}₽\n"
             f"Комиссия за вывод: +{stats['withdrawal_fee_income_kopecks'] / 100:,.0f}₽\n"
             f"<b>Чистая прибыль: {stats['net_profit_kopecks'] / 100:,.0f}₽</b>"
         ).replace(',', ' ')
@@ -35605,13 +36133,66 @@ async def admin_list_legal_entities(message: types.Message):
         return
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute('SELECT id, name, password, owner_user_id FROM legal_entities ORDER BY id DESC')
+    # ИЗМЕНЕНО 28.09.2026 (см. миграцию kind в init_db - legal_entities
+    # теперь хранит и юр.лиц, и админ-партнёров, см. /add_admin_partner/
+    # /list_admin_partners ниже) - тут показываем ТОЛЬКО настоящих юр.лиц,
+    # чтобы список не задваивался с /list_admin_partners.
+    cursor.execute("SELECT id, name, password, owner_user_id FROM legal_entities WHERE kind != 'admin_partner' OR kind IS NULL ORDER BY id DESC")
     rows = cursor.fetchall()
     conn.close()
     if not rows:
         await message.answer("Юр.лиц пока нет. Добавь через /add_legal_entity.")
         return
     lines = ["🏢 *Юр.лица:*"]
+    for r in rows:
+        owner = f"владелец: {r[3]}" if r[3] else "владелец: — (никто ещё не вошёл)"
+        lines.append(f"#{r[0]} «{r[1]}» / пароль: `{r[2]}` / {owner}")
+    await message.answer("\n".join(lines), parse_mode='Markdown')
+
+
+# ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "чтобы у них тоже был
+# свой пароль и своя реферальная система... как у юрлица... так и по админ
+# реферальная система") - те же 2 команды, что /add_legal_entity/
+# /list_legal_entities выше, буква в букву тот же паттерн, только для
+# админ-партнёров (kind='admin_partner', см. add_admin_partner/
+# apply_admin_partner_password выше). Пароль, заведённый этой командой,
+# принимается и в чате (admin_referral_password_flow), и в WebApp
+# (handle_admin_partner_password_api).
+@router.message(Command("add_admin_partner"))
+async def admin_add_admin_partner(message: types.Message):
+    if not ADMIN_TELEGRAM_ID or str(message.from_user.id) != str(ADMIN_TELEGRAM_ID):
+        return
+    raw = (message.text or '').split(maxsplit=1)
+    if len(raw) != 2 or ' ' not in raw[1].strip():
+        await message.answer("Использование: /add_admin_partner <Название> <пароль>\nПример: /add_admin_partner Иван Петров admin2026")
+        return
+    body = raw[1].strip()
+    name, _, password = body.rpartition(' ')
+    name = name.strip()
+    password = password.strip()
+    if not name or not password:
+        await message.answer("Использование: /add_admin_partner <Название> <пароль>")
+        return
+    new_id = add_admin_partner(name, password)
+    if new_id is None:
+        await message.answer(f"❌ Пароль «{password}» уже занят (другим юр.лицом или админ-партнёром).")
+        return
+    await message.answer(f"✅ Админ-партнёр «{name}» добавлен (id={new_id}), пароль: {password}")
+
+
+@router.message(Command("list_admin_partners"))
+async def admin_list_admin_partners(message: types.Message):
+    if not ADMIN_TELEGRAM_ID or str(message.from_user.id) != str(ADMIN_TELEGRAM_ID):
+        return
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, name, password, owner_user_id FROM legal_entities WHERE kind = 'admin_partner' ORDER BY id DESC")
+    rows = cursor.fetchall()
+    conn.close()
+    if not rows:
+        await message.answer("Админ-партнёров пока нет. Добавь через /add_admin_partner.")
+        return
+    lines = ["🤝 *Админ-партнёры:*"]
     for r in rows:
         owner = f"владелец: {r[3]}" if r[3] else "владелец: — (никто ещё не вошёл)"
         lines.append(f"#{r[0]} «{r[1]}» / пароль: `{r[2]}` / {owner}")
