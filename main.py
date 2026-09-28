@@ -35,7 +35,6 @@ import fetch_trains_data  # поезда дальнего следования (
 import fetch_favt_notices  # логика сбора уведомлений Росавиации (@favt_info), тоже фоново
 import fetch_road_events   # ДТП по городам (Москва: @dtp777+@DtOperativno слиты в одну ленту, СПб: @dtp_spb78) - тем же способом, фоново
 import fetch_concert_events  # афиша концертов из Telegram-каналов (Москва: @concerts_moscow, СПб: @spb_conc) - второй источник для "🎭 СОБЫТИЯ ГОРОДА", тем же способом, фоново
-import fetch_city_ticker    # новости/афиша для бегущей строки на карте (Москва: @moscowmap+@moscowsee, Краснодар: @krd_tipich_ru) - тем же способом, фоново
 import fetch_mos_road_data  # официальный API data.mos.ru (доп. источник для Москвы) - см. MOS_DATA_API_KEY ниже
 import fetch_timepad_data  # афиша города (TimePad) для кнопки "🎭 СОБЫТИЯ ГОРОДА" - используется
                             # только для TIMEPAD_CITY_MAP; timepad_data.json обновляется ЛОКАЛЬНО
@@ -242,13 +241,6 @@ FAVT_UPDATE_INTERVAL_MINUTES = 3
 # map_webapp_html). Уменьшено до 2 минут.
 ROAD_EVENTS_DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'road_events_data.json')
 ROAD_EVENTS_UPDATE_INTERVAL_MINUTES = 2
-
-# ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - бегущая строка над
-# картой, новости/афиша @moscowmap+@moscowsee (Москва), @krd_tipich_ru
-# (Краснодар), см. fetch_city_ticker.py). Новости не так критичны по
-# времени, как ДТП - обновляем реже.
-TICKER_NEWS_DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'city_ticker_news.json')
-TICKER_NEWS_UPDATE_INTERVAL_MINUTES = 10
 
 # Афиша концертов из Telegram-каналов (Москва: @concerts_moscow, СПб:
 # @spb_conc) - второй источник для "🎭 СОБЫТИЯ ГОРОДА" вместе с TimePad, тот
@@ -1037,40 +1029,6 @@ def traffic_level_notice(traffic_level):
     if not label:
         return None
     return f"🚦 Пробки сейчас: {label} ({traffic_level}/10)"
-
-# ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "баллы пробок с
-# рекомендациями" для бегущей строки на карте) - короткий совет водителю по
-# уровню пробок, та же шкала 1-10, что и TRAFFIC_LEVEL_LABELS выше. Не
-# новый источник данных - уровень уже приходит с карты (reportTrafficLevel
-# в JS -> /map/traffic_level), просто добавляем вторую строку к уже
-# известному баллу. См. build_ticker_items ниже.
-TICKER_TRAFFIC_RECOMMENDATION = {
-    1: "хорошее время для дальних заказов", 2: "хорошее время для дальних заказов",
-    3: "в целом норм, местами тормозит", 4: "в целом норм, местами тормозит",
-    5: "закладывай запас времени в пути", 6: "закладывай запас времени в пути",
-    7: "лучше короткие заказы рядом", 8: "лучше короткие заказы рядом",
-    9: "дальние заказы не бери - не успеешь", 10: "дальние заказы не бери - не успеешь",
-}
-
-# ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "можно чтобы если не
-# показывают были заглушки пробок советов куда ехать дорожных событий") -
-# бегущая строка раньше просто ПРОПУСКАЛА пункт пробок, если свежего балла
-# от водителей ещё не поступало (свежий отчёт - обязательное условие
-# get_city_traffic_level, см. её докстринг) - лента в этом случае выглядела
-# "сломанной"/куце. Теперь вместо пропуска - заглушка с тем же эмодзи, чтобы
-# лента всегда показывала хоть что-то по каждому виду данных.
-TICKER_TRAFFIC_STUB = "🚦 Пробки: свежих данных пока нет - ориентируйся по своему опыту и часам пик"
-
-def traffic_ticker_item(city):
-    """Строка для бегущей строки на карте с баллом пробок и рекомендацией -
-    либо, если свежего балла по городу нет (см. get_city_traffic_level - тот
-    же кэш, что у "Куда ехать"), заглушка TICKER_TRAFFIC_STUB вместо пустоты."""
-    level = get_city_traffic_level(city)
-    if level is None:
-        return TICKER_TRAFFIC_STUB
-    label = TRAFFIC_LEVEL_LABELS.get(level, '')
-    advice = TICKER_TRAFFIC_RECOMMENDATION.get(level, '')
-    return f"🚦 Пробки {level}/10 - {label.lower()}, {advice}" if label else TICKER_TRAFFIC_STUB
 
 def is_city_holiday_today(city):
     """True, если СЕГОДНЯ (по местному времени города) идёт праздник -
@@ -2279,329 +2237,6 @@ def count_active_road_closures(city):
     (см. format_where_to_go_text). ИЗМЕНЕНО 24.09.2026 - см.
     _road_events_chat_window (то же окно 6ч, что у "Дороги"/"События")."""
     return sum(1 for e in _road_events_chat_window(city) if e.get('is_closure'))
-
-_ticker_news_cache = None
-_ticker_news_mtime = None
-
-def load_ticker_news():
-    """Загружает city_ticker_news.json (новости/афиша @moscowmap+@moscowsee/
-    @krd_tipich_ru для бегущей строки на карте, см. fetch_city_ticker.py)."""
-    global _ticker_news_cache, _ticker_news_mtime
-    try:
-        mtime = os.path.getmtime(TICKER_NEWS_DATA_FILE)
-        if _ticker_news_cache is not None and mtime == _ticker_news_mtime:
-            return _ticker_news_cache
-        with open(TICKER_NEWS_DATA_FILE, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-        _ticker_news_cache = data
-        _ticker_news_mtime = mtime
-        return data
-    except FileNotFoundError:
-        return None
-    except Exception as e:
-        logger.error(f"❌ Ошибка чтения city_ticker_news.json: {e}")
-        return None
-
-def get_ticker_news_for_city(city):
-    """Последние новости/афиша для бегущей строки - пусто, если для города
-    новостной канал не настроен (см. fetch_city_ticker.TICKER_NEWS_CHANNELS)
-    или файл ещё не собран."""
-    data = load_ticker_news()
-    if not data:
-        return []
-    return data.get('cities', {}).get(city, [])
-
-# ДОБАВЛЕНО (снова) 28.09.2026 (прямая просьба пользователя - большой
-# редизайн ленты: "новости с паблика новостного конкретно новости шли одна
-# новость раз в 3 минуты чтобы этой информации было как можно меньше, а
-# основной информации для водителя как можно больше") - новости паблика
-# ВОЗВРАЩЕНЫ в ленту (были временно убраны в предыдущей версии
-# build_ticker_items этого же дня), но не на каждой загрузке, а строго раз
-# в TICKER_NEWS_CADENCE_MINUTES минут - см. news_ticker_item ниже.
-TICKER_NEWS_CADENCE_MINUTES = 3
-
-def news_ticker_item(city):
-    """Одна строка новости паблика для бегущей строки - None, если сейчас
-    "не та" минута (см. TICKER_NEWS_CADENCE_MINUTES выше - показываем
-    новость только когда datetime.now().minute кратна этому числу) либо
-    новостей для города вообще нет. Фронтенд опрашивает /map/ticker раз в
-    минуту (см. loadMapTicker/setInterval в map_webapp_html), поэтому такой
-    гейт на СЕРВЕРНОЙ стороне и даёт в среднем "раз в 3 минуты", без
-    отдельного таймера на клиенте.
-
-    Номер новости выбирается по количеству прошедших
-    TICKER_NEWS_CADENCE_MINUTES-минуток от начала часа (minute // cadence),
-    по модулю числа новостей - соседние показы (в разные "тройки минут")
-    ротируют разные новости, а не залипают на самой первой."""
-    news = get_ticker_news_for_city(city)
-    if not news:
-        return None
-    now = datetime.now()
-    if now.minute % TICKER_NEWS_CADENCE_MINUTES != 0:
-        return None
-    slot = now.minute // TICKER_NEWS_CADENCE_MINUTES
-    item = news[slot % len(news)]
-    text = item.get('text') if isinstance(item, dict) else item
-    if not text:
-        return None
-    short = text if len(text) <= 100 else text[:100].rsplit(' ', 1)[0].rstrip(' ,.-') + '…'
-    return f"📰 {short}"
-
-# ИЗМЕНЕНО 28.09.2026 (прямая просьба пользователя - "что здесь может быть
-# ваша реклама по поводу рекламы обращаться в поддержку") - раньше это была
-# ПОЛНАЯ заглушка (всегда []), пока пользователь не решит, как вносить
-# рекламу вручную. Решение принято: пока не заведено НИ ОДНОГО настоящего
-# рекламного места - показываем один дефолтный слот-приглашение, одинаковый
-# на все города. Когда появится реальный ручной механизм внесения рекламы
-# (отдельная задача), он заменит собой этот дефолт (или дополнит его).
-TICKER_AD_PLACEHOLDER_TEXT = "Здесь может быть ваша реклама - по вопросам рекламы обращайтесь в поддержку"
-
-def get_ticker_ads(city):
-    """Реклама для бегущей строки на карте. См. TICKER_AD_PLACEHOLDER_TEXT
-    выше - пока нет ни одного настоящего рекламного места, отдаём именно
-    его, а не пустой список."""
-    return [TICKER_AD_PLACEHOLDER_TEXT]
-
-TICKER_ROAD_EVENTS_STUB = "🚧 Крупных ДТП и перекрытий сейчас не зафиксировано"
-
-# ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "погода" в бегущей
-# строке) - короткая сводка из ГОТОВОГО снепшота погоды (тот же источник,
-# что у кнопки "🌤 ПОГОДА"/карты осадков - get_cached_weather_forecast/
-# describe_weathercode), без live-запроса. None, если снепшота для города
-# ещё нет (не все города бота покрыты RAIN_CITY_COORDS/weather_data.json).
-def weather_ticker_item(city):
-    forecast = get_cached_weather_forecast(city)
-    if not forecast:
-        return None
-    current = (forecast or {}).get('current') or {}
-    temp = current.get('temperature_2m')
-    if temp is None:
-        return None
-    code = current.get('weathercode')
-    desc, _intensity, emoji = describe_weathercode(code) if code is not None else ('', 0, '🌤')
-    temp_int = round(temp)
-    temp_str = f"+{temp_int}" if temp_int >= 0 else str(temp_int)
-    text = f"{emoji} Погода: {temp_str}°C"
-    if desc:
-        text += f", {desc}"
-    return text
-
-# ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "советы в верхнем
-# баре: если туман - быть осторожным, включить противотуманные фары,
-# снизить скорость; когда гололёд, когда температура переходит за 0° и
-# есть осадки - давать информацию, что есть гололёд на мостах/эстакадах,
-# быть аккуратнее, не забыть переобуть резину") - тот же готовый снепшот
-# погоды, что у weather_ticker_item (get_cached_weather_forecast, БЕЗ
-# отдельного live-запроса) - просто другое прочтение того же снепшота:
-# не "какая сейчас погода", а "на что обратить внимание за рулём".
-FOG_WEATHERCODES = {45, 48}  # 'туман'/'изморозь' в WEATHERCODE_INFO выше
-# Порог сознательно НЕ строго "температура <= 0" - дорожное полотно и
-# особенно мосты/эстакады (продуваются и остывают быстрее обычной дороги)
-# обмерзают уже при небольшом плюсе, поэтому предупреждаем с запасом в
-# пару градусов, а не строго по нулю.
-ICE_RISK_MAX_TEMP_C = 2
-
-def weather_safety_ticker_items(city):
-    """Предупреждения за рулём по текущей погоде - туман (свои фары/
-    скорость) и риск гололёда (температура около/ниже нуля + осадки прямо
-    сейчас - самое опасное сочетание, лёд образуется быстро, в первую
-    очередь на мостах/эстакадах). Не заменяет weather_ticker_item (тот -
-    нейтральная сводка "сколько градусов"), а дополняет его - оба пункта
-    могут быть в ленте одновременно."""
-    forecast = get_cached_weather_forecast(city)
-    if not forecast:
-        return []
-    current = (forecast or {}).get('current') or {}
-    temp = current.get('temperature_2m')
-    code = current.get('weathercode')
-    items = []
-    if code in FOG_WEATHERCODES:
-        items.append("🌫 Туман - будь осторожен, включи противотуманные фары и снизь скорость")
-    if temp is not None and temp <= ICE_RISK_MAX_TEMP_C and code in PRECIP_WEATHERCODES:
-        items.append(
-            "🧊 Риск гололёда (температура около 0°C и есть осадки) - "
-            "особенно на мостах и эстакадах, будь аккуратнее и не забудь "
-            "переобуться на зимнюю резину"
-        )
-    return items
-
-# ==================== ПРИЛЁТЫ (сигнал "волна прилётов") - ДОБАВЛЕНО 28.09.2026 ====================
-# По прямой просьбе пользователя ("через сколько начнётся... волна прилётов
-# в таких-то аэропортах") - зеркало departure_wave_info выше, только для
-# прилётов (get_airport_flights), которые, в отличие от вылетов, собираются
-# по ВСЕМ аэропортам города (см. AIRPORTS_INFO), а не только по списку
-# DEPARTURE_WAVE_AIRPORTS_BY_CITY (тот ограничен ради квоты Yandex Rasp).
-# Порог сознательно переиспользует DEPARTURE_WAVE_THRESHOLD_BY_CITY (как и
-# остальные пороги спроса в этом боте - ориентир, а не калиброванная
-# точность; прилётов у тех же аэропортов примерно столько же, сколько
-# вылетов).
-ARRIVAL_WAVE_LEAD_HOURS = 2
-
-def arrival_wave_info(city):
-    airports = AIRPORTS_INFO.get(city)
-    if not airports:
-        return {'count': 0, 'is_wave': False}
-    threshold = DEPARTURE_WAVE_THRESHOLD_BY_CITY.get(city, DEPARTURE_WAVE_THRESHOLD)
-    now_ts = datetime.now().timestamp()
-    horizon_ts = now_ts + ARRIVAL_WAVE_LEAD_HOURS * 3600
-    count = 0
-    for airport in airports:
-        for f in get_airport_flights(airport['icao']):
-            first_seen = f.get('firstSeen')
-            if first_seen is not None and now_ts <= first_seen <= horizon_ts:
-                count += 1
-    return {'count': count, 'is_wave': count >= threshold}
-
-def flight_wave_ticker_items(city):
-    """Пункты бегущей строки про волну вылетов/прилётов (ДОБАВЛЕНО
-    28.09.2026, прямая просьба пользователя) - показываются, только если
-    реально ожидается волна (is_wave) СЕЙЧАС, а не заглушкой "волны нет" -
-    в отличие от дорожных событий, отсутствие волны - обычное, большую
-    часть суток состояние, а не что-то, о чём стоит отдельно сообщать."""
-    items = []
-    dep_airports_icao = DEPARTURE_WAVE_AIRPORTS_BY_CITY.get(city)
-    if dep_airports_icao:
-        info = departure_wave_info(city)
-        if info['is_wave']:
-            names = [a['name'] for a in AIRPORTS_INFO.get(city, []) if a['icao'] in dep_airports_icao]
-            names_str = (' (' + ', '.join(dict.fromkeys(names)) + ')') if names else ''
-            items.append(f"🛫 Волна вылетов{names_str} в ближайшие {DEPARTURE_WAVE_LEAD_HOURS}ч - ~{info['count']} рейсов")
-    if AIRPORTS_INFO.get(city):
-        arr_info = arrival_wave_info(city)
-        if arr_info['is_wave']:
-            names = [a['name'] for a in AIRPORTS_INFO.get(city, [])]
-            names_str = (' (' + ', '.join(dict.fromkeys(names)) + ')') if names else ''
-            items.append(f"🛬 Волна прилётов{names_str} в ближайшие {ARRIVAL_WAVE_LEAD_HOURS}ч - ~{arr_info['count']} рейсов")
-    return items
-
-# ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "на ЖД вокзалах что
-# поднялся спрос") - те же данные/расчёт, что уже используют метки вокзалов
-# на карте (compute_current_train_period_load, см. handle_map_stations_api
-# выше) и раздел "🚆 ВОКЗАЛЫ" (get_train_load_label) - бинарная шкала:
-# показываем вокзал в ленте, только если спрос ВЫШЕ порога (load > 50,
-# та же граница, что у get_train_load_label 'ЕХАТЬ'). category берём
-# 'taxi' по умолчанию (как и у меток на карте) - лента общая на весь город,
-# не персональная под тариф конкретного водителя.
-def train_demand_ticker_items(city):
-    items = []
-    for station in STATIONS_INFO.get(city, []):
-        code = station['code']
-        try:
-            load, _trains, _ = compute_current_train_period_load(code, 'taxi')
-        except Exception:
-            continue
-        if load > 50:
-            items.append(f"🚉 {station['name']}: спрос вырос, стоит подъехать")
-    return items
-
-# Радиус вокруг живой позиции водителя, в котором дорожное событие (ДТП/
-# перекрытие) считается относящимся к "текущему району" в бегущей строке -
-# ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "перекрытие ДТП
-# аварии на текущий час и текущего района"). Чуть шире
-# CANDIDATE_CLOSURE_RADIUS_KM (6км, см. get_nearby_road_closures выше) -
-# там нужна точность под конкретную точку "Куда ехать", здесь достаточно
-# общей осведомлённости в масштабе района, а районы в get_district_demand
-# сами по себе довольно крупные (не микро-кварталы).
-TICKER_DISTRICT_RADIUS_KM = 8
-
-def tariff_demand_ticker_items(city, category, district_name):
-    """Пункты бегущей строки про спрос на тарифы В КОНКРЕТНОМ районе, где
-    сейчас находится водитель (district_name - см. find_nearest_district в
-    build_ticker_items ниже) - ДОБАВЛЕНО (снова) 28.09.2026 (прямая просьба
-    пользователя - "состояние спроса на тарифы в текущем районе"),
-    используя district_tariff_demand_summary (район ОДИН конкретный), а не
-    city_tariff_demand_summary (та берёт максимум по ВСЕМ районам города -
-    для ленты нужен именно район, где водитель находится сейчас, а не
-    лучший район города вообще). Показываем только 'high' - лента и так
-    длинная, "нормальный"/"низкий" спрос отдельной строкой не несёт
-    водителю практической пользы."""
-    if not district_name:
-        return []
-    items = []
-    for row in district_tariff_demand_summary(city, category, district_name):
-        if row['level'] == 'high':
-            items.append(f"📊 Высокий спрос на {row['tariff']} в районе «{district_name}»")
-    return items
-
-def build_ticker_items(city, category=None, user_lat=None, user_lon=None):
-    """Собирает содержимое бегущей строки над картой для города бота.
-
-    ИЗМЕНЕНО (снова) 28.09.2026 (прямая просьба пользователя - большой
-    редизайн ленты: "чтобы загружались пробки текущего часа Погода текущего
-    часа состояние спроса на тарифы в текущем районе перекрытие ДТП аварии
-    на текущий час и текущего района... новости... загрузку аэропортов
-    города загрузку ЖД вокзала города и это всё на постоянной основе...
-    зависимости от того района где находится юзер от локации"): состав
-    ленты СНОВА пересобран. Возвращены балл пробок (🚦 traffic_ticker_item)
-    и новости паблика (📰 news_ticker_item, но теперь дозированно - см. её
-    докстринг), добавлен спрос на тарифы В ТЕКУЩЕМ РАЙОНЕ водителя (📊
-    tariff_demand_ticker_items) - раньше такого пункта в ленте не было
-    вовсе. Дорожные события теперь тоже СКОПИРОВАНЫ на текущий район
-    водителя (TICKER_DISTRICT_RADIUS_KM), а не берутся по всему городу, как
-    раньше - но ТОЛЬКО когда известна геопозиция (user_lat/user_lon), иначе
-    прежнее поведение (весь город) сохраняется, чтобы лента не была пустой
-    у водителя без разрешённой геолокации браузера. Итоговый состав, по
-    порядку: пробки, погода, спрос по тарифам в районе, дорожные события в
-    районе, новости (раз в 3 минуты), волна вылетов/прилётов, спрос на
-    вокзалах, реклама.
-
-    ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя) - сразу за погодой
-    добавлены предупреждения за рулём по текущим условиям (туман/риск
-    гололёда, см. weather_safety_ticker_items) - показываются, только
-    когда условие реально есть сейчас, как и волна вылетов/прилётов выше.
-
-    Применяется ко ВСЕМ городам бота, не только Москве - у каждого города
-    просто показывается то, для чего реально есть данные (Москва богаче
-    остальных - для неё собирается больше всего: рейсы+вокзалы+дороги+
-    погода+районная матрица спроса)."""
-    items = []
-
-    district_name = None
-    if user_lat is not None and user_lon is not None:
-        nearest = find_nearest_district(city, user_lat, user_lon)
-        if nearest:
-            district_name = nearest[0]
-
-    items.append(traffic_ticker_item(city))
-
-    weather_item = weather_ticker_item(city)
-    if weather_item:
-        items.append(weather_item)
-    items.extend(weather_safety_ticker_items(city))
-
-    items.extend(tariff_demand_ticker_items(city, category, district_name))
-
-    road_items = []
-    for e in _road_events_chat_window(city):
-        text = e.get('text', '')
-        if not text:
-            continue
-        if district_name is not None:
-            e_lat, e_lon = e.get('lat'), e.get('lon')
-            if e_lat is None or e_lon is None:
-                continue  # без координат нельзя проверить "рядом ли с районом" - пропускаем при скоупинге
-            if haversine_km(user_lat, user_lon, e_lat, e_lon) > TICKER_DISTRICT_RADIUS_KM:
-                continue
-        short = text if len(text) <= 100 else text[:100].rsplit(' ', 1)[0].rstrip(' ,.-') + '…'
-        if e.get('is_closure'):
-            road_items.append(f"🚧 {short}")
-        elif e.get('is_severe'):
-            road_items.append(f"🚨 {short}")
-    items.extend(road_items if road_items else [TICKER_ROAD_EVENTS_STUB])
-
-    news_item = news_ticker_item(city)
-    if news_item:
-        items.append(news_item)
-
-    items.extend(flight_wave_ticker_items(city))
-    items.extend(train_demand_ticker_items(city))
-
-    for ad in get_ticker_ads(city):
-        text = ad.get('text') if isinstance(ad, dict) else ad
-        if text:
-            items.append(f"💛 {text}")
-
-    return items
 
 _concert_events_cache = None
 _concert_events_mtime = None
@@ -13492,54 +13127,6 @@ MAP_CHROME_CSS = """
     0%, 100% { filter: drop-shadow(0 0 2px rgba(255,196,0,.35)); }
     50% { filter: drop-shadow(0 0 7px rgba(255,196,0,.85)); }
   }
-  /* ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - бегущая строка над
-     картой: "реклама, дорожные перекрытия дтп краткие новости баллы пробок
-     с рекомендациями... овальным объёмный красивый... буквы как из точек
-     жёлтых") - визуал согласован заранее по мокапу (3 варианта шрифта),
-     выбран вариант 1 (Silkscreen). Высота/верхний отступ СТРОГО равны
-     .shift-radar-indicator (56px, тот же top с var(--tg-chrome-top)) - по
-     прямой более поздней просьбе пользователя "чтобы бар по высоте не
-     выходил границами кнопки смены" - вместо интерполяции 44px из мокапа
-     здесь взята РЕАЛЬНАЯ высота актуальной кнопки-индикатора на карте.
-     Начинается в left:80px - ровно там же, где начинается .map-toggles-row
-     (Тарифы/Слои/Пробки/Спрос), т.к. это соседняя, а не одна и та же
-     строка - см. .map-ticker.dimmed ниже и mapMenuToggleBtn.addEventListener
-     в JS: пока раскрыт ряд тарифов/слоёв, бегущая строка на время прячется,
-     чтобы они не перекрывались друг с другом (обе живут в одной полосе
-     верха экрана, но ряд тарифов раскрыт лишь временно, по тапу). */
-  .map-ticker {
-    /* box-sizing:border-box + height РОВНО как итоговая (с рамкой) высота
-       .shift-radar-indicator (56px контент + 3px рамка с каждой стороны =
-       62px итого, см. её box-sizing:content-box по умолчанию) - иначе при
-       разной толщине рамки (у кнопки 3px, здесь 1px) getBoundingClientRect
-       даёт разную ИТОГОВУЮ высоту при одинаковом height, хотя top совпадает
-       (сам top не зависит от box-sizing). Проверено тестом (см.
-       /tmp/test_map_ticker.py) - высоты теперь совпадают пиксель в пиксель. */
-    position: absolute; top: calc(14px + var(--tg-chrome-top, 0px)); left: 80px; right: 10px; height: 62px;
-    box-sizing: border-box;
-    /* ИЗМЕНЕНО 28.09.2026 (прямая просьба пользователя - "надо с скругления
-       карты сделать как скругления вот этой вот площадки... чтобы это была
-       единая концепция") - было 999px (капсула/пилюля), теперь РОВНО то же
-       значение, что у #map (28px, см. CSS выше) - у карты и у ленты теперь
-       единое визуальное скругление, как и просили. */
-    z-index: 900; border-radius: 28px; overflow: hidden;
-    background: linear-gradient(180deg, rgba(40,40,42,.95), rgba(14,14,16,.95));
-    border: 1px solid rgba(255,196,0,.4);
-    box-shadow: 0 3px 10px rgba(0,0,0,.45), inset 0 1px 0 rgba(255,255,255,.14);
-    display: flex; align-items: center;
-    transition: opacity .2s;
-  }
-  .map-ticker.hidden-empty { display: none; }
-  .map-ticker.dimmed { opacity: 0; pointer-events: none; }
-  /* ИЗМЕНЕНО 28.09.2026 (прямая просьба пользователя - "уменьши, не успевают
-     прочитать", затем повторно "ещё медленнее", затем ещё раз "ещё
-     помедленнее чтобы успевали читать", затем ещё раз "ещё чуть-чуть снизь
-     скорость") - было 26s -> 48s -> 75s -> 115s -> 130s на полный проход
-     ленты. */
-  .map-ticker-track { display: flex; white-space: nowrap; will-change: transform; animation: mapTickerScroll 130s linear infinite; }
-  .map-ticker-item { display: inline-block; padding: 0 26px; font-family: 'Silkscreen', monospace; font-weight: 700; font-size: 13px; letter-spacing: .05em; color: #FFC400; text-shadow: 0 0 4px rgba(255,196,0,.75), 0 0 1px rgba(255,196,0,.9); }
-  @keyframes mapTickerScroll { 0% { transform: translateX(0); } 100% { transform: translateX(-50%); } }
-  @media (prefers-reduced-motion: reduce) { .map-ticker-track { animation: none; } }
   .fuel-popup, .charging-popup { font-family: -apple-system, sans-serif; font-size: 12.5px; max-width: 230px; color: #000; }
   .fuel-popup h4, .charging-popup h4 { margin: 0 0 6px; font-size: 13.5px; }
   .fuel-popup .sub, .charging-popup .sub { color: #666; font-size: 11.5px; margin-bottom: 6px; }
@@ -13693,11 +13280,6 @@ def map_webapp_html():
 <link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
 {map_preconnect_hints}
 <script src="{TG_WEBAPP_JS_PROXY_PATH}"></script>
-<!-- ДОБАВЛЕНО 28.09.2026 (бегущая строка над картой, буквы жёлтым "точечным"
-     шрифтом - согласованный мокап, вариант 1) -->
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Silkscreen:wght@400;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
 <!-- УБРАНО 23.09.2026 (прямая просьба пользователя - "вообще убери
      слежение и на север", после жалобы "херня получилась") - фича
@@ -13851,14 +13433,6 @@ def map_webapp_html():
   <svg class="power-icon" viewBox="0 0 24 24" fill="#fff">
     <path d="M13 3h-2v10h2V3zm4.83 2.17-1.42 1.42A6.92 6.92 0 0 1 19 12c0 3.87-3.13 7-7 7s-7-3.13-7-7c0-2.24 1.06-4.32 2.83-5.65L6.41 5.17A8.936 8.936 0 0 0 3 12c0 4.97 4.03 9 9 9s9-4.03 9-9c0-2.78-1.28-5.3-3.17-6.83z"/>
   </svg>
-</div>
-<!-- ДОБАВЛЕНО 28.09.2026 (бегущая строка над картой - пробки/ДТП/перекрытия/
-     новости/реклама, см. .map-ticker в CSS выше и loadMapTicker в JS ниже).
-     Пустой .map-ticker-track заполняется JS'ом при первом же loadMapTicker()
-     - до первого ответа сервера тег просто пустой (не мигает "пустой
-     плашкой" за счёт hidden-empty, см. JS). -->
-<div class="map-ticker hidden-empty" id="mapTicker">
-  <div class="map-ticker-track" id="mapTickerTrack"></div>
 </div>
 <!-- ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - "сделай выбор
      тарифа с карты прям") - см. .tariff-picker-overlay в CSS выше и
@@ -17300,65 +16874,6 @@ def map_webapp_html():
       }});
     }} catch (e) {{ /* тихо */ }}
   }}
-  // ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - бегущая строка над
-  // картой: пробки/ДТП/перекрытия/новости/реклама одной лентой, см.
-  // build_ticker_items в main.py и MAP_TICKER_API_PATH). Каждый элемент -
-  // готовая строка с эмодзи внутри (сервер уже всё собрал/сжал/отсортировал
-  // по важности) - клиенту остаётся только отрисовать и прокрутить.
-  // Список дублируется (items+items) в самой ленте - анимация
-  // translateX(-50%) на .map-ticker-track тогда прокручивает БЕСШОВНО
-  // (конец первой копии точно совпадает с началом второй).
-  function renderMapTicker(items) {{
-    const tickerEl = document.getElementById('mapTicker');
-    const trackEl = document.getElementById('mapTickerTrack');
-    if (!tickerEl || !trackEl) return;
-    if (!items || !items.length) {{
-      tickerEl.classList.add('hidden-empty');
-      trackEl.innerHTML = '';
-      return;
-    }}
-    trackEl.innerHTML = '';
-    for (let copy = 0; copy < 2; copy++) {{
-      items.forEach(text => {{
-        const span = document.createElement('span');
-        span.className = 'map-ticker-item';
-        span.textContent = text;
-        trackEl.appendChild(span);
-      }});
-    }}
-    tickerEl.classList.remove('hidden-empty');
-  }}
-  // ИЗМЕНЕНО 28.09.2026 (прямая просьба пользователя - "на постоянной
-  // основе чтобы загружались... в зависимости от того района где
-  // находится юзер от локации"): раньше лента грузилась РОВНО ОДИН раз при
-  // открытии карты (см. loadMapTicker(); без setInterval ниже, по вызову) -
-  // теперь: 1) передаём selfLat/selfLon (см. updateSelfMarker выше), когда
-  // они уже известны, чтобы сервер (build_ticker_items) мог скоупить
-  // дорожные события/спрос на тарифы на район водителя, а не на весь
-  // город; 2) подмешиваем чисто клиентский пункт "на линии Xч Yмин" (по
-  // просьбе того же сообщения - "можно в эту сводку выводить сколько ты
-  // находишься на линии") - серверный /map/ticker публичный, без
-  // авторизации, персональные данные смены туда не передаются, поэтому
-  // этот один пункт добавляется здесь же, на клиенте, из уже известных
-  // myShiftActive/myShiftStartedAtMs (та же пара, что у нижней плашки
-  // bibShiftTime/tickBottomBar выше - обе объявлены раньше по файлу, TDZ
-  // здесь не грозит).
-  async function loadMapTicker() {{
-    try {{
-      let url = `/map/ticker?city=${{encodeURIComponent(city)}}&category=${{encodeURIComponent(myCategory)}}`;
-      if (selfLat !== null && selfLon !== null) {{
-        url += `&lat=${{selfLat}}&lon=${{selfLon}}`;
-      }}
-      const resp = await fetch(url);
-      if (!resp.ok) return;
-      const data = await resp.json();
-      const items = data.items || [];
-      if (myShiftActive && myShiftStartedAtMs) {{
-        items.unshift('⏱ На линии ' + formatShiftDuration(Date.now() - myShiftStartedAtMs));
-      }}
-      renderMapTicker(items);
-    }} catch (e) {{ /* тихо */ }}
-  }}
   // Афиша (концерты/мероприятия) с геокодированной площадкой - по просьбе
   // пользователя (22.09.2026): "Афишу тоже выноси". Как и дорожные события,
   // события без распознанного/геокодированного места сюда не попадают (см.
@@ -17708,13 +17223,6 @@ def map_webapp_html():
       mapTogglesRow.classList.toggle('collapsed');
       const isOpen = !mapTogglesRow.classList.contains('collapsed');
       mapMenuToggleBtn.classList.toggle('active', isOpen);
-      // ДОБАВЛЕНО 28.09.2026 (см. .map-ticker.dimmed в CSS выше) - ряд
-      // Тарифы/Слои/Пробки/Спрос и бегущая строка живут в одной верхней
-      // полосе экрана (обе начинаются в left:80px, сразу после кнопки
-      // смены) - ряд раскрыт лишь временно по тапу, поэтому на это время
-      // бегущую строку прячем, а не двигаем макет.
-      const mapTickerEl = document.getElementById('mapTicker');
-      if (mapTickerEl) mapTickerEl.classList.toggle('dimmed', isOpen);
       if (!isOpen) {{
         const tariffPanelEl = document.getElementById('tariffToggle');
         const layerToggleRowEl = document.getElementById('layerToggle');
@@ -17939,16 +17447,6 @@ def map_webapp_html():
   if (demandShownState) loadDemandCloud();
   loadRoadEvents();
   loadCityEvents();
-  loadMapTicker();
-  // ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "на постоянной
-  // основе чтоб не прекращаясь эта информация шла") - раньше лента
-  // грузилась ровно один раз при открытии карты и больше никогда не
-  // обновлялась (в отличие от заправок/зарядок/парковок выше, у которых
-  // уже был свой setInterval 60000) - теперь опрашивается так же, раз в
-  // минуту, тем же интервалом, что и совпадает с TICKER_NEWS_CADENCE_MINUTES
-  // на сервере (см. news_ticker_item в main.py) - каждая загрузка это ровно
-  // один "тик" гейта показа новости.
-  setInterval(loadMapTicker, 60000);
   setInterval(loadPositions, 15000);
   // ДОБАВЛЕНО 25.09.2026 (жалоба пользователя - "кнопка смены не отображает
   // реальную ситуацию, включена ли смена или нет"): loadMyProfile() раньше
@@ -17969,10 +17467,6 @@ def map_webapp_html():
   // (ROAD_EVENTS_UPDATE_INTERVAL_MINUTES 10->2 мин, см. main.py) свежее
   // событие теперь доходит до карты за секунды-минуты, а не до ~12 минут.
   setInterval(loadRoadEvents, 30000);
-  // Бегущая строка обновляется на сервере не чаще раза в TICKER_NEWS_UPDATE_
-  // INTERVAL_MINUTES (новости) - опрос раз в минуту с клиента более чем
-  // достаточен, не тяжелее остальных 30-60-секундных опросов рядом.
-  setInterval(loadMapTicker, 60000);
   // ИЗМЕНЕНО 24.09.2026 (прямая просьба пользователя - оптимизация тормозов
   // карты) - раньше все четыре 60-секундных опроса стартовали сразу друг за
   // другом синхронно, поэтому КАЖДУЮ минуту они срабатывали одним пиком в
@@ -23533,49 +23027,6 @@ def city_tariff_demand_summary(city, category):
         result.append({'tariff': tariff_name, 'level': level})
     return result
 
-# ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - бегущая строка на
-# карте: "состояние спроса на тарифы в текущем районе") - как
-# city_tariff_demand_summary выше, но НЕ берёт максимум по ВСЕМ районам
-# города, а смотрит СТРОГО на один конкретный район (district_name,
-# обычно - ближайший к живой позиции водителя, см. find_nearest_district в
-# build_ticker_items) - там нужен лучший район города вообще (для дашборда
-# "Куда ехать"), здесь - именно тот район, где водитель находится прямо
-# сейчас.
-def district_tariff_demand_summary(city, category, district_name):
-    table = get_district_demand(city)
-    if not table:
-        return []
-    indices = MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES.get(category)
-    if not indices:
-        return []
-    entry = (table.get('districts') or {}).get(district_name)
-    if not entry:
-        return []
-    tariff_display_names = CATEGORIES.get(category, {}).get('tariffs', [])
-    now = get_city_now(city)
-    weekday = str(now.weekday())
-    slots = entry.get('weekday', {}).get(weekday, [])
-    result = []
-    for pos, idx in enumerate(indices):
-        field = _DISTRICT_DEMAND_INDEX_TO_FIELD.get(idx)
-        value = _district_slot_value(slots, now.hour, (idx,))
-        if value is None:
-            continue  # тарифа нет в матрице этого города (напр. Элит у Краснодара/Сочи)
-        thresholds = district_premium_threshold(city, field, entry.get('lat'), entry.get('lon'))
-        show_threshold = thresholds[0] if thresholds else None
-        if show_threshold:
-            if value >= show_threshold:
-                level = 'high'
-            elif value >= show_threshold * 0.7:
-                level = 'normal'
-            else:
-                level = 'low'
-        else:
-            level = 'normal'
-        tariff_name = tariff_display_names[pos] if pos < len(tariff_display_names) else field
-        result.append({'tariff': tariff_name, 'level': level})
-    return result
-
 async def handle_map_district_demand_api(request):
     """JSON API для районных облаков спроса (см. loadDistrictDemandClouds
     в map_webapp_html) - только city из DISTRICT_DEMAND_FILES и
@@ -24068,37 +23519,6 @@ async def handle_map_road_events_api(request):
         logger.exception("❌ Ошибка при получении дорожных событий для карты водителей")
         result = []
     return web.json_response({'events': result})
-
-# ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - бегущая строка над
-# картой: "рекламу, дорожные перекрытия дтп краткие новости баллы пробок с
-# рекомендациями") - см. build_ticker_items выше, отдаёт готовый список
-# строк (эмодзи уже внутри каждой строки) для .map-ticker в map_webapp_html.
-#
-# ИЗМЕНЕНО (снова) 28.09.2026 (та же просьба, редизайн ленты - "на
-# постоянной основе... зависимости от того района где находится юзер от
-# локации") - принимает опциональные lat/lon (та же схема разбора, что у
-# /map/demand выше), чтобы build_ticker_items мог скоупить дорожные события
-# и спрос на тарифы на район водителя, а не на весь город. Без lat/lon
-# (первая загрузка карты, пока геолокация браузера ещё не разрешена/не
-# пришла) - прежнее поведение, город целиком.
-MAP_TICKER_API_PATH = '/map/ticker'
-
-async def handle_map_ticker_api(request):
-    city = request.query.get('city', '')
-    category = request.query.get('category', '') or None
-    user_lat = user_lon = None
-    try:
-        lat_raw, lon_raw = request.query.get('lat'), request.query.get('lon')
-        if lat_raw is not None and lon_raw is not None:
-            user_lat, user_lon = float(lat_raw), float(lon_raw)
-    except (TypeError, ValueError):
-        user_lat = user_lon = None
-    try:
-        items = build_ticker_items(city, category=category, user_lat=user_lat, user_lon=user_lon)
-    except Exception:
-        logger.exception("❌ Ошибка при сборке бегущей строки карты")
-        items = []
-    return web.json_response({'items': items})
 
 MAP_CITY_EVENTS_API_PATH = '/map/city_events'
 
@@ -34577,7 +33997,6 @@ async def start_subscription_webhook_server():
     app.router.add_post(MAP_GAS_QUEUE_REPORT_API_PATH, handle_map_gas_queue_report_api)
     app.router.add_post(MAP_CHARGING_REPORT_API_PATH, handle_map_charging_report_api)
     app.router.add_get(MAP_ROAD_EVENTS_API_PATH, handle_map_road_events_api)
-    app.router.add_get(MAP_TICKER_API_PATH, handle_map_ticker_api)
     app.router.add_get(MAP_CITY_EVENTS_API_PATH, handle_map_city_events_api)
     # Локальная раздача telegram-web-app.js (21.09.2026, см. блок "ЛОКАЛЬНАЯ
     # РАЗДАЧА telegram-web-app.js" выше) - используется и картой, и кабинетом.
@@ -38859,21 +38278,6 @@ async def road_events_updater():
             logger.error(f"❌ Ошибка фонового обновления road_events_data.json: {e}")
         await asyncio.sleep(ROAD_EVENTS_UPDATE_INTERVAL_MINUTES * 60)
 
-async def ticker_news_updater():
-    """Фоновая задача: раз в TICKER_NEWS_UPDATE_INTERVAL_MINUTES минут читает
-    публичные веб-версии новостных/афишных каналов (см.
-    fetch_city_ticker.TICKER_NEWS_CHANNELS) и обновляет city_ticker_news.json -
-    тот же способ сбора, что и road_events_updater выше, только без пуш-
-    уведомлений (новости в бегущей строке не критичны по времени)."""
-    while True:
-        try:
-            logger.info("🔄 Обновляю city_ticker_news.json (новости для бегущей строки)...")
-            await asyncio.to_thread(fetch_city_ticker.main)
-            logger.info("✅ city_ticker_news.json обновлён")
-        except Exception as e:
-            logger.error(f"❌ Ошибка фонового обновления city_ticker_news.json: {e}")
-        await asyncio.sleep(TICKER_NEWS_UPDATE_INTERVAL_MINUTES * 60)
-
 async def concert_events_updater():
     """Фоновая задача: раз в CONCERT_EVENTS_UPDATE_INTERVAL_MINUTES минут
     читает публичные веб-версии каналов @concerts_moscow (Москва) и
@@ -39043,7 +38447,6 @@ async def main():
         logger.warning("⚠️ YANDEX_RASP_API_KEY не задан в переменных окружения Railway - flights_data.json и trains_data.json не будут обновляться автоматически")
     asyncio.create_task(favt_notices_updater())
     asyncio.create_task(road_events_updater())
-    asyncio.create_task(ticker_news_updater())
     asyncio.create_task(concert_events_updater())
     # mos_road_data_updater() ОТКЛЮЧЁН - apidata.mos.ru не резолвится даже с
     # серверов Railway (NameResolutionError на 'apidata.mos.ru' в логах),
