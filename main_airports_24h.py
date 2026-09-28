@@ -36691,6 +36691,24 @@ def admin_panel_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔄 Обновить", callback_data="admin_panel_refresh")],
         [InlineKeyboardButton(text="📄 Отчёт в файл (.txt)", callback_data="admin_panel_export_txt")],
+        # ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "есть два
+        # человека, у которых есть доступ к админ реферальной программе...
+        # компания у нас сейчас внесена, и пароли есть только от одной...
+        # когда я захожу, то другой пользователь эту компанию уже не сможет
+        # зайти, потому что она уже введена под паролем... нужно создать
+        # ещё одну компанию юр.лица со своим паролем, чтобы пользователь
+        # мог зайти") - те же действия, что и у команд /add_legal_entity,
+        # /list_legal_entities, /add_admin_partner, /list_admin_partners
+        # (см. ниже), но кнопками, а НЕ слэш-командами - специально
+        # добавлено, чтобы не зависеть от ADMIN_TELEGRAM_ID (которая на
+        # Railway сейчас не задана) и от бага, из-за которого слэш-команды
+        # временно не отвечают (см. /myid). Доступ сюда уже защищён
+        # ADMIN_PANEL_PASSWORD (см. admin_panel_password_confirm_flow) -
+        # этого достаточно, дополнительных проверок не нужно.
+        [InlineKeyboardButton(text="🏢 Новое юрлицо", callback_data="admin_panel_new_legal_entity"),
+         InlineKeyboardButton(text="📋 Список юрлиц", callback_data="admin_panel_list_legal_entities")],
+        [InlineKeyboardButton(text="🤝 Новый админ-партнёр", callback_data="admin_panel_new_admin_partner"),
+         InlineKeyboardButton(text="📋 Список админ-партнёров", callback_data="admin_panel_list_admin_partners")],
     ])
 
 
@@ -36749,6 +36767,154 @@ async def admin_panel_refresh(callback_query: types.CallbackQuery):
         else:
             logger.error(f"❌ Не удалось обновить админ-панель: {e}")
             await callback_query.answer("Ошибка обновления")
+
+
+# ==================== ДОБАВЛЕНИЕ ЮР.ЛИЦ/АДМИН-ПАРТНЁРОВ КНОПКАМИ ====================
+# ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "есть два человека, у
+# которых есть доступ к админ реферальной программе... компания у нас
+# сейчас внесена, и пароли есть только от одной... когда я захожу, то
+# другой пользователь эту компанию уже не сможет зайти, потому что она уже
+# введена под паролем... нужно создать ещё одну компанию юр.лица со своим
+# паролем, чтобы пользователь мог зайти") - ТА ЖЕ логика, что у команд
+# /add_legal_entity, /list_legal_entities, /add_admin_partner,
+# /list_admin_partners (см. ниже, ADMIN_TELEGRAM_ID-only), но через кнопки
+# админ-панели - специально, чтобы НЕ зависеть от ADMIN_TELEGRAM_ID
+# (переменной, которой сейчас нет в Variables на Railway) и от
+# (независимого от этого) бага с молчащими слэш-командами (см. /myid).
+# Доступ в саму админ-панель уже защищён ADMIN_PANEL_PASSWORD (см.
+# admin_panel_password_confirm_flow) - этого достаточно.
+@router.callback_query(lambda c: c.data == "admin_panel_new_legal_entity")
+async def admin_panel_new_legal_entity_start(callback_query: types.CallbackQuery):
+    try:
+        await callback_query.answer()
+    except Exception:
+        pass
+    user_id = callback_query.from_user.id
+    state = user_state.setdefault(user_id, {})
+    state['awaiting_admin_panel_new_legal_entity'] = True
+    await callback_query.message.answer(
+        "🏢 Введи название компании и пароль ОДНИМ сообщением, через пробел "
+        "(пароль - последнее слово):\nНапример: ООО Ромашка 261194\n\nИли «❌ ОТМЕНА»:",
+        reply_markup=referral_withdraw_cancel_keyboard()
+    )
+
+
+async def _admin_panel_new_entity_flow(message, flag_name, cancel_text, usage_example, create_fn, already_taken_text, success_extra_text):
+    """Общая логика для admin_panel_new_legal_entity_flow/
+    admin_panel_new_admin_partner_flow - обычная (недекорированная) функция,
+    чтобы её можно было и переиспользовать, и вызывать напрямую в тестах
+    (декорированные @router.message-функции под тестовым стабом aiogram
+    становятся MagicMock, см. комментарии у _send_referral_scheme_view
+    выше)."""
+    user_id = message.from_user.id
+    state = user_state[user_id]
+    text = (message.text or '').strip()
+    if text == "❌ ОТМЕНА":
+        state.pop(flag_name, None)
+        await message.answer("Отменено.", reply_markup=types.ReplyKeyboardRemove())
+        return
+    name, _, password = text.rpartition(' ')
+    name = name.strip()
+    password = password.strip()
+    if not name or not password:
+        await message.answer(f"{usage_example}\nПопробуй ещё раз или нажми «❌ ОТМЕНА»:")
+        return
+    state.pop(flag_name, None)
+    new_id = create_fn(name, password)
+    if new_id is None:
+        await message.answer(already_taken_text.format(password=password), reply_markup=types.ReplyKeyboardRemove())
+        return
+    await message.answer(
+        f"✅ «{name}» добавлен(о) (id={new_id}), пароль: {password}\n\n{success_extra_text}",
+        reply_markup=types.ReplyKeyboardRemove()
+    )
+
+
+@router.message(lambda message: user_state.get(message.from_user.id, {}).get('awaiting_admin_panel_new_legal_entity'))
+async def admin_panel_new_legal_entity_flow(message: types.Message):
+    """Ловит ЛЮБОЙ текст, пока ждём "название + пароль" нового юр.лица -
+    тот же приём, что и у остальных awaiting_*-хендлеров (referral_legal_
+    password_flow и т.п.)."""
+    await _admin_panel_new_entity_flow(
+        message,
+        flag_name='awaiting_admin_panel_new_legal_entity',
+        cancel_text="Отменено.",
+        usage_example="Нужно название И пароль через пробел, например: ООО Ромашка 261194",
+        create_fn=add_legal_entity,
+        already_taken_text="❌ Пароль «{password}» уже занят другим юр.лицом или админ-партнёром. Открой «🔐 АДМИН ПАНЕЛЬ» заново и попробуй с другим паролем.",
+        success_extra_text="Этот пароль вводится на экране «🏢 ЮРЛИЦО» реферальной программы - кто введёт его первым, станет владельцем «Кабинета автопарка».",
+    )
+
+
+@router.callback_query(lambda c: c.data == "admin_panel_new_admin_partner")
+async def admin_panel_new_admin_partner_start(callback_query: types.CallbackQuery):
+    try:
+        await callback_query.answer()
+    except Exception:
+        pass
+    user_id = callback_query.from_user.id
+    state = user_state.setdefault(user_id, {})
+    state['awaiting_admin_panel_new_admin_partner'] = True
+    await callback_query.message.answer(
+        "🤝 Введи имя партнёра и пароль ОДНИМ сообщением, через пробел "
+        "(пароль - последнее слово):\nНапример: Иван Петров admin2026\n\nИли «❌ ОТМЕНА»:",
+        reply_markup=referral_withdraw_cancel_keyboard()
+    )
+
+
+@router.message(lambda message: user_state.get(message.from_user.id, {}).get('awaiting_admin_panel_new_admin_partner'))
+async def admin_panel_new_admin_partner_flow(message: types.Message):
+    await _admin_panel_new_entity_flow(
+        message,
+        flag_name='awaiting_admin_panel_new_admin_partner',
+        cancel_text="Отменено.",
+        usage_example="Нужно имя И пароль через пробел, например: Иван Петров admin2026",
+        create_fn=add_admin_partner,
+        already_taken_text="❌ Пароль «{password}» уже занят (другим юр.лицом или админ-партнёром). Открой «🔐 АДМИН ПАНЕЛЬ» заново и попробуй с другим паролем.",
+        success_extra_text="Этот пароль вводится через «👻 ФАНТОМ» → «🤝 АДМИН РЕФЕРАЛЬНАЯ СИСТЕМА» - кто введёт его первым, станет владельцем своего личного кабинета.",
+    )
+
+
+@router.callback_query(lambda c: c.data == "admin_panel_list_legal_entities")
+async def admin_panel_list_legal_entities_cb(callback_query: types.CallbackQuery):
+    try:
+        await callback_query.answer()
+    except Exception:
+        pass
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, name, password, owner_user_id FROM legal_entities WHERE kind != 'admin_partner' OR kind IS NULL ORDER BY id DESC")
+    rows = cursor.fetchall()
+    conn.close()
+    if not rows:
+        await callback_query.message.answer("Юр.лиц пока нет - добавь кнопкой «🏢 Новое юрлицо».")
+        return
+    lines = ["🏢 *Юр.лица:*"]
+    for r in rows:
+        owner = f"владелец: {r[3]}" if r[3] else "владелец: — (никто ещё не вошёл)"
+        lines.append(f"#{r[0]} «{r[1]}» / пароль: `{r[2]}` / {owner}")
+    await callback_query.message.answer("\n".join(lines), parse_mode='Markdown')
+
+
+@router.callback_query(lambda c: c.data == "admin_panel_list_admin_partners")
+async def admin_panel_list_admin_partners_cb(callback_query: types.CallbackQuery):
+    try:
+        await callback_query.answer()
+    except Exception:
+        pass
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, name, password, owner_user_id FROM legal_entities WHERE kind = 'admin_partner' ORDER BY id DESC")
+    rows = cursor.fetchall()
+    conn.close()
+    if not rows:
+        await callback_query.message.answer("Админ-партнёров пока нет - добавь кнопкой «🤝 Новый админ-партнёр».")
+        return
+    lines = ["🤝 *Админ-партнёры:*"]
+    for r in rows:
+        owner = f"владелец: {r[3]}" if r[3] else "владелец: — (никто ещё не вошёл)"
+        lines.append(f"#{r[0]} «{r[1]}» / пароль: `{r[2]}` / {owner}")
+    await callback_query.message.answer("\n".join(lines), parse_mode='Markdown')
 
 
 # По просьбе пользователя (20.09.2026): "делай пуши перекрытий... и крупные
