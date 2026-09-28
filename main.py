@@ -5979,7 +5979,7 @@ def services_keyboard(category=None, city=None, user_id=None):
     # водитель на линии, кнопки нет вовсе, как только завершил смену -
     # появляется снова.
     if not is_shift_active(user_state.get(user_id, {})):
-        buttons.append([KeyboardButton(text="🔓 БЕСПЛАТНЫЙ VPN TAXI HELPER")])
+        buttons.append([KeyboardButton(text="🔓 НАДЁЖНЫЙ VPN TAXI HELPER")])
     # "❓ ПОДДЕРЖКА" (по просьбе пользователя, 22.09.2026 - "поддержка,
     # которая сама будет отвечать в боте") - ИЗМЕНЕНО 23.09.2026 (прямая
     # просьба пользователя - "на главной меню вместо кнопки назад перенеси
@@ -6083,7 +6083,7 @@ def courier_module_keyboard(category=None):
         # тронуты - по этим кнопкам просто больше некуда нажать.
         [KeyboardButton(text="💰 ФИНАНСЫ"), KeyboardButton(text="🚻 ТУАЛЕТЫ")],
         [KeyboardButton(text="🅿️ БЕСПЛАТНАЯ ПАРКОВКА"), KeyboardButton(text="🔧 ШИНОМОНТАЖ")],
-        [KeyboardButton(text="🚿 МОЙКИ"), KeyboardButton(text="🍷 АЛКОМАРКЕТЫ 24Ч")],
+        [KeyboardButton(text="🚿 МОЙКИ"), KeyboardButton(text="🍷 АЛКОМАРКЕТЫ")],
         [KeyboardButton(text="🛒 МАГАЗИНЫ 24Ч"), KeyboardButton(text="🔌 ЭЛЕКТРОЗАРЯДКИ")],
         # "⛽ ГДЕ БЕНЗИН" перенесена сюда из главного меню (по просьбе
         # пользователя, 19.09.2026) - раньше была отдельной кнопкой в
@@ -6145,7 +6145,7 @@ NEARBY_BUTTON_TO_KIND = {
     "🅿️ БЕСПЛАТНАЯ ПАРКОВКА": 'parking',
     "🔧 ШИНОМОНТАЖ": 'tires',
     "🚿 МОЙКИ": 'car_wash',
-    "🍷 АЛКОМАРКЕТЫ 24Ч": 'alcohol',
+    "🍷 АЛКОМАРКЕТЫ": 'alcohol',
     "🛒 МАГАЗИНЫ 24Ч": 'grocery24',
     "🔌 ЭЛЕКТРОЗАРЯДКИ": 'ev_charging',
 }
@@ -6157,10 +6157,14 @@ NEARBY_SERVICES = {
     'parking': {'file': 'parking_data.json', 'label': 'Бесплатные парковки', 'emoji': '🅿️', 'noun': 'бесплатные парковки'},
     'tires': {'file': 'tires_data.json', 'label': 'Шиномонтажи', 'emoji': '🔧', 'noun': 'шиномонтажи'},
     'car_wash': {'file': 'car_wash_data.json', 'label': 'Автомойки', 'emoji': '🚿', 'noun': 'автомойки'},
-    # Алкомаркеты и магазины - по прямой просьбе пользователя показываем ТОЛЬКО
+    # Магазины 24 часа - по прямой просьбе пользователя показываем ТОЛЬКО
     # круглосуточные (фильтрация уже на этапе сбора, см. is_24h в
-    # fetch_alcohol_data.py/fetch_grocery24_data.py) - label честно об этом говорит.
-    'alcohol': {'file': 'alcohol_data.json', 'label': 'Алкомаркеты 24 часа', 'emoji': '🍷', 'noun': 'круглосуточные алкомаркеты'},
+    # fetch_grocery24_data.py) - label честно об этом говорит.
+    # ИЗМЕНЕНО 28.09.2026 (прямая просьба пользователя - "алкомаркеты убрать
+    # 24 часа, оставить только алкомаркеты") - у алкомаркетов (в отличие от
+    # магазинов 24ч ниже) фильтр по часам работы убран - см.
+    # fetch_alcohol_data.py, теперь идут ВСЕ алкомаркеты города.
+    'alcohol': {'file': 'alcohol_data.json', 'label': 'Алкомаркеты', 'emoji': '🍷', 'noun': 'алкомаркеты'},
     'grocery24': {'file': 'grocery24_data.json', 'label': 'Магазины 24 часа', 'emoji': '🛒', 'noun': 'круглосуточные магазины'},
     'ev_charging': {'file': 'ev_charging_data.json', 'label': 'Электрозарядки', 'emoji': '🔌', 'noun': 'электрозарядки'},
 }
@@ -7148,6 +7152,24 @@ def share_order_webapp_html(category=None):
   <div id="doneText">Заказ отправлен</div>
 </div>
 <script>
+  // ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "убери по двойному
+  // тапу увеличение экрана") - touch-action:manipulation в CSS выше уже
+  // должен убирать zoom по двойному тапу, но в WebView Telegram (особенно
+  // iOS) это работает не всегда надёжно - здесь дополнительный, более
+  // надёжный JS-перехватчик: если два touchend подряд происходят быстрее
+  // чем 300мс - это двойной тап, событие блокируется (preventDefault), чтобы
+  // браузер не успел интерпретировать его как zoom-жест. Обычный (не
+  // сдвоенный) тап не трогается - клики по кнопкам/ссылкам работают как
+  // раньше. passive:false обязателен - иначе preventDefault() внутри
+  // touchend игнорируется браузером.
+  (function () {
+    let lastTouchEndAt = 0;
+    document.addEventListener('touchend', function (e) {
+      const now = Date.now();
+      if (now - lastTouchEndAt <= 300) { e.preventDefault(); }
+      lastTouchEndAt = now;
+    }, { passive: false });
+  })();
   const tg = window.Telegram && window.Telegram.WebApp;
   if (tg) {
     tg.ready(); tg.expand();
@@ -7522,6 +7544,24 @@ def platform_probe_webapp_html():
 <body>
 готово ✅
 <script>
+  // ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "убери по двойному
+  // тапу увеличение экрана") - touch-action:manipulation в CSS выше уже
+  // должен убирать zoom по двойному тапу, но в WebView Telegram (особенно
+  // iOS) это работает не всегда надёжно - здесь дополнительный, более
+  // надёжный JS-перехватчик: если два touchend подряд происходят быстрее
+  // чем 300мс - это двойной тап, событие блокируется (preventDefault), чтобы
+  // браузер не успел интерпретировать его как zoom-жест. Обычный (не
+  // сдвоенный) тап не трогается - клики по кнопкам/ссылкам работают как
+  // раньше. passive:false обязателен - иначе preventDefault() внутри
+  // touchend игнорируется браузером.
+  (function () {
+    let lastTouchEndAt = 0;
+    document.addEventListener('touchend', function (e) {
+      const now = Date.now();
+      if (now - lastTouchEndAt <= 300) { e.preventDefault(); }
+      lastTouchEndAt = now;
+    }, { passive: false });
+  })();
   var tg = window.Telegram ? window.Telegram.WebApp : null;
   if (tg) { tg.ready(); }
   // ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "ограничим
@@ -12995,7 +13035,12 @@ MAP_CHROME_CSS = """
        тонкая внутренняя подсветка сверху - та же "приподнятая" плашка, что
        и остальные бары на карте, просто со своим фоном/блюром. */
     background: linear-gradient(180deg, rgba(32,32,32,.85), rgba(14,14,14,.85)); backdrop-filter: blur(8px); color: #fff;
-    border: 1px solid rgba(255,196,0,.35); border-radius: 16px; padding: 10px 16px;
+    /* ИЗМЕНЕНО 28.09.2026 (прямая просьба пользователя - "бар где пробки
+       погода и тд такие же скругления сделай как краёв") - было 16px,
+       теперь РОВНО то же значение, что у #map и у .shift-slider ниже (28px) -
+       единая скруглённость по всей карте, та же "единая концепция", что уже
+       применялась к другим элементам карты раньше. */
+    border: 1px solid rgba(255,196,0,.35); border-radius: 28px; padding: 10px 16px;
     font-family: -apple-system, sans-serif; box-shadow: 0 6px 20px rgba(0,0,0,.5), inset 0 1px 0 rgba(255,255,255,.08);
     pointer-events: none; transition: bottom .3s ease;
     /* ИЗМЕНЕНО 25.09.2026 (прямая просьба пользователя - "добавь через
@@ -13543,6 +13588,24 @@ def map_webapp_html():
   const CHARGING_STATUS_LABELS = {charging_status_labels_json};
   const GAS_QUEUE_STATUS_LABELS = {gas_queue_status_labels_json};
   const STATUS_ICON = {{ open: '🟢', coordinated: '🟡', closed: '🔴' }};
+  // ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "убери по двойному
+  // тапу увеличение экрана") - touch-action:manipulation в CSS выше уже
+  // должен убирать zoom по двойному тапу, но в WebView Telegram (особенно
+  // iOS) это работает не всегда надёжно - здесь дополнительный, более
+  // надёжный JS-перехватчик: если два touchend подряд происходят быстрее
+  // чем 300мс - это двойной тап, событие блокируется (preventDefault), чтобы
+  // браузер не успел интерпретировать его как zoom-жест. Обычный (не
+  // сдвоенный) тап не трогается - клики по кнопкам/ссылкам работают как
+  // раньше. passive:false обязателен - иначе preventDefault() внутри
+  // touchend игнорируется браузером.
+  (function () {{
+    let lastTouchEndAt = 0;
+    document.addEventListener('touchend', function (e) {{
+      const now = Date.now();
+      if (now - lastTouchEndAt <= 300) {{ e.preventDefault(); }}
+      lastTouchEndAt = now;
+    }}, {{ passive: false }});
+  }})();
   const tg = window.Telegram && window.Telegram.WebApp;
   // ДОБАВЛЕНО 26.09.2026 (перенос карты внутрь единого приложения /app, см.
   // unified_app_html() - карта теперь встраивается туда через <iframe>) -
@@ -17664,6 +17727,24 @@ def weather_webapp_html():
   </div>
 </div>
 <script>
+  // ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "убери по двойному
+  // тапу увеличение экрана") - touch-action:manipulation в CSS выше уже
+  // должен убирать zoom по двойному тапу, но в WebView Telegram (особенно
+  // iOS) это работает не всегда надёжно - здесь дополнительный, более
+  // надёжный JS-перехватчик: если два touchend подряд происходят быстрее
+  // чем 300мс - это двойной тап, событие блокируется (preventDefault), чтобы
+  // браузер не успел интерпретировать его как zoom-жест. Обычный (не
+  // сдвоенный) тап не трогается - клики по кнопкам/ссылкам работают как
+  // раньше. passive:false обязателен - иначе preventDefault() внутри
+  // touchend игнорируется браузером.
+  (function () {
+    let lastTouchEndAt = 0;
+    document.addEventListener('touchend', function (e) {
+      const now = Date.now();
+      if (now - lastTouchEndAt <= 300) { e.preventDefault(); }
+      lastTouchEndAt = now;
+    }, { passive: false });
+  })();
   const tg = window.Telegram && window.Telegram.WebApp;
   if (tg) {
     tg.ready(); tg.expand();
@@ -18320,6 +18401,24 @@ def where_to_go_webapp_html():
   <div id="content"></div>
 </div>
 <script>
+  // ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "убери по двойному
+  // тапу увеличение экрана") - touch-action:manipulation в CSS выше уже
+  // должен убирать zoom по двойному тапу, но в WebView Telegram (особенно
+  // iOS) это работает не всегда надёжно - здесь дополнительный, более
+  // надёжный JS-перехватчик: если два touchend подряд происходят быстрее
+  // чем 300мс - это двойной тап, событие блокируется (preventDefault), чтобы
+  // браузер не успел интерпретировать его как zoom-жест. Обычный (не
+  // сдвоенный) тап не трогается - клики по кнопкам/ссылкам работают как
+  // раньше. passive:false обязателен - иначе preventDefault() внутри
+  // touchend игнорируется браузером.
+  (function () {
+    let lastTouchEndAt = 0;
+    document.addEventListener('touchend', function (e) {
+      const now = Date.now();
+      if (now - lastTouchEndAt <= 300) { e.preventDefault(); }
+      lastTouchEndAt = now;
+    }, { passive: false });
+  })();
   const tg = window.Telegram && window.Telegram.WebApp;
   if (tg) {
     tg.ready(); tg.expand();
@@ -18861,21 +18960,33 @@ def unified_app_html():
      а не только в пределах своей строки - "Погода" и есть эта высота,
      контент везде прижат к верху (justify-content:flex-start, как в
      "Погода"), а не центрирован - буквально "как Погода" у каждой плитки. */
+  /* ИЗМЕНЕНО 28.09.2026 (прямая просьба пользователя - "привести в порядок
+     и отцентровать тексты в кнопках сервиса во вкладке Сервисы") - раньше
+     .tile растягивал .ic/.lbl/.sub на всю ширину плитки (align-items не
+     задан = stretch по умолчанию), из-за чего иконка и подпись прижимались
+     к левому краю. Теперь align-items:center собирает иконку+подпись+
+     подсказку в колонку по центру плитки; text-align:center на .lbl/.sub
+     дополнительно центрирует САМ текст внутри своей строки - важно для
+     двухстрочных подписей ("Реферальная программа", "Поддержка |
+     Документы"), у которых вторая строка короче первой и без text-align
+     осталась бы прижатой к левому краю несмотря на центрирование блока.
+     justify-content:flex-start (см. комментарий выше про эталон "Погода")
+     не трогали - это вертикальная ось, центрирование текста горизонтальное. */
   .tile {
     background: #131313; border: 1px solid rgba(255,255,255,.08); border-radius: 14px;
     padding: 16px 12px; text-decoration: none; color: #fff; display: flex; flex-direction: column;
-    justify-content: flex-start; gap: 8px; height: 104px; position: relative;
+    align-items: center; justify-content: flex-start; gap: 8px; height: 104px; position: relative;
   }
-  .tile .ic { height: 23px; display: flex; align-items: center; color: #FFC400; }
+  .tile .ic { height: 23px; display: flex; align-items: center; justify-content: center; color: #FFC400; }
   .tile .ic svg { display: block; flex-shrink: 0; }
-  .tile .lbl { font-size: 13px; font-weight: 600; line-height: 1.3; text-transform: uppercase; }
+  .tile .lbl { font-size: 13px; font-weight: 600; line-height: 1.3; text-transform: uppercase; text-align: center; }
   /* ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - "на эти кнопки
      выводи информацию где погода - погоду" - короткая живая подсказка под
      плиткой "Погода", см. loadWeatherTileSub в JS ниже). Фиксированная
      высота .tile (104px, см. комментарий выше) уже даёт запас под третью
      строку - .tile использует flex-column с gap, третий дочерний элемент
      просто добавляет ещё один gap, ничего пересчитывать не нужно. */
-  .tile .sub { font-size: 10.5px; color: #9a9a9a; font-weight: 500; line-height: 1.3; }
+  .tile .sub { font-size: 10.5px; color: #9a9a9a; font-weight: 500; line-height: 1.3; text-align: center; }
   .tile.placeholder { opacity: .45; }
   /* ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя со скриншотом сетки
      "Сервисы" - "реферальная система и впн надо сделать реалом и миганием
@@ -19232,6 +19343,24 @@ def unified_app_html():
   function loadingBlockHtml(text) {
     return '<div class="loading-block"><div class="mini-spin"></div><div>' + (text || 'Загружаю…') + '</div></div>';
   }
+  // ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "убери по двойному
+  // тапу увеличение экрана") - touch-action:manipulation в CSS выше уже
+  // должен убирать zoom по двойному тапу, но в WebView Telegram (особенно
+  // iOS) это работает не всегда надёжно - здесь дополнительный, более
+  // надёжный JS-перехватчик: если два touchend подряд происходят быстрее
+  // чем 300мс - это двойной тап, событие блокируется (preventDefault), чтобы
+  // браузер не успел интерпретировать его как zoom-жест. Обычный (не
+  // сдвоенный) тап не трогается - клики по кнопкам/ссылкам работают как
+  // раньше. passive:false обязателен - иначе preventDefault() внутри
+  // touchend игнорируется браузером.
+  (function () {
+    let lastTouchEndAt = 0;
+    document.addEventListener('touchend', function (e) {
+      const now = Date.now();
+      if (now - lastTouchEndAt <= 300) { e.preventDefault(); }
+      lastTouchEndAt = now;
+    }, { passive: false });
+  })();
   const tg = window.Telegram && window.Telegram.WebApp;
   if (tg) {
     tg.ready(); tg.expand();
@@ -19928,7 +20057,7 @@ def unified_app_html():
       { detail: 'tips', ic: TILE_ICONS.tips, lbl: 'Чаевые' },
       { detail: 'referral', ic: TILE_ICONS.referral, lbl: 'Реферальная программа', highlight: true },
       { detail: 'subscription', ic: TILE_ICONS.subscription, lbl: 'Подписка', cta: true },
-      { href: '""" + VPN_BOT_URL + """', ic: TILE_ICONS.vpn, lbl: 'Бесплатный VPN', highlight: true },
+      { href: '""" + VPN_BOT_URL + """', ic: TILE_ICONS.vpn, lbl: 'Надёжный VPN', highlight: true },
       // ИЗМЕНЕНО 28.09.2026 (прямая просьба пользователя - "кнопка Поддержка
       // будет красной с чёрным текстом внутри, свечение тоже будет, назовём
       // её ПОДДЕРЖКА | ДОКУМЕНТЫ") - подпись расширена, плитка получила
@@ -23842,6 +23971,24 @@ def events_webapp_html():
   <div class="section" id="secRoads"></div>
 </div>
 <script>
+  // ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "убери по двойному
+  // тапу увеличение экрана") - touch-action:manipulation в CSS выше уже
+  // должен убирать zoom по двойному тапу, но в WebView Telegram (особенно
+  // iOS) это работает не всегда надёжно - здесь дополнительный, более
+  // надёжный JS-перехватчик: если два touchend подряд происходят быстрее
+  // чем 300мс - это двойной тап, событие блокируется (preventDefault), чтобы
+  // браузер не успел интерпретировать его как zoom-жест. Обычный (не
+  // сдвоенный) тап не трогается - клики по кнопкам/ссылкам работают как
+  // раньше. passive:false обязателен - иначе preventDefault() внутри
+  // touchend игнорируется браузером.
+  (function () {
+    let lastTouchEndAt = 0;
+    document.addEventListener('touchend', function (e) {
+      const now = Date.now();
+      if (now - lastTouchEndAt <= 300) { e.preventDefault(); }
+      lastTouchEndAt = now;
+    }, { passive: false });
+  })();
   const tg = window.Telegram && window.Telegram.WebApp;
   if (tg) {
     tg.ready(); tg.expand();
@@ -24322,6 +24469,24 @@ def transport_webapp_html():
   <div class="section" id="secTrains"></div>
 </div>
 <script>
+  // ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "убери по двойному
+  // тапу увеличение экрана") - touch-action:manipulation в CSS выше уже
+  // должен убирать zoom по двойному тапу, но в WebView Telegram (особенно
+  // iOS) это работает не всегда надёжно - здесь дополнительный, более
+  // надёжный JS-перехватчик: если два touchend подряд происходят быстрее
+  // чем 300мс - это двойной тап, событие блокируется (preventDefault), чтобы
+  // браузер не успел интерпретировать его как zoom-жест. Обычный (не
+  // сдвоенный) тап не трогается - клики по кнопкам/ссылкам работают как
+  // раньше. passive:false обязателен - иначе preventDefault() внутри
+  // touchend игнорируется браузером.
+  (function () {
+    let lastTouchEndAt = 0;
+    document.addEventListener('touchend', function (e) {
+      const now = Date.now();
+      if (now - lastTouchEndAt <= 300) { e.preventDefault(); }
+      lastTouchEndAt = now;
+    }, { passive: false });
+  })();
   const tg = window.Telegram && window.Telegram.WebApp;
   if (tg) {
     tg.ready(); tg.expand();
@@ -26086,6 +26251,24 @@ def legal_cabinet_webapp_html():
 
 </div>
 <script>
+// ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "убери по двойному
+// тапу увеличение экрана") - touch-action:manipulation в CSS выше уже
+// должен убирать zoom по двойному тапу, но в WebView Telegram (особенно
+// iOS) это работает не всегда надёжно - здесь дополнительный, более
+// надёжный JS-перехватчик: если два touchend подряд происходят быстрее
+// чем 300мс - это двойной тап, событие блокируется (preventDefault), чтобы
+// браузер не успел интерпретировать его как zoom-жест. Обычный (не
+// сдвоенный) тап не трогается - клики по кнопкам/ссылкам работают как
+// раньше. passive:false обязателен - иначе preventDefault() внутри
+// touchend игнорируется браузером.
+(function () {
+  let lastTouchEndAt = 0;
+  document.addEventListener('touchend', function (e) {
+    const now = Date.now();
+    if (now - lastTouchEndAt <= 300) { e.preventDefault(); }
+    lastTouchEndAt = now;
+  }, { passive: false });
+})();
 const tg = window.Telegram && window.Telegram.WebApp;
 if (tg) {
   tg.ready(); tg.expand();
@@ -27108,6 +27291,24 @@ def cabinet_webapp_html():
   function loadingBlockHtml(text) {
     return '<div class="loading-block"><div class="mini-spin"></div><div>' + (text || 'Загружаю…') + '</div></div>';
   }
+  // ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "убери по двойному
+  // тапу увеличение экрана") - touch-action:manipulation в CSS выше уже
+  // должен убирать zoom по двойному тапу, но в WebView Telegram (особенно
+  // iOS) это работает не всегда надёжно - здесь дополнительный, более
+  // надёжный JS-перехватчик: если два touchend подряд происходят быстрее
+  // чем 300мс - это двойной тап, событие блокируется (preventDefault), чтобы
+  // браузер не успел интерпретировать его как zoom-жест. Обычный (не
+  // сдвоенный) тап не трогается - клики по кнопкам/ссылкам работают как
+  // раньше. passive:false обязателен - иначе preventDefault() внутри
+  // touchend игнорируется браузером.
+  (function () {
+    let lastTouchEndAt = 0;
+    document.addEventListener('touchend', function (e) {
+      const now = Date.now();
+      if (now - lastTouchEndAt <= 300) { e.preventDefault(); }
+      lastTouchEndAt = now;
+    }, { passive: false });
+  })();
   const tg = window.Telegram && window.Telegram.WebApp;
   if (tg) {
     tg.ready(); tg.expand();
@@ -27722,7 +27923,7 @@ def cabinet_webapp_html():
     {key: 'parking', emoji: '🅿️', label: 'Бесплатная парковка'},
     {key: 'tires', emoji: '🔧', label: 'Шиномонтаж'},
     {key: 'car_wash', emoji: '🚿', label: 'Мойки'},
-    {key: 'alcohol', emoji: '🍷', label: 'Алкомаркеты 24ч'},
+    {key: 'alcohol', emoji: '🍷', label: 'Алкомаркеты'},
     {key: 'grocery24', emoji: '🛒', label: 'Магазины 24ч'},
     {key: 'ev_charging', emoji: '🔌', label: 'Электрозарядки'},
   ];
@@ -28955,18 +29156,23 @@ async def show_fuel_bot(message: types.Message):
     )
     await message.answer(text, reply_markup=keyboard, parse_mode='Markdown')
 
-@router.message(lambda message: message.text == "🔓 БЕСПЛАТНЫЙ VPN TAXI HELPER")
+@router.message(lambda message: message.text == "🔓 НАДЁЖНЫЙ VPN TAXI HELPER")
 async def show_vpn_bot(message: types.Message):
     """Ссылка на стороннего VPN-бота (реферальная, VPN_BOT_URL) - тот же
     паттерн, что и show_fuel_bot выше: кнопка просто открывает чужой чат,
     без какой-либо интеграции с данными самого Taxi Helper. Название
     "TAXI HELPER" - по просьбе пользователя должно фигурировать везде, где
-    упоминается эта кнопка (текст кнопки, заголовок сообщения, инлайн-кнопка)."""
+    упоминается эта кнопка (текст кнопки, заголовок сообщения, инлайн-кнопка).
+
+    ИЗМЕНЕНО 28.09.2026 (прямая просьба пользователя - "заменить кнопку на
+    Надёжный VPN") - было "Бесплатный VPN" везде (кнопка/заголовок/тайл в
+    приложении/FAQ), переименовано в "Надёжный VPN" - сама ссылка
+    (VPN_BOT_URL) и логика не менялись, только название."""
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔓 ОТКРЫТЬ VPN TAXI HELPER", url=VPN_BOT_URL)]
     ])
     text = (
-        "🔓 *Бесплатный VPN TAXI HELPER*\n\n"
+        "🔓 *Надёжный VPN TAXI HELPER*\n\n"
         "Нажми кнопку ниже, чтобы открыть бота и подключить VPN."
     )
     await message.answer(text, reply_markup=keyboard, parse_mode='Markdown')
@@ -32733,9 +32939,9 @@ SUPPORT_FAQ_ITEMS = [
         "Это ориентир на основе открытых данных, а не гарантия заказов."
     ),
     (
-        "🔓 Как получить бесплатный VPN?",
-        "Как получить бесплатный VPN?",
-        "Кнопка «🔓 БЕСПЛАТНЫЙ VPN TAXI HELPER» в главном меню открывает отдельного VPN-бота - "
+        "🔓 Как получить надёжный VPN?",
+        "Как получить надёжный VPN?",
+        "Кнопка «🔓 НАДЁЖНЫЙ VPN TAXI HELPER» в главном меню открывает отдельного VPN-бота - "
         "дальше просто следуй инструкциям в нём."
     ),
     (
