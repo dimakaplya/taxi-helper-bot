@@ -12775,7 +12775,12 @@ MAP_CHROME_CSS = """
      с карты будут объёмные", "более выраженная тень/градиент") - плоская
      заливка #1c1c1c заменена на лёгкий вертикальный градиент, тень чуть
      сильнее (была 0 1px 4px). */
-  .layer-toggle-btn { display: inline-block; background: linear-gradient(180deg, #262626, #131313); color: #fff; border: 1px solid rgba(255,196,0,.4); border-radius: 8px; padding: 5px 7px; font-family: -apple-system, sans-serif; font-size: 11px; font-weight: 600; box-shadow: 0 2px 6px rgba(0,0,0,.4); cursor: pointer; user-select: none; white-space: nowrap; transition: transform .12s; text-transform: uppercase; }
+  /* ИЗМЕНЕНО 28.09.2026 (прямая просьба пользователя - "сверху сделай
+     скругление кнопок тарифы слои и тд тоже 28px") - верхний ряд кнопок
+     (Тарифы/Слои/Пробки/Спрос) теперь скруглён так же, как нижний бар/
+     кнопка "Выйти на линию"/сама карта (border-radius: 28px везде, см.
+     .bottom-info-bar/.shift-slider/#map) - было 8px. */
+  .layer-toggle-btn { display: inline-block; background: linear-gradient(180deg, #262626, #131313); color: #fff; border: 1px solid rgba(255,196,0,.4); border-radius: 28px; padding: 5px 7px; font-family: -apple-system, sans-serif; font-size: 11px; font-weight: 600; box-shadow: 0 2px 6px rgba(0,0,0,.4); cursor: pointer; user-select: none; white-space: nowrap; transition: transform .12s; text-transform: uppercase; }
   .layer-toggle-btn:active, .filter-toggle:active { transform: scale(.94); }
   /* ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - редизайн
      распространён на все WebApp'ы бота) - лёгкая тактильная отдача кнопок
