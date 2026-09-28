@@ -2386,6 +2386,45 @@ def weather_ticker_item(city):
         text += f", {desc}"
     return text
 
+# ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "советы в верхнем
+# баре: если туман - быть осторожным, включить противотуманные фары,
+# снизить скорость; когда гололёд, когда температура переходит за 0° и
+# есть осадки - давать информацию, что есть гололёд на мостах/эстакадах,
+# быть аккуратнее, не забыть переобуть резину") - тот же готовый снепшот
+# погоды, что у weather_ticker_item (get_cached_weather_forecast, БЕЗ
+# отдельного live-запроса) - просто другое прочтение того же снепшота:
+# не "какая сейчас погода", а "на что обратить внимание за рулём".
+FOG_WEATHERCODES = {45, 48}  # 'туман'/'изморозь' в WEATHERCODE_INFO выше
+# Порог сознательно НЕ строго "температура <= 0" - дорожное полотно и
+# особенно мосты/эстакады (продуваются и остывают быстрее обычной дороги)
+# обмерзают уже при небольшом плюсе, поэтому предупреждаем с запасом в
+# пару градусов, а не строго по нулю.
+ICE_RISK_MAX_TEMP_C = 2
+
+def weather_safety_ticker_items(city):
+    """Предупреждения за рулём по текущей погоде - туман (свои фары/
+    скорость) и риск гололёда (температура около/ниже нуля + осадки прямо
+    сейчас - самое опасное сочетание, лёд образуется быстро, в первую
+    очередь на мостах/эстакадах). Не заменяет weather_ticker_item (тот -
+    нейтральная сводка "сколько градусов"), а дополняет его - оба пункта
+    могут быть в ленте одновременно."""
+    forecast = get_cached_weather_forecast(city)
+    if not forecast:
+        return []
+    current = (forecast or {}).get('current') or {}
+    temp = current.get('temperature_2m')
+    code = current.get('weathercode')
+    items = []
+    if code in FOG_WEATHERCODES:
+        items.append("🌫 Туман - будь осторожен, включи противотуманные фары и снизь скорость")
+    if temp is not None and temp <= ICE_RISK_MAX_TEMP_C and code in PRECIP_WEATHERCODES:
+        items.append(
+            "🧊 Риск гололёда (температура около 0°C и есть осадки) - "
+            "особенно на мостах и эстакадах, будь аккуратнее и не забудь "
+            "переобуться на зимнюю резину"
+        )
+    return items
+
 # ==================== ПРИЛЁТЫ (сигнал "волна прилётов") - ДОБАВЛЕНО 28.09.2026 ====================
 # По прямой просьбе пользователя ("через сколько начнётся... волна прилётов
 # в таких-то аэропортах") - зеркало departure_wave_info выше, только для
@@ -2506,6 +2545,11 @@ def build_ticker_items(city, category=None, user_lat=None, user_lon=None):
     районе, новости (раз в 3 минуты), волна вылетов/прилётов, спрос на
     вокзалах, реклама.
 
+    ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя) - сразу за погодой
+    добавлены предупреждения за рулём по текущим условиям (туман/риск
+    гололёда, см. weather_safety_ticker_items) - показываются, только
+    когда условие реально есть сейчас, как и волна вылетов/прилётов выше.
+
     Применяется ко ВСЕМ городам бота, не только Москве - у каждого города
     просто показывается то, для чего реально есть данные (Москва богаче
     остальных - для неё собирается больше всего: рейсы+вокзалы+дороги+
@@ -2523,6 +2567,7 @@ def build_ticker_items(city, category=None, user_lat=None, user_lon=None):
     weather_item = weather_ticker_item(city)
     if weather_item:
         items.append(weather_item)
+    items.extend(weather_safety_ticker_items(city))
 
     items.extend(tariff_demand_ticker_items(city, category, district_name))
 
@@ -3947,6 +3992,26 @@ def init_db():
             status TEXT NOT NULL,
             reported_by INTEGER,
             reported_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    # ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - в пуше "отметь
+    # топливо" указывать не только название заправки, но и адрес: "вы
+    # находитесь рядом с такой-то заправкой, находящийся там по такому-то
+    # адресу") - у fuel_charging_data.json нет поля адреса (Overpass-сборщик
+    # берёт только name/brand/operator, см. fetch_fuel_charging_data.py), а
+    # сам Overpass заблокирован и из облака, и с компьютера пользователя
+    # (см. докстринг load_fuel_charging_data). Nominatim (обратное
+    # геокодирование lat/lon -> адрес), в отличие от Overpass, доступен
+    # напрямую - адрес конкретной заправки получаем ОДИН раз по требованию
+    # (при первом пуше по ней), а не всем массивом ~4000+ точек разом, и
+    # кэшируем НАВСЕГДА здесь (address='' - уже пробовали, не получилось,
+    # не пустая строка - реальный адрес; отсутствие строки - ещё не
+    # спрашивали Nominatim) - см. _resolve_fuel_station_address.
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS fuel_station_address_cache (
+            station_id TEXT PRIMARY KEY,
+            address TEXT NOT NULL,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     ''')
     # ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "делаем личный
@@ -12391,6 +12456,85 @@ def fuel_reminder_keyboard(station_id):
         ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
+FUEL_ADDRESS_NOMINATIM_URL = 'https://nominatim.openstreetmap.org/reverse'
+FUEL_ADDRESS_USER_AGENT = 'TaxiHelperBot/1.0 (https://github.com/dimakaplya/taxi-helper-bot)'
+# Троттлинг обратного геокодирования (см. _resolve_fuel_station_address) -
+# Nominatim usage policy требует не чаще 1 запроса/сек. Кэш-промахи редкие
+# (только у станций, к которым ЕЩЁ никогда не было пуша), поэтому простого
+# "подождать с прошлого запроса" достаточно, без очереди задач.
+_fuel_address_last_request_at = None
+
+def get_cached_fuel_station_address(station_id):
+    """None - адрес для этой станции ещё ни разу не спрашивали у Nominatim
+    (нужен запрос), '' - спрашивали, но Nominatim не вернул улицу/дом
+    (кэшируем неудачу, чтобы не долбить по одной и той же точке при
+    каждом пуше), непустая строка - реальный адрес."""
+    try:
+        init_db()
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT address FROM fuel_station_address_cache WHERE station_id = ?', (station_id,))
+        row = cursor.fetchone()
+        conn.close()
+        return row[0] if row else None
+    except Exception as e:
+        logger.warning(f"⚠️ Не удалось прочитать fuel_station_address_cache: {e}")
+        return None
+
+def save_cached_fuel_station_address(station_id, address):
+    try:
+        init_db()
+        conn = get_db_connection()
+        conn.execute(
+            'INSERT INTO fuel_station_address_cache (station_id, address, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP) '
+            'ON CONFLICT(station_id) DO UPDATE SET address=excluded.address, updated_at=excluded.updated_at',
+            (station_id, address or '')
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.warning(f"⚠️ Не удалось сохранить fuel_station_address_cache: {e}")
+
+async def _resolve_fuel_station_address(station_id, lat, lon):
+    """Адрес заправки (строка) или None - см. пояснение к таблице
+    fuel_station_address_cache в init_db выше. Ошибки/таймаут Nominatim не
+    должны мешать самому пушу - при любой проблеме просто возвращаем None
+    (текст пуша тогда обходится без адреса, см. _send_fuel_reminder_push),
+    но результат в этом случае НЕ кэшируем - попробуем ещё раз при
+    следующем заезде на эту заправку."""
+    global _fuel_address_last_request_at
+    cached = get_cached_fuel_station_address(station_id)
+    if cached is not None:
+        return cached or None
+    try:
+        if _fuel_address_last_request_at is not None:
+            elapsed = (datetime.now(timezone.utc) - _fuel_address_last_request_at).total_seconds()
+            if elapsed < 1.1:
+                await asyncio.sleep(1.1 - elapsed)
+        _fuel_address_last_request_at = datetime.now(timezone.utc)
+        address = None
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                FUEL_ADDRESS_NOMINATIM_URL,
+                params={'format': 'json', 'lat': str(lat), 'lon': str(lon), 'zoom': '17', 'addressdetails': '1'},
+                headers={'User-Agent': FUEL_ADDRESS_USER_AGENT},
+                timeout=aiohttp.ClientTimeout(total=8),
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    addr = (data or {}).get('address') or {}
+                    road = addr.get('road')
+                    house = addr.get('house_number')
+                    if road and house:
+                        address = f"{road}, {house}"
+                    elif road:
+                        address = road
+        save_cached_fuel_station_address(station_id, address)
+        return address
+    except Exception as e:
+        logger.warning(f"⚠️ Не удалось получить адрес заправки {station_id} через Nominatim: {e}")
+        return None
+
 def fuel_reminder_keyboard_v2(station_id, map_url):
     """ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "должно быть две
     кнопки я не на заправке и второе я на заправке отметить наличие...
@@ -12408,11 +12552,22 @@ def fuel_reminder_keyboard_v2(station_id, map_url):
 
 async def _send_fuel_reminder_push(user_id, station):
     name = station.get('name') or 'заправка рядом'
+    # ИЗМЕНЕНО 28.09.2026 (прямая просьба пользователя - "Push уведомления
+    # должно приходить с текстом вы находитесь рядом с такой-то заправкой,
+    # название заправки, находящийся там по такому-то адресу") - адрес
+    # добавляется, когда его удалось получить (см.
+    # _resolve_fuel_station_address); если нет (Nominatim не знает адрес
+    # этой точки или запрос не удался) - текст остаётся с одним названием,
+    # чтобы пуш не переставал приходить из-за недоступности адреса.
+    address = await _resolve_fuel_station_address(station['id'], station['lat'], station['lon'])
+    if address:
+        where = f"рядом с заправкой *{name}*, находящейся по адресу: {address}"
+    else:
+        where = f"рядом с заправкой *{name}*"
     text = (
-        f"⛽ *{name}*\n\n"
-        f"Ты уже больше {FUEL_REMINDER_MINUTES} минут рядом с этой заправкой - "
-        f"не забудь отметить, какое топливо сейчас есть в наличии. Это поможет "
-        f"другим водителям на карте."
+        f"⛽ Вы находитесь {where}.\n\n"
+        f"Вы здесь уже больше {FUEL_REMINDER_MINUTES} минут - не забудьте отметить, "
+        f"какое топливо сейчас есть в наличии. Это поможет другим водителям на карте."
     )
     # ИЗМЕНЕНО 28.09.2026 - см. fuel_reminder_keyboard_v2 выше: если можно
     # построить ссылку на карту (PUBLIC_URL настроен и у водителя есть
@@ -13089,6 +13244,34 @@ MAP_CHROME_CSS = """
   .shift-summary-close-btn { background: #333; color: #fff; }
   .shift-summary-finance-btn { background: #FFB800; color: #1c1c1c; }
   .shift-summary-finance-btn:disabled { opacity: .45; cursor: default; }
+  /* ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "убери смайлики,
+     сделай в стилистике как кнопки снизу" + "весь ввод смены сделай тут, а
+     не в личном кабинете финансы") - форма ввода дохода теперь встроена
+     прямо в эту же карточку (см. #shiftSummaryFinanceForm в HTML ниже),
+     вместо перехода во вкладку "Кабинет" - те же поля/расчёт, что и там
+     (CABINET_FINANCE_API_PATH), просто своя тёмная вёрстка под цвета этой
+     карточки. .ssf-fields - прокручиваемая область (как .tariff-picker-list
+     выше) на случай, если 10 полей не помещаются на экране целиком. */
+  .ssf-fields { max-height: 48vh; overflow-y: auto; padding-right: 2px; margin: 2px 0; }
+  .ssf-row { margin-bottom: 10px; }
+  .ssf-row label { display: block; font-size: 12.5px; color: #bbb; margin-bottom: 4px; line-height: 1.3; }
+  .ssf-row input, .ssf-row select {
+    width: 100%; box-sizing: border-box; background: #2a2a2a; color: #fff;
+    border: 1px solid rgba(255,255,255,.15); border-radius: 8px; padding: 10px 12px;
+    font-size: 16px; font-family: inherit;
+  }
+  .ssf-note { font-size: 12px; color: #FFC400; margin: -4px 0 8px; line-height: 1.4; }
+  .ssf-result { font-size: 14px; }
+  /* Результат расчёта (ssfRenderDaySummary) - тёмные аналоги .tile/.muted
+     из cabinet_webapp_html (те заточены под светлую тему
+     var(--tg-theme-secondary-bg-color), эта карточка - ВСЕГДА тёмная,
+     свой палитра, поэтому свои классы, а не переиспользование чужих). */
+  .ssf-result .ssf-tile { background: rgba(255,255,255,.06); border-radius: 12px; padding: 12px 13px; margin-bottom: 8px; }
+  .ssf-result .ssf-tile.accent { background: linear-gradient(135deg, rgba(255,196,0,.22), rgba(255,196,0,.06)); }
+  .ssf-result .ssf-tile .label { font-size: 11.5px; opacity: .65; margin-bottom: 4px; }
+  .ssf-result .ssf-tile .value { font-size: 18px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .ssf-result .ssf-tile .sub { font-size: 11.5px; opacity: .6; margin-top: 2px; }
+  .ssf-result .ssf-muted { opacity: .65; font-size: 13px; line-height: 1.6; margin: 0; }
   /* ДОБАВЛЕНО 27.09.2026 (жалоба пользователя - "выходишь на линию,
      геолокация не включена, всё просто скидывает и ничего не пишет" -
      ИЗМЕНЕНО в тот же день по прямой просьбе пользователя со скриншотом -
@@ -13675,18 +13858,56 @@ def map_webapp_html():
      (см. shift_summary в ответе /map/toggle_shift, doShiftToggle в JS
      ниже) или при следующем опросе профиля, если смена завершилась, пока
      приложение было закрыто (см. pending_shift_summary в ответе
-     /map/my_profile, loadMyProfile в JS ниже). Кнопка "💰 Указать доход"
-     запускает тот же чат-визард расчёта дохода, что и раньше - просто
-     явным тапом из приложения, а не автоматическим сообщением в чат (см.
-     MAP_START_FINANCE_API_PATH/handle_map_start_finance_api в main.py). -->
+     /map/my_profile, loadMyProfile в JS ниже). Кнопка "Указать доход"
+     (ИЗМЕНЕНО 28.09.2026, прямая просьба пользователя - "убери смайлики,
+     сделай в стилистике как кнопки снизу" + "весь ввод смены сделай тут, а
+     не в личном кабинете финансы") открывает форму ввода дохода ПРЯМО В
+     ЭТОЙ ЖЕ карточке (см. #shiftSummaryFinanceForm ниже,
+     openShiftSummaryFinanceForm в JS) - ни чат, ни переход на другую
+     вкладку больше не используются (старые MAP_START_FINANCE_API_PATH/
+     handle_map_start_finance_api в main.py и postMessage-сигнал
+     taxiHelperOpenFinance оставлены в коде нетронутыми, просто эта кнопка
+     их больше не вызывает). -->
 <div class="shift-summary-overlay" id="shiftSummaryOverlay" style="display:none">
   <div class="shift-summary-card">
     <h3>🔴 Смена завершена</h3>
     <p class="shift-summary-header-note" id="shiftSummaryHeader" style="display:none"></p>
     <div id="shiftSummaryBody"></div>
-    <div class="shift-summary-actions">
+    <div class="shift-summary-actions" id="shiftSummaryActions">
       <button type="button" class="shift-summary-close-btn" id="shiftSummaryClose">Закрыть</button>
-      <button type="button" class="shift-summary-finance-btn" id="shiftSummaryFinanceBtn">💰 Указать доход</button>
+      <button type="button" class="shift-summary-finance-btn" id="shiftSummaryFinanceBtn">Указать доход</button>
+    </div>
+    <!-- ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "весь ввод
+         смены сделай тут, а не в личном кабинете финансы") - те же поля и
+         тот же расчёт, что во вкладке "Кабинет -> Финансы"
+         (CABINET_FINANCE_API_PATH/CABINET_FINANCE_DEFAULTS_API_PATH,
+         calculate_finance_result), просто прямо здесь, без перехода на
+         другую вкладку - см. ssf* в JS ниже. -->
+    <div class="shift-summary-finance-form" id="shiftSummaryFinanceForm" style="display:none">
+      <div class="ssf-fields">
+        <div class="ssf-row"><label>Доход за день, ₽ (с учётом вычета комиссии сервисов)</label><input type="number" inputmode="decimal" id="ssfIncome" placeholder="2340"></div>
+        <div class="ssf-row"><label>Количество поездок за день</label><input type="number" inputmode="numeric" id="ssfTrips" placeholder="12"></div>
+        <div class="ssf-row"><label>Километраж за день, км</label><input type="number" inputmode="decimal" id="ssfKm" placeholder="87"></div>
+        <div id="ssfAutoNote" class="ssf-note" style="display:none"></div>
+        <div class="ssf-row"><label>Расход топлива на 100 км</label><input type="number" inputmode="decimal" id="ssfConsumption" placeholder="6.2"></div>
+        <div class="ssf-row"><label>Стоимость топлива/литр, ₽</label><input type="number" inputmode="decimal" id="ssfFuelPrice" placeholder="61.5"></div>
+        <div class="ssf-row">
+          <label>Автомобиль</label>
+          <select id="ssfCarOwnership">
+            <option value="own">Своя / кредит / лизинг</option>
+            <option value="rented">В аренде</option>
+          </select>
+        </div>
+        <div class="ssf-row"><label>Аренда ТС за день, ₽ (0 если своя)</label><input type="number" inputmode="decimal" id="ssfRent" placeholder="0"></div>
+        <div class="ssf-row"><label>Доп. расходы за день, ₽</label><input type="number" inputmode="decimal" id="ssfExpenses" placeholder="0"></div>
+        <div class="ssf-row"><label>Ставка налога, %</label><input type="number" inputmode="decimal" id="ssfTaxRate" placeholder="6"></div>
+        <div class="ssf-row"><label>Часов за рулём (число или время "с-до", например 9-21)</label><input type="text" inputmode="text" id="ssfHours" placeholder="5.5 или 9-21"></div>
+      </div>
+      <div class="ssf-result" id="ssfResult"></div>
+      <div class="shift-summary-actions">
+        <button type="button" class="shift-summary-close-btn" id="ssfBack">Назад</button>
+        <button type="button" class="shift-summary-finance-btn" id="ssfCalcBtn">Рассчитать</button>
+      </div>
     </div>
   </div>
 </div>
@@ -14669,13 +14890,57 @@ def map_webapp_html():
   }}
   // ДОБАВЛЕНО 27.09.2026 (см. #shiftSummaryOverlay в HTML выше и подробный
   // комментарий там) - карточка итогов смены вместо сообщений в чат бота.
+  // ИЗМЕНЕНО 28.09.2026 (прямая просьба пользователя - "весь ввод смены
+  // сделай тут, а не в личном кабинете финансы") - маленькие форматтеры под
+  // расчёт дохода прямо в этой карточке (см. ssf* ниже) - копия
+  // fmtMoney/fmtHours/fmtKm/parseHoursOrRange/renderDaySummary из
+  // cabinet_webapp_html (вкладка "Финансы"), под своим префиксом ssf, т.к.
+  // это ОТДЕЛЬНЫЙ HTML-документ/скрипт (map_webapp_html), общих функций с
+  // Кабинетом у него нет.
+  function ssfFmtMoney(n) {{ return Math.round(n).toLocaleString('ru-RU') + ' ₽'; }}
+  function ssfFmtHours(h) {{ return h.toLocaleString('ru-RU', {{ maximumFractionDigits: 1 }}) + ' ч'; }}
+  function ssfFmtKm(km) {{ return Math.round(km).toLocaleString('ru-RU') + ' км'; }}
+  function ssfParseHoursOrRange(text) {{
+    const raw = (text || '').trim();
+    if (!raw) return null;
+    const m = raw.match(/(\d{{1,2}})(?::(\d{{2}}))?\s*(?:-|—|до)\s*(\d{{1,2}})(?::(\d{{2}}))?/);
+    if (m && (raw.includes('до') || raw.includes('-') || raw.includes('—'))) {{
+      const startH = parseInt(m[1], 10), startM = m[2] ? parseInt(m[2], 10) : 0;
+      const endH = parseInt(m[3], 10), endM = m[4] ? parseInt(m[4], 10) : 0;
+      if (startH >= 0 && startH <= 24 && endH >= 0 && endH <= 24 && startM < 60 && endM < 60) {{
+        let startTotal = startH * 60 + startM;
+        let endTotal = endH * 60 + endM;
+        if (endTotal <= startTotal) endTotal += 24 * 60;
+        const hours = (endTotal - startTotal) / 60;
+        if (hours > 0 && hours <= 24) return Math.round(hours * 100) / 100;
+      }}
+    }}
+    const num = parseFloat(raw.replace(',', '.'));
+    return isNaN(num) ? null : num;
+  }}
+  function ssfRenderDaySummary(r) {{
+    return '<div class="ssf-tile accent"><div class="label">Чистыми за день</div><div class="value">' + ssfFmtMoney(r.net_profit) + '</div>' +
+      '<div class="sub">≈ ' + ssfFmtMoney(r.per_hour) + '/ч' + (r.hours ? ' · ' + ssfFmtHours(r.hours) + ' за рулём' : '') + '</div></div>' +
+      '<p class="ssf-muted">Валовый доход: ' + ssfFmtMoney(r.income) + '<br>' +
+      (r.trips_count ? '🚕 Заказов: ' + r.trips_count + (r.avg_check ? '  ·  средний чек ≈ ' + ssfFmtMoney(r.avg_check) : '') + '<br>' : '') +
+      (r.km ? '🛣 Пробег: ' + ssfFmtKm(r.km) + '<br>' : '') +
+      '⛽ Топливо: −' + ssfFmtMoney(r.fuel_cost) + '<br>' +
+      (r.is_rented ? '🔧 Резерв на износ: не учтён (аренда)<br>' : '🔧 Резерв на износ (10%): −' + ssfFmtMoney(r.wear_reserve) + '<br>') +
+      (r.rent ? '🚘 Аренда ТС: −' + ssfFmtMoney(r.rent) + '<br>' : '') +
+      (r.expenses ? '📦 Доп. расходы: −' + ssfFmtMoney(r.expenses) + '<br>' : '') +
+      '🧾 Налог (' + r.tax_rate + '%): −' + ssfFmtMoney(r.tax_amount) + '</p>';
+  }}
   const shiftSummaryOverlay = document.getElementById('shiftSummaryOverlay');
   const shiftSummaryHeader = document.getElementById('shiftSummaryHeader');
   const shiftSummaryBody = document.getElementById('shiftSummaryBody');
+  const shiftSummaryActions = document.getElementById('shiftSummaryActions');
   const shiftSummaryClose = document.getElementById('shiftSummaryClose');
   const shiftSummaryFinanceBtn = document.getElementById('shiftSummaryFinanceBtn');
+  const shiftSummaryFinanceForm = document.getElementById('shiftSummaryFinanceForm');
+  let lastShiftSummary = null;
   function openShiftSummaryOverlay(summary) {{
     if (!shiftSummaryOverlay || !shiftSummaryBody || !summary) return;
+    lastShiftSummary = summary;
     const rows = [];
     const durationText = summary.duration_text || '—';
     const km = (typeof summary.total_km === 'number') ? summary.total_km.toFixed(1) : '0.0';
@@ -14692,6 +14957,10 @@ def map_webapp_html():
         shiftSummaryHeader.style.display = 'none';
       }}
     }}
+    // Форма дохода закрыта при каждом новом открытии карточки - водитель
+    // сначала видит итоги смены, форму открывает сам кнопкой.
+    if (shiftSummaryFinanceForm) shiftSummaryFinanceForm.style.display = 'none';
+    if (shiftSummaryActions) shiftSummaryActions.style.display = 'flex';
     shiftSummaryOverlay.style.display = 'flex';
   }}
   function closeShiftSummaryOverlay() {{
@@ -14703,53 +14972,117 @@ def map_webapp_html():
       if (e.target === shiftSummaryOverlay) closeShiftSummaryOverlay();
     }});
   }}
+  // ИЗМЕНЕНО 28.09.2026 (прямая просьба пользователя - "убери смайлики,
+  // сделай в стилистике как кнопки снизу" + "весь ввод смены сделай тут, а
+  // не в личном кабинете финансы") - раньше кнопка либо звала /map/
+  // start_finance (сообщение в ЧАТ бота), либо (после прошлой правки в тот
+  // же день) сигналила родителю переключиться на вкладку "Кабинет" -
+  // Финансы через postMessage. Теперь форма дохода открывается ПРЯМО В
+  // ЭТОЙ карточке (см. #shiftSummaryFinanceForm в HTML выше) - ни перехода
+  // в чат, ни переключения вкладки, независимо от того, вложена карта в
+  // единое приложение или открыта отдельно (старый /map/start_finance и
+  // postMessage-сигнал никуда не делись в самом коде - на случай отката -
+  // но кнопка их больше не вызывает).
+  const ssfIncomeEl = document.getElementById('ssfIncome');
+  const ssfTripsEl = document.getElementById('ssfTrips');
+  const ssfKmEl = document.getElementById('ssfKm');
+  const ssfAutoNoteEl = document.getElementById('ssfAutoNote');
+  const ssfConsumptionEl = document.getElementById('ssfConsumption');
+  const ssfFuelPriceEl = document.getElementById('ssfFuelPrice');
+  const ssfCarOwnershipEl = document.getElementById('ssfCarOwnership');
+  const ssfRentEl = document.getElementById('ssfRent');
+  const ssfExpensesEl = document.getElementById('ssfExpenses');
+  const ssfTaxRateEl = document.getElementById('ssfTaxRate');
+  const ssfHoursEl = document.getElementById('ssfHours');
+  const ssfResultEl = document.getElementById('ssfResult');
+  const ssfBackBtn = document.getElementById('ssfBack');
+  const ssfCalcBtn = document.getElementById('ssfCalcBtn');
+  async function openShiftSummaryFinanceForm() {{
+    if (shiftSummaryActions) shiftSummaryActions.style.display = 'none';
+    if (shiftSummaryFinanceForm) shiftSummaryFinanceForm.style.display = 'block';
+    if (ssfResultEl) ssfResultEl.innerHTML = '';
+    // Km/часы - из только что завершённой смены (та же карточка их уже
+    // показывает выше), чтобы не вбивать заново то, что бот и так знает.
+    const summary = lastShiftSummary;
+    if (summary) {{
+      if (ssfKmEl && typeof summary.total_km === 'number') ssfKmEl.value = summary.total_km.toFixed(1);
+      if (ssfHoursEl && typeof summary.duration_minutes === 'number' && summary.duration_minutes > 0) {{
+        ssfHoursEl.value = Math.round((summary.duration_minutes / 60) * 100) / 100;
+      }}
+      if (ssfAutoNoteEl && (summary.total_km || summary.duration_minutes)) {{
+        ssfAutoNoteEl.style.display = 'block';
+        ssfAutoNoteEl.textContent = 'Км и часы подставлены из этой смены - если что-то не так, можешь поправить.';
+      }}
+      if (ssfConsumptionEl && summary.consumption != null) ssfConsumptionEl.value = summary.consumption;
+      if (ssfFuelPriceEl && summary.fuel_price != null) ssfFuelPriceEl.value = summary.fuel_price;
+    }}
+    // Остальные "запоминаемые" поля (налог/аренда/своя машина) - тот же
+    // профиль, что и в Кабинете -> Финансы (см. handle_cabinet_finance_
+    // defaults_api) - тут просто ещё один источник подстановки для тех же
+    // самых значений.
+    try {{
+      const initData = _mapInitData();
+      const dResp = await fetch('{CABINET_FINANCE_DEFAULTS_API_PATH}', {{ headers: {{ 'X-Telegram-Init-Data': initData }} }});
+      if (dResp.ok) {{
+        const d = await dResp.json();
+        if (d.consumption != null && ssfConsumptionEl && !ssfConsumptionEl.value) ssfConsumptionEl.value = d.consumption;
+        if (d.fuel_price != null && ssfFuelPriceEl && !ssfFuelPriceEl.value) ssfFuelPriceEl.value = d.fuel_price;
+        if (d.tax_rate != null && ssfTaxRateEl) ssfTaxRateEl.value = d.tax_rate;
+        if (d.rent != null && ssfRentEl) ssfRentEl.value = d.rent;
+        if (d.car_ownership && ssfCarOwnershipEl) ssfCarOwnershipEl.value = d.car_ownership;
+      }}
+    }} catch (e) {{ /* нет сохранённых значений или сеть недоступна - оставляем поля как есть */ }}
+  }}
   if (shiftSummaryFinanceBtn) {{
-    shiftSummaryFinanceBtn.addEventListener('click', async () => {{
+    shiftSummaryFinanceBtn.addEventListener('click', () => {{
       if (shiftSummaryFinanceBtn.disabled) return;
-      // ИЗМЕНЕНО 28.09.2026 (прямая жалоба пользователя со скриншотом -
-      // "уходишь с линии в приложении... нажимаешь указать и он переводит
-      // опять в бот, нужно сделать чтобы все было в приложении") - раньше
-      // кнопка ВСЕГДА звала /map/start_finance (см. подробный комментарий у
-      // MAP_START_FINANCE_API_PATH/handle_map_start_finance_api в main.py -
-      // там же более раннее решение "Минимально" переносить сам визард), что
-      // отправляло сообщение в ЧАТ бота и требовало переключиться туда. В
-      // Кабинете уже давно есть ПОЛНЫЙ эквивалент того же расчёта - форма
-      // "💰 Финансы" (CABINET_FINANCE_API_PATH/handle_cabinet_finance_api,
-      // тот же calculate_finance_result/save_finance_result, что и в чате) -
-      // просто раньше на неё не было прямого перехода отсюда.
-      //
-      // Карта почти всегда открыта ВЛОЖЕННОЙ внутрь единого приложения (см.
-      // unified_app_html, вкладка "Карта") - в этом случае остаёмся
-      // полностью в приложении: сигналим родителю через postMessage
-      // переключиться на вкладку "Кабинет" и сразу открыть в ней раздел
-      // "Финансы" (см. openCabinetFinance()/addEventListener('message', ...)
-      // в unified_app_html). Редкий случай, когда карта открыта САМОСТОЯТЕЛЬНО
-      // (прямая WebApp-кнопка в чате, без вложения - вокруг нет вкладки
-      // "Кабинет", переключаться некуда) - оставляем старое поведение
-      // (переход в чат) как запасной путь, старый эндпоинт никуда не делся.
-      if (window.self !== window.top) {{
-        closeShiftSummaryOverlay();
-        window.parent.postMessage({{ taxiHelperOpenFinance: true }}, '*');
+      openShiftSummaryFinanceForm();
+    }});
+  }}
+  if (ssfBackBtn) {{
+    ssfBackBtn.addEventListener('click', () => {{
+      if (shiftSummaryFinanceForm) shiftSummaryFinanceForm.style.display = 'none';
+      if (shiftSummaryActions) shiftSummaryActions.style.display = 'flex';
+    }});
+  }}
+  if (ssfCalcBtn) {{
+    ssfCalcBtn.addEventListener('click', async () => {{
+      if (ssfCalcBtn.disabled || !ssfResultEl) return;
+      const hours = ssfParseHoursOrRange(ssfHoursEl ? ssfHoursEl.value : '');
+      if (!hours || hours <= 0) {{
+        ssfResultEl.innerHTML = '<p class="ssf-muted">Укажи часы за рулём больше нуля (число, например 5.5, или время смены "с-до", например 9-21).</p>';
         return;
       }}
       const initData = _mapInitData();
       if (!initData) return;
-      shiftSummaryFinanceBtn.disabled = true;
+      const payload = {{
+        income: parseFloat(ssfIncomeEl.value) || 0,
+        trips_count: parseInt(ssfTripsEl.value) || 0,
+        km: parseFloat(ssfKmEl.value) || 0,
+        consumption: parseFloat(ssfConsumptionEl.value) || 0,
+        fuel_price: parseFloat(ssfFuelPriceEl.value) || 0,
+        car_ownership: ssfCarOwnershipEl.value,
+        rent: parseFloat(ssfRentEl.value) || 0,
+        expenses: parseFloat(ssfExpensesEl.value) || 0,
+        tax_rate: parseFloat(ssfTaxRateEl.value) || 6,
+        hours: hours,
+      }};
+      ssfResultEl.innerHTML = '<p class="ssf-muted">Считаю…</p>';
+      ssfCalcBtn.disabled = true;
       try {{
-        const resp = await fetch('/map/start_finance', {{
+        const resp = await fetch('{CABINET_FINANCE_API_PATH}', {{
           method: 'POST',
-          headers: {{ 'X-Telegram-Init-Data': initData }},
+          headers: {{ 'X-Telegram-Init-Data': initData, 'Content-Type': 'application/json' }},
+          body: JSON.stringify(payload),
         }});
-        const data = await resp.json().catch(() => ({{}}));
-        closeShiftSummaryOverlay();
-        const msg = (resp.ok && data.ok)
-          ? 'Открыл расчёт дохода в чате бота - переключись туда, чтобы продолжить 💰'
-          : 'Не удалось запустить расчёт - попробуй ещё раз';
-        if (tg && tg.showAlert) tg.showAlert(msg); else alert(msg);
+        if (!resp.ok) throw new Error('http_' + resp.status);
+        const r = await resp.json();
+        ssfResultEl.innerHTML = ssfRenderDaySummary(r);
+        if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
       }} catch (e) {{
-        /* тихо - карточка просто закрыта, кнопку "Финансы" можно нажать позже */
+        ssfResultEl.innerHTML = '<p class="ssf-muted">Не получилось посчитать, попробуй ещё раз.</p>';
       }} finally {{
-        shiftSummaryFinanceBtn.disabled = false;
+        ssfCalcBtn.disabled = false;
       }}
     }});
   }}
@@ -17099,20 +17432,51 @@ def map_webapp_html():
     return `<a class="pc-go" href="${{navUrl(lat, lon)}}" target="_blank">🚕 Поехали</a>`;
   }}
 
+  // ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "чтобы была
+  // информация что последняя отметка 95-го была во сколько-то, 92-го во
+  // сколько-то, в зависимости от того были ли отметки за ближайшие 12
+  // часов") - reported_at уже приходит с сервера в p.fuel[тип] (см.
+  // handle_map_fuel_stations_api/get_gas_fuel_statuses), тут только
+  // отображение: SQLite CURRENT_TIMESTAMP отдаёт "YYYY-MM-DD HH:MM:SS" в
+  // UTC без разделителя 'T' и зоны - достраиваем их сами; отметка, только
+  // что поставленная тут же в браузере (см. window.reportFuel ниже),
+  // приходит уже как обычная ISO-строка с 'T'/'Z' - обе формы отличаем по
+  // наличию 'T'. Старше FUEL_REPORT_FRESH_HOURS - считаем неактуальной и
+  // не показываем вовсе (по просьбе пользователя).
+  const FUEL_REPORT_FRESH_HOURS = 12;
+  function fuelReportTimeLabel(info) {{
+    if (!info || !info.reported_at) return '';
+    let raw = String(info.reported_at);
+    if (raw.indexOf('T') === -1) raw = raw.replace(' ', 'T');
+    if (!/Z|[+-]\d\d:?\d\d$/.test(raw)) raw += 'Z';
+    const t = new Date(raw);
+    if (isNaN(t.getTime())) return '';
+    const ageHours = (Date.now() - t.getTime()) / 3600000;
+    if (ageHours < 0 || ageHours > FUEL_REPORT_FRESH_HOURS) return '';
+    return t.toLocaleTimeString('ru-RU', {{ hour: '2-digit', minute: '2-digit' }});
+  }}
+
   function buildFuelPopup(p) {{
     let html = `<div class="fuel-popup"><h4>⛽ ${{p.name || 'Заправка'}}</h4>`;
     const eta = etaText(p.lat, p.lon);
     if (eta) html += `<div class="sub">${{eta}} (~${{AVG_SPEED_KMH}} км/ч)</div>`;
-    html += `<div class="sub">Отметь, что есть на заправке:</div><div class="status-btn-row">`;
+    let statusButtonsHtml = '';
+    const fuelTimeParts = [];
     ['92', '95', '100', 'diesel'].forEach(ft => {{
       const info = (p.fuel && p.fuel[ft]) || null;
       let cls = 'status-btn';
       if (info && info.available === true) cls += ' on-yes';
       if (info && info.available === false) cls += ' on-no';
-      html += `<button class="${{cls}}" onclick="window.reportFuel('${{p.id}}','${{ft}}',true)">${{FUEL_TYPE_LABELS[ft]}} есть</button>`;
-      html += `<button class="${{cls}}" onclick="window.reportFuel('${{p.id}}','${{ft}}',false)">${{FUEL_TYPE_LABELS[ft]}} нет</button>`;
+      statusButtonsHtml += `<button class="${{cls}}" onclick="window.reportFuel('${{p.id}}','${{ft}}',true)">${{FUEL_TYPE_LABELS[ft]}} есть</button>`;
+      statusButtonsHtml += `<button class="${{cls}}" onclick="window.reportFuel('${{p.id}}','${{ft}}',false)">${{FUEL_TYPE_LABELS[ft]}} нет</button>`;
+      const timeLabel = fuelReportTimeLabel(info);
+      if (timeLabel) fuelTimeParts.push(`${{FUEL_TYPE_LABELS[ft]}} - ${{timeLabel}}`);
     }});
-    html += `</div>`;
+    html += `<div class="sub">Отметь, что есть на заправке:</div>`;
+    if (fuelTimeParts.length) {{
+      html += `<div class="status-note" style="margin-top:0;margin-bottom:6px;">🕓 Последние отметки: ${{fuelTimeParts.join(', ')}}</div>`;
+    }}
+    html += `<div class="status-btn-row">${{statusButtonsHtml}}</div>`;
     // ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "добавь была ли
     // очередь нет мало машин много машин") - та же крауд-отметка, что и у
     // статуса зарядки (одна текущая отметка на станцию), 3 кнопки.
@@ -17142,7 +17506,10 @@ def map_webapp_html():
     const p = fuelStations.find(s => s.id === stationId);
     if (p) {{
       p.fuel = p.fuel || {{}};
-      p.fuel[fuelType] = {{ available: available }};
+      // reported_at - своя же отметка "прямо сейчас", чтобы время в попапе
+      // (см. fuelReportTimeLabel/buildFuelPopup) обновилось сразу, не
+      // дожидаясь следующей перезагрузки списка станций с сервера.
+      p.fuel[fuelType] = {{ available: available, reported_at: new Date().toISOString() }};
       const marker = fuelMarkerById[stationId];
       if (marker) marker.setPopupContent(buildFuelPopup(p));
     }}
