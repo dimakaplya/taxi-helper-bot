@@ -12438,6 +12438,13 @@ MAP_CHARGING_STATIONS_API_PATH = '/map/charging_stations'
 MAP_FUEL_REPORT_API_PATH = '/map/fuel_report'
 MAP_CHARGING_REPORT_API_PATH = '/map/charging_report'
 MAP_GAS_QUEUE_REPORT_API_PATH = '/map/gas_queue_report'
+# ДОБАВЛЕНО 29.09.2026 (прямая просьба пользователя - "нужно реализовать
+# логику выбора очереди также с карты тоже... тыкаешь на аэропорт выбираешь
+# свой тариф и выбираешь очередь... по аналогии выбора заправок с карты") -
+# третий способ отметиться в очереди у аэропорта (наравне с push-
+# уведомлением - join_queue_/qsub_ - и ручным выбором в разделе Авиа/ЖД -
+# /transport WebApp-форма), теперь прямо из попапа аэропорта на карте.
+MAP_QUEUE_REPORT_API_PATH = '/map/queue_report'
 
 def get_gas_fuel_statuses():
     """dict {station_id: {fuel_type: {'available': bool, 'reported_at': iso_str}}}
@@ -14029,7 +14036,7 @@ MAP_CHROME_CSS = """
   }
   .fuel-popup, .charging-popup { font-family: -apple-system, sans-serif; font-size: 12.5px; max-width: 230px; color: #000; }
   .fuel-popup h4, .charging-popup h4 { margin: 0 0 6px; font-size: 13.5px; }
-  .fuel-popup .sub, .charging-popup .sub { color: #666; font-size: 11.5px; margin-bottom: 6px; }
+  .fuel-popup .sub, .charging-popup .sub, .airport-popup .sub { color: #666; font-size: 11.5px; margin-bottom: 6px; }
   .status-btn-row { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 2px; }
   .status-btn { border: 1px solid #bbb; border-radius: 6px; padding: 5px 8px; font-size: 12px; font-family: -apple-system, sans-serif; cursor: pointer; background: #f2f2f2; color: #333; text-transform: uppercase; }
   .status-btn.on-yes { background: #2e7d32; color: #fff; border-color: #2e7d32; }
@@ -14126,6 +14133,21 @@ def map_webapp_html():
         }
         for cat, info in MAP_CATEGORY_STYLE.items()
     }, ensure_ascii=False)
+    # ДОБАВЛЕНО 29.09.2026 (прямая просьба пользователя - "нужно реализовать
+    # логику выбора очереди также с карты тоже... по аналогии выбора заправок
+    # с картой") - третий способ отметиться в очереди у аэропорта, прямо из
+    # попапа на карте (см. buildAirportPopup/window.submitAirportQueue ниже).
+    # AIRPORT_QUEUE_CATEGORIES отдаётся в JS, чтобы виджет показывался только
+    # тем, у кого категория входит в MAP_AIRPORT_QUEUE_CATEGORIES (то же
+    # ограничение, что и у чтения очереди на карте - см.
+    # handle_map_airports_api), AIRPORT_QUEUE_RANGE_LABELS - готовые подписи
+    # кнопок диапазона в том же порядке/индексации, что QUEUE_RANGES на
+    # сервере (индекс кнопки = range_idx, который handle_map_queue_report_api
+    # передаёт напрямую в queue_range_label).
+    airport_queue_categories_json = json.dumps(MAP_AIRPORT_QUEUE_CATEGORIES, ensure_ascii=False)
+    airport_queue_range_labels_json = json.dumps(
+        [queue_range_label(i) for i in range(len(QUEUE_RANGES))], ensure_ascii=False
+    )
     # ДОБАВЛЕНО 22.09.2026 (см. YANDEX_MAPS_API_KEY выше) - подключаем JS API
     # Яндекс.Карт и Leaflet-плагин L.Yandex ТОЛЬКО если ключ реально задан на
     # Railway; иначе эти два тега просто не попадают в HTML, и карта, как и
@@ -14448,6 +14470,8 @@ def map_webapp_html():
 <script>
   const CATEGORY_STYLE = {style_json};
   const TARIFF_OPTIONS = {tariff_options_json};
+  const AIRPORT_QUEUE_CATEGORIES = {airport_queue_categories_json};
+  const AIRPORT_QUEUE_RANGE_LABELS = {airport_queue_range_labels_json};
   const FUEL_TYPE_LABELS = {fuel_type_labels_json};
   const CHARGING_STATUS_LABELS = {charging_status_labels_json};
   const GAS_QUEUE_STATUS_LABELS = {gas_queue_status_labels_json};
@@ -15060,6 +15084,19 @@ def map_webapp_html():
   }}
   let markers = [];
   let airportMarkers = [];
+  // ДОБАВЛЕНО 29.09.2026 (прямая просьба пользователя - отметка очереди
+  // прямо с карты, по аналогии с заправками) - airportMarkerById находит
+  // маркер конкретного аэропорта/терминальной зоны по ключу "icao::zone_key"
+  // (см. _airportKey ниже) для обновления попапа на месте после отправки
+  // отметки (marker.setPopupContent), currentAirportsData - последний
+  // полученный от сервера список аэропортов (см. renderAirports), в котором
+  // ищем нужную запись для локального мержа свежей отметки;
+  // airportQueueUiState - чисто клиентское состояние "на каком шаге сейчас
+  // попап" (выбор тарифа / диапазона очереди), переживает перерисовку карты
+  // и сбрасывается только после успешной отправки отметки.
+  let airportMarkerById = {{}};
+  let currentAirportsData = [];
+  let airportQueueUiState = {{}};
   // ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - кнопка "📊 Спрос"
   // должна выключать ВЕСЬ спрос на карте разом: дождь, аэропорты и
   // районную матрицу, "грубо говоря отображение спроса на карте выключали
@@ -16457,6 +16494,14 @@ def map_webapp_html():
   function renderAirports(data) {{
       airportMarkers.forEach(m => map.removeLayer(m));
       airportMarkers = [];
+      // ДОБАВЛЕНО 29.09.2026 (см. airportMarkerById/currentAirportsData выше)
+      // - сбрасываем и пересобираем на каждый проход, как и сам
+      // airportMarkers чуть выше; currentAirportsData берём из ПОЛНОГО
+      // списка (до фильтра по границам экрана ниже), чтобы попап открытого
+      // маркера мог найти свою запись, даже если её пришлось пересчитать
+      // сразу после панорамирования.
+      airportMarkerById = {{}};
+      currentAirportsData = data.airports || [];
       // ИЗМЕНЕНО 25.09.2026 (см. _airportCloudCandidates выше) - облака
       // спроса аэропортов больше не рисуются тут напрямую - только
       // собираются в кэш кандидатов, сбрасываем его на новый проход.
@@ -16611,45 +16656,13 @@ def map_webapp_html():
         // открыт.
         const airportHighLoad = a.load !== null && a.load !== undefined && a.load > HIGH_DEMAND_LOAD_THRESHOLD;
         const icon = L.divIcon({{ className: 'airport-icon airport-icon-badge' + (airportHighLoad ? ' badge-pulse' : ''), html: airportBadgeIconHtml(a.status), iconSize: [26, 26] }});
-        const airportEta = etaText(a.lat, a.lon);
-        let popup = `<div class="airport-popup"><h4>${{a.emoji || '✈️'}} ${{a.name}}</h4>`;
-        if (airportEta) popup += `<div class="row">${{airportEta}} (~${{AVG_SPEED_KMH}} км/ч)</div>`;
-        popup += `<div class="row">${{STATUS_ICON[a.status] || ''}} ${{a.status_text}}</div>`;
-        if (a.load !== null && a.load !== undefined) {{
-          popup += `<div class="row">📊 Загрузка сейчас: ${{a.load}}%</div>`;
-        }}
-        // ИСПРАВЛЕНО 20.09.2026 (жалоба пользователя - "надо разбить на
-        // тарифы очереди, а не просто Ultima"): у категорий с тарифами
-        // (Business/Premier/Elite/Cruise у Ultima и т.п.) сервер теперь
-        // отдаёт queue[cat].by_tariff = {{tariff: {{range, local_time}}}}
-        // вместо одной общей цифры на всю категорию - показываем каждый
-        // тариф отдельной строкой. У категорий без тарифов формат остался
-        // прежним (queue[cat] = {{range, local_time}}).
-        const queueKeys = Object.keys(a.queue || {{}});
-        let queueLines = [];
-        queueKeys.forEach(key => {{
-          const q = a.queue[key];
-          const label = (CATEGORY_STYLE[key] && CATEGORY_STYLE[key].label) || key;
-          if (q.by_tariff) {{
-            Object.keys(q.by_tariff).forEach(tariff => {{
-              const t = q.by_tariff[tariff];
-              queueLines.push({{ text: `${{label}} ${{tariff}}: ${{t.range}} (на ${{t.local_time}})`, short: `${{tariff}}: ${{t.range}}` }});
-            }});
-          }} else {{
-            queueLines.push({{ text: `${{label}}: ${{q.range}} (на ${{q.local_time}})`, short: `${{label}}: ${{q.range}}` }});
-          }}
-        }});
-        if (queueLines.length) {{
-          queueLines.forEach(q => {{ popup += `<div class="row">🚗 ${{q.text}}</div>`; }});
-        }} else {{
-          popup += `<div class="row">🚗 Очередь: свежих отметок нет</div>`;
-        }}
-        // ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "поехать" от
-        // текущей позиции прямо из попапа аэропорта, тот же паттерн, что уже
-        // есть у заправок/зарядок/парковок) - открывает Яндекс Навигатор/Карты
-        // с готовым маршрутом.
-        popup += goButtonHtml(a.lat, a.lon);
-        popup += `</div>`;
+        // ИЗМЕНЕНО 29.09.2026 (прямая просьба пользователя - отметка очереди
+        // прямо с карты, по аналогии с заправками) - построение HTML попапа
+        // вынесено в отдельную buildAirportPopup(a) (см. сразу после
+        // renderAirports ниже), по образцу buildFuelPopup у заправок - чтобы
+        // попап можно было пересобрать и обновить НА МЕСТЕ
+        // (marker.setPopupContent), не перерисовывая карту заново, сразу
+        // после отправки отметки об очереди.
         // УБРАНО 25.09.2026 (прямая просьба пользователя - "оставь тока
         // самолётик"; первая попытка этого убиралась вместе с остальными
         // правками в отменённом коммите c75c87c - карта тогда сломалась на
@@ -16664,12 +16677,13 @@ def map_webapp_html():
         // добавлено позже в тот же день) - подпись дублировала ту же
         // информацию и визуально накладывалась на иконку двумя метками на
         // одну точку. Вся подробная информация (статус текстом/загрузка/
-        // очередь) осталась в попапе по клику - см. popup выше, ничего
-        // оттуда не убрано.
+        // очередь/отметка) осталась в попапе по клику - см. buildAirportPopup
+        // ниже, ничего оттуда не убрано.
         const marker = L.marker([a.lat, a.lon], {{ icon }})
-          .bindPopup(popup)
+          .bindPopup(buildAirportPopup(a))
           .addTo(map);
         airportMarkers.push(marker);
+        airportMarkerById[_airportKey(a)] = marker;
       }});
       // Единая перерисовка слитых облаков спроса (матрица + дождь +
       // аэропорты) - см. _redrawUnifiedDemandClouds ниже.
@@ -16687,6 +16701,146 @@ def map_webapp_html():
       }}
       airportsLoaded = true;
   }}
+
+  // ДОБАВЛЕНО 29.09.2026 (прямая просьба пользователя - "нужно реализовать
+  // логику выбора очереди также с карты тоже... тыкаешь на аэропорт
+  // выбираешь свой тариф и выбираешь очередь и соответственно отметка
+  // автоматически уходит в данные чтобы показывать последнюю отметку и
+  // также нужно писать время последней отметки также на карте грубо говоря
+  // по аналогии выбора заправок с карты") - третий способ отметиться в
+  // очереди у аэропорта (наравне с push-уведомлением - join_queue_/
+  // show_range_picker/qsub_/submit_range - и ручным выбором в разделе
+  // Авиа/ЖД - /transport WebApp-форма), прямо из попапа на карте, тот же
+  // паттерн, что у buildFuelPopup/window.reportFuel у заправок.
+  function _airportKey(a) {{
+    return a.icao + '::' + (a.zone_key || '');
+  }}
+
+  function buildAirportPopup(a) {{
+    const airportEta = etaText(a.lat, a.lon);
+    let popup = `<div class="airport-popup"><h4>${{a.emoji || '✈️'}} ${{a.name}}</h4>`;
+    if (airportEta) popup += `<div class="row">${{airportEta}} (~${{AVG_SPEED_KMH}} км/ч)</div>`;
+    popup += `<div class="row">${{STATUS_ICON[a.status] || ''}} ${{a.status_text}}</div>`;
+    if (a.load !== null && a.load !== undefined) {{
+      popup += `<div class="row">📊 Загрузка сейчас: ${{a.load}}%</div>`;
+    }}
+    // ИСПРАВЛЕНО 20.09.2026 (жалоба пользователя - "надо разбить на
+    // тарифы очереди, а не просто Ultima"): у категорий с тарифами
+    // (Business/Premier/Elite/Cruise у Ultima и т.п.) сервер теперь
+    // отдаёт queue[cat].by_tariff = {{tariff: {{range, local_time}}}}
+    // вместо одной общей цифры на всю категорию - показываем каждый
+    // тариф отдельной строкой. У категорий без тарифов формат остался
+    // прежним (queue[cat] = {{range, local_time}}).
+    const queueKeys = Object.keys(a.queue || {{}});
+    let queueLines = [];
+    queueKeys.forEach(key => {{
+      const q = a.queue[key];
+      const label = (CATEGORY_STYLE[key] && CATEGORY_STYLE[key].label) || key;
+      if (q.by_tariff) {{
+        Object.keys(q.by_tariff).forEach(tariff => {{
+          const t = q.by_tariff[tariff];
+          queueLines.push({{ text: `${{label}} ${{tariff}}: ${{t.range}} (на ${{t.local_time}})`, short: `${{tariff}}: ${{t.range}}` }});
+        }});
+      }} else {{
+        queueLines.push({{ text: `${{label}}: ${{q.range}} (на ${{q.local_time}})`, short: `${{label}}: ${{q.range}}` }});
+      }}
+    }});
+    if (queueLines.length) {{
+      queueLines.forEach(q => {{ popup += `<div class="row">🚗 ${{q.text}}</div>`; }});
+    }} else {{
+      popup += `<div class="row">🚗 Очередь: свежих отметок нет</div>`;
+    }}
+    // ДОБАВЛЕНО 29.09.2026 (см. комментарий у _airportKey выше) - виджет
+    // отметки очереди прямо в попапе. Показывается только тем, чья текущая
+    // категория (myCategory, из URL мини-приложения) входит в
+    // AIRPORT_QUEUE_CATEGORIES (только для такси/Ultima вообще ведётся
+    // очередь на карте - см. MAP_AIRPORT_QUEUE_CATEGORIES на сервере,
+    // handle_map_airports_api). Два шага, как в чате
+    // (show_range_picker/render_range_picker): сначала тариф, потом
+    // диапазон машин в очереди - текущий шаг хранится в
+    // airportQueueUiState[icao::zone_key] (чисто на клиенте).
+    if (myCategory && AIRPORT_QUEUE_CATEGORIES.includes(myCategory)) {{
+      const aKey = _airportKey(a);
+      const uiState = airportQueueUiState[aKey] || {{}};
+      const tariffs = (TARIFF_OPTIONS[myCategory] && TARIFF_OPTIONS[myCategory].tariffs) || [];
+      popup += `<div class="sub" style="margin-top:8px;">📋 Отметиться в очереди:</div>`;
+      if (tariffs.length && !uiState.tariff) {{
+        popup += `<div class="status-btn-row">`;
+        tariffs.forEach((t, i) => {{
+          popup += `<button class="status-btn" onclick="window.selectAirportQueueTariff('${{a.icao}}','${{a.zone_key || ''}}',${{i}})">${{t}}</button>`;
+        }});
+        popup += `</div>`;
+      }} else {{
+        if (uiState.tariff) {{
+          popup += `<div class="row">Тариф: ${{uiState.tariff}} · <a href="#" onclick="window.resetAirportQueueTariff('${{a.icao}}','${{a.zone_key || ''}}'); return false;">изменить</a></div>`;
+        }}
+        popup += `<div class="sub">Сколько машин видишь в очереди:</div><div class="status-btn-row">`;
+        AIRPORT_QUEUE_RANGE_LABELS.forEach((label, i) => {{
+          popup += `<button class="status-btn" onclick="window.submitAirportQueue('${{a.icao}}','${{a.zone_key || ''}}',${{i}})">${{label}}</button>`;
+        }});
+        popup += `</div>`;
+      }}
+    }}
+    // ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "поехать" от
+    // текущей позиции прямо из попапа аэропорта, тот же паттерн, что уже
+    // есть у заправок/зарядок/парковок) - открывает Яндекс Навигатор/Карты
+    // с готовым маршрутом.
+    popup += goButtonHtml(a.lat, a.lon);
+    popup += `</div>`;
+    return popup;
+  }}
+
+  window.selectAirportQueueTariff = function(icao, zoneKey, tariffIdx) {{
+    const aKey = icao + '::' + (zoneKey || '');
+    const tariffs = (TARIFF_OPTIONS[myCategory] && TARIFF_OPTIONS[myCategory].tariffs) || [];
+    airportQueueUiState[aKey] = {{ tariff: tariffs[tariffIdx] || null }};
+    const a = currentAirportsData.find(x => x.icao === icao && (x.zone_key || '') === (zoneKey || ''));
+    const marker = airportMarkerById[aKey];
+    if (a && marker) marker.setPopupContent(buildAirportPopup(a));
+  }};
+
+  window.resetAirportQueueTariff = function(icao, zoneKey) {{
+    const aKey = icao + '::' + (zoneKey || '');
+    delete airportQueueUiState[aKey];
+    const a = currentAirportsData.find(x => x.icao === icao && (x.zone_key || '') === (zoneKey || ''));
+    const marker = airportMarkerById[aKey];
+    if (a && marker) marker.setPopupContent(buildAirportPopup(a));
+  }};
+
+  window.submitAirportQueue = async function(icao, zoneKey, rangeIdx) {{
+    const aKey = icao + '::' + (zoneKey || '');
+    const uiState = airportQueueUiState[aKey] || {{}};
+    const category = myCategory;
+    const tariff = uiState.tariff || null;
+    let result = null;
+    try {{
+      const initData = _mapInitData();
+      const resp = await fetch('{MAP_QUEUE_REPORT_API_PATH}', {{
+        method: 'POST',
+        headers: {{ 'Content-Type': 'application/json', 'X-Telegram-Init-Data': initData }},
+        body: JSON.stringify({{ city, icao, zone_key: zoneKey || null, category, tariff, range_idx: rangeIdx }}),
+      }});
+      if (resp.ok) result = await resp.json();
+    }} catch (e) {{ /* тихо */ }}
+    delete airportQueueUiState[aKey];
+    const a = currentAirportsData.find(x => x.icao === icao && (x.zone_key || '') === (zoneKey || ''));
+    if (a && result && result.ok) {{
+      // Локально мержим свежую отметку в те же поля, что читает
+      // buildAirportPopup выше (queue[cat] / queue[cat].by_tariff) - попап
+      // обновляется в поле сразу, без ожидания следующего опроса
+      // /map/airports (тот же приём, что у window.reportFuel/buildFuelPopup).
+      a.queue = a.queue || {{}};
+      if (tariff) {{
+        a.queue[category] = a.queue[category] || {{}};
+        a.queue[category].by_tariff = a.queue[category].by_tariff || {{}};
+        a.queue[category].by_tariff[tariff] = {{ range: result.range, local_time: result.local_time }};
+      }} else {{
+        a.queue[category] = {{ range: result.range, local_time: result.local_time }};
+      }}
+    }}
+    const marker = airportMarkerById[aKey];
+    if (a && marker) marker.setPopupContent(buildAirportPopup(a));
+  }};
 
   async function loadAirports() {{
     try {{
@@ -23225,6 +23379,12 @@ async def handle_map_airports_api(request):
             entry = {
                 'name': airport['name'], 'emoji': airport.get('emoji', '✈️'),
                 'icao': icao, 'lat': coords[0], 'lon': coords[1],
+                # ДОБАВЛЕНО 29.09.2026 (прямая просьба пользователя - отметка
+                # очереди прямо с карты) - фронтенду нужен zone_key, чтобы
+                # отправить его обратно в handle_map_queue_report_api и
+                # попасть в ТУ ЖЕ терминальную зону (см. _queue_airport_key),
+                # что и при отметке через push/ручной выбор в Авиа/ЖД.
+                'zone_key': zone_key,
             }
             if airport.get('closed'):
                 entry['status'] = 'closed'
@@ -24746,6 +24906,68 @@ async def handle_map_gas_queue_report_api(request):
         return web.json_response({'error': 'invalid_params'}, status=400)
     set_gas_queue_status(station_id, status, user_id)
     return web.json_response({'ok': True})
+
+async def handle_map_queue_report_api(request):
+    """POST {city, icao, zone_key, category, tariff, range_idx} - третий
+    способ отметиться в очереди у аэропорта (по прямой просьбе пользователя,
+    29.09.2026 - "тыкаешь на аэропорт выбираешь свой тариф и выбираешь
+    очередь... по аналогии выбора заправок с карты"), наравне с push-
+    уведомлением (join_queue_/qsub_/submit_range) и ручным выбором в разделе
+    Авиа/ЖД (/transport WebApp-форма) - все три в итоге пишут через один и
+    тот же queue_submit_report, тем же class_key = "категория:тариф" (или
+    голая категория без тарифов), что и submit_range в чате. initData
+    ОБЯЗАТЕЛЕН и строго проверяется, тот же паттерн, что у
+    handle_map_fuel_report_api - отметка привязана к user_id, кто её
+    оставил. icao+zone_key дополнительно сверяются со списком реальных
+    аэропортов города (AIRPORTS_INFO), а не просто доверяются клиенту -
+    иначе с карты можно было бы записать очередь произвольному
+    несуществующему аэропорту/городу."""
+    init_data = request.headers.get('X-Telegram-Init-Data', '')
+    parsed = validate_telegram_webapp_init_data(init_data, BOT_TOKEN) if BOT_TOKEN else None
+    if not parsed:
+        return web.json_response({'error': 'invalid_init_data'}, status=401)
+    try:
+        tg_user = json.loads(parsed.get('user', '{}'))
+        user_id = tg_user.get('id')
+    except Exception:
+        user_id = None
+    if not user_id:
+        return web.json_response({'error': 'invalid_init_data'}, status=401)
+    try:
+        body = await request.json()
+        city = str(body.get('city') or '')
+        icao = str(body.get('icao') or '')
+        zone_key = body.get('zone_key') or None
+        category = str(body.get('category') or '')
+        tariff = body.get('tariff') or None
+        range_idx = int(body.get('range_idx'))
+    except Exception:
+        return web.json_response({'error': 'invalid_body'}, status=400)
+    if not city or not icao or category not in MAP_AIRPORT_QUEUE_CATEGORIES:
+        return web.json_response({'error': 'invalid_params'}, status=400)
+    if not (0 <= range_idx < len(QUEUE_RANGES)):
+        return web.json_response({'error': 'invalid_params'}, status=400)
+    # Сверяем icao+zone_key с реальным списком аэропортов города - тот же
+    # источник правды (AIRPORTS_INFO), что использует join_queue_/submit_range
+    # в чате (там city/airport_idx приходят из инлайн-кнопки, тут - напрямую
+    # от клиента, поэтому нужна явная проверка).
+    airport_match = next(
+        (a for a in AIRPORTS_INFO.get(city, []) if a['icao'] == icao and (a.get('zone_key') or None) == zone_key),
+        None
+    )
+    if not airport_match:
+        return web.json_response({'error': 'invalid_params'}, status=400)
+    tariff_options = CATEGORIES.get(category, {}).get('tariffs') or []
+    if tariff_options:
+        if tariff not in tariff_options:
+            return web.json_response({'error': 'invalid_params'}, status=400)
+    else:
+        tariff = None
+    range_str = queue_range_label(range_idx)
+    class_key = f"{category}:{tariff}" if tariff else category
+    queue_submit_report(user_id, city, icao, class_key, range_str, zone_key=zone_key)
+    local_time = format_airport_local_time(datetime.now(ZoneInfo('UTC')).strftime('%Y-%m-%d %H:%M:%S'), icao)
+    return web.json_response({'ok': True, 'range': range_str, 'local_time': local_time, 'category': category, 'tariff': tariff})
 
 async def handle_map_charging_report_api(request):
     """POST {station_id, status: 'free'|'busy'|'queue'} - крауд-отметка
@@ -35476,6 +35698,7 @@ async def start_subscription_webhook_server():
     app.router.add_post(MAP_FUEL_REPORT_API_PATH, handle_map_fuel_report_api)
     app.router.add_post(MAP_GAS_QUEUE_REPORT_API_PATH, handle_map_gas_queue_report_api)
     app.router.add_post(MAP_CHARGING_REPORT_API_PATH, handle_map_charging_report_api)
+    app.router.add_post(MAP_QUEUE_REPORT_API_PATH, handle_map_queue_report_api)
     app.router.add_get(MAP_ROAD_EVENTS_API_PATH, handle_map_road_events_api)
     app.router.add_get(MAP_CITY_EVENTS_API_PATH, handle_map_city_events_api)
     # Локальная раздача telegram-web-app.js (21.09.2026, см. блок "ЛОКАЛЬНАЯ
