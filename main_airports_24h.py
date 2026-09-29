@@ -21378,50 +21378,92 @@ def unified_app_html():
     const legalPartnerNote = data.legal_entity_name ? ('<div class="svc-card">🏷 Компания: ' + data.legal_entity_name + '</div>') : '';
     // ДОБАВЛЕНО 29.09.2026 (см. refDashHtml в renderReferralDriverDetail
     // выше - тот же дашборд "Текущая схема", теперь и здесь).
-    let html = '<div class="svc-h">🏢 Юридическое лицо</div>' + refDashHtml(data) + legalPartnerNote + referralStatsBlockHtml(data, legalRates, legalDescription);
-    if (access && access.has_access) {
-      html += '<div class="svc-card">У тебя уже есть доступ к кабинету автопарка.</div>' +
-        '<a class="svc-btn" href="' + LEGAL_CABINET_WEBAPP_PATH + '?tgInitData=' + encodeURIComponent((tg && tg.initData) || '') + '">🏛 Открыть кабинет автопарка</a>';
-    } else if (access && !access.subscription_active) {
-      html += '<div class="svc-card">Доступ к схеме начислений юр.лица и кабинету автопарка - платная подписка на реферальную систему юрлиц, ' + access.subscription_price_rub + ' ₽/мес.</div>';
-      if (!access.has_email) {
-        html += '<input type="email" class="svc-input" id="refLegalEmail" placeholder="email@example.com">' +
-          '<button type="button" class="svc-btn" id="refLegalEmailBtn">Продолжить</button>';
-      } else if (access.pay_url) {
-        // ИЗМЕНЕНО 29.09.2026 (прямая просьба пользователя - "оплата
-        // подписки организации происходит исключительно в приложении тг
-        // апп") - раньше это была обычная ссылка target="_blank", которая
-        // в WebView Telegram уводит в системный браузер, ПОКИДАЯ
-        // приложение. Теперь это кнопка с обработчиком клика: если доступен
-        // tg.openLink - открываем через него (официальный способ открыть
-        // внешнюю ссылку, не покидая интерфейс Telegram, см.
-        // https://core.telegram.org/bots/webapps#initializing-web-apps);
-        // если tg недоступен (открыто вне Telegram, напр. для отладки) -
-        // запасной вариант window.open, как и было.
-        html += '<button type="button" class="svc-btn" id="refLegalPayBtn" data-pay-url="' + access.pay_url.replace(/"/g, '&quot;') + '">Оплатить ' + access.subscription_price_rub + ' ₽</button>';
-      } else {
-        html += '<div class="svc-note">Не получилось создать ссылку на оплату - попробуй ещё раз чуть позже.</div>';
+    // ИЗМЕНЕНО 29.09.2026 (ПОВТОРНАЯ прямая жалоба пользователя со
+    // скриншотом того же экрана - "Опять вход не по паролю" / "я не могу
+    // зайти в конкретную кампанию, я проваливаюсь чисто в схему юр лицо") -
+    // раньше ссылка/статистика/уровни (referralStatsBlockHtml) показывались
+    // ВСЕГДА, ещё ДО ввода пароля конкретной компании (см. отменённый ниже
+    // комментарий от 27.09.2026 про "общие данные") - пользователь несколько
+    // раз подряд объяснил, что именно это и воспринимает как "вход без
+    // пароля": заходя на плитку "Юридическое лицо", он видит уже готовую,
+    // как будто активную, панель схемы (ссылка, заработок, уровни), хотя ни
+    // разу не вводил пароль НИ ОДНОЙ конкретной компании - экран не был
+    // привязан к какой-то конкретной компании вообще, просто показывал
+    // общую схему. Теперь СТРОГО как экран "Админ реферальная программа"
+    // (renderPhantomAdminReferral выше) - ссылка/статистика/уровни/кнопка
+    // "выход"/кнопка кабинета показываются ТОЛЬКО когда СЕЙЧАС реально
+    // активна схема 'legal_entity' (access.referrer_type, свежий ответ
+    // LEGAL_CABINET_ACCESS_API_PATH выше, а не устаревшее data.referrer_type
+    // из /referral/data) - то есть пользователь только что либо раньше
+    // успешно ввёл пароль КОНКРЕТНОЙ компании (см. apply_legal_entity_password
+    // -> claim_legal_entity_ownership/entity_name). До этого момента видна
+    // только краткая справка о ставках (legalDescription) и форма
+    // подписки/пароля - никаких данных о рефералах.
+    const legalActive = !!(access && access.referrer_type === 'legal_entity');
+    let html = '<div class="svc-h">🏢 Юридическое лицо</div>' + refDashHtml(data);
+    if (legalActive) {
+      html += legalPartnerNote + referralStatsBlockHtml(data, legalRates, legalDescription);
+      if (access.has_access) {
+        html += '<div class="svc-card">У тебя уже есть доступ к кабинету автопарка.</div>' +
+          '<a class="svc-btn" href="' + LEGAL_CABINET_WEBAPP_PATH + '?tgInitData=' + encodeURIComponent((tg && tg.initData) || '') + '">🏛 Открыть кабинет автопарка</a>';
+      } else if (!access.subscription_active) {
+        html += '<div class="svc-card">Кабинет автопарка (управление машинами/арендой) - отдельная платная подписка, ' + access.subscription_price_rub + ' ₽/мес. Начисления по схеме юр.лица уже идут - подписка нужна только для самого кабинета.</div>';
+        if (!access.has_email) {
+          html += '<input type="email" class="svc-input" id="refLegalEmail" placeholder="email@example.com">' +
+            '<button type="button" class="svc-btn" id="refLegalEmailBtn">Продолжить</button>';
+        } else if (access.pay_url) {
+          html += '<button type="button" class="svc-btn" id="refLegalPayBtn" data-pay-url="' + access.pay_url.replace(/"/g, '&quot;') + '">Оплатить ' + access.subscription_price_rub + ' ₽</button>';
+        } else {
+          html += '<div class="svc-note">Не получилось создать ссылку на оплату - попробуй ещё раз чуть позже.</div>';
+        }
       }
-    } else {
-      // ИЗМЕНЕНО 29.09.2026 (прямая просьба пользователя - "ввод НАЗВАНИЕ
-      // КАМПАНИИ И ПАРОЛЯ") - добавлено поле названия компании рядом с
-      // паролем (см. handle_legal_cabinet_password_api в main.py - если
-      // название передано, оно сверяется с реальным названием найденной по
-      // паролю компании).
-      html += '<div class="svc-card">Подписка активна - осталось ввести название и пароль компании (те же, что открывают «Кабинет автопарка»).</div>' +
-        '<input type="text" class="svc-input" id="refLegalName" placeholder="Название компании">' +
-        '<input type="text" class="svc-input" id="refLegalPassword" placeholder="Пароль компании">' +
-        '<button type="button" class="svc-btn" id="refLegalPasswordBtn">Подтвердить</button>' +
-        '<div class="svc-note" id="refLegalPasswordNote"></div>';
-    }
-    // ДОБАВЛЕНО 29.09.2026 (прямая просьба пользователя - "кнопка Выход из
-    // кабинета") - показывается, пока у пользователя СЕЙЧАС активна именно
-    // схема 'legal_entity' (см. handle_legal_cabinet_access_api ->
-    // referrer_type в access, не в общем data реферального меню),
-    // независимо от того, платная ли подписка/есть ли купленный кабинет -
-    // выйти можно в любом из этих состояний.
-    if (access && access.referrer_type === 'legal_entity') {
+      // ДОБАВЛЕНО 29.09.2026 (прямая просьба пользователя - "кнопка Выход из
+      // кабинета") - раз мы уже внутри legalActive, схема точно активна.
       html += '<button type="button" class="svc-btn ghost" id="refLegalLogoutBtn">🚪 Выход из кабинета</button>';
+    } else if (!access) {
+      // ДОБАВЛЕНО 29.09.2026 - раньше (см. отменённый выше код) при
+      // неудачном запросе LEGAL_CABINET_ACCESS_API_PATH (access === null,
+      // напр. сеть отвалилась) код молча падал в ветку "показать форму
+      // пароля" - не зная даже, активна ли подписка. Теперь честно
+      // показываем ошибку загрузки вместо формы входа, которая могла бы
+      // ввести в заблуждение (тем более что сама попытка входа с неизвестным
+      // статусом подписки всё равно была бы отклонена сервером).
+      html += '<div class="svc-note">Не получилось проверить доступ - попробуй ещё раз чуть позже.</div>';
+    } else {
+      html += '<div class="svc-card">' + legalDescription + '</div>';
+      if (!access.subscription_active) {
+        html += '<div class="svc-card">Доступ к схеме начислений юр.лица - платная подписка на реферальную систему юрлиц, ' + access.subscription_price_rub + ' ₽/мес. Без подписки войти в конкретную компанию нельзя.</div>';
+        if (!access.has_email) {
+          html += '<input type="email" class="svc-input" id="refLegalEmail" placeholder="email@example.com">' +
+            '<button type="button" class="svc-btn" id="refLegalEmailBtn">Продолжить</button>';
+        } else if (access.pay_url) {
+          // ИЗМЕНЕНО 29.09.2026 (прямая просьба пользователя - "оплата
+          // подписки организации происходит исключительно в приложении тг
+          // апп") - раньше это была обычная ссылка target="_blank", которая
+          // в WebView Telegram уводит в системный браузер, ПОКИДАЯ
+          // приложение. Теперь это кнопка с обработчиком клика: если доступен
+          // tg.openLink - открываем через него (официальный способ открыть
+          // внешнюю ссылку, не покидая интерфейс Telegram, см.
+          // https://core.telegram.org/bots/webapps#initializing-web-apps);
+          // если tg недоступен (открыто вне Telegram, напр. для отладки) -
+          // запасной вариант window.open, как и было.
+          html += '<button type="button" class="svc-btn" id="refLegalPayBtn" data-pay-url="' + access.pay_url.replace(/"/g, '&quot;') + '">Оплатить ' + access.subscription_price_rub + ' ₽</button>';
+        } else {
+          html += '<div class="svc-note">Не получилось создать ссылку на оплату - попробуй ещё раз чуть позже.</div>';
+        }
+      } else {
+        // ИЗМЕНЕНО 29.09.2026 (прямая просьба пользователя - "ввод НАЗВАНИЕ
+        // КАМПАНИИ И ПАРОЛЯ") - добавлено поле названия компании рядом с
+        // паролем (см. handle_legal_cabinet_password_api в main.py - если
+        // название передано, оно сверяется с реальным названием найденной по
+        // паролю компании). Показывается ТОЛЬКО когда access загрузился и
+        // подписка активна (access.subscription_active === true).
+        html += '<div class="svc-card">Подписка активна - осталось ввести название и пароль конкретной компании (те же, что открывают «Кабинет автопарка»).</div>' +
+          '<input type="text" class="svc-input" id="refLegalName" placeholder="Название компании">' +
+          '<input type="text" class="svc-input" id="refLegalPassword" placeholder="Пароль компании">' +
+          '<button type="button" class="svc-btn" id="refLegalPasswordBtn">Подтвердить</button>' +
+          '<div class="svc-note" id="refLegalPasswordNote"></div>';
+      }
     }
     box.innerHTML = html;
     wireReferralStatsBlock(box, data);
