@@ -19963,6 +19963,13 @@ def unified_app_html():
     animation: backGlowPulse 2.6s ease-in-out infinite; text-transform: uppercase;
   }
   .svc-h { font-family: 'Unbounded', sans-serif; font-size: 16px; font-weight: 700; margin: 0 0 12px; }
+  /* ДОБАВЛЕНО 29.09.2026 (прямая просьба пользователя - "описание 2
+     реферальных систем сделать, так же продающий текст") - небольшой
+     подзаголовок ВНУТРИ .svc-card (см. renderReferralMaterialsDetail),
+     тот же язык, что у .svc-h/.ref-rating-title (Unbounded), но меньше -
+     чтобы отделить "Для физлиц"/"Для юрлиц" друг от друга внутри одной
+     карточки, не заводя под каждый текст отдельный .svc-h. */
+  .svc-subh { font-family: 'Unbounded', sans-serif; font-size: 13.5px; font-weight: 700; margin: 0 0 6px; color: #FFC400; }
   .svc-row {
     display: flex; align-items: center; justify-content: space-between; gap: 12px;
     background: #131313; border: 1px solid rgba(255,255,255,.08); border-radius: 12px;
@@ -21377,7 +21384,17 @@ def unified_app_html():
   // остальных схем по-прежнему 3, поэтому обе функции ниже строятся
   // динамически по фактической длине rates (зеркало referral_how_it_works_text/
   // referral_level_counts_lines в main.py, тот же порядок фраз/строк).
-  function referralHowItWorksText(rates) {
+  // ИЗМЕНЕНО 29.09.2026 (прямая просьба пользователя - "описание 2
+  // реферальных систем сделать" в разделе "Материалы") - необязательный
+  // 2-й параметр omitReferralsNote: по умолчанию (не передан) - поведение
+  // не изменилось, хвост "...видно в «Мои рефералы» ниже" остаётся (там,
+  // где эта функция уже использовалась - referralStatsBlockHtml,
+  // detail-экраны "Водитель/Курьер" и "Юридическое лицо" - кнопка "Мои
+  // рефералы" на этих экранах ДЕЙСТВИТЕЛЬНО есть ниже). В "Материалах"
+  // (renderReferralMaterialsDetail) такой кнопки нет - там функция
+  // вызывается с omitReferralsNote=true, чтобы не ссылаться на
+  // несуществующий на этом экране элемент.
+  function referralHowItWorksText(rates, omitReferralsNote) {
     const n = rates.length;
     if (!n) return '';
     const clauses = [rates[0] + '% с каждого ежемесячного платежа приглашённого тобой напрямую (1 уровень)'];
@@ -21385,8 +21402,10 @@ def unified_app_html():
       clauses.push(rates[i] + '% с платежей рефералов ' + i + '-го уровня (' + (i + 1) + ' уровень)');
     }
     const joined = n === 1 ? clauses[0] : clauses.slice(0, -1).join(', ') + ' и ' + clauses[clauses.length - 1];
-    return joined + ' - прямой процент от суммы платежа на каждом уровне. Начисляется каждый месяц, пока реферал платит ' +
-      'подписку. Дальше ' + n + ' уровня деньги не идут, но всю ветку целиком видно в «Мои рефералы» ниже.';
+    const base = joined + ' - прямой процент от суммы платежа на каждом уровне. Начисляется каждый месяц, пока реферал платит подписку.';
+    return omitReferralsNote
+      ? base
+      : (base + ' Дальше ' + n + ' уровня деньги не идут, но всю ветку целиком видно в «Мои рефералы» ниже.');
   }
   function referralLevelRowsHtml(data, rates) {
     let out = '';
@@ -21718,33 +21737,55 @@ def unified_app_html():
     }
   }
 
-  // "Материалы реферальной системы" - презентация + объяснение процентов,
-  // те же данные/файл, что уже были частью карточки "Водитель/Курьер" выше,
-  // просто вынесены в отдельную плитку.
+  // "Материалы реферальной системы" - продающий текст + описание ОБЕИХ схем
+  // (физлица/юрлица) + презентации, справочник по всем схемам сразу (а НЕ
+  // "как это работает у ТЕБЯ конкретно" - для этого есть детальные экраны
+  // "Водитель/Курьер" и "Юридическое лицо" со своим referralStatsBlockHtml).
+  // ПЕРЕСМОТРЕНО 29.09.2026 (прямая просьба пользователя - "описание 2
+  // реферальных систем сделать, так же сделать продающий текст почему
+  // нужна это реферальная система что она дает вам заработать больше") -
+  // раньше здесь была одна общая ratesNote, построенная из data.rates_percent
+  // (ставки ТЕКУЩЕЙ схемы ЭТОГО пользователя - юрлицо на скриншоте видело
+  // бы свою же схему, а не обе сразу, хотя ниже уже лежат 2 разные
+  // презентации под 2 разные схемы) - теперь два отдельных, ФИКСИРОВАННЫХ
+  // описания (REFERRAL_RATES_PERCENT.individual/.legal_entity, те же
+  // ставки, что и в детальных экранах renderReferralDriverDetail/
+  // renderReferralLegalDetail - числа никогда не разойдутся, источник один),
+  // каждое сразу над своей презентацией.
   function renderReferralMaterialsDetail(box, data) {
     svcBackAction = function () { renderReferralMenu(box, data); }; // ИЗМЕНЕНО 27.09.2026 - "Назад" отсюда ведёт в меню реферальной программы, на один шаг назад
-    const rates = data.rates_percent || [];
-    // ДОБАВЛЕНО 28.09.2026 (см. REFERRAL_TAX_NOTE_TEXT/tax_withhold_percent
-    // в main.py) - та же приписка про удержание 6%, что и в основном блоке
-    // статистики (referralStatsBlockHtml).
+    const individualRates = REFERRAL_RATES_PERCENT.individual;
+    const legalRates = REFERRAL_RATES_PERCENT.legal_entity;
     const taxNote = data && data.tax_withhold_percent
-      ? ('<div class="svc-note">ℹ️ С каждого начисления удерживается ' + data.tax_withhold_percent + '% в счёт налога на доход.</div>')
+      ? ('<div class="svc-note">ℹ️ С каждого начисления удерживается ' + data.tax_withhold_percent + '% в счёт налога на доход - относится к обеим схемам ниже.</div>')
       : '';
-    const ratesNote = rates.length
-      ? ('<div class="svc-card">Как это работает: ' + referralHowItWorksText(rates) + '</div>' + taxNote)
-      : '';
-    // ПЕРЕСМОТРЕНО 29.09.2026 (прямая просьба пользователя - "в материалах
-    // должно быть две презентации для физиков и для юриков с QR-кодами") -
-    // старая общая презентация без QR убрана отсюда (теперь используется
-    // ТОЛЬКО в личном кабинете водителя, см. referralStatsBlockHtml) -
-    // здесь ровно 2 кнопки, обе с QR-кодом на t.me/taxihelperbot_bot:
-    // "для физлиц" (PRESENTATION_MATERIALS_INDIVIDUAL_PDF_PATH) и "для
-    // юрлиц" (PRESENTATION_FLEET_PDF_PATH, была здесь и раньше).
+    const sellingCardHtml =
+      '<div class="svc-card">' +
+        '💰 Зарабатывай на том, что просто делишься ссылкой. Один раз пригласил человека - и дальше получаешь процент ' +
+        'с каждого его ежемесячного платежа за подписку, пока он ей пользуется, плюс процент с рефералов твоих ' +
+        'рефералов на несколько уровней вглубь. Чем больше людей в твоей ветке - тем больше доход каждый месяц, без ' +
+        'потолка по количеству приглашённых и без каких-либо дополнительных действий с твоей стороны. Презентации ' +
+        'ниже - готовый материал, чтобы быстро объяснить человеку, что за бот и почему стоит подключиться: скинь в ' +
+        'чат или покажи при личной встрече.' +
+      '</div>';
+    const individualCardHtml =
+      '<div class="svc-card">' +
+        '<div class="svc-subh">👤 Для физлиц (водители и курьеры)</div>' +
+        'Приглашай других водителей и курьеров по своей персональной ссылке - получай ' + referralHowItWorksText(individualRates, true) +
+      '</div>';
+    const legalCardHtml =
+      '<div class="svc-card">' +
+        '<div class="svc-subh">🏢 Для юрлиц (автопарки)</div>' +
+        'Повышенный процент для владельцев автопарков - получай ' + referralHowItWorksText(legalRates, true) +
+      '</div>';
     box.innerHTML =
       '<div class="svc-h">📚 Материалы реферальной системы</div>' +
-      ratesNote +
+      sellingCardHtml +
+      individualCardHtml +
       '<a class="svc-btn ghost" href="' + PRESENTATION_MATERIALS_INDIVIDUAL_PDF_WEBAPP_PATH + '" target="_blank" rel="noopener">📥 Презентация для физлиц (с QR)</a>' +
-      '<a class="svc-btn ghost" href="' + PRESENTATION_FLEET_PDF_WEBAPP_PATH + '" target="_blank" rel="noopener">📥 Презентация для юрлиц (с QR)</a>';
+      legalCardHtml +
+      '<a class="svc-btn ghost" href="' + PRESENTATION_FLEET_PDF_WEBAPP_PATH + '" target="_blank" rel="noopener">📥 Презентация для юрлиц (с QR)</a>' +
+      taxNote;
   }
 
   // "Фантом" - точка входа во ВЕСЬ административный функционал. ПЕРЕПИСАНО
