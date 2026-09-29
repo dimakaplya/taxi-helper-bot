@@ -6615,6 +6615,18 @@ WELCOME_PHOTO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'a
 # Презентация бота (без QR-кода) - см. кнопку "📥 СКАЧАТЬ ПРЕЗЕНТАЦИЮ" в
 # referral_menu_keyboard / хендлер referral_download_presentation ниже.
 PRESENTATION_PDF_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'assets', 'taxi_helper_presentation.pdf')
+# ДОБАВЛЕНО 29.09.2026 (см. build_admin_overview_pdf_bytes ниже) - встроенные
+# TTF-шрифты с поддержкой кириллицы для генерации PDF через reportlab.
+# Встроенные PDF-шрифты reportlab (Helvetica и т.п.) - это Latin-1-кодировка
+# БЕЗ кириллицы: любой русский текст ими рисуется "тофу"-символами (в этом
+# и был первый баг PDF-сводки - при живом тесте с реальным рендером все
+# русские буквы превратились в "n"). Файлы шрифтов лежат прямо в репозитории
+# (assets/fonts/) вместо надежды на системные шрифты хоста - на Railway
+# (минимальный образ) DejaVu Sans в системе может не быть установлен вообще,
+# а так шрифт гарантированно едет вместе с кодом. DejaVu Sans - свободная
+# лицензия (Bitstream Vera + DejaVu changes), полный набор кириллицы.
+PDF_CYRILLIC_FONT_REGULAR_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'assets', 'fonts', 'DejaVuSans.ttf')
+PDF_CYRILLIC_FONT_BOLD_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'assets', 'fonts', 'DejaVuSans-Bold.ttf')
 
 # ОБНОВЛЕНО 21.09.2026 (прямая просьба пользователя - прислал готовый новый
 # текст питча целиком): позиционирование сменилось на "AI помощник" (было
@@ -20297,6 +20309,11 @@ def unified_app_html():
   const PHANTOM_UNLOCK_API_PATH = '""" + PHANTOM_UNLOCK_API_PATH + """';
   const ADMIN_PANEL_UNLOCK_API_PATH = '""" + ADMIN_PANEL_UNLOCK_API_PATH + """';
   const ADMIN_PANEL_OVERVIEW_API_PATH = '""" + ADMIN_PANEL_OVERVIEW_API_PATH + """';
+  // ДОБАВЛЕНО 29.09.2026 (прямая просьба пользователя - "Сделай возможность
+  // формирование pdf файла по кнопке по запросу данные") - кнопка "📄 Скачать
+  // PDF" на этом же экране (см. renderAdminPanelSection ниже и
+  // handle_admin_panel_overview_pdf_api в main.py).
+  const ADMIN_PANEL_OVERVIEW_PDF_API_PATH = '""" + ADMIN_PANEL_OVERVIEW_PDF_API_PATH + """';
   const ADMIN_PANEL_ENTITIES_API_PATH = '""" + ADMIN_PANEL_ENTITIES_API_PATH + """';
   const ADMIN_PANEL_ENTITY_DELETE_API_PATH = '""" + ADMIN_PANEL_ENTITY_DELETE_API_PATH + """';
   // ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - у каждой из трёх
@@ -21352,7 +21369,13 @@ def unified_app_html():
     // выше - для единообразия) - handle_referral_data_api теперь отдаёт
     // entity_name для ЛЮБОГО владельца кабинета (юрлицо или админ-партнёр),
     // показываем название компании-владельца, если оно есть.
-    const legalPartnerNote = data.entity_name ? ('<div class="svc-card">🏷 Компания: ' + data.entity_name + '</div>') : '';
+    // ИЗМЕНЕНО 29.09.2026 (прямая просьба пользователя - "вход в юр.лицо
+    // строго по паролю компании") - раньше был data.entity_name (ЛЮБОЙ
+    // владеемый кабинет, включая чужеродный для этого экрана
+    // admin_partner), теперь строго legal_entity_name (см.
+    // handle_referral_data_api в main.py) - показывается ТОЛЬКО если
+    // пользователь реально ввёл пароль СВОЕГО юр.лица.
+    const legalPartnerNote = data.legal_entity_name ? ('<div class="svc-card">🏷 Компания: ' + data.legal_entity_name + '</div>') : '';
     // ДОБАВЛЕНО 29.09.2026 (см. refDashHtml в renderReferralDriverDetail
     // выше - тот же дашборд "Текущая схема", теперь и здесь).
     let html = '<div class="svc-h">🏢 Юридическое лицо</div>' + refDashHtml(data) + legalPartnerNote + referralStatsBlockHtml(data, legalRates, legalDescription);
@@ -21452,6 +21475,16 @@ def unified_app_html():
             pwBtn.disabled = false;
             return;
           }
+          // ДОБАВЛЕНО 29.09.2026 (см. аналогичный приём для admin_partner
+          // выше в renderPhantomAdminReferral) - локально помечаем схему
+          // активной и запоминаем имя компании сразу, не дожидаясь
+          // отдельного похода за /referral/data, чтобы дашборд "Текущая
+          // схема" и "Компания: ..." обновились сразу после успешного ввода
+          // пароля, а не только при следующем полном открытии меню.
+          let json = null;
+          try { json = await resp.json(); } catch (e) { json = null; }
+          data.referrer_type = 'legal_entity';
+          if (json && json.entity_name) data.legal_entity_name = json.entity_name;
           renderReferralLegalDetail(box, data);
         } catch (e) {
           if (note) note.textContent = 'Не получилось отправить - попробуй ещё раз.';
@@ -21480,6 +21513,11 @@ def unified_app_html():
             headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': (tg && tg.initData) || '' }
           });
         } catch (e) {}
+        // ДОБАВЛЕНО 29.09.2026 (см. локальный патч data.referrer_type в
+        // pwBtn выше - для симметрии) - без этого дашборд "Текущая схема"
+        // наверху экрана ещё секунду-другую показывал бы старую схему
+        // 'legal_entity' после выхода, пока не подгрузятся свежие данные.
+        data.referrer_type = 'individual';
         renderReferralLegalDetail(box, data);
       });
     }
@@ -21594,7 +21632,9 @@ def unified_app_html():
       // себя") - показываем зарегистрированное имя/ник партнёра
       // (entity_name, задаётся через /add_admin_partner), чтобы два разных
       // админ-партнёра видели, в каком именно кабинете они находятся.
-      const partnerNote = data.entity_name ? ('<div class="svc-card">🏷 Партнёр: ' + data.entity_name + '</div>') : '';
+      // ИЗМЕНЕНО 29.09.2026 (см. legalPartnerNote выше - тот же фикс, для
+      // симметрии) - строго admin_partner_name, не общий entity_name.
+      const partnerNote = data.admin_partner_name ? ('<div class="svc-card">🏷 Партнёр: ' + data.admin_partner_name + '</div>') : '';
       // ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "открывая
       // учётку мы видим кнопки в моей Админ панель Новая кампания Список
       // кампаний удалить кампании а в остальных двух тока эти три кнопки
@@ -21606,7 +21646,7 @@ def unified_app_html():
       // пользователя) - ТОЛЬКО у ADMIN_PANEL_FREE_ACCESS_ENTITY_NAME
       // (AdminDmitry, см. main.py) - у AdminRuslan/AdminMike этих кнопок
       // нет вообще, что бы они ни вводили.
-      const isAdminDmitry = data.entity_name === 'AdminDmitry';
+      const isAdminDmitry = data.admin_partner_name === 'AdminDmitry';
       const manageButtonsHtml =
         '<button type="button" class="svc-btn" id="phantomMenuNewCompany" style="margin-top:10px;">🏢 Новая кампания</button>' +
         '<button type="button" class="svc-btn ghost" id="phantomMenuListCompanies" style="margin-top:8px;">📋 Список кампаний</button>' +
@@ -21685,7 +21725,7 @@ def unified_app_html():
         let json = null;
         try { json = await resp.json(); } catch (e) { json = null; }
         data.referrer_type = 'admin';
-        if (json && json.entity_name) data.entity_name = json.entity_name;
+        if (json && json.entity_name) data.admin_partner_name = json.entity_name;
         renderPhantomAdminReferral(subBox, data);
       } catch (e) {
         if (note) note.textContent = 'Не получилось отправить - попробуй ещё раз.';
@@ -21874,8 +21914,43 @@ def unified_app_html():
         subBox.innerHTML =
           '<div class="svc-h">🔐 Админ панель</div>' +
           '<pre class="svc-card" style="white-space:pre-wrap;font-family:inherit;">' + (json.overview_text || '') + '</pre>' +
-          '<button type="button" class="svc-btn ghost" id="apRefreshBtn">🔄 Обновить</button>';
+          '<button type="button" class="svc-btn ghost" id="apRefreshBtn">🔄 Обновить</button>' +
+          // ДОБАВЛЕНО 29.09.2026 (прямая просьба пользователя - "Сделай
+          // возможность формирование pdf файла по кнопке по запросу данные")
+          '<button type="button" class="svc-btn ghost" id="apPdfBtn" style="margin-top:8px;">📄 Скачать PDF</button>' +
+          '<div class="svc-note" id="apPdfNote"></div>';
         document.getElementById('apRefreshBtn').addEventListener('click', function () { renderAdminPanelSection(subBox); });
+        const pdfBtn = document.getElementById('apPdfBtn');
+        pdfBtn.addEventListener('click', async function () {
+          const note = document.getElementById('apPdfNote');
+          pdfBtn.disabled = true;
+          if (note) note.textContent = 'Формирую PDF...';
+          try {
+            // Та же самая пара "fetch с заголовком X-Telegram-Init-Data ->
+            // blob" что уже используется для QR-кода (см. loadReferralQr
+            // выше) - <a download> не умеет слать заголовки, поэтому нельзя
+            // просто дать прямую ссылку на .pdf: initData обязателен для
+            // проверки доступа (см. handle_admin_panel_overview_pdf_api).
+            const resp2 = await fetch(ADMIN_PANEL_OVERVIEW_PDF_API_PATH, { headers: { 'X-Telegram-Init-Data': (tg && tg.initData) || '' } });
+            if (!resp2.ok) throw new Error('http_' + resp2.status);
+            const blob = await resp2.blob();
+            const blobUrl = URL.createObjectURL(blob);
+            const dispo = resp2.headers.get('Content-Disposition') || '';
+            const match = /filename="([^"]+)"/.exec(dispo);
+            const filename = match ? match[1] : 'taxi_helper_admin_overview.pdf';
+            const a = document.createElement('a');
+            a.href = blobUrl;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            setTimeout(function () { URL.revokeObjectURL(blobUrl); }, 30000);
+            if (note) note.textContent = 'Готово - файл сохранён/открыт.';
+          } catch (e) {
+            if (note) note.textContent = 'Не получилось сформировать PDF - попробуй ещё раз.';
+          }
+          pdfBtn.disabled = false;
+        });
       } catch (e) {
         subBox.innerHTML = '<div class="svc-h">🔐 Админ панель</div><div class="svc-note">Не получилось загрузить - попробуй ещё раз.</div>';
       }
@@ -35097,6 +35172,7 @@ async def start_subscription_webhook_server():
     app.router.add_post(PHANTOM_UNLOCK_API_PATH, handle_phantom_unlock_api)
     app.router.add_post(ADMIN_PANEL_UNLOCK_API_PATH, handle_admin_panel_unlock_api)
     app.router.add_get(ADMIN_PANEL_OVERVIEW_API_PATH, handle_admin_panel_overview_api)
+    app.router.add_get(ADMIN_PANEL_OVERVIEW_PDF_API_PATH, handle_admin_panel_overview_pdf_api)
     app.router.add_get(ADMIN_PANEL_ENTITIES_API_PATH, handle_admin_panel_entities_api)
     app.router.add_post(ADMIN_PANEL_ENTITIES_API_PATH, handle_admin_panel_entities_api)
     app.router.add_post(ADMIN_PANEL_ENTITY_DELETE_API_PATH, handle_admin_panel_entity_delete_api)
@@ -35743,17 +35819,40 @@ def claim_legal_entity_ownership(entity_id, user_id):
     conn.close()
 
 
-def get_legal_entity_owned_by(user_id):
+def get_legal_entity_owned_by(user_id, kind=None):
     """Юр.лицо, которым владеет этот user_id (создатель/первый введший
-    пароль), или None, если он не владелец ни одного кабинета."""
+    пароль), или None, если он не владелец ни одного кабинета.
+    ИЗМЕНЕНО 29.09.2026 (прямая просьба пользователя - скриншот "нажал
+    Юридическое лицо и зашёл в схему юр.лица без пароля"): у одного
+    user_id МОГУТ быть одновременно ДВЕ разных записи в legal_entities -
+    его личное юр.лицо (kind='legal_entity') и его же учётка
+    админ-партнёра (kind='admin_partner', см. add_admin_partner) - это
+    два независимых кабинета с разными паролями. Раньше эта функция без
+    фильтра по kind брала ЛЮБУЮ (fetchone() без ORDER BY - фактически
+    первую по id) из этих записей и отдавала её вызывающему коду, даже
+    если вызывающему явно был нужен именно kind='legal_entity' (напр.
+    handle_referral_data_api -> "Компания: <имя>" на экране "Юридическое
+    лицо" в мини-приложении) - из-за чего там мог показаться админ-
+    партнёрский кабинет ("AdminDmitry") как будто это и есть юр.лицо,
+    хотя пароль юр.лица так и не вводился. Добавлен необязательный
+    параметр kind: без него поведение прежнее (любой владеемый кабинет,
+    как и раньше - см. вызовы, которым специально нужен ЛЮБОЙ кабинет,
+    напр. общий "Личный кабинет" для админ-партнёров), с ним - строго
+    запись указанного kind."""
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute('SELECT id, name, password, owner_user_id, created_at FROM legal_entities WHERE owner_user_id = ?', (user_id,))
+    if kind is not None:
+        cursor.execute(
+            'SELECT id, name, password, owner_user_id, created_at, kind FROM legal_entities WHERE owner_user_id = ? AND kind = ?',
+            (user_id, kind)
+        )
+    else:
+        cursor.execute('SELECT id, name, password, owner_user_id, created_at, kind FROM legal_entities WHERE owner_user_id = ?', (user_id,))
     row = cursor.fetchone()
     conn.close()
     if not row:
         return None
-    return {'id': row[0], 'name': row[1], 'password': row[2], 'owner_user_id': row[3], 'created_at': row[4]}
+    return {'id': row[0], 'name': row[1], 'password': row[2], 'owner_user_id': row[3], 'created_at': row[4], 'kind': row[5] or 'legal_entity'}
 
 
 def add_legal_entity(name, password, kind='legal_entity'):
@@ -36730,11 +36829,22 @@ async def handle_referral_data_api(request):
     # ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "чтобы у них было
     # различие чтобы два этих юзера... могли как бы различать у себя") -
     # название кабинета (см. /add_admin_partner//add_legal_entity), если
-    # этот пользователь - владелец какого-либо (юрлица ИЛИ админ-партнёра,
-    # get_legal_entity_owned_by не различает kind - см. main.py) - иначе
-    # None (не владелец: обычный пользователь, или не первый вошедший по
-    # общему паролю).
-    owned_entity = get_legal_entity_owned_by(user_id)
+    # этот пользователь - владелец какого-либо.
+    # ИЗМЕНЕНО 29.09.2026 (прямая просьба пользователя - скриншот "нажал
+    # Юридическое лицо и зашёл в схему юр.лица без пароля", жалоба "вход в
+    # юр.лицо строго по паролю кампании") - раньше тут был ОДИН общий
+    # owned_entity без учёта kind (см. get_legal_entity_owned_by), из-за
+    # чего экран "Юридическое лицо" в мини-приложении мог показать
+    # "Компания: <имя>", даже если у пользователя нет своего юр.лица (пароль
+    # юр.лица не вводился), а есть только его СОВСЕМ ДРУГОЙ кабинет
+    # админ-партнёра (kind='admin_partner', напр. "AdminDmitry") - визуально
+    # выглядело так, будто "вход в юр.лицо" произошёл без пароля. Теперь
+    # два независимых поля, строго по kind - юр.лицо показывается ТОЛЬКО на
+    # экране "Юридическое лицо" (renderReferralLegalDetail -> legalPartnerNote),
+    # админ-партнёр - ТОЛЬКО на экране "Админ реферальная программа"
+    # (renderPhantomAdminReferral -> partnerNote).
+    owned_legal_entity = get_legal_entity_owned_by(user_id, kind='legal_entity')
+    owned_admin_partner = get_legal_entity_owned_by(user_id, kind='admin_partner')
     return web.json_response({
         'live': True,
         'link': link,
@@ -36759,7 +36869,14 @@ async def handle_referral_data_api(request):
         'tax_withhold_percent': REFERRAL_TAX_WITHHOLD_PERCENT,
         'withdrawal_fee_percent': REFERRAL_WITHDRAWAL_FEE_PERCENT,
         'min_withdrawal_rub': REFERRAL_MIN_WITHDRAWAL_RUB,
-        'entity_name': owned_entity['name'] if owned_entity else None,
+        # 'entity_name' оставлено ради обратной совместимости со старыми
+        # закэшированными копиями фронта (см. комментарий выше) - отдаёт то
+        # же, что и раньше (любой владеемый кабинет, юр.лицо или
+        # админ-партнёр). Новый код должен использовать
+        # legal_entity_name/admin_partner_name ниже - они строго по kind.
+        'entity_name': (owned_legal_entity or owned_admin_partner or {}).get('name'),
+        'legal_entity_name': owned_legal_entity['name'] if owned_legal_entity else None,
+        'admin_partner_name': owned_admin_partner['name'] if owned_admin_partner else None,
     })
 
 
@@ -37102,6 +37219,34 @@ async def handle_admin_panel_overview_api(request):
     if not _admin_panel_require_unlocked(request):
         return web.json_response({'error': 'forbidden'}, status=403)
     return web.json_response({'overview_text': format_admin_overview_plain_text()})
+
+
+ADMIN_PANEL_OVERVIEW_PDF_API_PATH = '/admin_panel/overview.pdf'
+
+
+# ДОБАВЛЕНО 29.09.2026 (прямая просьба пользователя - "Сделай возможность
+# формирование pdf файла по кнопке по запросу данные") - та же проверка
+# доступа, что и у текстовой версии сводки выше (build_admin_overview_pdf_bytes
+# берёт данные из ТОЙ ЖЕ format_admin_overview_text, никакого отдельного
+# источника данных). Отдаётся как файл для скачивания
+# (Content-Disposition: attachment), а не для показа в браузере, чтобы
+# WebView Telegram сразу предложил сохранить/поделиться файлом.
+async def handle_admin_panel_overview_pdf_api(request):
+    if not _admin_panel_require_unlocked(request):
+        return web.json_response({'error': 'forbidden'}, status=403)
+    try:
+        pdf_bytes = build_admin_overview_pdf_bytes()
+    except Exception:
+        logger.exception("❌ Не удалось сформировать PDF сводки админ-панели")
+        return web.json_response({'error': 'pdf_generation_failed'}, status=500)
+    filename = 'taxi_helper_admin_overview_' + datetime.now(ZoneInfo('Europe/Moscow')).strftime('%Y-%m-%d_%H%M') + '.pdf'
+    return web.Response(
+        body=pdf_bytes, content_type='application/pdf',
+        headers={
+            'Content-Disposition': f'attachment; filename="{filename}"',
+            'Cache-Control': 'no-store, no-cache, must-revalidate',
+        },
+    )
 
 
 ADMIN_PANEL_ENTITIES_API_PATH = '/admin_panel/entities'
@@ -38348,6 +38493,103 @@ def format_admin_overview_plain_text():
     для показа в мини-приложении (JSON -> обычный текстовый блок), а не в
     Telegram-сообщении с parse_mode='HTML'."""
     return _ADMIN_OVERVIEW_HTML_TAG_RE.sub('', format_admin_overview_text())
+
+
+# ДОБАВЛЕНО 29.09.2026 (прямая просьба пользователя - "Сделай возможность
+# формирование pdf файла по кнопке по запросу данные", отправлено со
+# скриншотом экрана "🔐 Админ-панель") - кнопка "📄 Скачать PDF" рядом с
+# "🔄 Обновить" на этом же экране в мини-приложении (см.
+# renderAdminPanelSection в unified_app_html и handle_admin_panel_overview_pdf_api
+# ниже) формирует PDF ИЗ ТЕХ ЖЕ САМЫХ данных, что уже показаны на экране -
+# никакого отдельного похода за данными, просто другое представление уже
+# готового format_admin_overview_text(). Тег <b>...</b> в этом тексте - та
+# же самая мини-разметка Telegram HTML, которую ReportLab Paragraph понимает
+# "из коробки" (см. коммент у _ADMIN_OVERVIEW_HTML_TAG_RE выше про то, что
+# текст полностью свой и недоверенного HTML тут не бывает), поэтому теги не
+# нужно ни снимать, ни переводить - только заменить одинарные '\n' на
+# '<br/>' (Paragraph поддерживает оба тега, но не голый перевод строки).
+def _register_pdf_cyrillic_fonts():
+    """Регистрирует DejaVu Sans (обычный + жирный) в reportlab под именами
+    'DejaVuSans'/'DejaVuSans-Bold', если это ещё не сделано в этом процессе
+    (pdfmetrics хранит регистрацию глобально - повторная регистрация того же
+    имени просто no-op, но незачем читать файлы шрифтов с диска на каждый
+    вызов build_admin_overview_pdf_bytes). Поднимает исключение, если файлы
+    шрифтов почему-то не доехали с кодом (assets/fonts/ - см. пути выше) -
+    вызывающий код (handle_admin_panel_overview_pdf_api) это логирует и
+    отдаёт понятную 500-ошибку, а не молча рисует "тофу" вместо кириллицы."""
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+    if 'DejaVuSans' not in pdfmetrics.getRegisteredFontNames():
+        pdfmetrics.registerFont(TTFont('DejaVuSans', PDF_CYRILLIC_FONT_REGULAR_PATH))
+        pdfmetrics.registerFont(TTFont('DejaVuSans-Bold', PDF_CYRILLIC_FONT_BOLD_PATH))
+        # Связываем обычный/жирный как одну "семью" - иначе тег <b>...</b>
+        # внутри Paragraph (см. format_admin_overview_text - <b>Чистая
+        # прибыль: ...</b> и т.п.) не найдёт жирное начертание ИМЕННО этого
+        # шрифта и либо тихо останется небольшим, либо reportlab попробует
+        # подставить Helvetica-Bold (снова без кириллицы - тот же баг вернётся
+        # только для жирных фрагментов текста).
+        pdfmetrics.registerFontFamily(
+            'DejaVuSans', normal='DejaVuSans', bold='DejaVuSans-Bold',
+            italic='DejaVuSans', boldItalic='DejaVuSans-Bold',
+        )
+
+
+def build_admin_overview_pdf_bytes():
+    """Рисует ту же сводку админ-панели (пользователи/подписки/прибыль
+    кампании/резерв на выплаты - format_admin_overview_text) в виде PDF-файла
+    (bytes), готового к скачиванию. Генерация полностью локальная
+    (библиотека reportlab, см. requirements.txt), без сторонних сервисов -
+    те же цифры, что уже посчитаны для текстовой версии, просто другая
+    "упаковка". ИСПРАВЛЕНО 29.09.2026 - см. _register_pdf_cyrillic_fonts
+    выше: первая версия использовала встроенный Helvetica, который рисует
+    русский текст нечитаемыми "тофу"-символами (нет кириллицы в кодировке
+    Latin-1) - обнаружено живым рендером PDF и извлечением текста обратно,
+    не только чтением кода."""
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.units import mm
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, HRFlowable
+    from reportlab.lib.colors import HexColor
+
+    _register_pdf_cyrillic_fonts()
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        'AdminOverviewTitle', parent=styles['Heading1'],
+        fontName='DejaVuSans-Bold', fontSize=17, spaceAfter=2, textColor=HexColor('#14213D'),
+    )
+    meta_style = ParagraphStyle(
+        'AdminOverviewMeta', parent=styles['Normal'],
+        fontName='DejaVuSans', fontSize=9, textColor=HexColor('#6B7280'), spaceAfter=14,
+    )
+    body_style = ParagraphStyle(
+        'AdminOverviewBody', parent=styles['Normal'],
+        fontName='DejaVuSans', fontSize=10.5, leading=15.5, spaceAfter=10,
+    )
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf, pagesize=A4,
+        leftMargin=18 * mm, rightMargin=18 * mm, topMargin=16 * mm, bottomMargin=16 * mm,
+        title='Taxi Helper - Админ-панель',
+    )
+    generated_at = datetime.now(ZoneInfo('Europe/Moscow')).strftime('%d.%m.%Y %H:%M')
+    story = [
+        Paragraph('Taxi Helper - сводка админ-панели', title_style),
+        Paragraph('Сформировано: ' + generated_at + ' (МСК)', meta_style),
+        HRFlowable(width='100%', thickness=0.6, color=HexColor('#E5E7EB'), spaceAfter=12),
+    ]
+    raw_text = format_admin_overview_text()
+    # Режем на абзацы по пустой строке (та же визуальная разбивка, что и в
+    # <pre> мини-приложения/сообщении чата), одинарные переводы строк внутри
+    # абзаца - в <br/>.
+    for block in re.split(r'\n\s*\n', raw_text.strip('\n')):
+        block = block.strip('\n')
+        if not block:
+            continue
+        story.append(Paragraph(block.replace('\n', '<br/>'), body_style))
+        story.append(Spacer(1, 2))
+    doc.build(story)
+    return buf.getvalue()
 
 
 # По просьбе пользователя (20.09.2026): "делай пуши перекрытий... и крупные
