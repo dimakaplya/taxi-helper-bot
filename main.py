@@ -35,6 +35,7 @@ import fetch_trains_data  # поезда дальнего следования (
 import fetch_favt_notices  # логика сбора уведомлений Росавиации (@favt_info), тоже фоново
 import fetch_road_events   # ДТП по городам (Москва: @dtp777+@DtOperativno слиты в одну ленту, СПб: @dtp_spb78) - тем же способом, фоново
 import fetch_concert_events  # афиша концертов из Telegram-каналов (Москва: @concerts_moscow, СПб: @spb_conc) - второй источник для "🎭 СОБЫТИЯ ГОРОДА", тем же способом, фоново
+import fetch_neurogodriver_preorders  # предзаказы из канала @NeurogoDriver - тем же способом (публичная веб-версия канала), фоново, см. блок "ПРЕДЗАКАЗЫ" ниже
 import fetch_mos_road_data  # официальный API data.mos.ru (доп. источник для Москвы) - см. MOS_DATA_API_KEY ниже
 import fetch_timepad_data  # афиша города (TimePad) для кнопки "🎭 СОБЫТИЯ ГОРОДА" - используется
                             # только для TIMEPAD_CITY_MAP; timepad_data.json обновляется ЛОКАЛЬНО
@@ -7986,6 +7987,200 @@ async def handle_orders_hub_webapp(request):
         text=orders_hub_webapp_html(), content_type='text/html',
         headers={'Cache-Control': 'no-store, no-cache, must-revalidate', 'Pragma': 'no-cache'},
     )
+
+# ==================== ПРЕДЗАКАЗЫ (канал NeurogoDriver, WebApp) ====================
+# ДОБАВЛЕНО 29.09.2026 (продолжение задачи "предзаказы бери отсюда только
+# формируй по нашей структуре... и формируй кнопку перехода на страницу
+# этого канала с этим заказом", https://t.me/NeurogoDriver) - подключение
+# уже написанного fetch_neurogodriver_preorders.py (тот же способ сбора, что
+# у ROAD_EVENTS/CONCERT_EVENTS выше - публичная веб-версия канала, фоновая
+# задача раз в NEUROGODRIVER_PREORDERS_UPDATE_INTERVAL_MINUTES обновляет
+# neurogodriver_preorders_data.json, страница читает его через
+# load_neurogodriver_preorders/handle_preorders_data_api). Карточка заказа
+# показывает распознанные поля (маршрут/тариф/расстояние/цена), а НИЖЕ -
+# ПОЛНЫЙ raw_text поста как подстраховка (см. докстринг fetch_neurogodriver_
+# preorders.py - единого жёсткого формата у канала нет) и кнопку-ссылку на
+# оригинальный пост в канале (по прямой просьбе пользователя - "формируй
+# кнопку перехода в на страницу это канала с этим заказом").
+NEUROGODRIVER_PREORDERS_DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'neurogodriver_preorders_data.json')
+NEUROGODRIVER_PREORDERS_UPDATE_INTERVAL_MINUTES = 3
+PREORDERS_DATA_API_PATH = '/preorders/data'
+
+_neurogodriver_preorders_cache = None
+_neurogodriver_preorders_mtime = None
+
+def load_neurogodriver_preorders():
+    """Загружает neurogodriver_preorders_data.json (см. fetch_neurogodriver_
+    preorders.py) - тот же mtime-кэш, что у load_road_events/load_concert_events
+    выше, чтобы не читать файл с диска на каждый запрос страницы."""
+    global _neurogodriver_preorders_cache, _neurogodriver_preorders_mtime
+    try:
+        mtime = os.path.getmtime(NEUROGODRIVER_PREORDERS_DATA_FILE)
+        if _neurogodriver_preorders_cache is not None and mtime == _neurogodriver_preorders_mtime:
+            return _neurogodriver_preorders_cache
+        with open(NEUROGODRIVER_PREORDERS_DATA_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        _neurogodriver_preorders_cache = data
+        _neurogodriver_preorders_mtime = mtime
+        return data
+    except FileNotFoundError:
+        return None
+    except Exception as e:
+        logger.error(f"❌ Ошибка чтения neurogodriver_preorders_data.json: {e}")
+        return None
+
+
+def preorders_webapp_html():
+    return """<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Предзаказы</title>
+<script src=\"""" + TG_WEBAPP_JS_PROXY_PATH + """\"></script>
+<style>
+  html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  html { background: #000; overscroll-behavior: none; }
+  body {
+    margin: 0; padding: 18px; padding-bottom: max(18px, env(safe-area-inset-bottom, 0px));
+    padding-top: max(18px, calc(env(safe-area-inset-top, 0px) + var(--tg-chrome-top, 0px)));
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: #000; color: #fff; overscroll-behavior: none; touch-action: manipulation;
+  }
+  h1 { font-size: 17px; margin: 4px 0 4px; }
+  .src-note { font-size: 12px; color: #6cc3ff; margin-bottom: 14px; }
+  #list { display: flex; flex-direction: column; gap: 12px; }
+  .card {
+    background: #131313; border: 1px solid rgba(80,180,255,.25); border-radius: 16px; padding: 14px 15px;
+    animation: cardIn .25s ease both;
+  }
+  @keyframes cardIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+  .card .route { font-size: 14.5px; font-weight: 700; line-height: 1.4; margin-bottom: 6px; }
+  .card .route .arrow { color: #6cc3ff; margin: 0 4px; }
+  .card .line { font-size: 13px; color: #ccc; margin-top: 3px; display: flex; align-items: baseline; gap: 5px; }
+  .card .line .ic { flex-shrink: 0; }
+  .card .price { font-size: 16px; font-weight: 800; color: #6cc3ff; margin-top: 8px; }
+  .card .raw {
+    margin-top: 10px; padding: 10px 11px; border-radius: 10px; background: rgba(255,255,255,.04);
+    border: 1px solid rgba(255,255,255,.08); font-size: 12px; color: #999; line-height: 1.45;
+    white-space: pre-wrap; word-break: break-word; max-height: 120px; overflow-y: auto;
+  }
+  .card .open-btn {
+    display: block; width: 100%; margin-top: 12px; padding: 11px; border-radius: 12px; text-align: center;
+    text-decoration: none; background: rgba(80,180,255,.14); color: #6cc3ff; border: 1px solid rgba(80,180,255,.4);
+    font-size: 13.5px; font-weight: 700; text-transform: uppercase;
+  }
+  .card .open-btn:active { transform: scale(.97); }
+  .card .time { font-size: 11.5px; color: #777; margin-top: 8px; }
+  #empty, #state { text-align: center; padding: 60px 16px; color: #888; font-size: 14px; }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation-duration: .001ms !important; transition-duration: .001ms !important; }
+  }
+</style>
+</head>
+<body>
+<button type="button" onclick="try{if(window.history.length>1){history.back();}else if(window.Telegram&&Telegram.WebApp&&Telegram.WebApp.close){Telegram.WebApp.close();}}catch(e){}" style="position:relative;z-index:2;display:inline-flex;align-items:center;gap:5px;margin:4px 0 10px;padding:8px 14px 8px 10px;background:#1c1c1c;border:1px solid rgba(255,255,255,.12);border-radius:10px;color:#fff;font-size:13px;font-weight:600;cursor:pointer;">← Назад</button>
+<h1>📡 Предзаказы</h1>
+<div class="src-note">Заказы из канала @NeurogoDriver - формат постов у канала произвольный, поэтому ниже под распознанными полями всегда показан исходный текст поста целиком.</div>
+<div id="state">Загружаю…</div>
+<div id="empty" style="display:none">Сейчас нет свежих предзаказов в канале.<br>Загляни попозже - список обновляется автоматически.</div>
+<div id="list"></div>
+<script>
+  (function () {
+    let lastTouchEndAt = 0;
+    document.addEventListener('touchend', function (e) {
+      const now = Date.now();
+      if (now - lastTouchEndAt <= 300) { e.preventDefault(); }
+      lastTouchEndAt = now;
+    }, { passive: false });
+  })();
+  const tg = window.Telegram && window.Telegram.WebApp;
+  if (tg) {
+    tg.ready(); tg.expand();
+    if (tg.lockOrientation && window.innerHeight >= window.innerWidth) {
+      try { tg.lockOrientation(); } catch (e) {}
+    }
+    try { if (typeof tg.disableVerticalSwipes === 'function') tg.disableVerticalSwipes(); } catch (e) {}
+    try { if (typeof tg.requestFullscreen === 'function') tg.requestFullscreen(); } catch (e) {}
+    var applyTgChromeInset = function () {
+      try {
+        var csa = tg.contentSafeAreaInset || {};
+        document.documentElement.style.setProperty('--tg-chrome-top', (csa.top || 0) + 'px');
+      } catch (e) {}
+    };
+    applyTgChromeInset();
+    try { if (typeof tg.onEvent === 'function') tg.onEvent('contentSafeAreaChanged', applyTgChromeInset); } catch (e) {}
+  }
+  function escapeHtml(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+  function timeAgo(iso) {
+    if (!iso) return '';
+    var diffMin = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 60000));
+    if (diffMin < 1) return 'только что';
+    if (diffMin < 60) return diffMin + ' мин назад';
+    var h = Math.round(diffMin / 60);
+    return h + ' ч назад';
+  }
+  function cardHtml(post) {
+    const lines = [];
+    if (post.tariff) lines.push('<div class="line"><span class="ic">🚘</span><span>' + escapeHtml(post.tariff) + '</span></div>');
+    if (post.distance_km) lines.push('<div class="line"><span class="ic">📏</span><span>' + escapeHtml(post.distance_km) + ' км</span></div>');
+    const hasRoute = post.pickup || post.dropoff;
+    const routeHtml = hasRoute
+      ? ('<div class="route">📍 ' + escapeHtml(post.pickup || '?') + '<span class="arrow">→</span>🏁 ' + escapeHtml(post.dropoff || '?') + '</div>')
+      : '';
+    const priceHtml = post.price ? ('<div class="price">' + escapeHtml(post.price) + ' ₽</div>') : '';
+    return '<div class="card">' +
+      routeHtml +
+      lines.join('') +
+      priceHtml +
+      '<div class="raw">' + escapeHtml(post.raw_text || '') + '</div>' +
+      '<div class="time">' + timeAgo(post.time) + '</div>' +
+      (post.link ? ('<a class="open-btn" href="' + escapeHtml(post.link) + '" target="_blank" rel="noopener">📡 Открыть пост в канале</a>') : '') +
+      '</div>';
+  }
+  async function load() {
+    try {
+      const resp = await fetch('""" + PREORDERS_DATA_API_PATH + """');
+      const data = await resp.json();
+      document.getElementById('state').style.display = 'none';
+      const posts = data.posts || [];
+      if (!posts.length) { document.getElementById('empty').style.display = 'block'; return; }
+      document.getElementById('list').innerHTML = posts.map(cardHtml).join('');
+    } catch (e) {
+      document.getElementById('state').textContent = 'Не удалось загрузить предзаказы - попробуй закрыть и открыть ещё раз.';
+    }
+  }
+  load();
+</script>
+</body>
+</html>"""
+
+async def handle_preorders_webapp(request):
+    return web.Response(
+        text=preorders_webapp_html(), content_type='text/html',
+        headers={'Cache-Control': 'no-store, no-cache, must-revalidate', 'Pragma': 'no-cache'},
+    )
+
+async def handle_preorders_data_api(request):
+    """GET -> {posts: [...]}. Публичный листинг (initData не нужен - тот же
+    принцип, что у активных заказов без initData: ничего персонального
+    здесь нет, канал публичный). Показываем только ОТКРЫТЫЕ (taken=false)
+    посты - взятые/закрытые заказы отфильтровываются (см. докстринг
+    fetch_neurogodriver_preorders.py - они остаются в самом JSON-файле на
+    случай диагностики, но не показываются водителю)."""
+    data = load_neurogodriver_preorders()
+    if not data:
+        return web.json_response({'posts': []})
+    posts = [p for p in (data.get('posts') or []) if not p.get('taken')]
+    fields = ('id', 'link', 'time', 'pickup', 'dropoff', 'tariff', 'distance_km', 'price', 'raw_text')
+    packed = [{k: p.get(k) for k in fields} for p in posts]
+    return web.json_response({'posts': packed})
 
 PLATFORM_REPORT_API_PATH = '/platform/report'
 
@@ -34950,6 +35145,8 @@ async def start_subscription_webhook_server():
     app.router.add_post(ACTIVE_ORDERS_ACCEPT_API_PATH, handle_active_orders_accept_api)
     # Хаб заказов (см. блок "ХАБ ЗАКАЗОВ (АКТИВНЫЕ/ПРЕДЗАКАЗЫ/ОТДАТЬ, WebApp)" выше)
     app.router.add_get(ORDERS_HUB_WEBAPP_PATH, handle_orders_hub_webapp)
+    app.router.add_get(PREORDERS_WEBAPP_PATH, handle_preorders_webapp)
+    app.router.add_get(PREORDERS_DATA_API_PATH, handle_preorders_data_api)
     app.router.add_post(PLATFORM_REPORT_API_PATH, handle_platform_report_api)
     app.router.add_get(TIPS_QR_STATUS_API_PATH, handle_tips_qr_status_api)
     app.router.add_get(PLATFORM_PROBE_WEBAPP_PATH, handle_platform_probe_webapp)
@@ -39290,6 +39487,21 @@ async def concert_events_updater():
             logger.error(f"❌ Ошибка фонового обновления concert_events_data.json: {e}")
         await asyncio.sleep(CONCERT_EVENTS_UPDATE_INTERVAL_MINUTES * 60)
 
+async def neurogodriver_preorders_updater():
+    """Фоновая задача: раз в NEUROGODRIVER_PREORDERS_UPDATE_INTERVAL_MINUTES
+    минут читает публичную веб-версию канала @NeurogoDriver и обновляет
+    neurogodriver_preorders_data.json (см. fetch_neurogodriver_preorders.py -
+    тот же способ сбора, что и у road_events_updater/concert_events_updater
+    выше)."""
+    while True:
+        try:
+            logger.info("🔄 Обновляю neurogodriver_preorders_data.json (предзаказы @NeurogoDriver)...")
+            await asyncio.to_thread(fetch_neurogodriver_preorders.main)
+            logger.info("✅ neurogodriver_preorders_data.json обновлён")
+        except Exception as e:
+            logger.error(f"❌ Ошибка фонового обновления neurogodriver_preorders_data.json: {e}")
+        await asyncio.sleep(NEUROGODRIVER_PREORDERS_UPDATE_INTERVAL_MINUTES * 60)
+
 async def mos_road_data_updater():
     """Фоновая задача: раз в MOS_ROAD_DATA_UPDATE_INTERVAL_MINUTES минут
     запрашивает официальный API data.mos.ru (см. fetch_mos_road_data.py).
@@ -39445,6 +39657,7 @@ async def main():
     asyncio.create_task(favt_notices_updater())
     asyncio.create_task(road_events_updater())
     asyncio.create_task(concert_events_updater())
+    asyncio.create_task(neurogodriver_preorders_updater())
     # mos_road_data_updater() ОТКЛЮЧЁН - apidata.mos.ru не резолвится даже с
     # серверов Railway (NameResolutionError на 'apidata.mos.ru' в логах),
     # не только из среды разработки. Похоже, домен просто недоступен из
