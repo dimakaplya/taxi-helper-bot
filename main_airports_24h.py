@@ -3693,6 +3693,68 @@ def init_db():
         )
     except Exception:
         pass
+    # ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "всё что до этого
+    # пароли и введённые данные обнуляй, придерживайся моей схемы что дал
+    # выше") - ОДНОРАЗОВЫЙ сброс старой схемы юрлиц/админ-партнёров:
+    # если ни одной из 3 новых именованных учёток АДМИН РЕФ ЕЩЁ нет в БД -
+    # значит, эта миграция выполняется первый раз после появления новой
+    # схемы (3 именованные учётки, см. ниже) - тогда стираем ВСЕ старые
+    # записи юрлиц/админ-партнёров (в т.ч. заведённые раньше вручную через
+    # /add_legal_entity//add_admin_partner и легаси-записи по старым общим
+    # паролям REFERRAL_LEGAL_ENTITY_PASSWORD/REFERRAL_ADMIN_PASSWORD) вместе
+    # с их машинами/начислениями аренды, и возвращаем ВСЕМ пользователям
+    # схему начислений по умолчанию 'individual' - новая схема (3 именные
+    # учётки АДМИН РЕФ ниже) становится ЕДИНСТВЕННЫМ источником доступа к
+    # 'legal_entity'/'admin'. При ПОСЛЕДУЮЩИХ перезапусках (когда все 3
+    # учётки уже существуют) этот блок больше НИЧЕГО не трогает - реальные
+    # кампании/владельцы, заведённые ПОСЛЕ сброса, не стираются на каждом
+    # редеплое, сброс происходит ровно один раз.
+    cursor.execute(
+        "SELECT COUNT(*) FROM legal_entities WHERE kind = 'admin_partner' AND name IN ('AdminDmitry', 'AdminRuslan', 'AdminMike')"
+    )
+    _new_admin_accounts_exist = (cursor.fetchone() or [0])[0] >= 3
+    if not _new_admin_accounts_exist:
+        try:
+            cursor.execute("DELETE FROM legal_entity_car_rent_payments")
+        except Exception:
+            pass
+        try:
+            cursor.execute("DELETE FROM legal_entity_cars")
+        except Exception:
+            pass
+        try:
+            cursor.execute("DELETE FROM legal_entities")
+        except Exception:
+            pass
+        try:
+            cursor.execute("UPDATE referrals SET referrer_type = 'individual'")
+        except Exception:
+            pass
+        conn.commit()
+    # Заранее создаём 3 именованных админ-партнёра (та же таблица
+    # legal_entities, kind='admin_partner', что и у обычных админ-партнёров,
+    # см. add_admin_partner ниже по файлу) прямо здесь, напрямую через уже
+    # открытые cursor/conn - НЕ вызовом add_admin_partner(), т.к.
+    # add_legal_entity() внутри него сам вызывает init_db(), а на этом этапе
+    # _db_initialized ещё не выставлен в True (см. ниже по функции) -
+    # вложенный вызов заново прогнал бы ВСЮ эту функцию с начала и дошёл бы
+    # до этого же места снова (бесконечная рекурсия). INSERT OR IGNORE даёт
+    # тот же идемпотентный эффект, что и UNIQUE-конфликт в add_legal_entity -
+    # при повторном запуске init_db() на уже заполненной БД (каждый рестарт
+    # процесса) просто ничего не делает.
+    for _admin_name, _admin_password in (
+        ("AdminDmitry", "Anefog1994!"),
+        ("AdminRuslan", "zxcvbnm1"),
+        ("AdminMike", "26081995"),
+    ):
+        try:
+            cursor.execute(
+                "INSERT OR IGNORE INTO legal_entities (name, password, kind) VALUES (?, ?, 'admin_partner')",
+                (_admin_name, _admin_password)
+            )
+        except Exception:
+            pass
+    conn.commit()
     # Машины юрлица - привязка к конкретному водителю (driver_user_id,
     # может быть NULL, если машина пока никому не привязана), пробег и
     # последняя поездка обновляются водителем через карту/личный кабинет
@@ -4368,6 +4430,47 @@ def is_shared_order_expired(order):
     except Exception:
         return False  # не смогли распарсить - не считаем протухшим, чтобы не терять заказ на пустом месте
     return datetime.now(ZoneInfo('UTC')) - created > timedelta(hours=SHARED_ORDER_EXPIRY_HOURS)
+
+# ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - единая кнопка
+# "ПРЕДЗАКАЗЫ/ОТДАТЬ ЗАКАЗ" с тремя разделами внутри, один из них -
+# "АКТИВНЫЕ ЗАКАЗЫ" - "биржа всех открытых заказов" нашего города, а не
+# только пуш-уведомление, как раньше). До этого во всём файле НЕ было ни
+# одного запроса, который бы просто ЛИСТИНГОВАЛ открытые shared_orders
+# города - get_shared_order читает только ОДИН заказ по id (из callback_data
+# инлайн-кнопки пуша). ИСПОЛЬЗУЕТ ТЕ ЖЕ _SHARED_ORDER_FIELDS/status='open',
+# что и остальные функции этого блока - никакая схема не дублируется.
+def get_open_shared_orders_for_city(city, exclude_sender_id=None, limit=40):
+    """Список открытых (ещё не принятых и не протухших) заказов "Отдать
+    заказ" по городу, свежие сначала - для экрана "АКТИВНЫЕ ЗАКАЗЫ"
+    (handle_active_orders_data_api). Как и в broadcast_shared_order,
+    категория НЕ фильтрует - заказ доступен водителям любой категории.
+    exclude_sender_id - не показывать водителю его же собственные заказы
+    (тот же принцип, что и у пуш-рассылки, где отправитель не входит в
+    recipients). Протухшие (SHARED_ORDER_EXPIRY_HOURS) отфильтровываются
+    здесь же через is_shared_order_expired, БЕЗ вызова expire_shared_order
+    на каждый - реальный статус в БД обновится при первой попытке принять
+    (см. handle_active_orders_accept_api), как и раньше у пуш-кнопки."""
+    init_db()
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        f'SELECT {", ".join(_SHARED_ORDER_FIELDS)} FROM shared_orders '
+        f'WHERE status=\'open\' AND city=? ORDER BY created_at DESC LIMIT ?',
+        (city, limit * 2)  # с запасом - часть отсеется как протухшие/собственные ниже
+    )
+    rows = cursor.fetchall()
+    conn.close()
+    orders = [dict(zip(_SHARED_ORDER_FIELDS, row)) for row in rows]
+    result = []
+    for order in orders:
+        if exclude_sender_id is not None and order['sender_id'] == exclude_sender_id:
+            continue
+        if is_shared_order_expired(order):
+            continue
+        result.append(order)
+        if len(result) >= limit:
+            break
+    return result
 
 def try_accept_shared_order(order_id, accepted_by, accepted_by_contact):
     """Атомарно "забирает" заказ - условие status='open' прямо в WHERE
@@ -7446,6 +7549,443 @@ async def handle_share_order_submit_api(request):
         logger.exception(f"❌ Ошибка рассылки заказа #{order_id} из /share-order/submit")
         sent = 0
     return web.json_response({'ok': True, 'order_id': order_id, 'sent': sent, 'expiry_hours': SHARED_ORDER_EXPIRY_HOURS})
+
+# ==================== АКТИВНЫЕ ЗАКАЗЫ (биржа, WebApp) ====================
+# ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "сделай единую кнопку
+# ПРЕДЗАКАЗЫ/ОТДАТЬ ЗАКАЗ внутри будет три кнопки: АКТИВНЫЕ ЗАКАЗЫ,
+# ПРЕДЗАКАЗЫ, ОТДАТЬ ЗАКАЗ"; уточнение пользователя - "АКТИВНЫЕ ЗАКАЗЫ" это
+# "биржа всех открытых заказов", отдельно от "ПРЕДЗАКАЗОВ" из канала, см.
+# NEUROGODRIVER_PREORDERS_CHANNEL ниже). Раньше заказы "Отдать заказ" можно
+# было увидеть ТОЛЬКО через пуш-рассылку в чат в момент создания (см.
+# broadcast_shared_order) - если пропустил пуш, заказ было не найти. Этот
+# экран - листинг ВСЕХ открытых заказов города (get_open_shared_orders_for_city
+# выше), с кнопкой принять прямо из списка - та же бизнес-логика
+# (try_accept_shared_order/format_share_order_price_range/
+# format_shared_order_cargo_line), что и у пуш-кнопки "✅ ПРИНЯТЬ ЗАКАЗ"
+# (accept_shared_order), не дублируется - переиспользуются те же примитивы.
+ACTIVE_ORDERS_WEBAPP_PATH = '/active-orders'
+ACTIVE_ORDERS_DATA_API_PATH = '/active-orders/data'
+ACTIVE_ORDERS_ACCEPT_API_PATH = '/active-orders/accept'
+
+def active_orders_webapp_html():
+    return """<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Активные заказы</title>
+<script src=\"""" + TG_WEBAPP_JS_PROXY_PATH + """\"></script>
+<style>
+  html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  html { background: #000; overscroll-behavior: none; }
+  body {
+    margin: 0; padding: 18px; padding-bottom: max(18px, env(safe-area-inset-bottom, 0px));
+    padding-top: max(18px, calc(env(safe-area-inset-top, 0px) + var(--tg-chrome-top, 0px)));
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: #000; color: #fff; overscroll-behavior: none; touch-action: manipulation;
+  }
+  h1 { font-size: 17px; margin: 4px 0 14px; }
+  #list { display: flex; flex-direction: column; gap: 12px; }
+  .card {
+    background: #131313; border: 1px solid rgba(255,255,255,.1); border-radius: 16px; padding: 14px 15px;
+    animation: cardIn .25s ease both;
+  }
+  @keyframes cardIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+  .card .route { font-size: 14.5px; font-weight: 700; line-height: 1.4; margin-bottom: 6px; }
+  .card .route .arrow { color: #FFC400; margin: 0 4px; }
+  .card .line { font-size: 13px; color: #ccc; margin-top: 3px; display: flex; align-items: baseline; gap: 5px; }
+  .card .line .ic { flex-shrink: 0; }
+  .card .price { font-size: 16px; font-weight: 800; color: #FFC400; margin-top: 8px; }
+  .card .accept-btn {
+    width: 100%; margin-top: 12px; padding: 11px; border-radius: 12px; border: none;
+    background: #FFC400; color: #000; font-size: 14px; font-weight: 800; transition: transform .12s;
+    text-transform: uppercase;
+  }
+  .card .accept-btn:active:not(:disabled) { transform: scale(.97); }
+  .card .accept-btn:disabled { opacity: .5; }
+  .card.accepted { border-color: rgba(76,217,100,.5); }
+  .card .accepted-box {
+    margin-top: 10px; padding: 10px 12px; border-radius: 12px; background: rgba(76,217,100,.12);
+    border: 1px solid rgba(76,217,100,.4); font-size: 13px; line-height: 1.5;
+  }
+  #empty, #state { text-align: center; padding: 60px 16px; color: #888; font-size: 14px; }
+  #err { color: #ff6b6b; font-size: 12.5px; margin-top: 6px; }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation-duration: .001ms !important; transition-duration: .001ms !important; }
+  }
+</style>
+</head>
+<body>
+<button type="button" onclick="try{if(window.history.length>1){history.back();}else if(window.Telegram&&Telegram.WebApp&&Telegram.WebApp.close){Telegram.WebApp.close();}}catch(e){}" style="position:relative;z-index:2;display:inline-flex;align-items:center;gap:5px;margin:4px 0 10px;padding:8px 14px 8px 10px;background:#1c1c1c;border:1px solid rgba(255,255,255,.12);border-radius:10px;color:#fff;font-size:13px;font-weight:600;cursor:pointer;">← Назад</button>
+<h1>📋 Активные заказы</h1>
+<div id="state">Загружаю…</div>
+<div id="empty" style="display:none">Сейчас нет открытых заказов в твоём городе.<br>Загляни попозже - список обновляется постоянно.</div>
+<div id="list"></div>
+<script>
+  (function () {
+    let lastTouchEndAt = 0;
+    document.addEventListener('touchend', function (e) {
+      const now = Date.now();
+      if (now - lastTouchEndAt <= 300) { e.preventDefault(); }
+      lastTouchEndAt = now;
+    }, { passive: false });
+  })();
+  const tg = window.Telegram && window.Telegram.WebApp;
+  if (tg) {
+    tg.ready(); tg.expand();
+    if (tg.lockOrientation && window.innerHeight >= window.innerWidth) {
+      try { tg.lockOrientation(); } catch (e) {}
+    }
+    try { if (typeof tg.disableVerticalSwipes === 'function') tg.disableVerticalSwipes(); } catch (e) {}
+    try { if (typeof tg.requestFullscreen === 'function') tg.requestFullscreen(); } catch (e) {}
+    var applyTgChromeInset = function () {
+      try {
+        var csa = tg.contentSafeAreaInset || {};
+        document.documentElement.style.setProperty('--tg-chrome-top', (csa.top || 0) + 'px');
+      } catch (e) {}
+    };
+    applyTgChromeInset();
+    try { if (typeof tg.onEvent === 'function') tg.onEvent('contentSafeAreaChanged', applyTgChromeInset); } catch (e) {}
+  }
+  function _initData() {
+    if (tg && tg.initData) return tg.initData;
+    try { return new URLSearchParams(window.location.search).get('tgInitData') || ''; } catch (e) { return ''; }
+  }
+  const params = new URLSearchParams(window.location.search);
+  const city = params.get('city') || '';
+  const category = params.get('category') || '';
+
+  function priceLine(order) {
+    if (order.price_from && order.price_to) return order.price_from + '–' + order.price_to + ' ₽';
+    if (order.price_from || order.price_to) return (order.price_from || order.price_to) + ' ₽';
+    return order.price ? (order.price + ' ₽') : '';
+  }
+  function cargoLine(order) {
+    if (!order.cargo_length_cm && !order.cargo_width_cm && !order.cargo_height_cm && !order.cargo_volume_m3 && !order.cargo_weight_kg) return '';
+    const dims = (order.cargo_length_cm || order.cargo_width_cm || order.cargo_height_cm)
+      ? ((order.cargo_length_cm || '?') + '×' + (order.cargo_width_cm || '?') + '×' + (order.cargo_height_cm || '?') + ' см') : '';
+    const parts = [dims, order.cargo_volume_m3 ? (order.cargo_volume_m3 + ' м³') : '', order.cargo_weight_kg ? (order.cargo_weight_kg + ' кг') : ''].filter(Boolean);
+    return parts.length ? ('📦 Груз: ' + parts.join(', ')) : '';
+  }
+  function commissionLine(order) {
+    if (order.commission_from && order.commission_to) return '💼 Комиссия: ' + order.commission_from + '–' + order.commission_to + ' ₽';
+    if (order.commission_from || order.commission_to) return '💼 Комиссия: ' + (order.commission_from || order.commission_to) + ' ₽';
+    return '';
+  }
+
+  function cardHtml(order) {
+    const lines = [];
+    if (order.car_class) lines.push('<div class="line"><span class="ic">🚘</span><span>' + order.car_class + '</span></div>');
+    if (order.passengers) lines.push('<div class="line"><span class="ic">👥</span><span>Пассажиров: ' + order.passengers + '</span></div>');
+    if (order.loader_needed) lines.push('<div class="line"><span class="ic">🧑‍🔧</span><span>Нужен грузчик: ' + (order.loader_needed === 'yes' ? 'Да' : 'Нет') + '</span></div>');
+    const cLine = cargoLine(order);
+    if (cLine) lines.push('<div class="line">' + cLine + '</div>');
+    const comLine = commissionLine(order);
+    if (comLine) lines.push('<div class="line">' + comLine + '</div>');
+    return '<div class="card" id="card-' + order.order_id + '">' +
+      '<div class="route">📍 ' + escapeHtml(order.pickup) + '<span class="arrow">→</span>🏁 ' + escapeHtml(order.dropoff) + '</div>' +
+      lines.join('') +
+      '<div class="price">' + priceLine(order) + '</div>' +
+      '<button class="accept-btn" onclick="acceptOrder(' + order.order_id + ')">✅ Принять заказ</button>' +
+      '<div id="err-' + order.order_id + '" style="color:#ff6b6b;font-size:12px;margin-top:6px;"></div>' +
+      '</div>';
+  }
+  function escapeHtml(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+
+  async function load() {
+    try {
+      const resp = await fetch('""" + ACTIVE_ORDERS_DATA_API_PATH + """?city=' + encodeURIComponent(city) + '&category=' + encodeURIComponent(category), {
+        headers: { 'X-Telegram-Init-Data': _initData() },
+      });
+      const data = await resp.json();
+      document.getElementById('state').style.display = 'none';
+      const orders = data.orders || [];
+      if (!orders.length) { document.getElementById('empty').style.display = 'block'; return; }
+      document.getElementById('list').innerHTML = orders.map(cardHtml).join('');
+    } catch (e) {
+      document.getElementById('state').textContent = 'Не удалось загрузить заказы - попробуй закрыть и открыть ещё раз.';
+    }
+  }
+
+  window.acceptOrder = async function (orderId) {
+    const card = document.getElementById('card-' + orderId);
+    const btn = card.querySelector('.accept-btn');
+    const errEl = document.getElementById('err-' + orderId);
+    errEl.textContent = '';
+    btn.disabled = true;
+    btn.textContent = 'Принимаю…';
+    try {
+      const resp = await fetch('""" + ACTIVE_ORDERS_ACCEPT_API_PATH + """', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': _initData() },
+        body: JSON.stringify({ order_id: orderId }),
+      });
+      const data = await resp.json();
+      if (!resp.ok || data.error) {
+        const messages = {
+          unavailable: 'Заказ уже занят другим водителем или срок истёк.',
+          not_found: 'Заказ не найден.',
+          invalid_init_data: 'Не удалось подтвердить - открой заново из Telegram.',
+        };
+        errEl.textContent = messages[data.error] || 'Не удалось принять заказ - попробуй ещё раз.';
+        btn.disabled = false;
+        btn.textContent = '✅ Принять заказ';
+        return;
+      }
+      const order = data.order;
+      card.classList.add('accepted');
+      btn.style.display = 'none';
+      const phoneLine = order.client_phone ? ('<br>📱 Телефон клиента: ' + escapeHtml(order.client_phone)) : '';
+      const box = document.createElement('div');
+      box.className = 'accepted-box';
+      box.innerHTML = '✅ Заказ принят!<br>📞 Свяжитесь с отправителем: ' + escapeHtml(order.sender_contact) + phoneLine;
+      card.appendChild(box);
+    } catch (e) {
+      errEl.textContent = 'Не удалось принять заказ - проверь связь и попробуй ещё раз.';
+      btn.disabled = false;
+      btn.textContent = '✅ Принять заказ';
+    }
+  };
+
+  load();
+</script>
+</body>
+</html>"""
+
+async def handle_active_orders_webapp(request):
+    return web.Response(
+        text=active_orders_webapp_html(), content_type='text/html',
+        headers={'Cache-Control': 'no-store, no-cache, must-revalidate', 'Pragma': 'no-cache'},
+    )
+
+async def handle_active_orders_data_api(request):
+    """GET ?city=&category= -> {orders: [...]}. Город - публичный параметр
+    (как у погоды/куда ехать), initData НЕОБЯЗАТЕЛЕН для самого листинга
+    (best-effort, тот же принцип, что у handle_where_to_go_data_api) - нужен
+    только чтобы исключить из списка СОБСТСТВЕННЫЕ заказы водителя
+    (get_open_shared_orders_for_city(exclude_sender_id=...)); без initData
+    список просто покажет и свои заказы тоже - не критично, страница не
+    ломается. sender_contact/client_phone НЕ отдаются в листинге - та же
+    приватность, что и у пуш-рассылки (broadcast_shared_order): контакт
+    отправителя виден только ПОСЛЕ принятия заказа (см. accept ниже)."""
+    city = request.query.get('city', '')
+    if not city:
+        return web.json_response({'error': 'missing_params'}, status=400)
+    exclude_sender_id = None
+    try:
+        init_data = request.headers.get('X-Telegram-Init-Data', '')
+        parsed = validate_telegram_webapp_init_data(init_data, BOT_TOKEN) if (init_data and BOT_TOKEN) else None
+        if parsed:
+            tg_user = json.loads(parsed.get('user', '{}'))
+            exclude_sender_id = tg_user.get('id')
+    except Exception:
+        exclude_sender_id = None
+    try:
+        orders = get_open_shared_orders_for_city(city, exclude_sender_id=exclude_sender_id)
+    except Exception:
+        logger.exception(f"❌ Не удалось получить список активных заказов для {city}")
+        return web.json_response({'error': 'compute_failed'}, status=500)
+    fields = ('order_id', 'pickup', 'dropoff', 'price', 'price_from', 'price_to', 'car_class', 'passengers',
+              'loader_needed', 'cargo_length_cm', 'cargo_width_cm', 'cargo_height_cm', 'cargo_volume_m3',
+              'cargo_weight_kg', 'commission_from', 'commission_to', 'created_at')
+    packed = [{k: order.get(k) for k in fields} for order in orders]
+    return web.json_response({'orders': packed})
+
+async def handle_active_orders_accept_api(request):
+    """POST {order_id} -> {ok, order}. initData ОБЯЗАТЕЛЕН и строго
+    проверяется (тот же helper, что у /share-order/submit) - принятие
+    заказа записывает КОНКРЕТНОГО водителя (accepted_by) и раскрывает ему
+    контакт отправителя, без подписи неизвестно, кто принимает. Переиспользует
+    ТЕ ЖЕ примитивы, что и инлайн-кнопка "✅ ПРИНЯТЬ ЗАКАЗ" в чате
+    (accept_shared_order выше) - get_shared_order/is_shared_order_expired/
+    expire_shared_order/try_accept_shared_order - и так же уведомляет
+    отправителя через bot.send_message, чтобы поведение не расходилось между
+    чатом и этим экраном. ВАЖНО: контакт водителя собирается ВРУЧНУЮ из
+    словаря tg_user (initDataUnsafe.user), а НЕ через format_user_contact() -
+    та функция ожидает объект aiogram User с атрибутами (.username/.id), а
+    здесь после json.loads() это обычный dict; тот же паттерн уже
+    использовался в handle_share_order_submit_api (см. sender_contact выше)."""
+    init_data = request.headers.get('X-Telegram-Init-Data', '')
+    parsed = validate_telegram_webapp_init_data(init_data, BOT_TOKEN) if BOT_TOKEN else None
+    if not parsed:
+        return web.json_response({'error': 'invalid_init_data'}, status=401)
+    try:
+        tg_user = json.loads(parsed.get('user', '{}'))
+        user_id = tg_user.get('id')
+    except Exception:
+        user_id = None
+    if not user_id:
+        return web.json_response({'error': 'invalid_init_data'}, status=401)
+    try:
+        body = await request.json()
+        order_id = int(body.get('order_id'))
+    except Exception:
+        return web.json_response({'error': 'invalid_body'}, status=400)
+
+    order = get_shared_order(order_id)
+    if not order:
+        return web.json_response({'error': 'not_found'}, status=404)
+    if order['status'] != 'open' or is_shared_order_expired(order):
+        if order['status'] == 'open':
+            expire_shared_order(order_id)
+        return web.json_response({'error': 'unavailable'}, status=409)
+
+    accepted_by_contact = tg_user.get('username') and f"@{tg_user['username']}" or tg_user.get('first_name') or str(user_id)
+    won = try_accept_shared_order(order_id, user_id, accepted_by_contact)
+    if not won:
+        return web.json_response({'error': 'unavailable'}, status=409)
+
+    order = get_shared_order(order_id)  # свежая копия - accepted_by/accepted_at уже проставлены
+    if bot:
+        try:
+            await bot.send_message(
+                order['sender_id'],
+                f"🎉 *Ваш заказ #{order_id} принят!*\n\n📞 Свяжитесь с водителем: {accepted_by_contact}",
+                parse_mode='Markdown'
+            )
+        except Exception as e:
+            logger.warning(f"⚠️ Не удалось уведомить отправителя {order['sender_id']} о принятии заказа #{order_id} (через /active-orders/accept): {e}")
+
+    fields = ('order_id', 'pickup', 'dropoff', 'price', 'price_from', 'price_to', 'car_class', 'passengers',
+              'loader_needed', 'cargo_length_cm', 'cargo_width_cm', 'cargo_height_cm', 'cargo_volume_m3',
+              'cargo_weight_kg', 'commission_from', 'commission_to', 'sender_contact', 'client_phone')
+    return web.json_response({'ok': True, 'order': {k: order.get(k) for k in fields}})
+
+# ==================== ХАБ ЗАКАЗОВ (АКТИВНЫЕ/ПРЕДЗАКАЗЫ/ОТДАТЬ, WebApp) ====
+# ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "сделай единую кнопку
+# ПРЕДЗАКАЗЫ/ОТДАТЬ ЗАКАЗ внутри будет три кнопки: АКТИВНЫЕ ЗАКАЗЫ,
+# ПРЕДЗАКАЗЫ, ОТДАТЬ ЗАКАЗ"; уточнение - навигация "отдельный WebApp-экран",
+# а не раскрывающееся меню внутри Сервисов). Раньше плитка "Отдать заказ" в
+# unified_app_html вела НАПРЯМУЮ на share_order_webapp_html - теперь она ведёт
+# СЮДА, а отсюда уже 3 отдельные кнопки на все три экрана (см.
+# ORDERS_HUB_WEBAPP_PATH ниже и правку tiles-массива в unified_app_html).
+ORDERS_HUB_WEBAPP_PATH = '/orders-hub'
+# PREORDERS_WEBAPP_PATH объявлен здесь (используется в orders_hub_webapp_html
+# ниже как ссылка на кнопку "Предзаказы"), полная реализация экрана - см.
+# блок "ПРЕДЗАКАЗЫ (канал NeurogoDriver, WebApp)" ниже по файлу.
+PREORDERS_WEBAPP_PATH = '/preorders'
+
+def orders_hub_webapp_html():
+    return """<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Заказы</title>
+<script src=\"""" + TG_WEBAPP_JS_PROXY_PATH + """\"></script>
+<style>
+  html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  html { background: #000; overscroll-behavior: none; }
+  body {
+    margin: 0; padding: 18px; padding-bottom: max(18px, env(safe-area-inset-bottom, 0px));
+    padding-top: max(18px, calc(env(safe-area-inset-top, 0px) + var(--tg-chrome-top, 0px)));
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: #000; color: #fff; overscroll-behavior: none; touch-action: manipulation;
+  }
+  h1 { font-size: 17px; margin: 4px 0 16px; }
+  #hubGrid { display: flex; flex-direction: column; gap: 14px; }
+  .hub-btn {
+    display: block; text-decoration: none; padding: 18px 16px; border-radius: 18px;
+    background: #131313; border: 1px solid rgba(255,255,255,.1); transition: transform .12s;
+  }
+  .hub-btn:active { transform: scale(.97); }
+  .hub-btn .ic { font-size: 26px; line-height: 1; margin-bottom: 8px; }
+  .hub-btn .lbl { font-size: 15.5px; font-weight: 800; text-transform: uppercase; color: #fff; }
+  .hub-btn .sub { font-size: 12.5px; color: #9a9a9a; margin-top: 4px; line-height: 1.4; }
+  /* АКТИВНЫЕ ЗАКАЗЫ - жёлтый акцент (тот же цвет, что у остальной "биржи"). */
+  .hub-btn.active-orders { border-color: rgba(255,196,0,.35); }
+  .hub-btn.active-orders .lbl { color: #FFC400; }
+  /* ПРЕДЗАКАЗЫ - голубой акцент (визуально отделяем "чужой" источник - канал -
+     от собственной биржи заказов бота). */
+  .hub-btn.preorders { border-color: rgba(80,180,255,.35); }
+  .hub-btn.preorders .lbl { color: #6cc3ff; }
+  /* ОТДАТЬ ЗАКАЗ - зелёный акцент (действие, создающее новый заказ). */
+  .hub-btn.share-order { border-color: rgba(76,217,100,.35); }
+  .hub-btn.share-order .lbl { color: #4cd964; }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation-duration: .001ms !important; transition-duration: .001ms !important; }
+  }
+</style>
+</head>
+<body>
+<button type="button" onclick="try{if(window.history.length>1){history.back();}else if(window.Telegram&&Telegram.WebApp&&Telegram.WebApp.close){Telegram.WebApp.close();}}catch(e){}" style="position:relative;z-index:2;display:inline-flex;align-items:center;gap:5px;margin:4px 0 10px;padding:8px 14px 8px 10px;background:#1c1c1c;border:1px solid rgba(255,255,255,.12);border-radius:10px;color:#fff;font-size:13px;font-weight:600;cursor:pointer;">← Назад</button>
+<h1>🔄 Заказы</h1>
+<div id="hubGrid">
+  <a class="hub-btn active-orders" id="btnActiveOrders" href="#">
+    <div class="ic">📋</div>
+    <div class="lbl">Активные заказы</div>
+    <div class="sub">Биржа всех открытых заказов «Отдать заказ» в твоём городе - прими прямо из списка</div>
+  </a>
+  <a class="hub-btn preorders" id="btnPreorders" href="#">
+    <div class="ic">📡</div>
+    <div class="lbl">Предзаказы</div>
+    <div class="sub">Свежие заказы из канала NeurogoDriver - карточками, с переходом на оригинальный пост</div>
+  </a>
+  <a class="hub-btn share-order" id="btnShareOrder" href="#">
+    <div class="ic">📤</div>
+    <div class="lbl">Отдать заказ</div>
+    <div class="sub">Разослать свой заказ другим водителям твоего города</div>
+  </a>
+</div>
+<script>
+  (function () {
+    let lastTouchEndAt = 0;
+    document.addEventListener('touchend', function (e) {
+      const now = Date.now();
+      if (now - lastTouchEndAt <= 300) { e.preventDefault(); }
+      lastTouchEndAt = now;
+    }, { passive: false });
+  })();
+  const tg = window.Telegram && window.Telegram.WebApp;
+  if (tg) {
+    tg.ready(); tg.expand();
+    if (tg.lockOrientation && window.innerHeight >= window.innerWidth) {
+      try { tg.lockOrientation(); } catch (e) {}
+    }
+    try { if (typeof tg.disableVerticalSwipes === 'function') tg.disableVerticalSwipes(); } catch (e) {}
+    try { if (typeof tg.requestFullscreen === 'function') tg.requestFullscreen(); } catch (e) {}
+    var applyTgChromeInset = function () {
+      try {
+        var csa = tg.contentSafeAreaInset || {};
+        document.documentElement.style.setProperty('--tg-chrome-top', (csa.top || 0) + 'px');
+      } catch (e) {}
+    };
+    applyTgChromeInset();
+    try { if (typeof tg.onEvent === 'function') tg.onEvent('contentSafeAreaChanged', applyTgChromeInset); } catch (e) {}
+  }
+  // ВАЖНО: обычная навигация <a href> внутри Telegram WebView НЕ гарантирует,
+  // что tg.initData снова будет доступен на следующей странице (тот же
+  // принцип, что уже используется у shareOrderUrl в unified_app_html) -
+  // поэтому initData явно прокидывается дальше через query-параметр
+  // tgInitData на все 3 дочерних экрана, которым он может понадобиться.
+  const params = new URLSearchParams(window.location.search);
+  const city = params.get('city') || '';
+  const category = params.get('category') || '';
+  const initData = params.get('tgInitData') || (tg && tg.initData) || '';
+  const initDataParam = initData ? ('&tgInitData=' + encodeURIComponent(initData)) : '';
+  const cityQ = encodeURIComponent(city);
+  const catQ = encodeURIComponent(category);
+
+  document.getElementById('btnActiveOrders').href = '""" + ACTIVE_ORDERS_WEBAPP_PATH + """?city=' + cityQ + '&category=' + catQ + initDataParam;
+  document.getElementById('btnPreorders').href = '""" + PREORDERS_WEBAPP_PATH + """?city=' + cityQ + '&category=' + catQ + initDataParam;
+  document.getElementById('btnShareOrder').href = '""" + SHARE_ORDER_WEBAPP_PATH + """?category=' + catQ + initDataParam;
+</script>
+</body>
+</html>"""
+
+async def handle_orders_hub_webapp(request):
+    return web.Response(
+        text=orders_hub_webapp_html(), content_type='text/html',
+        headers={'Cache-Control': 'no-store, no-cache, must-revalidate', 'Pragma': 'no-cache'},
+    )
 
 PLATFORM_REPORT_API_PATH = '/platform/report'
 
@@ -18830,19 +19370,32 @@ def unified_app_html():
   #shell { position: fixed; inset: 0; display: flex; flex-direction: column; }
   header {
     flex-shrink: 0; display: flex; align-items: center; justify-content: space-between;
-    padding: 0 16px;
+    padding: 0 16px; gap: 8px;
     /* ИЗМЕНЕНО 27.09.2026 (жалоба пользователя со скриншотом - "верхние
        кнопки заезжают") - добавлен var(--tg-chrome-top, 0px) поверх обычного
        env(safe-area-inset-top): это ОТДЕЛЬНАЯ величина - высота собственных
        системных кнопок Telegram ("✕ Закрыть"/"⋮") в полноэкранном режиме
        (см. applyTgChromeInset() в <script> ниже), которая не входит в
        физический safe-area-inset-top устройства. Без неё лого/плашка города
-       рисовались прямо под этими кнопками Telegram. */
-    padding-top: calc(env(safe-area-inset-top, 0px) + var(--tg-chrome-top, 0px));
-    height: calc(52px + env(safe-area-inset-top, 0px) + var(--tg-chrome-top, 0px));
+       рисовались прямо под этими кнопками Telegram.
+       ДОПОЛНЕНО 29.09.2026 (жалоба пользователя со скриншотом Android -
+       "на шапку наехало", у пользователя увеличен размер шрифта в
+       настройках) - при увеличенном системном/телеграмном размере шрифта
+       собственные кнопки Telegram ("✕ Закрыть"/"⋮") становятся ВЫШЕ, а
+       contentSafeAreaInset не всегда успевает это отразить в моменте -
+       поэтому: 1) добавлен запасной буфер +8px поверх измеренной величины
+       и пол max(14px, ...) на случай нулевых инсетов, 2) фиксированный
+       height заменён на min-height, чтобы шапка при нехватке места росла
+       вниз, а не наезжала вверх на системные кнопки, 3) .logo ниже больше
+       не может перенестись на вторую строку и вылезти за пределы шапки. */
+    padding-top: max(14px, calc(env(safe-area-inset-top, 0px) + var(--tg-chrome-top, 0px) + 8px));
+    min-height: calc(52px + max(14px, calc(env(safe-area-inset-top, 0px) + var(--tg-chrome-top, 0px) + 8px)));
     background: #0a0a0a; border-bottom: 1px solid rgba(255,255,255,.08);
   }
-  header .logo { font-size: 14.5px; font-weight: 700; letter-spacing: .04em; }
+  header .logo {
+    font-size: 14.5px; font-weight: 700; letter-spacing: .04em;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex-shrink: 1;
+  }
   /* ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "сделай надпись
      HELPER мерцание жёлтое чтобы сверху слева он мерцал, будет красиво") -
      не переиспользуем selPulse (тот пульсирует box-shadow-кольцом вокруг
@@ -18866,7 +19419,7 @@ def unified_app_html():
      (город/категория), что уже были в разделе "Сервисы" (см. renderCityDetail
      ниже - переиспользуется как есть, без дублирования логики). */
   .city-panel {
-    position: absolute; top: calc(52px + env(safe-area-inset-top, 0px) + var(--tg-chrome-top, 0px)); left: 12px; right: 12px; z-index: 45;
+    position: absolute; top: calc(52px + max(14px, calc(env(safe-area-inset-top, 0px) + var(--tg-chrome-top, 0px) + 8px))); left: 12px; right: 12px; z-index: 45;
     background: #131313; border: 1px solid rgba(255,196,0,.3); border-radius: 14px; padding: 14px;
     box-shadow: 0 12px 32px rgba(0,0,0,.55);
   }
@@ -20053,7 +20606,12 @@ def unified_app_html():
     const withoutEventsOrAirports = CATEGORIES_WITHOUT_EVENTS_OR_AIRPORTS.indexOf(category) !== -1;
     let eventsUrl = '""" + EVENTS_WEBAPP_PATH + """?city=' + cityQ + '&category=' + catQ;
     if (withoutEventsOrAirports) { eventsUrl += '&tab=roads'; }
-    const shareOrderUrl = '""" + SHARE_ORDER_WEBAPP_PATH + """?category=' + catQ + tgInitDataParam();
+    // ИЗМЕНЕНО 28.09.2026 (прямая просьба пользователя - "сделай единую
+    // кнопку ПРЕДЗАКАЗЫ/ОТДАТЬ ЗАКАЗ внутри будет три кнопки") - раньше эта
+    // плитка вела НАПРЯМУЮ на share_order_webapp_html; теперь ведёт на
+    // ordersHubUrl (см. orders_hub_webapp_html), откуда уже 3 отдельные
+    // кнопки: АКТИВНЫЕ ЗАКАЗЫ / ПРЕДЗАКАЗЫ / ОТДАТЬ ЗАКАЗ.
+    const ordersHubUrl = '""" + ORDERS_HUB_WEBAPP_PATH + """?city=' + cityQ + '&category=' + catQ + tgInitDataParam();
     const chatUrl = DRIVER_CHAT_LINKS[city] || '';
 
     const tiles = [
@@ -20062,7 +20620,7 @@ def unified_app_html():
       // живую подсказку под плиткой (см. loadWeatherTileSub в JS ниже).
       { href: '""" + WEATHER_WEBAPP_PATH + """?city=' + cityQ, ic: TILE_ICONS.weather, lbl: 'Погода', id: 'weatherTile', sub: true },
       { href: eventsUrl, ic: withoutEventsOrAirports ? TILE_ICONS.roadEvents : TILE_ICONS.events, lbl: withoutEventsOrAirports ? 'Дорожные события' : 'События города' },
-      { href: shareOrderUrl, ic: TILE_ICONS.exchange, lbl: 'Отдать заказ' },
+      { href: ordersHubUrl, ic: TILE_ICONS.exchange, lbl: 'Предзаказы/Отдать заказ' },
       { action: openFuelMapTab, ic: TILE_ICONS.fuel, lbl: 'Где бензин' },
       { href: chatUrl, ic: TILE_ICONS.chat, lbl: 'Чаты водителей' },
       { detail: 'tips', ic: TILE_ICONS.tips, lbl: 'Чаевые' },
@@ -20741,27 +21299,27 @@ def unified_app_html():
   }
 
   function renderPhantomMenu(box, data) {
+    // ИЗМЕНЕНО 28.09.2026 (прямая просьба пользователя - "открывая фантом
+    // мы видим кнопку Админ реферальная программа нажимая на неё мы
+    // вводим пароль он то и открывает 3 учётки АДМИН РЕФ... открывает их
+    // по паролю") - внешние врата "Фантома" теперь ведут ТОЛЬКО к одной
+    // кнопке-входу в именные учётки АДМИН РЕФ; управление кампаниями/
+    // учётками (раньше было здесь, кнопки 2-5) переехало ВНУТРЬ конкретной
+    // учётки - см. renderPhantomAdminReferral ниже, разное у разных учёток.
     box.innerHTML =
       '<div class="svc-h">👻 Фантом</div>' +
       '<button type="button" class="svc-btn" id="phantomMenuAdminRef">🤝 Админ реферальная программа</button>' +
-      '<button type="button" class="svc-btn" id="phantomMenuNewCompany" style="margin-top:8px;">🏢 Новая компания</button>' +
-      '<button type="button" class="svc-btn ghost" id="phantomMenuListCompanies" style="margin-top:8px;">📋 Список компаний</button>' +
-      '<button type="button" class="svc-btn ghost" id="phantomMenuDeleteCompany" style="margin-top:8px;">🗑 Удалить компанию</button>' +
-      '<button type="button" class="svc-btn" id="phantomMenuAdminPanel" style="margin-top:8px;">🔐 Админ панель</button>' +
       '<div id="phantomMenuSubBox" style="margin-top:8px;"></div>';
     const subBox = document.getElementById('phantomMenuSubBox');
     document.getElementById('phantomMenuAdminRef').addEventListener('click', function () { renderPhantomAdminReferral(subBox, data); });
-    document.getElementById('phantomMenuNewCompany').addEventListener('click', function () { renderAdminPanelCreateForm(subBox, 'legal_entity'); });
-    document.getElementById('phantomMenuListCompanies').addEventListener('click', function () { renderAdminPanelList(subBox, 'legal_entity'); });
-    document.getElementById('phantomMenuDeleteCompany').addEventListener('click', function () { renderAdminPanelDeleteList(subBox, 'legal_entity'); });
-    document.getElementById('phantomMenuAdminPanel').addEventListener('click', function () { renderAdminPanelSection(subBox); });
   }
 
-  // Кнопка 1 "🤝 Админ реферальная программа" - вход в схему 'admin' (тот
-  // же apply_admin_partner_password/handle_admin_partner_password_api, что
-  // и раньше), плюс статистика/личный кабинет, если пользователь уже
-  // внутри. Рендерится в подблок меню Фантома (subBox) - кнопки 2-5 меню
-  // остаются на экране, "Назад" из этого подблока отдельно не нужен.
+  // Кнопка "🤝 Админ реферальная программа" - вход в схему 'admin' (тот же
+  // apply_admin_partner_password/handle_admin_partner_password_api, что и
+  // раньше) - какая ИМЕННО из 3 именных учёток (AdminDmitry/AdminRuslan/
+  // AdminMike) откроется, решает ТОЛЬКО введённый пароль (см.
+  // find_admin_partner_by_password в main.py) - отдельного выбора учётки
+  // нет. Рендерится в подблок меню Фантома (subBox).
   function renderPhantomAdminReferral(subBox, data) {
     if (data.referrer_type === 'admin') {
       const adminRates = REFERRAL_RATES_PERCENT.admin;
@@ -20772,8 +21330,49 @@ def unified_app_html():
       // (entity_name, задаётся через /add_admin_partner), чтобы два разных
       // админ-партнёра видели, в каком именно кабинете они находятся.
       const partnerNote = data.entity_name ? ('<div class="svc-card">🏷 Партнёр: ' + data.entity_name + '</div>') : '';
-      subBox.innerHTML = '<div class="svc-h">🤝 Админ реферальная программа</div>' + partnerNote + referralStatsBlockHtml(data, adminRates, adminDescription);
+      // ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "открывая
+      // учётку мы видим кнопки в моей Админ панель Новая кампания Список
+      // кампаний удалить кампании а в остальных двух тока эти три кнопки
+      // без админ панель админ панель для моего аккаунта без пароля" +
+      // "ещё в моей учётке добавь кнопку добавить пользователя Админ реф
+      // и удалить из списка") - кнопки создания/списка/удаления КАМПАНИЙ
+      // (юр.лиц) видны ЛЮБОЙ вошедшей учётке АДМИН РЕФ; "🔐 Админ панель"
+      // и управление САМИМИ учётками АДМИН РЕФ (добавить/удалить
+      // пользователя) - ТОЛЬКО у ADMIN_PANEL_FREE_ACCESS_ENTITY_NAME
+      // (AdminDmitry, см. main.py) - у AdminRuslan/AdminMike этих кнопок
+      // нет вообще, что бы они ни вводили.
+      const isAdminDmitry = data.entity_name === 'AdminDmitry';
+      const manageButtonsHtml =
+        '<button type="button" class="svc-btn" id="phantomMenuNewCompany" style="margin-top:10px;">🏢 Новая кампания</button>' +
+        '<button type="button" class="svc-btn ghost" id="phantomMenuListCompanies" style="margin-top:8px;">📋 Список кампаний</button>' +
+        '<button type="button" class="svc-btn ghost" id="phantomMenuDeleteCompany" style="margin-top:8px;">🗑 Удалить кампанию</button>' +
+        (isAdminDmitry
+          ? '<button type="button" class="svc-btn" id="phantomMenuAdminPanel" style="margin-top:8px;">🔐 Админ панель</button>' +
+            '<button type="button" class="svc-btn ghost" id="phantomMenuAddAdmin" style="margin-top:8px;">➕ Добавить пользователя Админ реф</button>' +
+            '<button type="button" class="svc-btn ghost" id="phantomMenuDeleteAdmin" style="margin-top:8px;">🗑 Удалить пользователя Админ реф</button>'
+          : '');
+      subBox.innerHTML = '<div class="svc-h">🤝 Админ реферальная программа</div>' + partnerNote +
+        referralStatsBlockHtml(data, adminRates, adminDescription) + manageButtonsHtml +
+        '<div id="phantomAdminManageBox" style="margin-top:8px;"></div>';
       wireReferralStatsBlock(subBox, data);
+      const manageBox = document.getElementById('phantomAdminManageBox');
+      document.getElementById('phantomMenuNewCompany').addEventListener('click', function () { renderAdminPanelCreateForm(manageBox, 'legal_entity'); });
+      document.getElementById('phantomMenuListCompanies').addEventListener('click', function () { renderAdminPanelList(manageBox, 'legal_entity'); });
+      document.getElementById('phantomMenuDeleteCompany').addEventListener('click', function () { renderAdminPanelDeleteList(manageBox, 'legal_entity'); });
+      if (isAdminDmitry) {
+        document.getElementById('phantomMenuAdminPanel').addEventListener('click', function () {
+          // ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "AdminPanel
+          // она без пароля") - для AdminDmitry пропускаем экран ввода
+          // ADMIN_PANEL_PASSWORD целиком; сервер тоже пускает его без
+          // этого пароля (см. _admin_panel_require_unlocked/
+          // ADMIN_PANEL_FREE_ACCESS_ENTITY_NAME в main.py) - сразу
+          // показываем сводку.
+          adminPanelUnlocked = true;
+          renderAdminPanelSection(manageBox);
+        });
+        document.getElementById('phantomMenuAddAdmin').addEventListener('click', function () { renderAdminPanelCreateForm(manageBox, 'admin_partner'); });
+        document.getElementById('phantomMenuDeleteAdmin').addEventListener('click', function () { renderAdminPanelDeleteList(manageBox, 'admin_partner'); });
+      }
       (async function () {
         try {
           const resp = await fetch(LEGAL_CABINET_ACCESS_API_PATH, { headers: { 'X-Telegram-Init-Data': (tg && tg.initData) || '' } });
@@ -32920,7 +33519,11 @@ SUBSCRIPTION_CHECK_INTERVAL_MINUTES = 60
 # phantom_password_flow ниже; бесплатные SUBSCRIPTION_PERIOD_DAYS дней
 # подписки теперь выдаются в admin_referral_password_flow, а не тут).
 # ИЗМЕНЕНО 23.09.2026 (прямая просьба пользователя - смена пароля Фантома).
-PHANTOM_SUBSCRIPTION_PASSWORD = "1234567890"
+# ИЗМЕНЕНО 28.09.2026 (прямая просьба пользователя - новый пароль внешних
+# врат "Фантома"; см. ниже 3 именованных учётки АДМИН РЕФ, вход в которые -
+# ОТДЕЛЬНЫЙ, вложенный шаг ПОСЛЕ этого пароля, через кнопку "🤝 Админ
+# реферальная программа" - см. seed-миграцию 3 админ-партнёров в init_db).
+PHANTOM_SUBSCRIPTION_PASSWORD = "12345678900987654321"
 # ДОБАВЛЕНО 23.09.2026 (по факту - Tinkoff Init отказывал: обязателен
 # фискальный чек по 54-ФЗ для этого терминала) - система налогообложения
 # для чека, уточнено с пользователем через AskUserQuestion ("УСН доходы").
@@ -33450,6 +34053,21 @@ def subscription_active_until(user_id, sub_group=None):
 
 
 def is_subscription_active(user_id, sub_group=None):
+    # ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "имея доступы к
+    # админ реф автоматически даёт право пользоваться подписками всеми
+    # бесплатно без срока пользования") - админ-партнёры (referrer_type
+    # 'admin', вход по одному из паролей AdminDmitry/AdminRuslan/AdminMike,
+    # см. apply_admin_partner_password/get_referrer_type выше) получают
+    # БЕССРОЧНЫЙ бесплатный доступ ко ВСЕМ подпискам бота, а не только один
+    # бесплатный месяц (который apply_admin_partner_password всё ещё выдаёт
+    # отдельно - просто для красивой даты в бейдже подписки). Это ЕДИНАЯ
+    # точка входа для всех проверок активности ОСНОВНОЙ подписки в файле
+    # (is_subscription_active переиспользуется везде) - патчить каждое
+    # место отдельно не нужно. Аналогичный бесплатный доступ к ОТДЕЛЬНОЙ
+    # подписке "Юрлицо" (Кабинет автопарка) уже был у admin и раньше - см.
+    # is_legal_entity_referral_subscription_active/её вызовы.
+    if get_referrer_type(user_id) == 'admin':
+        return True
     active_until = subscription_active_until(user_id, sub_group)
     if active_until is None:
         return True  # запись ещё не создана (не должно происходить, ensure_subscription вызывается раньше) - не блокируем на всякий случай
@@ -34253,6 +34871,12 @@ async def start_subscription_webhook_server():
     # Отдать заказ (см. блок "ОТДАТЬ ЗАКАЗ (WebApp)" выше)
     app.router.add_get(SHARE_ORDER_WEBAPP_PATH, handle_share_order_webapp)
     app.router.add_post(SHARE_ORDER_SUBMIT_API_PATH, handle_share_order_submit_api)
+    # Активные заказы / биржа (см. блок "АКТИВНЫЕ ЗАКАЗЫ (биржа, WebApp)" выше)
+    app.router.add_get(ACTIVE_ORDERS_WEBAPP_PATH, handle_active_orders_webapp)
+    app.router.add_get(ACTIVE_ORDERS_DATA_API_PATH, handle_active_orders_data_api)
+    app.router.add_post(ACTIVE_ORDERS_ACCEPT_API_PATH, handle_active_orders_accept_api)
+    # Хаб заказов (см. блок "ХАБ ЗАКАЗОВ (АКТИВНЫЕ/ПРЕДЗАКАЗЫ/ОТДАТЬ, WebApp)" выше)
+    app.router.add_get(ORDERS_HUB_WEBAPP_PATH, handle_orders_hub_webapp)
     app.router.add_post(PLATFORM_REPORT_API_PATH, handle_platform_report_api)
     app.router.add_get(TIPS_QR_STATUS_API_PATH, handle_tips_qr_status_api)
     app.router.add_get(PLATFORM_PROBE_WEBAPP_PATH, handle_platform_probe_webapp)
@@ -36125,15 +36749,32 @@ async def handle_admin_panel_unlock_api(request):
     return web.json_response({'ok': True})
 
 
+ADMIN_PANEL_FREE_ACCESS_ENTITY_NAME = "AdminDmitry"
+
+
 def _admin_panel_require_unlocked(request):
     """Общая проверка для /admin_panel/overview ниже - валидный initData И
     этот user_id уже разблокировал ИМЕННО админ-панель (кнопка 5) верным
     ADMIN_PANEL_PASSWORD. Возвращает user_id или None - вызывающий код
-    тогда отвечает 403."""
+    тогда отвечает 403.
+    ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "AdminDmitry это
+    моя учётка... вынеси функционал AdminPanel она без пароля"): владелец
+    именованной учётки АДМИН РЕФ ADMIN_PANEL_FREE_ACCESS_ENTITY_NAME
+    (AdminDmitry, см. seed-миграцию 3 админ-партнёров в init_db) проходит
+    БЕЗ отдельного ADMIN_PANEL_PASSWORD - ему достаточно уже пройденного
+    внешнего пароля "Фантома" + своего именного пароля админ-партнёра (см.
+    apply_admin_partner_password). Остальные 2 учётки (AdminRuslan/
+    AdminMike) этот бесплатный проход НЕ получают - им, как и раньше,
+    нужен отдельный ADMIN_PANEL_PASSWORD."""
     user_id = _cabinet_require_user(request)
-    if not user_id or user_id not in ADMIN_PANEL_UNLOCKED_USER_IDS:
+    if not user_id:
         return None
-    return user_id
+    if user_id in ADMIN_PANEL_UNLOCKED_USER_IDS:
+        return user_id
+    owned = get_legal_entity_owned_by(user_id)
+    if owned and owned.get('name') == ADMIN_PANEL_FREE_ACCESS_ENTITY_NAME:
+        return user_id
+    return None
 
 
 ADMIN_PANEL_OVERVIEW_API_PATH = '/admin_panel/overview'
