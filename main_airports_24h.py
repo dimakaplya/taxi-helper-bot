@@ -13676,6 +13676,22 @@ MAP_CHROME_CSS = """
   .shift-radar-indicator.active .radar-sweep { opacity: 1; animation: shift-radar-spin 2.4s linear infinite; }
   @keyframes shift-radar-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
   @media (prefers-reduced-motion: reduce) { .shift-radar-indicator .radar-sweep { animation: none !important; } }
+  /* ДОБАВЛЕНО 29.09.2026 (прямая просьба пользователя - "заходишь на карту
+     водителей с карты водителей есть только закрыть приложение а должна
+     быть кнопка вернуться обратно в личный кабинет автопарка") - карта
+     ОБЫЧНО открывается либо вкладкой внутри unified_app_html (там кнопка
+     "Назад" не нужна, см. комментарий "УБРАНО 27.09.2026" у #map ниже), либо
+     отдельной страницей из чата (там закрыть - естественный выход). Но с
+     23.09.2026 "🗺 КАРТА ВОДИТЕЛЕЙ" в кабинете юрлица (legal_cabinet_webapp_html)
+     тоже открывает эту же страницу через window.location.href - ПОЛНОСТЬЮ
+     заменяя кабинет, без возможности вернуться, кроме как закрыть всё
+     приложение целиком. Кнопка ниже показывается ТОЛЬКО в этом случае (см.
+     ?from=legal_cabinet в handle_legal_cabinet_data_api/JS ниже) - стоит
+     НИЖЕ .shift-radar-indicator (top: 78px, тот же left: 14px), чтобы не
+     перекрываться с ним (историческая причина "кнопка физически не
+     нажималась" в комментарии у #map ниже - та же самая ловушка). */
+  .map-back-to-cabinet-btn { position: absolute; top: calc(78px + var(--tg-chrome-top, 0px)); left: 14px; z-index: 999; display: none; align-items: center; gap: 5px; padding: 8px 14px 8px 10px; background: #1c1c1c; border: 1px solid rgba(255,255,255,.12); border-radius: 10px; color: #fff; font-size: 13px; font-weight: 600; cursor: pointer; box-shadow: 0 3px 10px rgba(0,0,0,.35); }
+  .map-back-to-cabinet-btn:active { transform: scale(.96); }
   /* ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - "сделай выбор
      тарифа с картой прям") - карточка выбора тарифов ПРЯМО НА КАРТЕ вместо
      ухода в чат бота (см. openTariffPicker/closeTariffPicker в JS ниже,
@@ -14154,6 +14170,9 @@ def map_webapp_html():
      исправление сохранено здесь в истории, хотя сама кнопка теперь
      убрана целиком. -->
 <div id="map"></div>
+<!-- ДОБАВЛЕНО 29.09.2026 (см. .map-back-to-cabinet-btn в CSS выше) - скрыта
+     по умолчанию, показывается JS-ом только при ?from=legal_cabinet. -->
+<button type="button" class="map-back-to-cabinet-btn" id="mapBackToCabinetBtn">← Кабинет автопарка</button>
 <!-- ИСПРАВЛЕНО 27.09.2026 (прямая просьба пользователя, скриншот - "текст
      погоды и смайлик слева внизу расположи одной строчкой на карте") -
      раньше иконка (.bib-icon) и её подпись (.bib-time/.bib-label/
@@ -14434,6 +14453,26 @@ def map_webapp_html():
   const params = new URLSearchParams(window.location.search);
   const city = params.get('city') || '';
   const myCategory = params.get('category') || '';
+  // ДОБАВЛЕНО 29.09.2026 (см. .map-back-to-cabinet-btn в CSS/HTML выше) -
+  // "🗺 КАРТА ВОДИТЕЛЕЙ" в кабинете юрлица кладёт ?from=legal_cabinet в
+  // map_url (см. handle_legal_cabinet_data_api) именно для этого случая -
+  // показываем кнопку "Назад" только тогда, когда действительно есть куда
+  // возвращаться. history.back()/WebApp.close() - тот же паттерн, что и у
+  // "← Назад" на других отдельных страницах (weather/events/... ниже по
+  // файлу), просто со своим текстом кнопки под этот конкретный переход.
+  const backTo = params.get('from') || '';
+  if (backTo === 'legal_cabinet') {{
+    const backBtn = document.getElementById('mapBackToCabinetBtn');
+    if (backBtn) {{
+      backBtn.style.display = 'inline-flex';
+      backBtn.onclick = function () {{
+        try {{
+          if (window.history.length > 1) {{ history.back(); }}
+          else if (window.Telegram && Telegram.WebApp && Telegram.WebApp.close) {{ Telegram.WebApp.close(); }}
+        }} catch (e) {{}}
+      }};
+    }}
+  }}
   // ДОБАВЛЕНО 23.09.2026 (см. TARIFF_OPTIONS/tariff-toggle-wrap выше) -
   // замена сломанного бинарного тумблера "Показать все категории" на
   // мультивыбор конкретных тарифов. selectedTariffs - Set строк вида
@@ -26945,6 +26984,15 @@ async def handle_legal_cabinet_data_api(request):
     # у обычной кнопки "🗺 КАРТА ВОДИТЕЛЕЙ" в services_keyboard) - если он
     # ещё ни разу не выбирал город в боте, ссылку не отдаём вовсе (клиент
     # тогда просто не показывает кнопку - см. legal_cabinet_webapp_html).
+    # ДОБАВЛЕНО &from=legal_cabinet 29.09.2026 (прямая просьба пользователя -
+    # "заходишь на карту водителей с карты водителей есть только закрыть
+    # приложение а должна быть кнопка вернуться обратно в личный кабинет
+    # автопарка") - переход на карту тут делается через window.location.href
+    # (см. openMapBtn.onclick в legal_cabinet_webapp_html ниже), а не
+    # открытием ОТДЕЛЬНОГО web_app - это ПОЛНОСТЬЮ заменяет открытую
+    # страницу кабинета, поэтому на самой карте (см. map_webapp_html,
+    # .map-back-to-cabinet-btn) нужна явная кнопка возврата - без этого
+    # параметра единственный выход был закрыть Mini App целиком.
     map_url = None
     if PUBLIC_URL:
         owner_state = user_state.get(user_id) or {}
@@ -26953,7 +27001,7 @@ async def handle_legal_cabinet_data_api(request):
         if owner_city and owner_category:
             map_url = (
                 f"{PUBLIC_URL}{MAP_WEBAPP_PATH}?city={urllib.parse.quote(owner_city)}"
-                f"&category={urllib.parse.quote(owner_category)}&mine=1"
+                f"&category={urllib.parse.quote(owner_category)}&mine=1&from=legal_cabinet"
             )
 
     return web.json_response({
