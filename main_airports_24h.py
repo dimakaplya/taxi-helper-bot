@@ -20086,6 +20086,7 @@ def unified_app_html():
   const PRESENTATION_PDF_WEBAPP_PATH = '""" + PRESENTATION_PDF_WEBAPP_PATH + """';
   const LEGAL_CABINET_ACCESS_API_PATH = '""" + LEGAL_CABINET_ACCESS_API_PATH + """';
   const LEGAL_CABINET_PASSWORD_API_PATH = '""" + LEGAL_CABINET_PASSWORD_API_PATH + """';
+  const LEGAL_CABINET_LOGOUT_API_PATH = '""" + LEGAL_CABINET_LOGOUT_API_PATH + """';
   const LEGAL_CABINET_WEBAPP_PATH = '""" + LEGAL_CABINET_WEBAPP_PATH + """';
   // ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "чтобы у них тоже
   // был свой пароль... как у юрлица") - ввод пароля админ-партнёра теперь
@@ -21104,7 +21105,14 @@ def unified_app_html():
     svcBackAction = function () { renderReferralMenu(box, data); }; // ИЗМЕНЕНО 27.09.2026 - "Назад" отсюда ведёт в меню реферальной программы, на один шаг назад (а не сразу в сетку сервисов)
     const rates = REFERRAL_RATES_PERCENT.individual;
     const description = 'Обычная реферальная программа для водителей и курьеров: приглашай других водителей по своей ссылке и получай процент с каждого их платежа за подписку (' + rates.join('/') + '% с 1/2/3 уровня).';
-    box.innerHTML = '<div class="svc-h">🚕 Водитель / Курьер</div>' + referralStatsBlockHtml(data, rates, description);
+    // ДОБАВЛЕНО 29.09.2026 (прямая просьба пользователя - "при входе в
+    // личный кабинет любой реф системы сверху должен быть дашборд твоей
+    // статистики с указанием сверху твоя текущая реферальная система") -
+    // refDashHtml (тот же блок "Текущая схема"/рейтинг/заработано за месяц/
+    // пользователей в системе, что уже был на общем экране renderReferralMenu)
+    // теперь показывается СВЕРХУ и на каждом детальном экране схемы, а не
+    // только на общем меню - переиспользуем как есть, ничего не пересчитано.
+    box.innerHTML = '<div class="svc-h">🚕 Водитель / Курьер</div>' + refDashHtml(data) + referralStatsBlockHtml(data, rates, description);
     wireReferralStatsBlock(box, data);
   }
 
@@ -21150,7 +21158,9 @@ def unified_app_html():
     // entity_name для ЛЮБОГО владельца кабинета (юрлицо или админ-партнёр),
     // показываем название компании-владельца, если оно есть.
     const legalPartnerNote = data.entity_name ? ('<div class="svc-card">🏷 Компания: ' + data.entity_name + '</div>') : '';
-    let html = '<div class="svc-h">🏢 Юридическое лицо</div>' + legalPartnerNote + referralStatsBlockHtml(data, legalRates, legalDescription);
+    // ДОБАВЛЕНО 29.09.2026 (см. refDashHtml в renderReferralDriverDetail
+    // выше - тот же дашборд "Текущая схема", теперь и здесь).
+    let html = '<div class="svc-h">🏢 Юридическое лицо</div>' + refDashHtml(data) + legalPartnerNote + referralStatsBlockHtml(data, legalRates, legalDescription);
     if (access && access.has_access) {
       html += '<div class="svc-card">У тебя уже есть доступ к кабинету автопарка.</div>' +
         '<a class="svc-btn" href="' + LEGAL_CABINET_WEBAPP_PATH + '?tgInitData=' + encodeURIComponent((tg && tg.initData) || '') + '">🏛 Открыть кабинет автопарка</a>';
@@ -21160,15 +21170,40 @@ def unified_app_html():
         html += '<input type="email" class="svc-input" id="refLegalEmail" placeholder="email@example.com">' +
           '<button type="button" class="svc-btn" id="refLegalEmailBtn">Продолжить</button>';
       } else if (access.pay_url) {
-        html += '<a class="svc-btn" href="' + access.pay_url + '" target="_blank" rel="noopener">Оплатить ' + access.subscription_price_rub + ' ₽</a>';
+        // ИЗМЕНЕНО 29.09.2026 (прямая просьба пользователя - "оплата
+        // подписки организации происходит исключительно в приложении тг
+        // апп") - раньше это была обычная ссылка target="_blank", которая
+        // в WebView Telegram уводит в системный браузер, ПОКИДАЯ
+        // приложение. Теперь это кнопка с обработчиком клика: если доступен
+        // tg.openLink - открываем через него (официальный способ открыть
+        // внешнюю ссылку, не покидая интерфейс Telegram, см.
+        // https://core.telegram.org/bots/webapps#initializing-web-apps);
+        // если tg недоступен (открыто вне Telegram, напр. для отладки) -
+        // запасной вариант window.open, как и было.
+        html += '<button type="button" class="svc-btn" id="refLegalPayBtn" data-pay-url="' + access.pay_url.replace(/"/g, '&quot;') + '">Оплатить ' + access.subscription_price_rub + ' ₽</button>';
       } else {
         html += '<div class="svc-note">Не получилось создать ссылку на оплату - попробуй ещё раз чуть позже.</div>';
       }
     } else {
-      html += '<div class="svc-card">Подписка активна - осталось ввести пароль компании (тот же, что открывает «Кабинет автопарка»).</div>' +
+      // ИЗМЕНЕНО 29.09.2026 (прямая просьба пользователя - "ввод НАЗВАНИЕ
+      // КАМПАНИИ И ПАРОЛЯ") - добавлено поле названия компании рядом с
+      // паролем (см. handle_legal_cabinet_password_api в main.py - если
+      // название передано, оно сверяется с реальным названием найденной по
+      // паролю компании).
+      html += '<div class="svc-card">Подписка активна - осталось ввести название и пароль компании (те же, что открывают «Кабинет автопарка»).</div>' +
+        '<input type="text" class="svc-input" id="refLegalName" placeholder="Название компании">' +
         '<input type="text" class="svc-input" id="refLegalPassword" placeholder="Пароль компании">' +
         '<button type="button" class="svc-btn" id="refLegalPasswordBtn">Подтвердить</button>' +
         '<div class="svc-note" id="refLegalPasswordNote"></div>';
+    }
+    // ДОБАВЛЕНО 29.09.2026 (прямая просьба пользователя - "кнопка Выход из
+    // кабинета") - показывается, пока у пользователя СЕЙЧАС активна именно
+    // схема 'legal_entity' (см. handle_legal_cabinet_access_api ->
+    // referrer_type в access, не в общем data реферального меню),
+    // независимо от того, платная ли подписка/есть ли купленный кабинет -
+    // выйти можно в любом из этих состояний.
+    if (access && access.referrer_type === 'legal_entity') {
+      html += '<button type="button" class="svc-btn ghost" id="refLegalLogoutBtn">🚪 Выход из кабинета</button>';
     }
     box.innerHTML = html;
     wireReferralStatsBlock(box, data);
@@ -21191,23 +21226,34 @@ def unified_app_html():
     const pwBtn = document.getElementById('refLegalPasswordBtn');
     if (pwBtn) {
       pwBtn.addEventListener('click', async function () {
+        const nameInput = document.getElementById('refLegalName');
+        const name = (nameInput && nameInput.value || '').trim();
         const pwInput = document.getElementById('refLegalPassword');
         const password = (pwInput.value || '').trim();
         const note = document.getElementById('refLegalPasswordNote');
-        if (!password) return;
+        if (!name || !password) {
+          if (note) note.textContent = 'Заполни оба поля - название компании и пароль.';
+          return;
+        }
         pwBtn.disabled = true;
         if (note) note.textContent = '';
         try {
           const resp = await fetch('""" + LEGAL_CABINET_PASSWORD_API_PATH + """', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': (tg && tg.initData) || '' },
-            body: JSON.stringify({ password: password })
+            body: JSON.stringify({ password: password, name: name })
           });
           if (!resp.ok) {
-            if (note) note.innerHTML = 'Неверный пароль - проверь и попробуй снова, либо ' +
-              '<a href="#" id="refLegalOpenChat" style="color:#FFC400;">введи его в чате</a>.';
-            const chatLink = document.getElementById('refLegalOpenChat');
-            if (chatLink) chatLink.addEventListener('click', function (e) { e.preventDefault(); openBotDeepLink(botUsername, 'reflegal'); });
+            let errBody = null;
+            try { errBody = await resp.json(); } catch (e) {}
+            if (errBody && errBody.error === 'name_mismatch') {
+              if (note) note.textContent = 'Название компании не совпадает с паролем - проверь оба поля.';
+            } else {
+              if (note) note.innerHTML = 'Неверный пароль - проверь и попробуй снова, либо ' +
+                '<a href="#" id="refLegalOpenChat" style="color:#FFC400;">введи его в чате</a>.';
+              const chatLink = document.getElementById('refLegalOpenChat');
+              if (chatLink) chatLink.addEventListener('click', function (e) { e.preventDefault(); openBotDeepLink(botUsername, 'reflegal'); });
+            }
             pwBtn.disabled = false;
             return;
           }
@@ -21216,6 +21262,30 @@ def unified_app_html():
           if (note) note.textContent = 'Не получилось отправить - попробуй ещё раз.';
           pwBtn.disabled = false;
         }
+      });
+    }
+    const payBtn = document.getElementById('refLegalPayBtn');
+    if (payBtn) {
+      payBtn.addEventListener('click', function () {
+        const url = payBtn.getAttribute('data-pay-url');
+        if (!url) return;
+        try {
+          if (tg && typeof tg.openLink === 'function') { tg.openLink(url); return; }
+        } catch (e) {}
+        window.open(url, '_blank');
+      });
+    }
+    const logoutBtn = document.getElementById('refLegalLogoutBtn');
+    if (logoutBtn) {
+      logoutBtn.addEventListener('click', async function () {
+        logoutBtn.disabled = true;
+        try {
+          await fetch(LEGAL_CABINET_LOGOUT_API_PATH, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': (tg && tg.initData) || '' }
+          });
+        } catch (e) {}
+        renderReferralLegalDetail(box, data);
       });
     }
   }
@@ -21351,7 +21421,9 @@ def unified_app_html():
             '<button type="button" class="svc-btn ghost" id="phantomMenuAddAdmin" style="margin-top:8px;">➕ Добавить пользователя Админ реф</button>' +
             '<button type="button" class="svc-btn ghost" id="phantomMenuDeleteAdmin" style="margin-top:8px;">🗑 Удалить пользователя Админ реф</button>'
           : '');
-      subBox.innerHTML = '<div class="svc-h">🤝 Админ реферальная программа</div>' + partnerNote +
+      // ДОБАВЛЕНО 29.09.2026 (см. refDashHtml в renderReferralDriverDetail
+      // выше - тот же дашборд "Текущая схема", теперь и здесь).
+      subBox.innerHTML = '<div class="svc-h">🤝 Админ реферальная программа</div>' + refDashHtml(data) + partnerNote +
         referralStatsBlockHtml(data, adminRates, adminDescription) + manageButtonsHtml +
         '<div id="phantomAdminManageBox" style="margin-top:8px;"></div>';
       wireReferralStatsBlock(subBox, data);
@@ -34508,30 +34580,30 @@ async def send_legal_entity_referral_paywall(event):
     (см. referral_category_legal_start)."""
     user_id = event.from_user.id
     ensure_subscription(user_id, SUBSCRIPTION_GROUP_LEGAL_ENTITY_REFERRAL)
-    # ИЗМЕНЕНО 28.09.2026 (см. _subscription_app_url выше) - раньше при
-    # отсутствии email отправлялось ОТДЕЛЬНОЕ сообщение-просьба ввести его в
-    # приложении. Теперь экран оплаты юрлица показывается сразу, кнопка
-    # "ОПЛАТИТЬ" сама откроет приложение (экран "🏢 Юридическое лицо" внутри
-    # "Реферальная программа"), если email ещё не собран.
-    pay_url = None
-    app_url = None
-    if get_receipt_email(user_id):
-        pay_url = await create_tinkoff_payment(user_id, sub_group=SUBSCRIPTION_GROUP_LEGAL_ENTITY_REFERRAL)
-    else:
-        app_url = _subscription_app_url(user_id, 'referral')
+    # ИЗМЕНЕНО 29.09.2026 (прямая просьба пользователя - "оплата подписки
+    # организации ее происходит исключительно в приложении тг апп") - раньше
+    # при УЖЕ сохранённом email кнопка "ОПЛАТИТЬ" вела на внешнюю ссылку
+    # Тинькофф (url=pay_url), которая в Telegram открывается ВНЕ приложения
+    # (системным браузером) - это именно то, чего пользователь просил
+    # избежать для оплаты юрлица. Теперь кнопка оплаты юрлица ВСЕГДА
+    # web_app-кнопка (app_url, открывает экран "🏢 Юридическое лицо" внутри
+    # "Реферальная программа" мини-приложения) - там уже кнопка "Оплатить"
+    # тоже открывается через tg.openLink (см. renderReferralLegalDetail),
+    # не покидая интерфейс Telegram. pay_url/create_tinkoff_payment больше
+    # НЕ вызывается из этой функции (сама оплата всё равно создаётся и
+    # проверяется на экране в приложении).
+    app_url = _subscription_app_url(user_id, 'referral')
     sub = get_subscription(user_id, SUBSCRIPTION_GROUP_LEGAL_ENTITY_REFERRAL)
     active_until = _sub_parse(sub['paid_until']) if sub and sub['paid_until'] else None
     text = legal_entity_referral_paywall_text(active_until if active_until and _sub_now() < active_until else None)
-    if not pay_url and not app_url:
+    if not app_url:
         text += "\n\n⚠️ Не получилось создать ссылку на оплату, попробуй ещё раз чуть позже."
     # ВАЖНО: своя клавиатура (не subscription_paywall_keyboard) - у той
     # кнопка "Проверить" всегда ведёт на callback_data="sub_pay_check"
     # (обычная driver-подписка), здесь нужен отдельный
     # "legal_entity_sub_pay_check" (см. legal_entity_sub_pay_check выше).
     buttons = []
-    if pay_url:
-        buttons.append([InlineKeyboardButton(text=f"💳 ОПЛАТИТЬ {REFERRAL_LEGAL_ENTITY_SUBSCRIPTION_PRICE_RUB}₽", url=pay_url)])
-    elif app_url:
+    if app_url:
         buttons.append([InlineKeyboardButton(text=f"💳 ОПЛАТИТЬ {REFERRAL_LEGAL_ENTITY_SUBSCRIPTION_PRICE_RUB}₽", web_app=WebAppInfo(url=app_url))])
     buttons.append([InlineKeyboardButton(text="🔄 Я ОПЛАТИЛ(А), ПРОВЕРИТЬ", callback_data="legal_entity_sub_pay_check")])
     markup = InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -34825,6 +34897,7 @@ async def start_subscription_webhook_server():
     app.router.add_get(PRESENTATION_PDF_WEBAPP_PATH, handle_presentation_pdf)
     app.router.add_get(LEGAL_CABINET_ACCESS_API_PATH, handle_legal_cabinet_access_api)
     app.router.add_post(LEGAL_CABINET_PASSWORD_API_PATH, handle_legal_cabinet_password_api)
+    app.router.add_post(LEGAL_CABINET_LOGOUT_API_PATH, handle_legal_cabinet_logout_api)
     app.router.add_post(ADMIN_PARTNER_PASSWORD_API_PATH, handle_admin_partner_password_api)
     app.router.add_post(PHANTOM_UNLOCK_API_PATH, handle_phantom_unlock_api)
     app.router.add_post(ADMIN_PANEL_UNLOCK_API_PATH, handle_admin_panel_unlock_api)
@@ -36584,12 +36657,18 @@ async def handle_legal_cabinet_access_api(request):
     if not user_id:
         return web.json_response({'error': 'invalid_init_data'}, status=401)
     owned_entity = get_legal_entity_owned_by(user_id)
-    is_admin = get_referrer_type(user_id) == 'admin'
+    referrer_type = get_referrer_type(user_id)
+    is_admin = referrer_type == 'admin'
     subscription_active = is_admin or is_legal_entity_referral_subscription_active(user_id)
     payload = {
         'has_access': bool(owned_entity and subscription_active),
         'has_owned_entity': bool(owned_entity),
         'subscription_active': subscription_active,
+        # ДОБАВЛЕНО 29.09.2026 (прямая просьба пользователя - кнопка "Выход
+        # из кабинета" на экране "Юридическое лицо") - фронту нужно знать,
+        # активна ли СЕЙЧАС именно схема 'legal_entity' у этого user_id,
+        # чтобы показать кнопку выхода (см. renderReferralLegalDetail ниже).
+        'referrer_type': referrer_type,
     }
     if not subscription_active:
         payload['subscription_price_rub'] = REFERRAL_LEGAL_ENTITY_SUBSCRIPTION_PRICE_RUB
@@ -36606,7 +36685,18 @@ async def handle_legal_cabinet_password_api(request):
     """WebApp-версия referral_legal_password_flow (см. выше) - тот же
     apply_legal_entity_password, только без чата. Подписку на реферальную
     систему юрлиц (1890₽/мес) проверяем ещё раз здесь же (не только на
-    экране) - на случай устаревшего состояния экрана в браузере/WebView."""
+    экране) - на случай устаревшего состояния экрана в браузере/WebView.
+
+    ИЗМЕНЕНО 29.09.2026 (прямая просьба пользователя - "ввод НАЗВАНИЕ
+    КАМПАНИИ И ПАРОЛЯ") - помимо пароля теперь принимается необязательное
+    поле name: если оно передано, оно должно совпадать (без учёта регистра
+    и пробелов по краям) с названием компании, которой принадлежит найденный
+    по паролю пароль - иначе 400 name_mismatch, даже если сам пароль верный.
+    Само поле name НЕ используется для поиска (пароли и так уникальны на
+    всю таблицу legal_entities, см. find_legal_entity_by_password) - это
+    доп. проверка "второго фактора", как и просил пользователь. name
+    оставлен необязательным (а не обязательным), чтобы не ломать пока
+    незакэшированные старые копии фронта, которые его ещё не присылают."""
     user_id = _cabinet_require_user(request)
     if not user_id:
         return web.json_response({'error': 'invalid_init_data'}, status=401)
@@ -36615,14 +36705,41 @@ async def handle_legal_cabinet_password_api(request):
     try:
         body = await request.json()
         password = (body.get('password') or '').strip()
+        name = (body.get('name') or '').strip()
     except Exception:
         return web.json_response({'error': 'invalid_body'}, status=400)
     if not password:
         return web.json_response({'error': 'invalid_body'}, status=400)
+    if name:
+        found = find_legal_entity_by_password(password)
+        if found and found.get('kind') != 'admin_partner' and found['name'].strip().lower() != name.lower():
+            return web.json_response({'error': 'name_mismatch'}, status=400)
     result = apply_legal_entity_password(user_id, password)
     if not result['ok']:
         return web.json_response({'error': 'wrong_password'}, status=400)
     return web.json_response(result)
+
+
+LEGAL_CABINET_LOGOUT_API_PATH = '/legal_cabinet/logout'
+
+# ДОБАВЛЕНО 29.09.2026 (прямая просьба пользователя - кнопка "Выход из
+# кабинета" на экране "Юридическое лицо") - переключает ЛИЧНУЮ схему
+# начислений пользователя обратно на 'individual' (см. set_referrer_type/
+# REFERRAL_DEFAULT_TYPE). Владение самим кабинетом (legal_entities.
+# owner_user_id) НЕ трогается - это постоянный факт ("кто первый ввёл
+# пароль компании"), а не сессионное состояние, и "выход" не должен отнимать
+# у человека его же компанию: повторный ввод того же пароля компании снова
+# вернёт схему 'legal_entity'. Работает для ЛЮБОЙ активной схемы, кроме
+# 'individual' (там просто нечего "выходить") - так и для юрлица, и (если
+# понадобится переиспользовать эту же кнопку) для admin.
+async def handle_legal_cabinet_logout_api(request):
+    user_id = _cabinet_require_user(request)
+    if not user_id:
+        return web.json_response({'error': 'invalid_init_data'}, status=401)
+    current_type = get_referrer_type(user_id)
+    if current_type != REFERRAL_DEFAULT_TYPE:
+        set_referrer_type(user_id, REFERRAL_DEFAULT_TYPE)
+    return web.json_response({'ok': True, 'referrer_type': REFERRAL_DEFAULT_TYPE})
 
 
 ADMIN_PARTNER_PASSWORD_API_PATH = '/legal_cabinet/admin_partner_password'
