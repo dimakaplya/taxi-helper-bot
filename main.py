@@ -6623,6 +6623,29 @@ WELCOME_PHOTO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'a
 # Презентация бота (без QR-кода) - см. кнопку "📥 СКАЧАТЬ ПРЕЗЕНТАЦИЮ" в
 # referral_menu_keyboard / хендлер referral_download_presentation ниже.
 PRESENTATION_PDF_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'assets', 'taxi_helper_presentation.pdf')
+# ДОБАВЛЕНО 29.09.2026 (прямая просьба пользователя - "эту презентацию
+# добавь файлом пдф в раздел материалы") - ОТДЕЛЬНАЯ презентация "Taxi
+# Helper - для таксопарков" (питч для владельцев автопарков/юр.лиц, с
+# QR-кодом на t.me/taxihelperbot_bot на последнем слайде) - НЕ тот же файл,
+# что PRESENTATION_PDF_PATH выше (тот - общий питч для водителей, без QR).
+# Кнопка только в разделе "📚 Материалы" реферальной программы (WebApp) -
+# см. renderReferralMaterialsDetail в unified_app_html.
+PRESENTATION_FLEET_PDF_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'assets', 'taxi_helper_presentation_fleet.pdf')
+# ДОБАВЛЕНО 29.09.2026 (прямая просьба пользователя - "этот файл пдф
+# добавь как презентацию для водителей в их личный кабинет для скачивания
+# и распостронения"; уточнено через AskUserQuestion - "Заменить кнопку
+# только у водителей" + "Кнопка "Посмотреть возможности" -> этот PDF") -
+# презентация "TaxiHelper. Меньше простоя. Больше заработок." (питч для
+# самих водителей/курьеров, с QR-слайдом на t.me/taxihelperbot_bot) -
+# используется в ДВУХ местах: (1) кнопка "📥 Скачать презентацию" ТОЛЬКО на
+# экране "🚕 Водитель / Курьер" реферальной программы (см.
+# renderReferralDriverDetail/referralStatsBlockHtml в unified_app_html -
+# на экране "Юридическое лицо" презентация осталась прежней,
+# PRESENTATION_PDF_PATH); (2) кнопка "📊 Посмотреть возможности бота" в
+# приветственном питче при первом /start (см. welcome_pitch_keyboard ниже -
+# раньше вела на внешний артефакт BOT_PRESENTATION_URL, теперь скачивает
+# сразу этот файл).
+PRESENTATION_DRIVER_PDF_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'assets', 'taxi_helper_presentation_driver.pdf')
 # ДОБАВЛЕНО 29.09.2026 (см. build_admin_overview_pdf_bytes ниже) - встроенные
 # TTF-шрифты с поддержкой кириллицы для генерации PDF через reportlab.
 # Встроенные PDF-шрифты reportlab (Helvetica и т.п.) - это Latin-1-кодировка
@@ -6684,8 +6707,19 @@ BOT_PRESENTATION_URL = "https://claude.ai/artifact/RKFt9ZggB5zLbUyA3eMDCN"
 
 
 def welcome_pitch_keyboard():
+    # ИЗМЕНЕНО 29.09.2026 (прямая просьба пользователя - "при старте
+    # приложения ... со словами приветствия ... и кнопкой входа"; уточнено
+    # через AskUserQuestion - "Кнопка "Посмотреть возможности" -> этот
+    # PDF") - кнопка теперь скачивает PRESENTATION_DRIVER_PDF_PATH прямо с
+    # сервера бота (тот же паттерн раздачи, что у остальных презентаций -
+    # см. PRESENTATION_DRIVER_PDF_WEBAPP_PATH ниже), вместо внешней ссылки
+    # на артефакт BOT_PRESENTATION_URL выше. Fallback на BOT_PRESENTATION_URL
+    # оставлен на случай PUBLIC_URL не задан (дев-запуск без HTTPS -
+    # Telegram inline-кнопка url= требует абсолютный https-адрес, по
+    # относительному /assets/... открыть нельзя).
+    presentation_url = f"{PUBLIC_URL}{PRESENTATION_DRIVER_PDF_WEBAPP_PATH}" if PUBLIC_URL else BOT_PRESENTATION_URL
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📊 ПОСМОТРЕТЬ ВОЗМОЖНОСТИ БОТА", url=BOT_PRESENTATION_URL)],
+        [InlineKeyboardButton(text="📊 ПОСМОТРЕТЬ ВОЗМОЖНОСТИ БОТА", url=presentation_url)],
     ])
 
 
@@ -20362,6 +20396,12 @@ def unified_app_html():
   const REFERRAL_LIST_API_PATH = '""" + REFERRAL_LIST_API_PATH + """';
   const REFERRAL_QR_PNG_PATH = '""" + REFERRAL_QR_PNG_PATH + """';
   const PRESENTATION_PDF_WEBAPP_PATH = '""" + PRESENTATION_PDF_WEBAPP_PATH + """';
+  // ДОБАВЛЕНО 29.09.2026 (см. PRESENTATION_FLEET_PDF_PATH/PRESENTATION_DRIVER_PDF_PATH
+  // в main.py) - презентация "для таксопарков" (кнопка в "📚 Материалы") и
+  // презентация "для водителей" (кнопка ТОЛЬКО на экране "Водитель / Курьер",
+  // см. renderReferralDriverDetail/referralStatsBlockHtml ниже).
+  const PRESENTATION_FLEET_PDF_WEBAPP_PATH = '""" + PRESENTATION_FLEET_PDF_WEBAPP_PATH + """';
+  const PRESENTATION_DRIVER_PDF_WEBAPP_PATH = '""" + PRESENTATION_DRIVER_PDF_WEBAPP_PATH + """';
   const LEGAL_CABINET_ACCESS_API_PATH = '""" + LEGAL_CABINET_ACCESS_API_PATH + """';
   const LEGAL_CABINET_PASSWORD_API_PATH = '""" + LEGAL_CABINET_PASSWORD_API_PATH + """';
   const LEGAL_CABINET_LOGOUT_API_PATH = '""" + LEGAL_CABINET_LOGOUT_API_PATH + """';
@@ -21329,7 +21369,17 @@ def unified_app_html():
     }
     return out;
   }
-  function referralStatsBlockHtml(data, rates, description) {
+  // ДОБАВЛЕНО 29.09.2026 (прямая просьба пользователя - "этот файл пдф
+  // добавь как презентацию для водителей в их личный кабинет"; уточнено
+  // через AskUserQuestion - "Заменить кнопку только у водителей") -
+  // необязательный 4-й параметр presentationUrl: по умолчанию (не передан)
+  // - общая презентация без QR (PRESENTATION_PDF_WEBAPP_PATH, как и было),
+  // renderReferralDriverDetail ниже передаёт PRESENTATION_DRIVER_PDF_WEBAPP_PATH
+  // - меняется ТОЛЬКО ссылка кнопки на экране "Водитель / Курьер", экран
+  // "Юридическое лицо" и админский "Фантом" (вызывают без 4-го аргумента)
+  // не затронуты.
+  function referralStatsBlockHtml(data, rates, description, presentationUrl) {
+    const presentationHref = presentationUrl || PRESENTATION_PDF_WEBAPP_PATH;
     // ДОБАВЛЕНО 28.09.2026 (прямая просьба пользователя - "эти 6% ... где
     // будет написано что 6% идёт в счёт погашения налогов на доходы")
     // - та же приписка, что и в чат-версии (см. REFERRAL_TAX_NOTE_TEXT в
@@ -21356,7 +21406,7 @@ def unified_app_html():
       '<div id="refListBox"></div>' +
       '<button type="button" class="svc-btn ghost" id="refQrBtn">📱 QR-код ссылки</button>' +
       '<div id="refQrBox"></div>' +
-      '<a class="svc-btn ghost" href="' + PRESENTATION_PDF_WEBAPP_PATH + '" target="_blank" rel="noopener">📥 Скачать презентацию</a>' +
+      '<a class="svc-btn ghost" href="' + presentationHref + '" target="_blank" rel="noopener">📥 Скачать презентацию</a>' +
       '<button type="button" class="svc-btn disabled" disabled>💸 Вывод средств <span class="svc-soon">скоро</span></button>' +
       '<div class="svc-note">Комиссия за вывод: ' + data.withdrawal_fee_percent + '%. Минимальная сумма вывода: ' + data.min_withdrawal_rub + ' ₽. Вывод средств - как и раньше, через бота в чате.</div>'
     );
@@ -21395,7 +21445,12 @@ def unified_app_html():
     // пользователей в системе, что уже был на общем экране renderReferralMenu)
     // теперь показывается СВЕРХУ и на каждом детальном экране схемы, а не
     // только на общем меню - переиспользуем как есть, ничего не пересчитано.
-    box.innerHTML = '<div class="svc-h">🚕 Водитель / Курьер</div>' + refDashHtml(data) + referralStatsBlockHtml(data, rates, description);
+    // ДОБАВЛЕНО 29.09.2026 (прямая просьба пользователя - "добавь как
+    // презентацию для водителей в их личный кабинет для скачивания и
+    // распостронения") - ТОЛЬКО здесь передаём презентацию "для водителей"
+    // (PRESENTATION_DRIVER_PDF_WEBAPP_PATH) 4-м аргументом - см. комментарий
+    // у referralStatsBlockHtml выше.
+    box.innerHTML = '<div class="svc-h">🚕 Водитель / Курьер</div>' + refDashHtml(data) + referralStatsBlockHtml(data, rates, description, PRESENTATION_DRIVER_PDF_WEBAPP_PATH);
     wireReferralStatsBlock(box, data);
   }
 
@@ -21651,10 +21706,16 @@ def unified_app_html():
     const ratesNote = rates.length
       ? ('<div class="svc-card">Как это работает: ' + referralHowItWorksText(rates) + '</div>' + taxNote)
       : '';
+    // ДОБАВЛЕНО 29.09.2026 (прямая просьба пользователя - "эту презентацию
+    // добавь файлом пдф в раздел материалы") - отдельная кнопка для
+    // презентации "для таксопарков" (см. PRESENTATION_FLEET_PDF_PATH в
+    // main.py), рядом с уже существующей общей презентацией - обе кнопки
+    // ведут на разные PDF-файлы, ничего не заменяет.
     box.innerHTML =
       '<div class="svc-h">📚 Материалы реферальной системы</div>' +
       ratesNote +
-      '<a class="svc-btn ghost" href="' + PRESENTATION_PDF_WEBAPP_PATH + '" target="_blank" rel="noopener">📥 Скачать презентацию</a>';
+      '<a class="svc-btn ghost" href="' + PRESENTATION_PDF_WEBAPP_PATH + '" target="_blank" rel="noopener">📥 Скачать презентацию</a>' +
+      '<a class="svc-btn ghost" href="' + PRESENTATION_FLEET_PDF_WEBAPP_PATH + '" target="_blank" rel="noopener">📥 Презентация для таксопарков</a>';
   }
 
   // "Фантом" - точка входа во ВЕСЬ административный функционал. ПЕРЕПИСАНО
@@ -35310,6 +35371,8 @@ async def start_subscription_webhook_server():
     app.router.add_get(REFERRAL_LIST_API_PATH, handle_referral_list_api)
     app.router.add_get(REFERRAL_QR_PNG_PATH, handle_referral_qr_png)
     app.router.add_get(PRESENTATION_PDF_WEBAPP_PATH, handle_presentation_pdf)
+    app.router.add_get(PRESENTATION_FLEET_PDF_WEBAPP_PATH, handle_presentation_fleet_pdf)
+    app.router.add_get(PRESENTATION_DRIVER_PDF_WEBAPP_PATH, handle_presentation_driver_pdf)
     app.router.add_get(LEGAL_CABINET_ACCESS_API_PATH, handle_legal_cabinet_access_api)
     app.router.add_post(LEGAL_CABINET_PASSWORD_API_PATH, handle_legal_cabinet_password_api)
     app.router.add_post(LEGAL_CABINET_LOGOUT_API_PATH, handle_legal_cabinet_logout_api)
@@ -37088,6 +37151,42 @@ async def handle_presentation_pdf(request):
     return web.FileResponse(
         PRESENTATION_PDF_PATH,
         headers={'Content-Disposition': 'attachment; filename="Taxi_Helper_presentation.pdf"'},
+    )
+
+
+# ДОБАВЛЕНО 29.09.2026 (прямая просьба пользователя - "эту презентацию
+# добавь файлом пдф в раздел материалы") - презентация "для таксопарков"
+# (см. PRESENTATION_FLEET_PDF_PATH выше), тот же паттерн раздачи, что и
+# handle_presentation_pdf выше: обычный публичный GET без проверки
+# initData - файл тоже без персональных данных внутри (общий питч + QR на
+# t.me/taxihelperbot_bot, не персональная реферальная ссылка).
+PRESENTATION_FLEET_PDF_WEBAPP_PATH = '/assets/presentation_fleet.pdf'
+
+
+async def handle_presentation_fleet_pdf(request):
+    if not os.path.exists(PRESENTATION_FLEET_PDF_PATH):
+        return web.Response(status=404)
+    return web.FileResponse(
+        PRESENTATION_FLEET_PDF_PATH,
+        headers={'Content-Disposition': 'attachment; filename="Taxi_Helper_presentation_fleet.pdf"'},
+    )
+
+
+# ДОБАВЛЕНО 29.09.2026 (прямая просьба пользователя - "добавь как
+# презентацию для водителей в их личный кабинет для скачивания и
+# распостронения") - презентация "для водителей" (см.
+# PRESENTATION_DRIVER_PDF_PATH выше), тот же паттерн раздачи, что и у двух
+# хендлеров выше: публичный GET без проверки initData - файл без личных
+# данных (общий питч + QR на t.me/taxihelperbot_bot).
+PRESENTATION_DRIVER_PDF_WEBAPP_PATH = '/assets/presentation_driver.pdf'
+
+
+async def handle_presentation_driver_pdf(request):
+    if not os.path.exists(PRESENTATION_DRIVER_PDF_PATH):
+        return web.Response(status=404)
+    return web.FileResponse(
+        PRESENTATION_DRIVER_PDF_PATH,
+        headers={'Content-Disposition': 'attachment; filename="Taxi_Helper_presentation_driver.pdf"'},
     )
 
 
