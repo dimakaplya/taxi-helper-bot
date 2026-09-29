@@ -6844,7 +6844,11 @@ async def start(message: types.Message):
     # состояние, которое он запускал, удалены как мёртвый код.
     user_id = message.from_user.id
     if start_param == 'reflegal':
-        if get_referrer_type(user_id) != 'admin' and not is_legal_entity_referral_subscription_active(user_id):
+        # ИЗМЕНЕНО 29.09.2026 (см. is_admin_referral_account выше - тот же
+        # фикс "кнопка оплаты не должна появляться у admin-юзеров даже на
+        # другой вкладке/схеме", применён и здесь для единообразия с
+        # WebApp-версией handle_legal_cabinet_access_api).
+        if not is_admin_referral_account(user_id) and not is_legal_entity_referral_subscription_active(user_id):
             await send_legal_entity_referral_paywall(message)
         elif get_referrer_type(user_id) == 'legal_entity' and get_legal_entity_owned_by(user_id):
             await message.answer("Уже выбрана схема юр.лица")
@@ -34868,6 +34872,27 @@ def is_legal_entity_referral_subscription_active(user_id):
     return _sub_now() < _sub_parse(sub['paid_until'])
 
 
+# ДОБАВЛЕНО 29.09.2026 (прямая просьба пользователя - "сделай так чтобы у
+# admin юзеров не было кнопки оплаты а уже было оплачено всё") - раньше
+# "бесплатный проход" мимо подписки на юр.лиц (1890₽/мес) проверялся как
+# get_referrer_type(user_id) == 'admin', то есть СЕЙЧАС АКТИВНАЯ схема -
+# как только сам же админ переключался на схему 'legal_entity' (чтобы,
+# например, завести/проверить конкретную компанию), бесплатный проход
+# пропадал и ему показывалась кнопка "Оплатить 1890 ₽", хотя человек как
+# был админом, так и остался - просто сейчас смотрит другую вкладку. Новая
+# проверка - "владеет ли этот user_id вообще каким-либо кабинетом
+# админ-партнёра" (kind='admin_partner', см. get_legal_entity_owned_by) -
+# это ПОСТОЯННЫЙ факт про аккаунт (кто он), а не про то, какая вкладка
+# сейчас открыта, поэтому не исчезает при переключении схем.
+def is_admin_referral_account(user_id):
+    """True, если этот user_id - владелец какого-либо кабинета
+    админ-партнёра (см. add_admin_partner/apply_admin_partner_password) -
+    т.е. один из именных админ-аккаунтов (AdminDmitry/AdminRuslan/AdminMike
+    или любой другой, добавленный через админ-панель), независимо от того,
+    какая реферальная схема у него активна ПРЯМО СЕЙЧАС."""
+    return bool(get_legal_entity_owned_by(user_id, kind='admin_partner'))
+
+
 def legal_entity_referral_paywall_text(active_until=None):
     price_rub = REFERRAL_LEGAL_ENTITY_SUBSCRIPTION_PRICE_RUB
     if active_until:
@@ -37014,7 +37039,12 @@ async def handle_legal_cabinet_access_api(request):
         return web.json_response({'error': 'invalid_init_data'}, status=401)
     owned_entity = get_legal_entity_owned_by(user_id)
     referrer_type = get_referrer_type(user_id)
-    is_admin = referrer_type == 'admin'
+    # ИЗМЕНЕНО 29.09.2026 (прямая просьба пользователя - "сделай так чтобы у
+    # admin юзеров не было кнопки оплаты а уже было оплачено всё") - было
+    # referrer_type == 'admin' (СЕЙЧАС активная схема) - см.
+    # is_admin_referral_account выше про то, почему это ломалось при
+    # переключении на другую вкладку/схему.
+    is_admin = is_admin_referral_account(user_id)
     subscription_active = is_admin or is_legal_entity_referral_subscription_active(user_id)
     payload = {
         'has_access': bool(owned_entity and subscription_active),
@@ -37056,7 +37086,11 @@ async def handle_legal_cabinet_password_api(request):
     user_id = _cabinet_require_user(request)
     if not user_id:
         return web.json_response({'error': 'invalid_init_data'}, status=401)
-    if get_referrer_type(user_id) != 'admin' and not is_legal_entity_referral_subscription_active(user_id):
+    # ИЗМЕНЕНО 29.09.2026 (прямая просьба пользователя - "сделай так чтобы у
+    # admin юзеров не было кнопки оплаты а уже было оплачено всё") - было
+    # get_referrer_type(user_id) != 'admin' (ломалось, как только сам админ
+    # переключался на другую вкладку/схему - см. is_admin_referral_account).
+    if not is_admin_referral_account(user_id) and not is_legal_entity_referral_subscription_active(user_id):
         return web.json_response({'error': 'subscription_required'}, status=402)
     try:
         body = await request.json()
@@ -37582,7 +37616,9 @@ async def referral_category_legal_start(callback_query: types.CallbackQuery):
     if get_referrer_type(user_id) == 'admin' and not get_legal_entity_owned_by(user_id):
         await _send_referral_scheme_view(callback_query, 'legal_entity')
         return
-    if get_referrer_type(user_id) != 'admin' and not is_legal_entity_referral_subscription_active(user_id):
+    # ИЗМЕНЕНО 29.09.2026 (см. is_admin_referral_account выше - тот же фикс
+    # для единообразия с WebApp-версией).
+    if not is_admin_referral_account(user_id) and not is_legal_entity_referral_subscription_active(user_id):
         try:
             await callback_query.answer()
         except Exception:
