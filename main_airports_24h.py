@@ -13989,7 +13989,7 @@ MAP_CHROME_CSS = """
      drop-shadow - на пёстрой тайловой подложке почти не различить.
      Теперь квадратик на полупрозрачном белом фоне - как отдельный
      UI-элемент, а не часть карты, читается на любом фоне. */
-  .fuel-icon, .charging-icon, .parking-icon { box-sizing: border-box; display: flex; align-items: center; justify-content: center; font-size: 16px; background: rgba(255,255,255,.8); border: 1px solid rgba(0,0,0,.2); border-radius: 50%; box-shadow: 0 1px 3px rgba(0,0,0,.5); }
+  .fuel-icon, .charging-icon, .parking-icon, .poi-icon { box-sizing: border-box; display: flex; align-items: center; justify-content: center; font-size: 16px; background: rgba(255,255,255,.8); border: 1px solid rgba(0,0,0,.2); border-radius: 50%; box-shadow: 0 1px 3px rgba(0,0,0,.5); }
   /* ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "пусть на карте
      показывает тебя как треугольник со смайликом с заливкой соответствующей
      и угол верхний треугольника это направления движения а остальных в
@@ -14060,6 +14060,19 @@ def map_webapp_html():
     /map/positions?city=&category= с заголовком, содержащим initData, для
     проверки подписи на сервере (см. validate_telegram_webapp_init_data)."""
     style_json = json.dumps(MAP_CATEGORY_STYLE, ensure_ascii=False)
+    # ДОБАВЛЕНО 29.09.2026 (см. MAP_POI_LAYERS выше) - реестр новых слоёв
+    # точек интереса передаётся в JS ЦЕЛИКОМ (без 'file' - это чисто
+    # backend-поле пути к данным), а не по одному слою на чекбокс в самом
+    # HTML: страница генерируется БЕЗ query-параметров (category узнаётся
+    # уже в браузере из ?category=, см. myCategory ниже) - поэтому JS сам
+    # строит чекбоксы в #layerToggle и фильтрует их по своей категории
+    # (loadPoiLayer/renderPoiLayerCheckboxes ниже), вместо готовых <label>
+    # на каждую категорию в самой HTML-разметке (как у заправок/парковок).
+    map_poi_layers_json = json.dumps(
+        {key: {'label': cfg['label'], 'emoji': cfg['emoji'], 'categories': list(cfg['categories'])}
+         for key, cfg in MAP_POI_LAYERS.items()},
+        ensure_ascii=False,
+    )
     self_marker_style_json = json.dumps(SELF_MARKER_STYLE, ensure_ascii=False)
     demand_threshold_by_category_json = json.dumps(MAP_DEMAND_CLOUD_THRESHOLD_BY_CATEGORY, ensure_ascii=False)
     # ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "отображение
@@ -18306,6 +18319,88 @@ def map_webapp_html():
     parkingCluster.clearLayers();
     parkingLoaded = false;
   }}
+
+  // ==================== ДИНАМИЧЕСКИЕ СЛОИ ТОЧЕК ИНТЕРЕСА (POI) ====================
+  // ДОБАВЛЕНО 29.09.2026 (прямая просьба пользователя - расширить список
+  // переключаемых слоёв карты; см. MAP_POI_LAYERS/map_poi_layers_json в
+  // map_webapp_html Python выше). ОДИН общий набор функций на ВСЕ новые
+  // слои (туалеты/магазины 24ч/ТЦ/фастфуд/рестораны/клубы/кабаки/отели/
+  // театры/выставочные комплексы/кинотеатры/алкомаркеты/бизнес-центры/
+  // рынки/склады/строительные ТЦ/стройки) вместо копии
+  // loadParkingStations/clearParkingStations на каждую категорию отдельно
+  // - тот же паттерн (маркер-кластер + чекбокс + автообновление раз в
+  // минуту), но данные/подписи берутся из POI_LAYERS (ключ -> {{label,
+  // emoji, categories}}), а не хардкодятся по одной на слой. Чекбоксы
+  // видны ТОЛЬКО для категорий из cfg.categories (см. myCategory выше) -
+  // ключевое отличие от заправок/зарядок/парковок, которые показываются
+  // ВСЕМ категориям без исключения.
+  const POI_LAYERS = {map_poi_layers_json};
+  const poiClusters = {{}};
+  const poiLoaded = {{}};
+
+  function poiClusterFor(key) {{
+    if (!poiClusters[key]) {{
+      poiClusters[key] = L.markerClusterGroup({{ maxClusterRadius: 60, disableClusteringAtZoom: 16, spiderfyOnMaxZoom: false }});
+    }}
+    return poiClusters[key];
+  }}
+
+  async function loadPoiLayer(key) {{
+    const cfg = POI_LAYERS[key];
+    if (!cfg) return;
+    try {{
+      const resp = await fetch(`/map/poi/${{key}}?city=${{encodeURIComponent(city)}}`);
+      if (!resp.ok) return;
+      const data = await resp.json();
+      const cluster = poiClusterFor(key);
+      cluster.clearLayers();
+      const icon = L.divIcon({{ className: 'poi-icon', html: cfg.emoji, iconSize: [20, 20] }});
+      (data.points || []).forEach(p => {{
+        const eta = etaText(p.lat, p.lon);
+        const popup = `<div class="fuel-popup"><h4>${{cfg.emoji}} ${{p.name || cfg.label}}</h4>` +
+          (eta ? `<div class="sub">${{eta}} (~${{AVG_SPEED_KMH}} км/ч)</div>` : '') +
+          `${{goButtonHtml(p.lat, p.lon)}}</div>`;
+        const marker = L.marker([p.lat, p.lon], {{ icon }}).bindPopup(popup);
+        cluster.addLayer(marker);
+      }});
+      if (!map.hasLayer(cluster)) map.addLayer(cluster);
+      poiLoaded[key] = true;
+    }} catch (e) {{ /* тихо */ }}
+  }}
+
+  function clearPoiLayer(key) {{
+    const cluster = poiClusters[key];
+    if (!cluster) return;
+    map.removeLayer(cluster);
+    cluster.clearLayers();
+    poiLoaded[key] = false;
+  }}
+
+  // Строит чекбоксы для СВОЕЙ категории (myCategory) внутри #layerToggle,
+  // перед кнопкой "👥 Все" (mineToggleBtn) - см. HTML разметку выше. Если
+  // myCategory ещё не известна (страница открыта без ?category=) - на
+  // всякий случай показываем все слои сразу, чтобы раздел не остался
+  // пустым.
+  function renderPoiLayerCheckboxes() {{
+    const toggleBox = document.getElementById('layerToggle');
+    const mineBtn = document.getElementById('mineToggleBtn');
+    if (!toggleBox) return;
+    Object.entries(POI_LAYERS).forEach(([key, cfg]) => {{
+      if (myCategory && cfg.categories.indexOf(myCategory) === -1) return;
+      const label = document.createElement('label');
+      const checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.id = `poi_${{key}}LayerCheckbox`;
+      label.appendChild(checkbox);
+      label.appendChild(document.createTextNode(` ${{cfg.emoji}} ${{cfg.label}}`));
+      toggleBox.insertBefore(label, mineBtn || null);
+      checkbox.addEventListener('change', () => {{
+        if (checkbox.checked) loadPoiLayer(key); else clearPoiLayer(key);
+      }});
+      setInterval(() => {{ if (checkbox.checked) loadPoiLayer(key); }}, 60000);
+    }});
+  }}
+  renderPoiLayerCheckboxes();
 
   // ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя, референс-скриншот
   // круглой кнопки Яндекс Навигатора - "три палочки с лупой, круглую, в
@@ -25119,6 +25214,116 @@ async def handle_map_parking_api(request):
         logger.exception("❌ Ошибка при получении парковок для карты водителей")
         result = []
     return web.json_response({'stations': result})
+
+# ==================== СЛОИ ТОЧЕК ИНТЕРЕСА (POI) НА КАРТЕ ВОДИТЕЛЕЙ ====================
+# ДОБАВЛЕНО 29.09.2026 (прямая просьба пользователя - расширить список
+# переключаемых слоёв на карте: помимо уже существующих заправок/зарядок/
+# бесплатных парковок добавить туалеты/магазины 24ч/ТЦ/фастфуд (общее для
+# всех категорий), рестораны/клубы/кабаки/отели/театры/выставочные
+# комплексы/кинотеатры/алкомаркеты/бизнес-центры (только такси/Ultima),
+# рынки/склады/строительные ТЦ (курьер+грузовое) и стройки (только
+# грузовое) - см. переписку про итоговую разбивку категорий).
+#
+# СОЗНАТЕЛЬНО отдельный реестр от NEARBY_SERVICES выше (а не расширение
+# того словаря) - NEARBY_SERVICES питает СОВСЕМ ДРУГУЮ фичу ("найти
+# ближайшее" текстовым списком в чате бота через NEARBY_BUTTON_TO_KIND),
+# добавление сюда новых ключей автоматически завело бы новые кнопки в том
+# меню, которые пользователь не просил. Для туалетов/магазинов 24ч/
+# алкомаркетов (уже есть в NEARBY_SERVICES) данные читаются из ТЕХ ЖЕ
+# файлов (toilets_data.json/grocery24_data.json/alcohol_data.json) - один
+# источник данных, две независимые витрины (чат-поиск и карта).
+#
+# 'categories' - для каких категорий водителя (см. CATEGORIES выше) слой
+# вообще показывается на карте (чекбокс в #layerToggle) - см.
+# map_webapp_html ниже, где список чекбоксов фильтруется по этому полю.
+MAP_POI_LAYERS = {
+    'toilets': {'file': 'toilets_data.json', 'label': 'Туалеты', 'emoji': '🚻',
+                'categories': ('taxi', 'ultima', 'courier', 'cargo')},
+    'grocery24': {'file': 'grocery24_data.json', 'label': 'Магазины 24ч', 'emoji': '🛒',
+                  'categories': ('taxi', 'ultima', 'courier', 'cargo')},
+    'malls': {'file': 'malls_data.json', 'label': 'Торговые центры', 'emoji': '🏬',
+              'categories': ('taxi', 'ultima', 'courier', 'cargo')},
+    'fastfood': {'file': 'fastfood_data.json', 'label': 'Фастфуд', 'emoji': '🍔',
+                 'categories': ('taxi', 'ultima', 'courier', 'cargo')},
+    'restaurants': {'file': 'restaurants_data.json', 'label': 'Рестораны', 'emoji': '🍽️',
+                     'categories': ('taxi', 'ultima')},
+    'clubs': {'file': 'clubs_data.json', 'label': 'Клубы', 'emoji': '🎶',
+              'categories': ('taxi', 'ultima')},
+    'taverns': {'file': 'taverns_data.json', 'label': 'Кабаки', 'emoji': '🍺',
+                'categories': ('taxi', 'ultima')},
+    'hotels': {'file': 'hotels_data.json', 'label': 'Отели', 'emoji': '🏨',
+               'categories': ('taxi', 'ultima')},
+    'theatres': {'file': 'theatres_data.json', 'label': 'Театры', 'emoji': '🎭',
+                 'categories': ('taxi', 'ultima')},
+    'expo': {'file': 'expo_data.json', 'label': 'Выставочные комплексы', 'emoji': '🏛️',
+             'categories': ('taxi', 'ultima')},
+    'cinemas': {'file': 'cinemas_data.json', 'label': 'Кинотеатры', 'emoji': '🎬',
+                'categories': ('taxi', 'ultima')},
+    'alcohol': {'file': 'alcohol_data.json', 'label': 'Алкомаркеты', 'emoji': '🍷',
+                'categories': ('taxi', 'ultima')},
+    'business_centers': {'file': 'business_centers_data.json', 'label': 'Бизнес-центры', 'emoji': '🏢',
+                          'categories': ('taxi', 'ultima')},
+    'markets': {'file': 'markets_data.json', 'label': 'Рынки', 'emoji': '🧺',
+                'categories': ('courier', 'cargo')},
+    'warehouses': {'file': 'warehouses_data.json', 'label': 'Склады', 'emoji': '📦',
+                   'categories': ('courier', 'cargo')},
+    'building_malls': {'file': 'building_malls_data.json', 'label': 'Строительные ТЦ', 'emoji': '🔨',
+                        'categories': ('courier', 'cargo')},
+    'construction': {'file': 'construction_data.json', 'label': 'Стройки', 'emoji': '🚧',
+                      'categories': ('cargo',)},
+}
+
+_map_poi_cache = {}
+_map_poi_mtime = {}
+
+def load_map_poi_data(key):
+    """Тот же mtime-кэш, что и load_nearby_data выше - НЕ используем сам
+    load_nearby_data напрямую, т.к. у него свой отдельный кэш-словарь,
+    ключованный по kind из NEARBY_SERVICES, а не MAP_POI_LAYERS (ключи
+    пересекаются по названию у 3 слоёв, но это разные реестры)."""
+    global _map_poi_cache, _map_poi_mtime
+    cfg = MAP_POI_LAYERS.get(key)
+    if not cfg:
+        return None
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), cfg['file'])
+    try:
+        mtime = os.path.getmtime(path)
+        if _map_poi_cache.get(key) is not None and _map_poi_mtime.get(key) == mtime:
+            return _map_poi_cache[key]
+        with open(path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        _map_poi_cache[key] = data
+        _map_poi_mtime[key] = mtime
+        return data
+    except FileNotFoundError:
+        return None
+    except Exception as e:
+        logger.error(f"❌ Ошибка чтения {cfg['file']}: {e}")
+        return None
+
+MAP_POI_API_PATH = '/map/poi/{key}'
+
+async def handle_map_poi_api(request):
+    """Общий обработчик для ВСЕХ слоёв MAP_POI_LAYERS выше - один роут с
+    параметром {key} вместо отдельной функции на каждую категорию (как
+    handle_map_parking_api) - тот же формат ответа {'points': [...]},
+    что и у заправок/парковок ({'stations':...})/{'points':...} - имя поля
+    другое специально, чтобы не путать со старыми слоями при чтении кода
+    JS (см. loadPoiLayer в map_webapp_html)."""
+    key = request.match_info.get('key', '')
+    if key not in MAP_POI_LAYERS:
+        return web.json_response({'error': 'unknown_layer'}, status=404)
+    city = request.query.get('city', '')
+    result = []
+    try:
+        data = load_map_poi_data(key) or {}
+        points = (data.get('cities', {}).get(city) or [])
+        for p in points:
+            result.append({'lat': p['lat'], 'lon': p['lon'], 'name': p.get('name')})
+    except Exception:
+        logger.exception(f"❌ Ошибка при получении слоя POI '{key}' для карты водителей")
+        result = []
+    return web.json_response({'points': result})
 
 MAP_ROAD_EVENTS_API_PATH = '/map/road_events'
 
@@ -36058,6 +36263,7 @@ async def start_subscription_webhook_server():
     app.router.add_get(MAP_FUEL_STATIONS_API_PATH, handle_map_fuel_stations_api)
     app.router.add_get(MAP_CHARGING_STATIONS_API_PATH, handle_map_charging_stations_api)
     app.router.add_get(MAP_PARKING_API_PATH, handle_map_parking_api)
+    app.router.add_get(MAP_POI_API_PATH, handle_map_poi_api)
     app.router.add_post(MAP_FUEL_REPORT_API_PATH, handle_map_fuel_report_api)
     app.router.add_post(MAP_GAS_QUEUE_REPORT_API_PATH, handle_map_gas_queue_report_api)
     app.router.add_post(MAP_CHARGING_REPORT_API_PATH, handle_map_charging_report_api)
@@ -40321,19 +40527,53 @@ async def push_district_tariff_tip(user_id, state, city, district_name, tariffs)
         reply_markup=_district_advice_keyboard(state, city),
     )
 
-async def maybe_send_district_tariff_tip(user_id, state, city, category, district_name, weekday, hour, lat, lon):
+async def push_combined_district_tariff_alert(user_id, state, city, category, district_name, tariffs, lower_tariff):
+    """ДОБАВЛЕНО 29.09.2026 (прямая просьба пользователя со скриншотом - два
+    почти одинаковых по смыслу пуша про один и тот же район подряд: "давай
+    сделаем одно и крутое описание с тем же смыслом") - объединяет
+    push_district_tariff_tip ("в этом районе сейчас лучше быть в тарифе X")
+    и push_low_tariff_demand_alert ("на твоём тарифе сейчас мало заказов, а
+    на X - есть смысл подключить дополнительно") в ОДНО сообщение на случай,
+    когда оба срабатывают в одном проходе check_low_tariff_demand_alerts для
+    одного и того же пользователя/района (см. maybe_send_district_tariff_tip
+    ниже - параметр combine_with_lower_tariff). Кнопка та же, что у
+    push_low_tariff_demand_alert - сразу подключает lower_tariff."""
+    if not bot:
+        return False
+    city_display = CITY_DISPLAY_NAMES.get(city, city)
+    text = (
+        f"🔥 *Район {district_name} ({city_display})*\n\n"
+        f"Спрос здесь сейчас явно смещён в *{lower_tariff}*: на твоём тарифе заказов мало, "
+        f"а *{lower_tariff}* сейчас самый горячий тариф района.\n\n"
+        f"Подключи его дополнительно, чтобы не терять время в простое."
+    )
+    return await send_push_with_retry(
+        user_id, text, state=state, parse_mode='Markdown',
+        reply_markup=_live_shift_tariff_toggle_button(f"➕ Подключить {lower_tariff}", category, lower_tariff)
+        or _district_advice_keyboard(state, city),
+    )
+
+async def maybe_send_district_tariff_tip(user_id, state, city, category, district_name, weekday, hour, lat, lon, combine_with_lower_tariff=None):
     """Проверяет и, если нужно, шлёт push_district_tariff_tip выше - вызов
     ВСТРОЕН в check_low_tariff_demand_alerts (см. её тело ниже), чтобы
     переиспользовать уже посчитанные там district_name/weekday/hour/lat/lon
     вместо отдельного прохода по всем водителям. Отдельный, независимый от
     'low_tariff_demand' переключатель уведомлений ('district_tariff_tip') -
     пользователь должен уметь включить/выключить этот совет отдельно от
-    пуша "переключись на пониженный тариф"."""
+    пуша "переключись на пониженный тариф".
+
+    ДОБАВЛЕНО 29.09.2026 (см. push_combined_district_tariff_alert выше) -
+    необязательный combine_with_lower_tariff: если передан и входит в число
+    рекомендованных tariffs, вместо push_district_tariff_tip отправляется
+    ОДНО объединённое сообщение (dedup-состояние 'district_tariff_tip_alert'
+    обновляется как обычно). Возвращает True, только если реально было
+    отправлено именно объединённое сообщение - тогда вызывающий код не
+    должен слать отдельный push_low_tariff_demand_alert."""
     if not notifications_enabled(state, 'district_tariff_tip'):
-        return
+        return False
     tariffs = recommended_tariffs_for_category(city, category, district_name, weekday, hour, lat, lon)
     if not tariffs:
-        return
+        return False
     now_utc = datetime.now(timezone.utc)
     tip_state = state.get('district_tariff_tip_alert') or {}
     if tip_state.get('district') == district_name and tip_state.get('tariffs') == tariffs:
@@ -40342,13 +40582,18 @@ async def maybe_send_district_tariff_tip(user_id, state, city, category, distric
         except Exception:
             last_sent = None
         if last_sent and (now_utc - last_sent).total_seconds() < DISTRICT_TARIFF_TIP_RECHECK_MINUTES * 60:
-            return
-    ok = await push_district_tariff_tip(user_id, state, city, district_name, tariffs)
+            return False
+    combine = bool(combine_with_lower_tariff) and combine_with_lower_tariff in tariffs
+    if combine:
+        ok = await push_combined_district_tariff_alert(user_id, state, city, category, district_name, tariffs, combine_with_lower_tariff)
+    else:
+        ok = await push_district_tariff_tip(user_id, state, city, district_name, tariffs)
     if ok:
         state['district_tariff_tip_alert'] = {
             'district': district_name, 'tariffs': tariffs, 'last_sent': now_utc.isoformat(),
         }
     await asyncio.sleep(0.05)
+    return combine and ok
 
 def _live_shift_tariff_toggle_button(text, category, tariff):
     """Кнопка "➕/➖ <тариф>" под пушем про низкий/повышенный спрос - тап
@@ -40431,6 +40676,73 @@ async def check_low_tariff_demand_alerts():
         district_name = nearest[0]
         now = get_city_now(city)
         weekday = now.weekday()
+        # ИЗМЕНЕНО 29.09.2026 (прямая просьба пользователя со скриншотом -
+        # "два сообщения одинаковые почти по смыслу давай сделаем одно и
+        # крутое описание с тем же смыслом") - кандидат на "низкий спрос по
+        # тарифу" (current_tariff/lower_tariff) теперь считается ЗАРАНЕЕ, до
+        # вызова maybe_send_district_tariff_tip, чтобы передать lower_tariff
+        # в неё - если он совпадает с рекомендованным tip'ом тарифом, вместо
+        # ДВУХ почти одинаковых пушей уйдёт ОДИН объединённый (см.
+        # push_combined_district_tariff_alert/maybe_send_district_tariff_tip
+        # выше). Ветка "выключить дополнительный тариф" (disable_extra,
+        # push_disable_extra_tariff_alert) - ОТДЕЛЬНЫЙ, независимый сценарий,
+        # с объединением не смешивается, поведение не менялось.
+        low_demand_toggle_on = notifications_enabled(state, 'low_tariff_demand')
+        current_tariff = None
+        lower_tariff = None
+        disable_extra_pending = None  # (main_tariff, extra_tariff) или None
+        if low_demand_toggle_on:
+            current_tariff = _lowest_selected_tariff(category, shift.get('tariffs'))
+        if current_tariff:
+            # ИЗМЕНЕНО 25.09.2026 (см. push_disable_extra_tariff_alert/
+            # "обратную сторону" ниже) - раньше отсутствие candidates (тариф
+            # уже самый дешёвый в иерархии) сразу обрывало проверку этого
+            # водителя. Теперь пустой candidates - НЕ повод выходить сразу:
+            # если этот самый дешёвый тариф выбран ДОПОЛНИТЕЛЬНО поверх
+            # более дорогого и его спрос упал, нужно предложить его
+            # выключить (см. блок ниже, после is_current_low).
+            candidates = _lower_tariff_candidates(category, current_tariff)
+            try:
+                current_value, current_threshold = _tariff_demand_and_threshold(city, category, district_name, current_tariff, weekday, now.hour, user_lat, user_lon)
+            except Exception as e:
+                logger.error(f"❌ Не удалось проверить спрос по тарифам для {user_id} ({city}/{category}): {e}")
+                current_value, current_threshold = None, None
+            is_current_low = (current_value is not None and current_threshold and current_value < current_threshold[0])
+            if is_current_low and not candidates:
+                # ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя -
+                # "обратная сторона - отключить тариф бизнеса, оставить
+                # только премьер", см. push_disable_extra_tariff_alert выше)
+                # - current_tariff тут уже САМЫЙ ДЕШЁВЫЙ из иерархии,
+                # переключаться вниз некуда. Но если он был выбран
+                # ДОПОЛНИТЕЛЬНО поверх более дорогого тарифа (тоже сейчас
+                # выбранного) и спрос на него упал - предлагаем не
+                # "переключиться" (некуда), а просто выключить именно этот
+                # дополнительный тариф, раз он больше не оправдывает себя,
+                # пока более дорогой тариф работает нормально.
+                selected_now = shift.get('tariffs') or []
+                hierarchy = TARIFF_HIERARCHY.get(category) or []
+                selected_in_hierarchy = [t for t in hierarchy if t in selected_now]
+                if len(selected_in_hierarchy) >= 2 and selected_in_hierarchy[-1] == current_tariff:
+                    main_tariff = selected_in_hierarchy[-2]
+                    try:
+                        main_value, main_threshold = _tariff_demand_and_threshold(city, category, district_name, main_tariff, weekday, now.hour, user_lat, user_lon)
+                    except Exception as e:
+                        logger.error(f"❌ Не удалось проверить спрос по тарифам для {user_id} ({city}/{category}): {e}")
+                        main_value, main_threshold = None, None
+                    main_ok = (main_value is not None and main_threshold and main_value >= main_threshold[0])
+                    if main_ok:
+                        disable_extra_pending = (main_tariff, current_tariff)
+            elif is_current_low and candidates:
+                # Перебираем кандидатов на понижение по приоритету (ближайший
+                # сначала) и берём первый, у которого реально есть спрос сейчас.
+                try:
+                    for candidate in candidates:
+                        candidate_value, candidate_threshold = _tariff_demand_and_threshold(city, category, district_name, candidate, weekday, now.hour, user_lat, user_lon)
+                        if candidate_value is not None and candidate_threshold and candidate_value >= candidate_threshold[0]:
+                            lower_tariff = candidate
+                            break
+                except Exception as e:
+                    logger.error(f"❌ Не удалось проверить спрос по тарифам для {user_id} ({city}/{category}): {e}")
         # ДОБАВЛЕНО 25.09.2026 - см. maybe_send_district_tariff_tip выше.
         # Вызывается ЗДЕСЬ (а не только под notifications_enabled(...,
         # 'low_tariff_demand') ниже), т.к. это ОТДЕЛЬНЫЙ, независимый от
@@ -40438,85 +40750,47 @@ async def check_low_tariff_demand_alerts():
         # свой собственный переключатель, проверяется внутри самой
         # функции) - переиспользует уже посчитанные тут district_name/
         # weekday/hour/lat/lon вместо отдельного прохода по водителям.
+        combined = False
         try:
-            await maybe_send_district_tariff_tip(user_id, state, city, category, district_name, weekday, now.hour, user_lat, user_lon)
+            combined = await maybe_send_district_tariff_tip(
+                user_id, state, city, category, district_name, weekday, now.hour, user_lat, user_lon,
+                combine_with_lower_tariff=lower_tariff,
+            )
         except Exception as e:
             logger.error(f"❌ Не удалось отправить совет по тарифу района для {user_id}: {e}")
-        if not notifications_enabled(state, 'low_tariff_demand'):
+        if not low_demand_toggle_on:
             continue
-        current_tariff = _lowest_selected_tariff(category, shift.get('tariffs'))
-        if not current_tariff:
-            continue
-        # ИЗМЕНЕНО 25.09.2026 (см. push_disable_extra_tariff_alert/
-        # "обратную сторону" ниже) - раньше отсутствие candidates (тариф уже
-        # самый дешёвый в иерархии) сразу обрывало проверку этого водителя.
-        # Теперь пустой candidates - НЕ повод выходить сразу: если этот
-        # самый дешёвый тариф выбран ДОПОЛНИТЕЛЬНО поверх более дорогого и
-        # его спрос упал, нужно предложить его выключить (см. блок ниже,
-        # после is_current_low) - решение по candidates откладываем до
-        # after проверки is_current_low.
-        candidates = _lower_tariff_candidates(category, current_tariff)
-        try:
-            current_value, current_threshold = _tariff_demand_and_threshold(city, category, district_name, current_tariff, weekday, now.hour, user_lat, user_lon)
-        except Exception as e:
-            logger.error(f"❌ Не удалось проверить спрос по тарифам для {user_id} ({city}/{category}): {e}")
-            continue
-        is_current_low = (current_value is not None and current_threshold and current_value < current_threshold[0])
-        if not is_current_low:
-            continue
-        selected_now = shift.get('tariffs') or []
-        if not candidates:
-            # ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - "обратная
-            # сторона - отключить тариф бизнеса, оставить только премьер",
-            # см. push_disable_extra_tariff_alert выше) - current_tariff тут
-            # уже САМЫЙ ДЕШЁВЫЙ из иерархии, переключаться вниз некуда. Но
-            # если он был выбран КАК ДОПОЛНИТЕЛЬНЫЙ (в дополнение к более
-            # дорогому тарифу, который тоже сейчас выбран) и спрос на него
-            # упал - предлагаем не "переключиться" (некуда), а просто
-            # выключить именно этот дополнительный тариф, раз он больше не
-            # оправдывает себя, пока более дорогой тариф работает нормально.
-            hierarchy = TARIFF_HIERARCHY.get(category) or []
-            selected_in_hierarchy = [t for t in hierarchy if t in selected_now]
-            if len(selected_in_hierarchy) >= 2 and selected_in_hierarchy[-1] == current_tariff:
-                main_tariff = selected_in_hierarchy[-2]
+        if disable_extra_pending:
+            main_tariff, extra_tariff = disable_extra_pending
+            disable_state = state.get('disable_extra_tariff_alert') or {}
+            if (disable_state.get('district') == district_name
+                    and disable_state.get('extra') == extra_tariff
+                    and disable_state.get('main') == main_tariff):
                 try:
-                    main_value, main_threshold = _tariff_demand_and_threshold(city, category, district_name, main_tariff, weekday, now.hour, user_lat, user_lon)
-                except Exception as e:
-                    logger.error(f"❌ Не удалось проверить спрос по тарифам для {user_id} ({city}/{category}): {e}")
+                    last_sent = datetime.fromisoformat(disable_state['last_sent'])
+                except Exception:
+                    last_sent = None
+                if last_sent and (now_utc - last_sent).total_seconds() < LOW_TARIFF_DEMAND_RECHECK_MINUTES * 60:
                     continue
-                main_ok = (main_value is not None and main_threshold and main_value >= main_threshold[0])
-                if main_ok:
-                    disable_state = state.get('disable_extra_tariff_alert') or {}
-                    if (disable_state.get('district') == district_name
-                            and disable_state.get('extra') == current_tariff
-                            and disable_state.get('main') == main_tariff):
-                        try:
-                            last_sent = datetime.fromisoformat(disable_state['last_sent'])
-                        except Exception:
-                            last_sent = None
-                        if last_sent and (now_utc - last_sent).total_seconds() < LOW_TARIFF_DEMAND_RECHECK_MINUTES * 60:
-                            continue
-                    ok = await push_disable_extra_tariff_alert(user_id, state, city, category, district_name, main_tariff, current_tariff)
-                    if ok:
-                        state['disable_extra_tariff_alert'] = {
-                            'district': district_name, 'extra': current_tariff, 'main': main_tariff,
-                            'last_sent': now_utc.isoformat(),
-                        }
-                    await asyncio.sleep(0.05)
-            continue  # уже самый дешёвый тариф в категории - переключаться "вниз" некуда
-        # Перебираем кандидатов на понижение по приоритету (ближайший
-        # сначала) и берём первый, у которого реально есть спрос сейчас.
-        lower_tariff = None
-        try:
-            for candidate in candidates:
-                candidate_value, candidate_threshold = _tariff_demand_and_threshold(city, category, district_name, candidate, weekday, now.hour, user_lat, user_lon)
-                if candidate_value is not None and candidate_threshold and candidate_value >= candidate_threshold[0]:
-                    lower_tariff = candidate
-                    break
-        except Exception as e:
-            logger.error(f"❌ Не удалось проверить спрос по тарифам для {user_id} ({city}/{category}): {e}")
+            ok = await push_disable_extra_tariff_alert(user_id, state, city, category, district_name, main_tariff, extra_tariff)
+            if ok:
+                state['disable_extra_tariff_alert'] = {
+                    'district': district_name, 'extra': extra_tariff, 'main': main_tariff,
+                    'last_sent': now_utc.isoformat(),
+                }
+            await asyncio.sleep(0.05)
             continue
         if not lower_tariff:
+            continue  # уже самый дешёвый тариф в категории (и не подошло под disable_extra), либо ни у одного кандидата нет спроса
+        if combined:
+            # ДОБАВЛЕНО 29.09.2026 - объединили с district_tariff_tip выше,
+            # отдельное сообщение уже не нужно, но dedup-состояние всё равно
+            # обновляем, чтобы не пытаться отправить отдельный
+            # push_low_tariff_demand_alert раньше LOW_TARIFF_DEMAND_RECHECK_MINUTES.
+            state['low_tariff_demand_alert'] = {
+                'district': district_name, 'tariff': current_tariff, 'suggested': lower_tariff,
+                'last_sent': now_utc.isoformat(),
+            }
             continue
         # Дедуп - тот же район/тариф/подсказка уже отправлялись недавно - не
         # повторяем раньше LOW_TARIFF_DEMAND_RECHECK_MINUTES.
