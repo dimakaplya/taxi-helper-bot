@@ -35174,19 +35174,53 @@ async def create_tinkoff_payment(user_id: int, sub_group=None):
     return data.get('PaymentURL')
 
 
-def subscription_paywall_keyboard(pay_url, user_id=None, app_url=None):
-    """app_url - ДОБАВЛЕНО 28.09.2026 (см. комментарий у
-    _subscription_app_url выше): когда email для чека ещё не собран,
-    pay_url создать нельзя (create_tinkoff_payment вернёт None) - вместо
-    того чтобы вообще не показывать кнопку "ОПЛАТИТЬ" (как было раньше,
-    пока email не спросят ОТДЕЛЬНЫМ сообщением), кнопка ведёт web_app'ом
-    прямо в приложение - оно само спросит email и продолжит оплату."""
+async def subscription_paywall_pay_urls(user_id):
+    """Ссылки на оплату ОБЕИХ групп подписки (SUBSCRIPTION_DISPLAY_GROUPS)
+    сразу - {sub_group: url|None}. ДОБАВЛЕНО 29.09.2026 вместе с
+    subscription_paywall_keyboard/subscription_paywall_text ниже (прямая
+    просьба пользователя - "предлагать оплатить подписку для такси такси
+    Ультима 149 руб. либо курьер грузовой такси 89 руб., разнести на
+    разные кнопки, как же push уведомления в боте также и в приложении").
+    Вызывать только когда email уже собран (get_receipt_email) - иначе
+    create_tinkoff_payment всё равно вернёт None для обеих групп, дешевле
+    сразу использовать app_url (см. вызовы ниже)."""
+    urls = {}
+    for grp, _label in SUBSCRIPTION_DISPLAY_GROUPS:
+        urls[grp] = await create_tinkoff_payment(user_id, grp)
+    return urls
+
+
+def subscription_paywall_keyboard(pay_urls, user_id=None, app_url=None):
+    """pay_urls - dict {sub_group: url|None}, см. subscription_paywall_pay_urls
+    выше; пустой dict {}, если email для чека ещё не собран.
+
+    app_url - ДОБАВЛЕНО 28.09.2026 (см. комментарий у _subscription_app_url
+    выше): когда email для чека ещё не собран, pay_url создать нельзя
+    (create_tinkoff_payment вернёт None) - вместо того чтобы вообще не
+    показывать кнопку "ОПЛАТИТЬ" (как было раньше, пока email не спросят
+    ОТДЕЛЬНЫМ сообщением), кнопка ведёт web_app'ом прямо в приложение - оно
+    само спросит email и продолжит оплату (и там же, на экране "Подписка",
+    сразу покажет обе группы - см. renderSubscriptionDetail).
+
+    ИЗМЕНЕНО 29.09.2026 (см. subscription_paywall_pay_urls выше) - раньше
+    была ОДНА кнопка "ОПЛАТИТЬ" с ценой ТЕКУЩЕЙ категории пользователя.
+    Теперь - как и на экране "Подписка" внутри мини-приложения (см.
+    _subscription_status_payload/SUBSCRIPTION_DISPLAY_GROUPS выше) - ВСЕГДА
+    обе группы отдельными кнопками, независимо от текущей категории:
+    пользователь может заранее оплатить и вторую (например, если работает в
+    двух категориях сразу или планирует сменить), и цена каждой группы
+    видна сразу на самой кнопке, а не только внутри текста."""
+    current_group = get_user_subscription_group(user_id) if user_id is not None else None
     buttons = []
-    price_rub = get_subscription_price_rub(user_id) if user_id is not None else SUBSCRIPTION_PRICE_RUB
-    if pay_url:
-        buttons.append([InlineKeyboardButton(text=f"💳 ОПЛАТИТЬ {price_rub}₽", url=pay_url)])
-    elif app_url:
-        buttons.append([InlineKeyboardButton(text=f"💳 ОПЛАТИТЬ {price_rub}₽", web_app=WebAppInfo(url=app_url))])
+    for grp, label in SUBSCRIPTION_DISPLAY_GROUPS:
+        price_rub = get_subscription_group_price_rub(grp)
+        mark = "✅ " if grp == current_group else ""
+        btn_text = f"💳 {mark}{label} — {price_rub}₽"
+        url = pay_urls.get(grp) if pay_urls else None
+        if url:
+            buttons.append([InlineKeyboardButton(text=btn_text, url=url)])
+        elif app_url:
+            buttons.append([InlineKeyboardButton(text=btn_text, web_app=WebAppInfo(url=app_url))])
     buttons.append([InlineKeyboardButton(text="🔄 Я ОПЛАТИЛ(А), ПРОВЕРИТЬ", callback_data="sub_pay_check")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -35199,13 +35233,24 @@ def subscription_paywall_keyboard(pay_url, user_id=None, app_url=None):
 def subscription_paywall_text(user_id):
     """Было константой SUBSCRIPTION_PAYWALL_TEXT - стало функцией 22.09.2026
     (цена подписки теперь зависит от категории пользователя, см.
-    get_subscription_price_rub)."""
-    price_rub = get_subscription_price_rub(user_id)
+    get_subscription_price_rub).
+
+    ИЗМЕНЕНО 29.09.2026 (см. subscription_paywall_keyboard выше) - раньше
+    называла только цену ТЕКУЩЕЙ группы пользователя. Теперь прямым текстом
+    перечисляет цену ОБЕИХ групп (прямая просьба пользователя - "это
+    обязательно нужно прописать"), с пометкой, какая из них - текущая
+    категория пользователя."""
+    current_group = get_user_subscription_group(user_id)
+    price_lines = "\n".join(
+        f"• {label} — *{get_subscription_group_price_rub(grp)}₽/мес*" + (" _(твоя категория)_" if grp == current_group else "")
+        for grp, label in SUBSCRIPTION_DISPLAY_GROUPS
+    )
     return (
         "🔒 *Пробный период закончился*\n"
         f"{WHERE_TO_GO_DIVIDER}\n\n"
         f"Бесплатные {SUBSCRIPTION_TRIAL_DAYS} дней использованы. Чтобы продолжать пользоваться ботом, "
-        f"оформи подписку - *{price_rub}₽/мес*.\n\n"
+        f"оформи подписку:\n\n"
+        f"{price_lines}\n\n"
         "После оплаты доступ откроется в течение пары минут - или сразу нажми «Я оплатил(а), проверить»."
     )
 
@@ -35365,18 +35410,22 @@ async def send_subscription_paywall(event):
     ввести его в приложении, и только ПОСЛЕ этого (при следующем триггере
     paywall'а) показывался сам экран оплаты. Теперь один и тот же экран
     показывается сразу - просто кнопка "ОПЛАТИТЬ" ведёт в приложение вместо
-    прямой ссылки Тинькофф, пока email не собран."""
+    прямой ссылки Тинькофф, пока email не собран.
+
+    ИЗМЕНЕНО 29.09.2026 (см. subscription_paywall_keyboard выше) - теперь
+    запрашивает pay_url ОБЕИХ групп разом (subscription_paywall_pay_urls),
+    чтобы показать две отдельные кнопки с ценой каждой."""
     user_id = event.from_user.id
-    pay_url = None
+    pay_urls = {}
     app_url = None
     if get_receipt_email(user_id):
-        pay_url = await create_tinkoff_payment(user_id)
+        pay_urls = await subscription_paywall_pay_urls(user_id)
     else:
         app_url = _subscription_app_url(user_id, 'subscription')
     text = subscription_paywall_text(user_id)
-    if not pay_url and not app_url:
+    if not any(pay_urls.values()) and not app_url:
         text += "\n\n⚠️ Не получилось создать ссылку на оплату, попробуй ещё раз чуть позже."
-    markup = subscription_paywall_keyboard(pay_url, user_id, app_url=app_url)
+    markup = subscription_paywall_keyboard(pay_urls, user_id, app_url=app_url)
     if isinstance(event, types.CallbackQuery):
         try:
             await event.answer()
@@ -35422,14 +35471,24 @@ def subscription_lock_snippet_html():
     бы пользователя в замкнутом круге (не может оплатить, потому что сама
     страница оплаты заблокирована) и сломал бы бесплатную рефералку. Там
     отдельная, точечная защита на уровне диспетчера "сервисов" - см.
-    комментарий у неё же в unified_app_html."""
+    комментарий у неё же в unified_app_html.
+
+    ИЗМЕНЕНО 29.09.2026 (прямая просьба пользователя - "предлагать оплатить
+    подписку для такси такси Ультима 149 руб. либо курьер грузовой такси
+    89 руб., разнести на разные кнопки, как же push уведомления в боте
+    также и в приложении") - раньше здесь была ОДНА кнопка с ценой ТЕКУЩЕЙ
+    категории пользователя (data.price_rub/data.pay_url). Теперь - как и на
+    экране "Подписка" внутри unified_app_html (renderSubscriptionDetail) и
+    в push/чат-заглушке бота (subscription_paywall_keyboard) - ВСЕГДА обе
+    группы отдельными кнопками (data.groups, см. _subscription_status_payload),
+    с пометкой, какая из них - текущая категория пользователя."""
     return """
 <div id="subLockOverlay" style="display:none;position:fixed;inset:0;z-index:999999;background:rgba(10,10,18,.94);align-items:center;justify-content:center;padding:20px;box-sizing:border-box;font-family:-apple-system,BlinkMacSystemFont,sans-serif;">
   <div style="background:#fff;border-radius:16px;padding:26px 22px;max-width:340px;width:100%;text-align:center;box-shadow:0 12px 40px rgba(0,0,0,.45);">
     <div style="font-size:38px;line-height:1;margin-bottom:10px;">🔒</div>
     <div style="font-size:17px;font-weight:700;color:#111;margin-bottom:8px;">Пробный период закончился</div>
-    <div id="subLockText" style="font-size:13.5px;color:#555;line-height:1.5;margin-bottom:18px;">Проверяем статус подписки...</div>
-    <button type="button" id="subLockPayBtn" style="display:none;width:100%;background:#2AABEE;color:#fff;border:none;border-radius:10px;padding:13px;font-size:15px;font-weight:600;cursor:pointer;margin-bottom:8px;"></button>
+    <div id="subLockText" style="font-size:13.5px;color:#555;line-height:1.5;margin-bottom:14px;">Проверяем статус подписки...</div>
+    <div id="subLockPayBtns" style="margin-bottom:8px;"></div>
     <div id="subLockEmailBox" style="display:none;margin-bottom:8px;">
       <input type="email" id="subLockEmail" placeholder="email@example.com" style="width:100%;box-sizing:border-box;border:1px solid #ddd;border-radius:10px;padding:11px;font-size:14px;margin-bottom:8px;">
       <button type="button" id="subLockEmailBtn" style="width:100%;background:#2AABEE;color:#fff;border:none;border-radius:10px;padding:13px;font-size:15px;font-weight:600;cursor:pointer;">Продолжить</button>
@@ -35448,30 +35507,48 @@ def subscription_lock_snippet_html():
   }
   function _slRender(data) {
     var text = document.getElementById('subLockText');
-    var payBtn = document.getElementById('subLockPayBtn');
+    var btnsBox = document.getElementById('subLockPayBtns');
     var emailBox = document.getElementById('subLockEmailBox');
     if (!data) {
       if (text) text.textContent = 'Не получилось проверить статус подписки. Попробуй ещё раз чуть позже.';
-      if (payBtn) payBtn.style.display = 'none';
+      if (btnsBox) btnsBox.innerHTML = '';
       if (emailBox) emailBox.style.display = 'none';
       return;
     }
-    var price = data.price_rub;
-    if (text) text.textContent = 'Бесплатный пробный период закончился. Чтобы продолжать пользоваться приложением, оформи подписку' + (price ? (' - ' + price + ' ₽/мес.') : '.');
+    var groups = data.groups || [];
+    if (text) {
+      var intro = 'Бесплатный пробный период закончился. Чтобы продолжать пользоваться приложением, оформи подписку:';
+      var priceLines = groups.map(function (g) {
+        return (g.is_current ? '✅ ' : '• ') + g.label + ' — ' + g.price_rub + ' ₽/мес';
+      }).join('\\n');
+      text.textContent = groups.length ? (intro + '\\n' + priceLines) : intro.replace(':', '.');
+      text.style.whiteSpace = 'pre-line';
+    }
     if (data.has_email) {
       if (emailBox) emailBox.style.display = 'none';
-      if (data.pay_url && payBtn) {
-        payBtn.style.display = '';
-        payBtn.textContent = 'Оплатить' + (price ? (' ' + price + ' ₽') : '');
-        payBtn.onclick = function () {
-          try { if (_slTg && typeof _slTg.openLink === 'function') { _slTg.openLink(data.pay_url); return; } } catch (e) {}
-          window.open(data.pay_url, '_blank');
-        };
-      } else if (payBtn) {
-        payBtn.style.display = 'none';
+      if (btnsBox) {
+        btnsBox.innerHTML = '';
+        groups.forEach(function (g) {
+          var btn = document.createElement('button');
+          btn.type = 'button';
+          var mark = g.is_current ? '✅ ' : '';
+          btn.textContent = mark + g.label + ' — ' + g.price_rub + ' ₽/мес';
+          btn.style.cssText = 'display:block;width:100%;box-sizing:border-box;background:#2AABEE;color:#fff;border:none;border-radius:10px;padding:13px;font-size:14px;font-weight:600;cursor:pointer;margin-bottom:8px;';
+          if (g.pay_url) {
+            btn.onclick = function () {
+              try { if (_slTg && typeof _slTg.openLink === 'function') { _slTg.openLink(g.pay_url); return; } } catch (e) {}
+              window.open(g.pay_url, '_blank');
+            };
+          } else {
+            btn.disabled = true;
+            btn.style.opacity = '.5';
+            btn.style.cursor = 'default';
+          }
+          btnsBox.appendChild(btn);
+        });
       }
     } else {
-      if (payBtn) payBtn.style.display = 'none';
+      if (btnsBox) btnsBox.innerHTML = '';
       if (emailBox) emailBox.style.display = '';
     }
   }
@@ -35547,21 +35624,29 @@ async def show_subscription_status(message: types.Message):
     # ИЗМЕНЕНО 28.09.2026 (см. _subscription_app_url выше) - без email
     # раньше сюда вообще не доходили (отдельное сообщение-просьба). Теперь
     # статус показывается сразу, кнопка "ОПЛАТИТЬ" сама откроет приложение.
-    pay_url = None
+    # ИЗМЕНЕНО 29.09.2026 (см. subscription_paywall_keyboard/_text выше) -
+    # цена теперь перечисляется для ОБЕИХ групп подписки, а не только
+    # текущей - те же две кнопки, что и на экране-блокировке.
+    pay_urls = {}
     app_url = None
     if get_receipt_email(user_id):
-        pay_url = await create_tinkoff_payment(user_id)
+        pay_urls = await subscription_paywall_pay_urls(user_id)
     else:
         app_url = _subscription_app_url(user_id, 'subscription')
+    current_group = get_user_subscription_group(user_id)
+    price_lines = "\n".join(
+        f"• {label} — *{get_subscription_group_price_rub(grp)}₽/мес*" + (" _(твоя категория)_" if grp == current_group else "")
+        for grp, label in SUBSCRIPTION_DISPLAY_GROUPS
+    )
     text = (
         "💳 *Подписка*\n\n"
         f"{status_line}\n\n"
-        f"Стоимость: *{get_subscription_price_rub(user_id)}₽/мес*. Оплата продлевает подписку на "
-        f"{SUBSCRIPTION_PERIOD_DAYS} дней от текущей даты окончания (даже если она ещё активна)."
+        f"{price_lines}\n\n"
+        f"Оплата продлевает подписку на {SUBSCRIPTION_PERIOD_DAYS} дней от текущей даты окончания (даже если она ещё активна)."
     )
-    if not pay_url and not app_url:
+    if not any(pay_urls.values()) and not app_url:
         text += "\n\n⚠️ Не получилось создать ссылку на оплату, попробуй ещё раз чуть позже."
-    markup = subscription_paywall_keyboard(pay_url, user_id, app_url=app_url)
+    markup = subscription_paywall_keyboard(pay_urls, user_id, app_url=app_url)
     await message.answer(text, reply_markup=markup, parse_mode='Markdown')
 
 
@@ -36062,13 +36147,13 @@ async def check_subscription_expirations():
         active_until = subscription_active_until(user_id, sub_group)
         if active_until is None or now < active_until:
             continue
-        pay_url = await create_tinkoff_payment(user_id)
+        pay_urls = await subscription_paywall_pay_urls(user_id)
         text = subscription_paywall_text(user_id)
-        if not pay_url:
+        if not any(pay_urls.values()):
             text += "\n\n⚠️ Не получилось создать ссылку на оплату, попробуй ещё раз чуть позже."
         try:
             if bot:
-                await bot.send_message(user_id, text, reply_markup=subscription_paywall_keyboard(pay_url, user_id), parse_mode='Markdown')
+                await bot.send_message(user_id, text, reply_markup=subscription_paywall_keyboard(pay_urls, user_id), parse_mode='Markdown')
         except Exception:
             logger.warning(f"⚠️ Не удалось отправить пуш об окончании подписки user_id={user_id}")
         conn2 = get_db_connection()
