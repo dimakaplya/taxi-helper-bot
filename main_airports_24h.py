@@ -2832,18 +2832,26 @@ def moscow_departure_wave_info():
 
 def get_load_emoji(load_percent):
     # Пороги ИЗМЕНЕНЫ 21.09.2026 по просьбе пользователя (было 0-50/51-70/71-100/>100)
-    if load_percent <= 25: return '🔴'
-    elif load_percent <= 50: return '🟡'
-    elif load_percent <= 85: return '🟢'
+    # на 0-25/26-50/51-85/>85, а ЕЩЁ РАЗ ИЗМЕНЕНЫ 29.09.2026 (прямая просьба
+    # пользователя - "давай порог чуть понизим аэропортов по от 0-20 21-40
+    # 41-80 81-100") на 0-20/21-40/41-80/>80 - держать в синхроне с JS-версией
+    # loadEmoji() в unified_app_html() и легендами ниже (4 места, см. grep по
+    # "Не ехать").
+    if load_percent <= 20: return '🔴'
+    elif load_percent <= 40: return '🟡'
+    elif load_percent <= 80: return '🟢'
     else: return '🟣'
 
 def get_load_recommendation(load_percent):
     # Формулировки статусов - по просьбе пользователя (было
     # "НЕ ЕХАТЬ/ЗАНЯТЬ ОЧЕРЕДЬ/ЕХАТЬ/СРОЧНО"). Пороги загрузки ИЗМЕНЕНЫ
-    # 21.09.2026 (было 0-50/51-70/71-100/>100) на 0-25/26-50/51-85/>85.
-    if load_percent <= 25: return 'Не ехать'
-    elif load_percent <= 50: return 'Уточни очередь'
-    elif load_percent <= 85: return 'Занимай очередь'
+    # 21.09.2026 (было 0-50/51-70/71-100/>100) на 0-25/26-50/51-85/>85, а
+    # ЕЩЁ РАЗ ИЗМЕНЕНЫ 29.09.2026 (прямая просьба пользователя - "давай порог
+    # чуть понизим аэропортов по от 0-20 21-40 41-80 81-100") на
+    # 0-20/21-40/41-80/>80 - см. комментарий у get_load_emoji выше.
+    if load_percent <= 20: return 'Не ехать'
+    elif load_percent <= 40: return 'Уточни очередь'
+    elif load_percent <= 80: return 'Занимай очередь'
     else: return 'Срочно ехать'
 
 # Для вокзалов - ПО ПРОСЬБЕ ПОЛЬЗОВАТЕЛЯ упрощённая БИНАРНАЯ индикация вместо
@@ -25465,7 +25473,7 @@ def transport_webapp_html():
     <div class="tab active" id="tabAirports" data-tab="airports"><div class="ic">✈️</div><div class="lbl">Аэропорты</div></div>
     <div class="tab" id="tabTrains" data-tab="trains"><div class="ic">🚆</div><div class="lbl">Вокзалы</div></div>
   </div>
-  <div class="legend">🔴0-25% Не ехать | 🟡26-50% Уточни очередь | 🟢51-85% Занимай очередь | 🟣&gt;85% Срочно ехать</div>
+  <div class="legend">🔴0-20% Не ехать | 🟡21-40% Уточни очередь | 🟢41-80% Занимай очередь | 🟣&gt;80% Срочно ехать</div>
   <div class="section active" id="secAirports">
     <div id="airportsList"></div>
     <div class="queue-toggle-main" id="queueToggleMain" style="display:none">🚗 ОТМЕТИТЬ ОЧЕРЕДЬ</div>
@@ -25543,9 +25551,11 @@ def transport_webapp_html():
     return (s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   }
   function loadEmoji(load) {
-    if (load <= 25) return '🔴';
-    if (load <= 50) return '🟡';
-    if (load <= 85) return '🟢';
+    // Пороги 29.09.2026 (прямая просьба пользователя) - держать в синхроне
+    // с get_load_emoji()/get_load_recommendation() в main.py.
+    if (load <= 20) return '🔴';
+    if (load <= 40) return '🟡';
+    if (load <= 80) return '🟢';
     return '🟣';
   }
   // ru-плюрализация для "рейс/рейса/рейсов" - тот же принцип, что
@@ -30794,7 +30804,7 @@ async def show_airport_info(callback_query: types.CallbackQuery):
         keyboard.inline_keyboard.append([InlineKeyboardButton(text=button_text, callback_data=f"airport_details_{city}_{i}")])
     # ДОБАВЛЕНО 21.09.2026 (прямая просьба пользователя - легенда цветов
     # загрузки нужна везде, где виден % загрузки, не только на одном экране)
-    legend = "🔴0-25% Не ехать | 🟡26-50% Уточни очередь | 🟢51-85% Занимай очередь | 🟣>85% Срочно ехать"
+    legend = "🔴0-20% Не ехать | 🟡21-40% Уточни очередь | 🟢41-80% Занимай очередь | 🟣>80% Срочно ехать"
     # ДОБАВЛЕНО 21.09.2026 (пользователь уточнил - "я про кнопку назад"): у
     # этого экрана не было инлайн-кнопки "Назад" вообще - единственный путь
     # назад был через нижнюю reply-клавиатуру "← НАЗАД", что сбрасывает
@@ -30936,7 +30946,7 @@ async def show_airport_details(callback_query: types.CallbackQuery):
             text += f"   🛫 По терминалам: {' | '.join(zone_parts)}\n"
         text += "\n"
 
-    text += "_🔴0-25% Не ехать | 🟡26-50% Уточни очередь | 🟢51-85% Занимай очередь | 🟣>85% Срочно ехать_"
+    text += "_🔴0-20% Не ехать | 🟡21-40% Уточни очередь | 🟢41-80% Занимай очередь | 🟣>80% Срочно ехать_"
     keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ НАЗАД", callback_data="airport_arrivals")]])
     await msg.edit_text(text, reply_markup=keyboard, parse_mode='Markdown')
     await callback_query.answer()
@@ -31097,7 +31107,7 @@ async def show_airport_availability(callback_query: types.CallbackQuery):
         # цветов/порогов загрузки со скриншота другого экрана): та же
         # легенда, что уже была в show_airport_details, теперь показывается
         # на каждом экране со списком аэропортов, где видна загрузка %.
-        legend = "_🔴0-25% Не ехать | 🟡26-50% Уточни очередь | 🟢51-85% Занимай очередь | 🟣>85% Срочно ехать_"
+        legend = "_🔴0-20% Не ехать | 🟡21-40% Уточни очередь | 🟢41-80% Занимай очередь | 🟣>80% Срочно ехать_"
         # ДОБАВЛЕНО 21.09.2026 (пользователь уточнил - "я про кнопку назад"):
         # у этого экрана не было инлайн-кнопки "Назад" - добавлена на
         # родительский экран (меню аэропорта, transport_airports).
