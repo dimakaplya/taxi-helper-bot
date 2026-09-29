@@ -7270,7 +7270,7 @@ def share_order_webapp_html(category=None):
   }
 </style>
 </head>
-<body>
+<body>""" + subscription_lock_snippet_html() + """
 <!-- ИЗМЕНЕНО 28.09.2026 (жалоба пользователя со скриншотом кабинета юрлица -
      "выровняй по верху, посмотри как опустилось") - margin-top у этой
      кнопки раньше СНОВА добавлял env(safe-area-inset-top)+var(--tg-chrome-top)
@@ -7697,7 +7697,7 @@ def active_orders_webapp_html():
   }
 </style>
 </head>
-<body>
+<body>""" + subscription_lock_snippet_html() + """
 <button type="button" onclick="try{if(window.history.length>1){history.back();}else if(window.Telegram&&Telegram.WebApp&&Telegram.WebApp.close){Telegram.WebApp.close();}}catch(e){}" style="position:relative;z-index:2;display:inline-flex;align-items:center;gap:5px;margin:4px 0 10px;padding:8px 14px 8px 10px;background:#1c1c1c;border:1px solid rgba(255,255,255,.12);border-radius:10px;color:#fff;font-size:13px;font-weight:600;cursor:pointer;">← Назад</button>
 <h1>📋 Активные заказы</h1>
 <div id="state">Загружаю…</div>
@@ -7995,7 +7995,7 @@ def orders_hub_webapp_html():
   }
 </style>
 </head>
-<body>
+<body>""" + subscription_lock_snippet_html() + """
 <button type="button" onclick="try{if(window.history.length>1){history.back();}else if(window.Telegram&&Telegram.WebApp&&Telegram.WebApp.close){Telegram.WebApp.close();}}catch(e){}" style="position:relative;z-index:2;display:inline-flex;align-items:center;gap:5px;margin:4px 0 10px;padding:8px 14px 8px 10px;background:#1c1c1c;border:1px solid rgba(255,255,255,.12);border-radius:10px;color:#fff;font-size:13px;font-weight:600;cursor:pointer;">← Назад</button>
 <h1>🔄 Заказы</h1>
 <div id="hubGrid">
@@ -8159,7 +8159,7 @@ def preorders_webapp_html():
   }
 </style>
 </head>
-<body>
+<body>""" + subscription_lock_snippet_html() + """
 <button type="button" onclick="try{if(window.history.length>1){history.back();}else if(window.Telegram&&Telegram.WebApp&&Telegram.WebApp.close){Telegram.WebApp.close();}}catch(e){}" style="position:relative;z-index:2;display:inline-flex;align-items:center;gap:5px;margin:4px 0 10px;padding:8px 14px 8px 10px;background:#1c1c1c;border:1px solid rgba(255,255,255,.12);border-radius:10px;color:#fff;font-size:13px;font-weight:600;cursor:pointer;">← Назад</button>
 <h1>📡 Предзаказы</h1>
 <div class="src-note">Заказы из канала @NeurogoDriver - формат постов у канала произвольный, поэтому ниже под распознанными полями всегда показан исходный текст поста целиком.</div>
@@ -14236,7 +14236,7 @@ def map_webapp_html():
   {MAP_CHROME_CSS}
 </style>
 </head>
-<body>
+<body>""" + subscription_lock_snippet_html() + f"""
 <!-- УБРАНО 27.09.2026 (прямая просьба пользователя - "на карте кнопка
      назад не нужна, она нужна исключительно вкладкам Сервисов [настройки,
      личный кабинет и т.д.], главное чтобы снизу был доступен бар выбора
@@ -18727,7 +18727,7 @@ def weather_webapp_html():
   .hcard .v { font-size: 13px; font-weight: 700; font-variant-numeric: tabular-nums; color: #FFC400; }
 </style>
 </head>
-<body>
+<body>""" + subscription_lock_snippet_html() + """
 <!-- ИЗМЕНЕНО 28.09.2026 (жалоба пользователя со скриншотом кабинета юрлица -
      "выровняй по верху, посмотри как опустилось") - margin-top у этой
      кнопки раньше СНОВА добавлял env(safe-area-inset-top)+var(--tg-chrome-top)
@@ -19422,7 +19422,7 @@ def where_to_go_webapp_html():
   .carousel .card .dist { color: #666; }
 </style>
 </head>
-<body>
+<body>""" + subscription_lock_snippet_html() + """
 <!-- ИЗМЕНЕНО 28.09.2026 (жалоба пользователя со скриншотом кабинета юрлица -
      "выровняй по верху, посмотри как опустилось") - margin-top у этой
      кнопки раньше СНОВА добавлял env(safe-area-inset-top)+var(--tg-chrome-top)
@@ -21015,10 +21015,96 @@ def unified_app_html():
     wrap.appendChild(track);
   }
 
+  // ДОБАВЛЕНО 29.09.2026 (прямая просьба пользователя - "после окончания
+  // пробного периода приложение и бот дальше работает проверь это") -
+  // unified_app_html ЕДИНСТВЕННАЯ из 12 WebApp-страниц, куда НЕ вставлен
+  // общий блок subscription_lock_snippet_html (см. main.py) - это SPA, внутри
+  // которой одновременно живёт БЕСПЛАТНАЯ реферальная программа и сам экран
+  // оплаты подписки (renderSubscriptionDetail/loadReferralDetail ниже) -
+  // полноэкранный блокирующий оверлей здесь создал бы замкнутый круг
+  // (нельзя оплатить, потому что сама страница оплаты заблокирована) и
+  // сломал бы бесплатную рефералку. Вместо этого - точечная проверка в двух
+  // местах, где эта SPA рисует РЕАЛЬНЫЙ платный контент САМА, инлайном (а не
+  // через <iframe> на уже защищённую страницу, как "Карта"/"Кабинет" -
+  // см. loadMapFrame/loadCabinetFrame выше, там отдельная проверка не
+  // нужна, встроенная страница уже показывает свой оверлей): диспетчер
+  // разделов "Сервисов" (openServiceDetail ниже) и вкладка "Куда ехать"
+  // (loadWhereToGo, прямо здесь).
+  //
+  // SUB_LOCK_EXEMPT_KINDS - разделы, которые ДОЛЖНЫ оставаться доступны
+  // даже после окончания триала: 'subscription' (иначе нечем оплатить),
+  // 'referral' (бесплатная реферальная программа - как и в чате, см.
+  // REFERRAL_MENU_EXEMPT_CALLBACKS/SubscriptionMiddleware в main.py),
+  // 'city' (смена города/категории - настройка, а не платный контент) и
+  // 'support' (нужно оставаться доступным, чтобы разобраться с оплатой или
+  // сообщить о проблеме). 'tips' и 'fines' - реальные разделы приложения,
+  // блокируются как обычно.
+  const SUB_LOCK_EXEMPT_KINDS = ['subscription', 'referral', 'city', 'support'];
+  let _subActiveCache = null;
+  let _subActiveCheckPromise = null;
+  function ensureSubActiveChecked() {
+    if (_subActiveCheckPromise) return _subActiveCheckPromise;
+    _subActiveCheckPromise = fetch('""" + SUBSCRIPTION_STATUS_API_PATH + """', {
+      headers: { 'X-Telegram-Init-Data': (tg && tg.initData) || '' },
+    })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (data) {
+        // Как и в subscription_lock_snippet_html (main.py) - при сбое сети
+        // считаем неактивной (fail-closed), чтобы временная сетевая ошибка
+        // не открыла платный раздел по ошибке.
+        _subActiveCache = !!(data && data.active);
+        return _subActiveCache;
+      })
+      .catch(function () { _subActiveCache = false; return false; });
+    return _subActiveCheckPromise;
+  }
+  // Сбрасывает кэш и запрашивает статус заново - используется кнопкой
+  // "🔄 Я оплатил(а), проверить" на карточках-заглушках ниже (тот же приём,
+  // что и у window.checkSubscriptionLock в subscription_lock_snippet_html).
+  function refreshSubActiveChecked() {
+    _subActiveCheckPromise = null;
+    return ensureSubActiveChecked();
+  }
+  // Карточка-заглушка в том же визуальном языке, что и остальные разделы
+  // "Сервисов" (svc-h/svc-card/svc-btn - см. renderFinesDetail и т.д. выше/
+  // ниже) - onRetryActive(box) вызывается, если повторная проверка после
+  // клика "проверить" показала активную подписку (пере-рисовывает РЕАЛЬНЫЙ
+  // раздел на месте, без перезагрузки страницы). onPay - необязательный
+  // колбэк для кнопки "Перейти к оплате" (по умолчанию просто открывает
+  // раздел "Подписка" в уже видимой панели "Сервисы"; вкладке "Куда ехать"
+  // ниже нужно сначала переключиться на вкладку "Сервисы" - см. её вызов).
+  function renderSubLockCard(box, onRetryActive, onPay) {
+    box.innerHTML =
+      '<div class="svc-h">🔒 Пробный период закончился</div>' +
+      '<div class="svc-card">Чтобы открыть этот раздел, оформи подписку.</div>' +
+      '<button type="button" class="svc-btn" id="subLockPayBtn">Перейти к оплате</button>' +
+      '<button type="button" class="svc-btn ghost" id="subLockRetryBtn">🔄 Я оплатил(а), проверить</button>';
+    box.querySelector('#subLockPayBtn').addEventListener('click', onPay || function () { openServiceDetail('subscription'); });
+    const retryBtn = box.querySelector('#subLockRetryBtn');
+    retryBtn.addEventListener('click', function () {
+      retryBtn.disabled = true;
+      const oldText = retryBtn.textContent;
+      retryBtn.textContent = 'Проверяю...';
+      refreshSubActiveChecked().then(function (active) {
+        retryBtn.disabled = false;
+        retryBtn.textContent = oldText;
+        if (active) { onRetryActive(box); }
+      });
+    });
+  }
+
   async function loadWhereToGo() {
     const stateEl = document.getElementById('wtg-state');
     if (!city || !category) {
       stateEl.textContent = 'Город или категория не выбраны.';
+      return;
+    }
+    const subActive = await ensureSubActiveChecked();
+    if (!subActive) {
+      document.getElementById('wtg-app').hidden = true;
+      stateEl.style.display = '';
+      stateEl.style.opacity = '1';
+      renderSubLockCard(stateEl, function () { loadWhereToGo(); }, function () { showTab('services'); openServiceDetail('subscription'); });
       return;
     }
     try {
@@ -21269,17 +21355,34 @@ def unified_app_html():
       .catch(function () { el.textContent = ''; });
   }
 
-  function openServiceDetail(kind) {
-    const box = document.getElementById('svcDetailContent');
-    box.innerHTML = loadingBlockHtml();
-    svcBackAction = svcShowGrid; // ИЗМЕНЕНО 27.09.2026 - см. комментарий у svcShowGrid выше: из любого раздела сервисов "Назад" по умолчанию ведёт в сетку сервисов, на один шаг назад
-    svcShowDetail();
+  // ДОБАВЛЕНО 29.09.2026 (см. SUB_LOCK_EXEMPT_KINDS/ensureSubActiveChecked
+  // выше) - собственно показ раздела вынесен в отдельную функцию, чтобы
+  // после успешной повторной проверки (кнопка "проверить" на
+  // renderSubLockCard) можно было попасть в РЕАЛЬНЫЙ раздел на месте, не
+  // вызывая openServiceDetail заново (которая снова показала бы
+  // loadingBlockHtml/сбрасывала бы svcBackAction).
+  function openServiceDetailReal(kind, box) {
     if (kind === 'tips') return renderTipsDetail(box);
     if (kind === 'referral') return loadReferralDetail(box);
     if (kind === 'subscription') return loadSubscriptionDetail(box);
     if (kind === 'support') return loadSupportDetail(box);
     if (kind === 'city') return renderCityDetail(box);
     if (kind === 'fines') return renderFinesDetail(box);
+  }
+  async function openServiceDetail(kind) {
+    const box = document.getElementById('svcDetailContent');
+    box.innerHTML = loadingBlockHtml();
+    svcBackAction = svcShowGrid; // ИЗМЕНЕНО 27.09.2026 - см. комментарий у svcShowGrid выше: из любого раздела сервисов "Назад" по умолчанию ведёт в сетку сервисов, на один шаг назад
+    svcShowDetail();
+    // ДОБАВЛЕНО 29.09.2026 (прямая просьба пользователя - "после окончания
+    // пробного периода приложение и бот дальше работает проверь это") - см.
+    // подробный комментарий у SUB_LOCK_EXEMPT_KINDS выше: разделы вне этого
+    // списка показываются только при активной подписке.
+    if (SUB_LOCK_EXEMPT_KINDS.indexOf(kind) === -1) {
+      const active = await ensureSubActiveChecked();
+      if (!active) { renderSubLockCard(box, function (b) { openServiceDetailReal(kind, b); }); return; }
+    }
+    return openServiceDetailReal(kind, box);
   }
 
   // ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - плитка "Штрафы" в
@@ -25374,7 +25477,7 @@ def events_webapp_html():
   }
 </style>
 </head>
-<body>
+<body>""" + subscription_lock_snippet_html() + """
 <!-- ИЗМЕНЕНО 28.09.2026 (жалоба пользователя со скриншотом кабинета юрлица -
      "выровняй по верху, посмотри как опустилось") - margin-top у этой
      кнопки раньше СНОВА добавлял env(safe-area-inset-top)+var(--tg-chrome-top)
@@ -25867,7 +25970,7 @@ def transport_webapp_html():
   }
 </style>
 </head>
-<body>
+<body>""" + subscription_lock_snippet_html() + """
 <!-- ИЗМЕНЕНО 28.09.2026 (жалоба пользователя со скриншотом кабинета юрлица -
      "выровняй по верху, посмотри как опустилось") - margin-top у этой
      кнопки раньше СНОВА добавлял env(safe-area-inset-top)+var(--tg-chrome-top)
@@ -27579,7 +27682,7 @@ def legal_cabinet_webapp_html():
   }
 </style>
 </head>
-<body>
+<body>""" + subscription_lock_snippet_html() + """
 <!-- ИЗМЕНЕНО 28.09.2026 (жалоба пользователя со скриншотом кабинета юрлица -
      "выровняй по верху, посмотри как опустилось") - margin-top у этой
      кнопки раньше СНОВА добавлял env(safe-area-inset-top)+var(--tg-chrome-top)
@@ -28475,7 +28578,7 @@ def cabinet_webapp_html():
   .tiles .tile:nth-child(3) { animation-delay: 100ms; }
 </style>
 </head>
-<body>
+<body>""" + subscription_lock_snippet_html() + """
 <!-- УБРАНО 27.09.2026 (прямая просьба пользователя - та же логика, что и
      у карты, см. комментарий в map_webapp_html выше по файлу: "Кабинет" -
      это вкладка нижнего меню unified_app_html, встраивается через
@@ -34893,6 +34996,26 @@ def is_subscription_active(user_id, sub_group=None):
     return _sub_now() < active_until
 
 
+def is_subscription_enforced_and_active(user_id, sub_group=None):
+    """ДОБАВЛЕНО 29.09.2026 (прямая просьба пользователя - "после окончания
+    пробного периуда приложение и бот дальше работает проверь это") - при
+    проверке выяснилось, что SubscriptionMiddleware блокирует ТОЛЬКО чат
+    бота (Message/CallbackQuery), а мини-приложение (карта/кабинет/Авиа-ЖД и
+    т.д.) вообще не проверяло подписку - persistent Menu Button открывает
+    WebView НАПРЯМУЮ, минуя обработчики чата, поэтому истёкший триал в чате
+    не мешал бесконечно бесплатно пользоваться приложением. Эта функция -
+    ЕДИНАЯ точка входа для проверки блокировки мини-приложения (см.
+    SUBSCRIPTION_STATUS_API_PATH/subscription_lock_snippet ниже) - в
+    отличие от is_subscription_active, ЗДЕСЬ ЖЕ учитывается
+    SUBSCRIPTION_ENFORCEMENT_LIVE (в самой is_subscription_active его нет -
+    флаг проверяется только внутри SubscriptionMiddleware), чтобы при
+    выключенном флаге приложение вело себя ТАК ЖЕ, как чат - никого не
+    блокировать."""
+    if not SUBSCRIPTION_ENFORCEMENT_LIVE:
+        return True
+    return is_subscription_active(user_id, sub_group)
+
+
 SUBSCRIPTION_MENU_BUTTON_DEFAULT_TEXT = "💳 ОПЛАТИТЬ ПОДПИСКУ"
 
 
@@ -35172,6 +35295,14 @@ async def _subscription_group_payload(user_id, sub_group, has_email):
         'price_rub': get_subscription_group_price_rub(sub_group),
         'period_days': SUBSCRIPTION_PERIOD_DAYS,
         'pay_url': None,
+        # ДОБАВЛЕНО 29.09.2026 (см. is_subscription_enforced_and_active выше -
+        # "приложение и бот дальше работает после триала, проверь это") -
+        # status/days_left выше округлены до ДНЯ (days_left клампится в 0,
+        # но status остаётся 'trial' даже когда триал УЖЕ истёк) - для
+        # клиентской проверки блокировки мини-приложения (subscription_lock_*
+        # ниже) нужен точный boolean, тот же самый, что решает блокировку в
+        # чате (SubscriptionMiddleware), а не приблизительный по дням.
+        'active': is_subscription_enforced_and_active(user_id, sub_group),
     }
     if has_email:
         payload['pay_url'] = await create_tinkoff_payment(user_id, sub_group)
@@ -35198,6 +35329,15 @@ async def _subscription_status_payload(user_id):
         'active_until': current['active_until'],
         'current_group': current_group,
         'groups': groups,
+        # ДОБАВЛЕНО 29.09.2026 (см. is_subscription_enforced_and_active выше) -
+        # точный флаг активности ТЕКУЩЕЙ группы + цена/ссылка на оплату
+        # продублированы на верхнем уровне (не только внутри groups[]), чтобы
+        # общий JS-сниппет заглушки мини-приложения (subscription_lock_*) мог
+        # прочитать всё нужное одним полем, не выискивая нужный элемент
+        # массива groups.
+        'active': current['active'],
+        'price_rub': current['price_rub'],
+        'pay_url': current['pay_url'],
     }
 
 async def handle_subscription_status_api(request):
@@ -35245,6 +35385,144 @@ async def send_subscription_paywall(event):
         await event.message.answer(text, reply_markup=markup, parse_mode='Markdown')
     else:
         await event.answer(text, reply_markup=markup, parse_mode='Markdown')
+
+
+# ДОБАВЛЕНО 29.09.2026 (прямая просьба пользователя - "после окончания
+# пробного периуда приложение и бот дальше работает проверь это") - при
+# проверке выяснилось, что SubscriptionMiddleware блокирует ТОЛЬКО чат бота
+# (Message/CallbackQuery), а мини-приложение (карта/кабинет/Авиа-ЖД/погода/
+# события и т.д.) вообще не проверяло подписку - persistent Menu Button и
+# кнопки WebApp в Reply-клавиатуре открывают WebView НАПРЯМУЮ, минуя
+# обработчики чата, поэтому истёкший триал в чате никак не мешал бесконечно
+# бесплатно пользоваться самим приложением (стартовать смену, видеть карту
+# и т.д.). Полноэкранная заглушка ниже - выбранное пользователем решение
+# ("full-screen paywall on open").
+def subscription_lock_snippet_html():
+    """Самодостаточный HTML+JS блок полноэкранной заглушки "Пробный период
+    закончился" - вставляется ПЕРВЫМ (сразу после <body>) в каждую "чисто
+    платную" WebApp-страницу (см. вызовы ниже - map_webapp_html,
+    cabinet_webapp_html, legal_cabinet_webapp_html, transport_webapp_html,
+    events_webapp_html, weather_webapp_html, where_to_go_webapp_html,
+    share_order_webapp_html, active_orders_webapp_html,
+    orders_hub_webapp_html, preorders_webapp_html). HTML оверлея физически
+    существует в DOM раньше, чем что-либо ещё на странице, а свой <script>
+    идёт сразу следом и запускается СИНХРОННО (не ждёт DOMContentLoaded -
+    парсинг документа в этой точке уже дошёл досюда, оверлей уже в DOM).
+    НЕ полагается ни на один CSS-класс или JS-переменную конкретной
+    страницы (у каждой своя стилевая система - svc-* у unified_app_html,
+    status-btn у карты, tile у кабинета и т.д.) - все стили инлайновые,
+    единственная внешняя зависимость - глобальный window.Telegram.WebApp
+    (есть на любой WebApp-странице). Проверяет реальный boolean 'active' из
+    /subscription/status (is_subscription_enforced_and_active), а не
+    day-rounded status/days_left - тот же самый флаг, что блокирует чат.
+
+    НЕ используется в unified_app_html() - это SPA с БЕСПЛАТНОЙ реферальной
+    программой и самим экраном оплаты ВНУТРИ той же страницы (renderSubscriptionDetail/
+    renderReferralLegalDetail) - блокирующий оверлей на всю страницу запер
+    бы пользователя в замкнутом круге (не может оплатить, потому что сама
+    страница оплаты заблокирована) и сломал бы бесплатную рефералку. Там
+    отдельная, точечная защита на уровне диспетчера "сервисов" - см.
+    комментарий у неё же в unified_app_html."""
+    return """
+<div id="subLockOverlay" style="display:none;position:fixed;inset:0;z-index:999999;background:rgba(10,10,18,.94);align-items:center;justify-content:center;padding:20px;box-sizing:border-box;font-family:-apple-system,BlinkMacSystemFont,sans-serif;">
+  <div style="background:#fff;border-radius:16px;padding:26px 22px;max-width:340px;width:100%;text-align:center;box-shadow:0 12px 40px rgba(0,0,0,.45);">
+    <div style="font-size:38px;line-height:1;margin-bottom:10px;">🔒</div>
+    <div style="font-size:17px;font-weight:700;color:#111;margin-bottom:8px;">Пробный период закончился</div>
+    <div id="subLockText" style="font-size:13.5px;color:#555;line-height:1.5;margin-bottom:18px;">Проверяем статус подписки...</div>
+    <button type="button" id="subLockPayBtn" style="display:none;width:100%;background:#2AABEE;color:#fff;border:none;border-radius:10px;padding:13px;font-size:15px;font-weight:600;cursor:pointer;margin-bottom:8px;"></button>
+    <div id="subLockEmailBox" style="display:none;margin-bottom:8px;">
+      <input type="email" id="subLockEmail" placeholder="email@example.com" style="width:100%;box-sizing:border-box;border:1px solid #ddd;border-radius:10px;padding:11px;font-size:14px;margin-bottom:8px;">
+      <button type="button" id="subLockEmailBtn" style="width:100%;background:#2AABEE;color:#fff;border:none;border-radius:10px;padding:13px;font-size:15px;font-weight:600;cursor:pointer;">Продолжить</button>
+    </div>
+    <button type="button" id="subLockCheckBtn" style="width:100%;background:#f2f2f2;color:#333;border:none;border-radius:10px;padding:12px;font-size:13.5px;cursor:pointer;">🔄 Я оплатил(а), проверить</button>
+  </div>
+</div>
+<script>
+(function () {
+  var _slTg = window.Telegram && window.Telegram.WebApp;
+  function _slFetchStatus() {
+    var initData = (_slTg && _slTg.initData) || '';
+    return fetch('""" + SUBSCRIPTION_STATUS_API_PATH + """', { headers: { 'X-Telegram-Init-Data': initData } })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .catch(function () { return null; });
+  }
+  function _slRender(data) {
+    var text = document.getElementById('subLockText');
+    var payBtn = document.getElementById('subLockPayBtn');
+    var emailBox = document.getElementById('subLockEmailBox');
+    if (!data) {
+      if (text) text.textContent = 'Не получилось проверить статус подписки. Попробуй ещё раз чуть позже.';
+      if (payBtn) payBtn.style.display = 'none';
+      if (emailBox) emailBox.style.display = 'none';
+      return;
+    }
+    var price = data.price_rub;
+    if (text) text.textContent = 'Бесплатный пробный период закончился. Чтобы продолжать пользоваться приложением, оформи подписку' + (price ? (' - ' + price + ' ₽/мес.') : '.');
+    if (data.has_email) {
+      if (emailBox) emailBox.style.display = 'none';
+      if (data.pay_url && payBtn) {
+        payBtn.style.display = '';
+        payBtn.textContent = 'Оплатить' + (price ? (' ' + price + ' ₽') : '');
+        payBtn.onclick = function () {
+          try { if (_slTg && typeof _slTg.openLink === 'function') { _slTg.openLink(data.pay_url); return; } } catch (e) {}
+          window.open(data.pay_url, '_blank');
+        };
+      } else if (payBtn) {
+        payBtn.style.display = 'none';
+      }
+    } else {
+      if (payBtn) payBtn.style.display = 'none';
+      if (emailBox) emailBox.style.display = '';
+    }
+  }
+  window.checkSubscriptionLock = function () {
+    return _slFetchStatus().then(function (data) {
+      var overlay = document.getElementById('subLockOverlay');
+      if (!overlay) return true;
+      if (data && data.active) {
+        overlay.style.display = 'none';
+        return true;
+      }
+      overlay.style.display = 'flex';
+      _slRender(data);
+      return false;
+    });
+  };
+  var emailBtn = document.getElementById('subLockEmailBtn');
+  if (emailBtn) {
+    emailBtn.addEventListener('click', function () {
+      var input = document.getElementById('subLockEmail');
+      var email = (input && input.value || '').trim();
+      if (!email) return;
+      emailBtn.disabled = true;
+      var initData = (_slTg && _slTg.initData) || '';
+      fetch('""" + SUBSCRIPTION_STATUS_API_PATH + """', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': initData },
+        body: JSON.stringify({ email: email }),
+      }).then(function (r) { return r.json(); }).then(function (data) {
+        emailBtn.disabled = false;
+        _slRender(data);
+      }).catch(function () { emailBtn.disabled = false; });
+    });
+  }
+  var checkBtn = document.getElementById('subLockCheckBtn');
+  if (checkBtn) {
+    checkBtn.addEventListener('click', function () {
+      checkBtn.disabled = true;
+      var oldText = checkBtn.textContent;
+      checkBtn.textContent = 'Проверяю...';
+      window.checkSubscriptionLock().then(function (ok) {
+        checkBtn.disabled = false;
+        checkBtn.textContent = oldText;
+        if (ok) { try { window.location.reload(); } catch (e) {} }
+      });
+    });
+  }
+  window.checkSubscriptionLock();
+})();
+</script>
+"""
 
 
 # ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - см. комментарий у
