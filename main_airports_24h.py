@@ -37043,6 +37043,21 @@ class SubscriptionMiddleware(BaseMiddleware):
             return await handler(event, data)
         if isinstance(event, types.CallbackQuery) and event.data in REFERRAL_MENU_EXEMPT_CALLBACKS:
             return await handler(event, data)
+        # ДОБАВЛЕНО 30.09.2026 (найдено по факту - "/chatid не отвечает ни в
+        # одном из 4 чатов категорий") - /chatid (см. блок "ЧАТЫ ПО
+        # КАТЕГОРИЯМ" выше) шлётся В ГРУППОВОМ чате, а эта мидлварь проверяет
+        # подписку САМОГО ОТПРАВИТЕЛЯ (обычно это сам владелец бота) как
+        # будто он обычный водитель - если у его личного аккаунта в боте нет
+        # активной подписки/триала, мидлварь молча подменяла ответ экраном
+        # оплаты (или тот падал в группе без прав бота - в обоих случаях
+        # хендлер cmd_chatid вообще не вызывался). Это первая команда,
+        # которую вообще шлют боту не в личном чате с ним - раньше эта дыра
+        # просто ни разу не проявлялась. /chatid - чисто служебная команда
+        # (сам хендлер и так проверяет ADMIN_TELEGRAM_ID/get_referrer_type),
+        # к подписке отношения не имеет вообще - пропускаем её мимо paywall
+        # безусловно, до какой-либо проверки подписки.
+        if isinstance(event, types.Message) and event.text == "/chatid":
+            return await handler(event, data)
         if isinstance(event, types.Message) and user_state.get(user_id, {}).get('awaiting_referral_legal_password'):
             return await handler(event, data)
         if isinstance(event, types.Message) and user_state.get(user_id, {}).get('referral_withdraw') is not None:
