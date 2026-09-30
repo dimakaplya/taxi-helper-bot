@@ -12462,6 +12462,42 @@ MAP_START_SHIFT_API_PATH = '/map/start_shift'
 # start_finance_after_shift без объекта callback_query.
 MAP_START_FINANCE_API_PATH = '/map/start_finance'
 
+# ДОБАВЛЕНО 30.09.2026 (прямая просьба пользователя - "давай делать в
+# приложение выезжают виджет встать в очередь на карте", изначальная задача
+# ("должен прийти как Push в Bot так и уведомления всплывающее такое на
+# экране приложения") - Push уже есть (send_airport_queue_push), тут
+# добавляется его пара - ненавязчивый баннер ПРЯМО НА КАРТЕ, автоматически
+# появляющийся, пока водитель физически в радиусе зоны аэропорта и ещё не
+# отметился в очереди (см. handle_map_my_profile_api - 'airport_queue_banner',
+# опрашивается тем же loadMyProfile() раз в 15с, что и pending_shift_summary/
+# shift_active выше). "Встать в очередь" на баннере переиспользует УЖЕ
+# существующий способ отметиться прямо с карты (тап по маркеру аэропорта,
+# см. buildAirportPopup/window.submitAirportQueue, добавлено 29.09.2026) -
+# JS баннера просто панорамирует карту к аэропорту и открывает его попап,
+# новый эндпоинт для самой отметки не нужен. "Не сейчас" - этот POST,
+# ставит per-аэропорт снуз (тот же set_airport_queue_snooze/
+# AIRPORT_QUEUE_SNOOZE_MINUTES=15, что и у кнопки "ОШИБКА GPS" под пушем в
+# чате - баннер и пуш используют один и тот же снуз, отключил в одном месте -
+# не мешает и другое).
+MAP_AIRPORT_QUEUE_SNOOZE_API_PATH = '/map/airport_queue/snooze'
+
+# ДОБАВЛЕНО 30.09.2026 (прямая просьба пользователя следом - "такой же
+# виджет о заправке выбрать наличие") - тот же баннер-паттерн, что у очереди
+# аэропорта выше, но для заправок: пока водитель в радиусе FUEL_REMINDER_
+# RADIUS_KM от АЗС (та же зона/тот же helper _nearest_fuel_station, что уже
+# использует check_fuel_reminder_pushes для push-напоминания - см. блок
+# "ЗАПРАВКИ + ЭЛЕКТРОЗАРЯДКИ" ниже), на карте всплывает баннер "отметить
+# наличие топлива". ПО ПРЯМОМУ УТОЧНЕНИЮ пользователя баннер показывается
+# ВСЕГДА при попадании в радиус (не только если по станции нет свежих
+# отметок - в отличие от push-варианта, который ждёт FUEL_REMINDER_MINUTES=4
+# минуты стоянки, баннер не ждёт вообще, он не навязчив, просто визуальная
+# подсказка). "Отметить" на баннере панорамирует карту к АЗС и открывает её
+# попап (buildFuelPopup/window.reportFuel - уже существующий способ
+# отметки). "Не сейчас" - этот снуз-эндпоинт, 15 минут на конкретную АЗС
+# (FUEL_PROXIMITY_SNOOZE_MINUTES, см. блок заправок ниже) - по прямому
+# уточнению пользователя, тот же срок, что у аэропорта.
+MAP_FUEL_PROXIMITY_SNOOZE_API_PATH = '/map/fuel_proximity/snooze'
+
 # ==================== ЗАПРАВКИ + ЭЛЕКТРОЗАРЯДКИ НА КАРТЕ ====================
 # ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "вынеси на карту все
 # заправки города и сделай фильтр чтоб можно было отключать/включать,
@@ -12853,6 +12889,28 @@ def get_all_map_positions_with_user_id():
         result.append({'user_id': r[0], 'city': r[1], 'category': r[2], 'lat': r[3], 'lon': r[4], 'tariffs': tariffs})
     return result
 
+# ДОБАВЛЕНО 30.09.2026 (для баннера "заправка рядом" на карте, см.
+# MAP_FUEL_PROXIMITY_SNOOZE_API_PATH выше и handle_map_my_profile_api ниже) -
+# как get_all_map_positions_with_user_id, но ОДНА строка конкретного
+# user_id, прямым запросом (не сканирует всю таблицу) - нужно знать ГДЕ
+# СЕЙЧАС этот конкретный водитель, чтобы посчитать расстояние до ближайшей
+# АЗС на каждый опрос /map/my_profile (раз в 15с на каждого открывшего
+# карту). Те же условия свежести/смены, что и у get_all_map_positions_
+# with_user_id (shift_active=1, не старше MAP_VISIBILITY_STALE_MINUTES) -
+# нет живой трансляции/смены не активна -> None, баннер не показываем.
+def get_map_position_for_user(user_id):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT city, lat, lon FROM map_positions
+        WHERE user_id = ? AND updated_at >= datetime('now', ?) AND shift_active = 1
+    ''', (user_id, f'-{MAP_VISIBILITY_STALE_MINUTES} minutes'))
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        return None
+    return {'city': row[0], 'lat': row[1], 'lon': row[2]}
+
 # ==================== ПУШ "РЯДОМ ЕСТЬ ВОДИТЕЛЬ" ====================
 # По прямой просьбе пользователя (21.09.2026): "если водителя находятся друг
 # с дружкой рядом на расстоянии меньше 300 м и находятся больше [5 минут] в
@@ -13008,6 +13066,29 @@ def _nearest_fuel_station(lat, lon, city, fuel_data):
         if dist_km <= FUEL_REMINDER_RADIUS_KM and (nearest_dist is None or dist_km < nearest_dist):
             nearest, nearest_dist = p, dist_km
     return nearest
+
+# ДОБАВЛЕНО 30.09.2026 (баннер "заправка рядом" на карте, см.
+# MAP_FUEL_PROXIMITY_SNOOZE_API_PATH выше) - "Не сейчас" на баннере прячет
+# ИМЕННО ЭТУ АЗС на FUEL_PROXIMITY_SNOOZE_MINUTES, тот же принцип и тот же
+# срок (15 минут), что и у get_airport_queue_snoozed_until/
+# set_airport_queue_snooze у аэропортов - отдельный словарь в state, т.к.
+# ключ тут station_id (osm type/id), а не icao аэропорта.
+FUEL_PROXIMITY_SNOOZE_MINUTES = 15
+
+def get_fuel_proximity_snoozed_until(state, station_id):
+    store = state.get('fuel_proximity_snooze') or {}
+    until_str = store.get(station_id)
+    if not until_str:
+        return None
+    try:
+        return datetime.fromisoformat(until_str)
+    except Exception:
+        return None
+
+def set_fuel_proximity_snooze(state, station_id, minutes):
+    store = dict(state.get('fuel_proximity_snooze') or {})
+    store[station_id] = (datetime.now(ZoneInfo('UTC')) + timedelta(minutes=minutes)).isoformat()
+    state['fuel_proximity_snooze'] = store
 
 async def check_fuel_reminder_pushes():
     """Раз в FUEL_REMINDER_CHECK_INTERVAL_MINUTES проверяет все активные
@@ -13855,6 +13936,32 @@ MAP_CHROME_CSS = """
      нажималась" в комментарии у #map ниже - та же самая ловушка). */
   .map-back-to-cabinet-btn { position: absolute; top: calc(78px + var(--tg-chrome-top, 0px)); left: 14px; z-index: 999; display: none; align-items: center; gap: 5px; padding: 8px 14px 8px 10px; background: #1c1c1c; border: 1px solid rgba(255,255,255,.12); border-radius: 10px; color: #fff; font-size: 13px; font-weight: 600; cursor: pointer; box-shadow: 0 3px 10px rgba(0,0,0,.35); }
   .map-back-to-cabinet-btn:active { transform: scale(.96); }
+  /* ДОБАВЛЕНО 30.09.2026 (прямая просьба пользователя - "давай делать в
+     приложение выезжают виджет встать в очередь на карте", следом "такой же
+     виджет о заправке выбрать наличие") - ненавязчивый баннер прямо на
+     карте (не блокирующий, в отличие от .shift-summary-overlay/.geo-wait-
+     overlay - те перекрывают весь экран, этот НЕ мешает смотреть карту),
+     появляется/пропадает сам по опросу /map/my_profile раз в 15с (см.
+     renderMapBanners в JS ниже). top ниже .shift-radar-indicator (56px+14px)
+     и .map-back-to-cabinet-btn (78px+~36px) - чтобы не перекрываться с
+     ними; .map-toggles-row свёрнут по умолчанию, а когда развёрнут -
+     занимает то же место, что .filter-toggle (те же top:10px, left:80px) -
+     136px хватает с запасом. До 2 карточек одновременно (аэропорт + АЗС
+     разом - редкий, но возможный случай), поэтому это ряд-контейнер
+     (column), а не одна карточка. pointer-events:none на контейнере (сам
+     он не должен перехватывать тапы по карте между карточками), auto - на
+     каждой карточке. */
+  #mapBanners { position: absolute; top: calc(136px + var(--tg-chrome-top, 0px)); left: 10px; right: 10px; z-index: 1150; display: flex; flex-direction: column; gap: 8px; pointer-events: none; }
+  .map-banner { pointer-events: auto; display: flex; align-items: center; gap: 10px; background: linear-gradient(180deg, rgba(36,32,10,.94), rgba(20,18,6,.94)); backdrop-filter: blur(8px); border: 1px solid rgba(255,196,0,.45); border-radius: 16px; padding: 10px 12px; color: #fff; font-family: -apple-system, sans-serif; box-shadow: 0 4px 16px rgba(0,0,0,.45), inset 0 1px 0 rgba(255,255,255,.08); animation: mapBannerIn .22s ease; }
+  @keyframes mapBannerIn { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: translateY(0); } }
+  .map-banner .mb-icon { font-size: 22px; flex: 0 0 auto; }
+  .map-banner .mb-body { flex: 1 1 auto; min-width: 0; }
+  .map-banner .mb-title { font-size: 13.5px; font-weight: 700; line-height: 1.3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .map-banner .mb-sub { font-size: 11.5px; color: rgba(255,255,255,.65); margin-top: 1px; }
+  .map-banner .mb-actions { display: flex; flex-direction: column; gap: 5px; flex: 0 0 auto; }
+  .map-banner .mb-btn { border: none; border-radius: 9px; padding: 7px 11px; font-size: 12px; font-weight: 700; font-family: inherit; cursor: pointer; white-space: nowrap; }
+  .map-banner .mb-btn-go { background: #FFB800; color: #1c1c1c; }
+  .map-banner .mb-btn-dismiss { background: rgba(255,255,255,.12); color: rgba(255,255,255,.85); }
   /* ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - "сделай выбор
      тарифа с картой прям") - карточка выбора тарифов ПРЯМО НА КАРТЕ вместо
      ухода в чат бота (см. openTariffPicker/closeTariffPicker в JS ниже,
@@ -14388,6 +14495,10 @@ def map_webapp_html():
 <!-- ДОБАВЛЕНО 29.09.2026 (см. .map-back-to-cabinet-btn в CSS выше) - скрыта
      по умолчанию, показывается JS-ом только при ?from=legal_cabinet. -->
 <button type="button" class="map-back-to-cabinet-btn" id="mapBackToCabinetBtn">← Кабинет автопарка</button>
+<!-- ДОБАВЛЕНО 30.09.2026 (см. #mapBanners в CSS выше) - контейнер баннеров
+     "встать в очередь"/"заправка рядом", наполняется JS-ом из
+     renderMapBanners() по данным /map/my_profile, изначально пуст. -->
+<div id="mapBanners"></div>
 <!-- ИСПРАВЛЕНО 27.09.2026 (прямая просьба пользователя, скриншот - "текст
      погоды и смайлик слева внизу расположи одной строчкой на карте") -
      раньше иконка (.bib-icon) и её подпись (.bib-time/.bib-label/
@@ -15491,6 +15602,118 @@ def map_webapp_html():
       selfMarker.setIcon(L.divIcon({{ className: 'self-icon' + (myShiftActive ? ' on-shift' : ''), html: selfIconHtml(selfHeading), iconSize: [42, 42], iconAnchor: [21, 21] }}));
     }}
   }}
+  // ДОБАВЛЕНО 30.09.2026 (прямая просьба пользователя - "давай делать в
+  // приложение выезжают виджет встать в очередь на карте", следом "такой же
+  // виджет о заправке выбрать наличие") - рендер баннеров #mapBanners по
+  // данным data.airport_queue_banner/data.fuel_banner из /map/my_profile
+  // (см. handle_map_my_profile_api). _mapBannersSignature - тот же приём,
+  // что у _airportsSignature/_airportCloudSignature выше (перерисовываем
+  // DOM только когда набор баннеров РЕАЛЬНО изменился) - иначе на каждый
+  // опрос раз в 15с карточка бы моргала заново (fade-in анимация
+  // mapBannerIn) даже когда ничего не поменялось.
+  let _mapBannersSignature = null;
+  function renderMapBanners(data) {{
+    const aq = data.airport_queue_banner || null;
+    const fb = data.fuel_banner || null;
+    const signature = JSON.stringify([aq, fb]);
+    if (signature === _mapBannersSignature) return;
+    _mapBannersSignature = signature;
+    const container = document.getElementById('mapBanners');
+    if (!container) return;
+    const cards = [];
+    if (aq) {{
+      const sub = (aq.zone_label ? aq.zone_label + ' — ' : '') + 'встать в очередь?';
+      cards.push(
+        `<div class="map-banner" data-kind="airport">` +
+          `<div class="mb-icon">${{aq.emoji || '✈️'}}</div>` +
+          `<div class="mb-body"><div class="mb-title">${{aq.name || 'Аэропорт'}} рядом</div><div class="mb-sub">${{sub}}</div></div>` +
+          `<div class="mb-actions">` +
+            `<button class="mb-btn mb-btn-go" onclick="window.mapBannerGoAirport('${{aq.icao}}','${{aq.zone_key || ''}}',${{aq.lat}},${{aq.lon}})">🚗 Встать</button>` +
+            `<button class="mb-btn mb-btn-dismiss" onclick="window.mapBannerDismissAirport('${{aq.icao}}')">Не сейчас</button>` +
+          `</div>` +
+        `</div>`
+      );
+    }}
+    if (fb) {{
+      cards.push(
+        `<div class="map-banner" data-kind="fuel">` +
+          `<div class="mb-icon">⛽</div>` +
+          `<div class="mb-body"><div class="mb-title">${{fb.name || 'АЗС'}} рядом</div><div class="mb-sub">Отметь, что есть в наличии</div></div>` +
+          `<div class="mb-actions">` +
+            `<button class="mb-btn mb-btn-go" onclick="window.mapBannerGoFuel('${{fb.station_id}}',${{fb.lat}},${{fb.lon}})">⛽ Отметить</button>` +
+            `<button class="mb-btn mb-btn-dismiss" onclick="window.mapBannerDismissFuel('${{fb.station_id}}')">Не сейчас</button>` +
+          `</div>` +
+        `</div>`
+      );
+    }}
+    container.innerHTML = cards.join('');
+  }}
+  // "Встать в очередь" на баннере - переиспользует УЖЕ существующий способ
+  // отметиться прямо с карты (тап по маркеру аэропорта, см.
+  // buildAirportPopup/window.submitAirportQueue выше, 29.09.2026) вместо
+  // отдельной формы в самом баннере. Маркер может быть ещё не отрисован
+  // (viewport culling, см. renderAirports/airportOrPolygonVisible выше) -
+  // panTo подвинет карту на сам аэропорт, это вызовет 'moveend' и
+  // renderAirports(_airportsCache) с debounce ~250мс (см. map.on('moveend
+  // zoomend', ...) выше) - несколько попыток с запасом по времени, прежде
+  // чем маркер точно появится в airportMarkerById.
+  window.mapBannerGoAirport = function(icao, zoneKey, lat, lon) {{
+    if (lat == null || lon == null) return;
+    const key = icao + '::' + (zoneKey || '');
+    map.panTo([lat, lon]);
+    let attempts = 0;
+    const tryOpen = () => {{
+      const marker = airportMarkerById[key];
+      if (marker) {{ marker.openPopup(); return; }}
+      attempts++;
+      if (attempts < 5) setTimeout(tryOpen, 300);
+    }};
+    setTimeout(tryOpen, 300);
+  }};
+  window.mapBannerDismissAirport = async function(icao) {{
+    const container = document.getElementById('mapBanners');
+    const card = container && container.querySelector('[data-kind="airport"]');
+    if (card) card.remove();
+    _mapBannersSignature = null; // след. опрос точно перерисует по свежим данным
+    try {{
+      const initData = _mapInitData();
+      await fetch('{MAP_AIRPORT_QUEUE_SNOOZE_API_PATH}', {{
+        method: 'POST',
+        headers: {{ 'Content-Type': 'application/json', 'X-Telegram-Init-Data': initData }},
+        body: JSON.stringify({{ icao: icao }}),
+      }});
+    }} catch (e) {{ /* тихо */ }}
+  }};
+  // "Отметить" на баннере заправки - тот же путь, что у push-напоминания
+  // (?layer=fuel&station=<id>, см. комментарий у params.get('layer') выше) -
+  // если слой заправок сейчас выключен, включаем его и ждём, пока станции
+  // подгрузятся, прежде чем открыть нужный маркер. zoomToShowLayer -
+  // встроенный метод Leaflet.markercluster, сам панорамирует/приближает
+  // карту ровно настолько, чтобы маркер вышел из кластера и стал виден.
+  window.mapBannerGoFuel = function(stationId, lat, lon) {{
+    const openIt = () => {{
+      const marker = fuelMarkerById[stationId];
+      if (marker) {{ fuelCluster.zoomToShowLayer(marker, () => {{ marker.openPopup(); }}); return true; }}
+      return false;
+    }};
+    if (openIt()) return;
+    fuelCheckbox.checked = true;
+    loadFuelStations().then(() => {{ openIt(); }});
+  }};
+  window.mapBannerDismissFuel = async function(stationId) {{
+    const container = document.getElementById('mapBanners');
+    const card = container && container.querySelector('[data-kind="fuel"]');
+    if (card) card.remove();
+    _mapBannersSignature = null;
+    try {{
+      const initData = _mapInitData();
+      await fetch('{MAP_FUEL_PROXIMITY_SNOOZE_API_PATH}', {{
+        method: 'POST',
+        headers: {{ 'Content-Type': 'application/json', 'X-Telegram-Init-Data': initData }},
+        body: JSON.stringify({{ station_id: stationId }}),
+      }});
+    }} catch (e) {{ /* тихо */ }}
+  }};
   async function loadMyProfile() {{
     try {{
       const initData = _mapInitData();
@@ -15516,6 +15739,11 @@ def map_webapp_html():
       if (data.pending_shift_summary) {{
         openShiftSummaryOverlay(data.pending_shift_summary);
       }}
+      // ДОБАВЛЕНО 30.09.2026 - см. renderMapBanners выше. До проверки "есть
+      // ли профиль" (см. `if (!p) return;` ниже) - баннеры не должны
+      // зависеть от того, заполнен ли у водителя тариф/машина/номер в
+      // кабинете.
+      renderMapBanners(data);
       // ДОБАВЛЕНО 25.09.2026 - см. myShiftStartedAtMs/myShiftTariffs выше.
       // Дата парсится ОДИН раз здесь (не на каждый тик tickBottomBar) -
       // dSince считаем от готового timestamp в мс.
@@ -23496,10 +23724,83 @@ async def handle_map_my_profile_api(request):
         pending_shift_summary = (user_state.get(user_id) or {}).pop('pending_shift_summary', None)
     except Exception:
         pending_shift_summary = None
+    # ДОБАВЛЕНО 30.09.2026 (прямая просьба пользователя - "давай делать в
+    # приложение выезжают виджет встать в очередь на карте") - баннер прямо
+    # на карте, пока водитель физически в радиусе зоны аэропорта
+    # (state['airport_queue']['entered_outer_at'] уже поддерживается
+    # process_airport_queue_ping на каждом пинге живой геопозиции - здесь
+    # просто читаем текущее состояние, НЕ пересчитываем расстояние заново).
+    # Условия подавления - ТЕ ЖЕ, что у самого push (см.
+    # process_airport_queue_ping): снуз ("Не сейчас"/"ОШИБКА GPS") и
+    # is_already_queued (уже реально отметился) - баннер не долбит тем, кто
+    # уже разобрался. В отличие от push, ничего не "потребляем" (не pop) -
+    # это НЕ одноразовая доставка, а живое состояние "сейчас актуально":
+    # пока водитель в зоне и не отметился, баннер виден на каждом опросе,
+    # пропадает сам, когда условие перестаёт выполняться (выехал из
+    # радиуса/отметился/нажал "Не сейчас").
+    state_full = user_state.get(user_id) or {}
+    airport_queue_banner = None
+    try:
+        if _airport_queue_pref_active(state_full):
+            aq = state_full.get('airport_queue') or {}
+            aq_icao = aq.get('icao')
+            if aq_icao and aq.get('entered_outer_at'):
+                aq_zone_key = aq.get('zone_key')
+                aq_snoozed_until = get_airport_queue_snoozed_until(state_full, aq_icao)
+                aq_is_snoozed = bool(aq_snoozed_until and datetime.now(ZoneInfo('UTC')) < aq_snoozed_until)
+                aq_city = ICAO_TO_CITY.get(aq_icao)
+                aq_is_already_queued = bool(aq_city and user_recent_queue_marks(
+                    user_id, aq_city, aq_icao, aq_zone_key, since=aq.get('entered_outer_at'),
+                ))
+                if not aq_is_snoozed and not aq_is_already_queued:
+                    aq_airport = ICAO_TO_AIRPORT.get(aq_icao) or {}
+                    aq_zone_data = AIRPORT_TERMINAL_ZONES.get(aq_icao, {}).get(aq_zone_key) if aq_zone_key else None
+                    aq_marker_coords = (
+                        (aq_zone_data.get('marker_coords') if aq_zone_data else None)
+                        or AIRPORT_COORDS.get(aq_icao)
+                    )
+                    airport_queue_banner = {
+                        'icao': aq_icao, 'zone_key': aq_zone_key,
+                        'name': aq_airport.get('name', aq_icao), 'emoji': aq_airport.get('emoji', '✈️'),
+                        'zone_label': (aq_zone_data or {}).get('label'),
+                        'lat': aq_marker_coords[0] if aq_marker_coords else None,
+                        'lon': aq_marker_coords[1] if aq_marker_coords else None,
+                    }
+    except Exception:
+        logger.exception("❌ /map/my_profile: ошибка при расчёте airport_queue_banner")
+        airport_queue_banner = None
+    # ДОБАВЛЕНО 30.09.2026 (следом, прямая просьба пользователя - "такой же
+    # виджет о заправке выбрать наличие") - тот же принцип, но источник
+    # позиции другой: у заправок нет своего state вроде airport_queue,
+    # поэтому берём последнюю живую позицию водителя из map_positions
+    # (get_map_position_for_user - пишется тем же потоком живой геопозиции,
+    # что уже кормит check_fuel_reminder_pushes) и считаем ближайшую АЗС
+    # тем же _nearest_fuel_station/FUEL_REMINDER_RADIUS_KM, которым уже
+    # пользуется push-напоминание - тот же радиус (100м), просто без
+    # ожидания FUEL_REMINDER_MINUTES и без привязки к тому, есть ли свежие
+    # отметки (по прямому уточнению пользователя - "всегда рядом").
+    fuel_banner = None
+    try:
+        fuel_pos = get_map_position_for_user(user_id)
+        if fuel_pos:
+            fuel_data_for_banner = load_fuel_charging_data() or {}
+            fuel_station = _nearest_fuel_station(fuel_pos['lat'], fuel_pos['lon'], fuel_pos['city'], fuel_data_for_banner)
+            if fuel_station:
+                fuel_snoozed_until = get_fuel_proximity_snoozed_until(state_full, fuel_station['id'])
+                fuel_is_snoozed = bool(fuel_snoozed_until and datetime.now(ZoneInfo('UTC')) < fuel_snoozed_until)
+                if not fuel_is_snoozed:
+                    fuel_banner = {
+                        'station_id': fuel_station['id'], 'name': fuel_station.get('name') or 'АЗС',
+                        'lat': fuel_station['lat'], 'lon': fuel_station['lon'],
+                    }
+    except Exception:
+        logger.exception("❌ /map/my_profile: ошибка при расчёте fuel_banner")
+        fuel_banner = None
     return web.json_response({
         'profile': profile, 'shift_active': shift_active, 'is_legal_entity_referrer': is_legal_entity_referrer,
         'shift_started_at': shift_started_at, 'shift_tariffs': shift_tariffs,
         'pending_shift_summary': pending_shift_summary,
+        'airport_queue_banner': airport_queue_banner, 'fuel_banner': fuel_banner,
     })
 
 async def handle_map_toggle_shift_api(request):
@@ -25382,6 +25683,66 @@ async def handle_map_queue_report_api(request):
     queue_submit_report(user_id, city, icao, class_key, range_str, zone_key=zone_key)
     local_time = format_airport_local_time(datetime.now(ZoneInfo('UTC')).strftime('%Y-%m-%d %H:%M:%S'), icao)
     return web.json_response({'ok': True, 'range': range_str, 'local_time': local_time, 'category': category, 'tariff': tariff})
+
+async def handle_map_airport_queue_snooze_api(request):
+    """POST {icao} - кнопка "Не сейчас" на баннере "встать в очередь" на
+    карте (см. MAP_AIRPORT_QUEUE_SNOOZE_API_PATH выше, airport_queue_banner
+    в handle_map_my_profile_api). Ставит ТОТ ЖЕ снуз (set_airport_queue_snooze,
+    AIRPORT_QUEUE_SNOOZE_MINUTES=15), что и кнопка "📍❌ ОШИБКА GPS / ОЧЕРЕДЬ
+    НЕ ТРЕБУЕТСЯ" под push-уведомлением в чате - баннер и push используют
+    один и тот же снуз-стор, дублировать логику не нужно. initData
+    ОБЯЗАТЕЛЕН - пишет per-user состояние."""
+    init_data = request.headers.get('X-Telegram-Init-Data', '')
+    parsed = validate_telegram_webapp_init_data(init_data, BOT_TOKEN) if BOT_TOKEN else None
+    if not parsed:
+        return web.json_response({'error': 'invalid_init_data'}, status=401)
+    try:
+        tg_user = json.loads(parsed.get('user', '{}'))
+        user_id = tg_user.get('id')
+    except Exception:
+        user_id = None
+    if not user_id:
+        return web.json_response({'error': 'invalid_init_data'}, status=401)
+    try:
+        body = await request.json()
+        icao = str(body.get('icao') or '')
+    except Exception:
+        return web.json_response({'error': 'invalid_body'}, status=400)
+    if not icao:
+        return web.json_response({'error': 'invalid_params'}, status=400)
+    state = user_state.setdefault(user_id, {})
+    set_airport_queue_snooze(state, icao, AIRPORT_QUEUE_SNOOZE_MINUTES)
+    return web.json_response({'ok': True})
+
+async def handle_map_fuel_proximity_snooze_api(request):
+    """POST {station_id} - кнопка "Не сейчас" на баннере "заправка рядом" на
+    карте (см. MAP_FUEL_PROXIMITY_SNOOZE_API_PATH выше, fuel_banner в
+    handle_map_my_profile_api). Ставит снуз на КОНКРЕТНУЮ АЗС на
+    FUEL_PROXIMITY_SNOOZE_MINUTES=15 (тот же срок, что у аэропорта, по
+    прямому уточнению пользователя) - отдельный от снуза очереди аэропорта
+    стор (state['fuel_proximity_snooze']), ключ - station_id, а не icao.
+    initData ОБЯЗАТЕЛЕН - пишет per-user состояние."""
+    init_data = request.headers.get('X-Telegram-Init-Data', '')
+    parsed = validate_telegram_webapp_init_data(init_data, BOT_TOKEN) if BOT_TOKEN else None
+    if not parsed:
+        return web.json_response({'error': 'invalid_init_data'}, status=401)
+    try:
+        tg_user = json.loads(parsed.get('user', '{}'))
+        user_id = tg_user.get('id')
+    except Exception:
+        user_id = None
+    if not user_id:
+        return web.json_response({'error': 'invalid_init_data'}, status=401)
+    try:
+        body = await request.json()
+        station_id = str(body.get('station_id') or '')
+    except Exception:
+        return web.json_response({'error': 'invalid_body'}, status=400)
+    if not station_id:
+        return web.json_response({'error': 'invalid_params'}, status=400)
+    state = user_state.setdefault(user_id, {})
+    set_fuel_proximity_snooze(state, station_id, FUEL_PROXIMITY_SNOOZE_MINUTES)
+    return web.json_response({'ok': True})
 
 async def handle_map_charging_report_api(request):
     """POST {station_id, status: 'free'|'busy'|'queue'} - крауд-отметка
@@ -36652,6 +37013,8 @@ async def start_subscription_webhook_server():
     app.router.add_post(MAP_TOGGLE_SHIFT_API_PATH, handle_map_toggle_shift_api)
     app.router.add_post(MAP_START_SHIFT_API_PATH, handle_map_start_shift_api)
     app.router.add_post(MAP_START_FINANCE_API_PATH, handle_map_start_finance_api)
+    app.router.add_post(MAP_AIRPORT_QUEUE_SNOOZE_API_PATH, handle_map_airport_queue_snooze_api)
+    app.router.add_post(MAP_FUEL_PROXIMITY_SNOOZE_API_PATH, handle_map_fuel_proximity_snooze_api)
     app.router.add_get(MAP_AIRPORTS_API_PATH, handle_map_airports_api)
     app.router.add_get(MAP_STATIONS_API_PATH, handle_map_stations_api)
     app.router.add_get(MAP_WEATHER_API_PATH, handle_map_weather_api)
