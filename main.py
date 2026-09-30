@@ -12,6 +12,7 @@ import functools
 import hashlib
 import hmac
 import ssl
+import secrets
 import urllib.parse
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -3394,6 +3395,42 @@ def init_db():
             confirmed_at DATETIME
         )
     ''')
+    # ДОБАВЛЕНО 30.09.2026 (прямая просьба пользователя - "хочу чтобы ты
+    # собрал мне приложение на ios") - таблицы для мобильного приложения
+    # (iOS/Android), которое работает ВНЕ Telegram и поэтому не может
+    # использовать initData для входа. Вместо этого - вход по номеру
+    # телефона с SMS-кодом (см. блок "МОБИЛЬНОЕ ПРИЛОЖЕНИЕ" ближе к концу
+    # файла). mobile_accounts - собственные аккаунты (НЕ те же самые
+    # user_id, что у Telegram-пользователей - см. MOBILE_USER_ID_OFFSET,
+    # синтетический отрицательный user_id, чтобы переиспользовать всю
+    # существующую бизнес-логику бота (карта/кабинет/подписка), которая
+    # везде ключуется по user_id, не переписывая её заново).
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS mobile_accounts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            phone TEXT NOT NULL UNIQUE,
+            city TEXT,
+            category TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS mobile_otp (
+            phone TEXT PRIMARY KEY,
+            code_hash TEXT NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            expires_at DATETIME NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS mobile_sessions (
+            token_hash TEXT PRIMARY KEY,
+            mobile_account_id INTEGER NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            expires_at DATETIME NOT NULL
+        )
+    ''')
     # ДОБАВЛЕНО 22.09.2026 (см. subscription_state/get_subscription_group
     # выше) - какую именно группу (такси+Ultima или курьер+грузовое такси)
     # оплачивает этот заказ, нужно знать в confirm_subscription_payment
@@ -3461,6 +3498,42 @@ def init_db():
                 "INSERT OR IGNORE INTO subscription_state (user_id, sub_group, trial_started_at, paid_until, last_order_id, expired_notified) VALUES (?, 'taxi_ultima', ?, ?, ?, ?)",
                 _old_row
             )
+    # ДОБАВЛЕНО 30.09.2026 (прямая просьба пользователя - "создать 4 чата
+    # (такси/Ultima/курьеры/грузовое такси), доступ только пока действует
+    # подписка") - кто сейчас состоит в каком групповом чате категории. Bot
+    # API не даёт боту получить список участников большой группы напрямую -
+    # без своей таблицы periodic-проверка (category_chat_access_checker,
+    # см. блок "ЧАТЫ ПО КАТЕГОРИЯМ (доступ по подписке)" ближе к концу
+    # файла) не знала бы, кого вообще проверять. Строка появляется, когда
+    # бот одобряет заявку на вступление (handle_category_chat_join_request),
+    # и исчезает, когда человека исключают (истекла подписка/сменил
+    # категорию) или он сам вышел из группы (handle_category_chat_member_
+    # update).
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS category_chat_members (
+            user_id INTEGER NOT NULL,
+            category TEXT NOT NULL,
+            chat_id INTEGER NOT NULL,
+            joined_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (user_id, category)
+        )
+    ''')
+    # Созданные ссылки-приглашения (с подтверждением заявки) на чат каждой
+    # категории - см. ensure_category_chat_invite_link ниже. Персистим,
+    # чтобы НЕ создавать новую ссылку через Bot API при каждом рестарте
+    # бота (старые ссылки иначе копились бы в настройках группы без
+    # необходимости) - создаём один раз на chat_id, дальше переиспользуем;
+    # chat_id хранится здесь же, чтобы заметить, если пользователь пересоздаст
+    # группу с новым chat_id (тогда старая ссылка уже не для этой группы -
+    # ensure_category_chat_invite_link создаст новую).
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS category_chat_invite_links (
+            category TEXT PRIMARY KEY,
+            chat_id INTEGER NOT NULL,
+            invite_link TEXT NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
     # ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - "в чаевые добавь
     # возможность загружать qr код для получения чаевых") - храним только
     # Telegram file_id загруженного фото (см. get_tip_qr_file_id/
@@ -9087,18 +9160,48 @@ async def show_tips_app_main_menu(message: types.Message):
         reply_markup=services_keyboard(state.get('category'), state.get('city'), user_id),
     )
 
-# ДОБАВЛЕНО 26.09.2026 (прямая просьба пользователя - "нужно сделать кнопку
-# когда пользователь на линии - показывает раздел чаты/чаевые, когда не на
-# линии - только чаты") - ссылки на групповые чаты водителей.
-# ⚠️ ЗАГЛУШКА: реальных ссылок на чаты по городам пользователь ещё не
-# прислал (спросили явно - "дай сами t.me-ссылки на чаты водителей"), он
-# попросил "пока заглушку ставь" - ниже одна и та же ссылка-заглушка на все
-# города, но структура УЖЕ per-city (тот же приём, что у
-# ROAD_EVENTS_CHANNEL_LINKS выше) - когда пользователь пришлёт реальные
-# ссылки, нужно будет только заменить значения в этом словаре, сам код
-# (build_driver_chats_keyboard/show_chats_menu) трогать не придётся.
-DRIVER_CHAT_LINK_PLACEHOLDER = "https://t.me/+taxihelper_chat_placeholder"
-DRIVER_CHAT_LINKS = {city: DRIVER_CHAT_LINK_PLACEHOLDER for city in CITY_DISPLAY_NAMES}
+# ИЗМЕНЕНО 30.09.2026 (прямая просьба пользователя - "создать 4 чата такси/
+# Ultima/курьеры/грузовое такси, доступ только пока действует подписка") -
+# ссылки на групповые чаты водителей были ОДНОЙ и той же заглушкой на все
+# города (DRIVER_CHAT_LINKS/DRIVER_CHAT_LINK_PLACEHOLDER, добавлено
+# 26.09.2026); теперь чат - ОДИН на КАТЕГОРИЮ (не на город), доступ в него
+# даёт только действующая подписка СВОЕЙ группы (см. category_chat_access_
+# allowed ниже) - реальная механика входа/исключения в самих чатах теперь
+# в отдельном блоке "ЧАТЫ ПО КАТЕГОРИЯМ (доступ по подписке)" ближе к концу
+# файла (там же join-request хендлер и периодическая проверка на
+# исключение при истечении подписки). Здесь остаётся только то, что нужно
+# ДЛЯ ГЛАВНОГО МЕНЮ БОТА - текст кнопки и сборка сообщения.
+#
+# ⚠️ ЗАГЛУШКА: реальные 4 группы в Telegram пользователь ещё не создал (см.
+# CATEGORY_CHAT_IDS ниже - все значения None) - пока так, кнопка ведёт на
+# старую ссылку-заглушку у всех категорий сразу. Как только пользователь
+# создаст группы, добавит туда бота админом и пришлёт chat_id каждой (см.
+# команду /chatid ниже) - нужно будет только вписать 4 числа в
+# CATEGORY_CHAT_IDS, остальной код трогать не придётся (тот же принцип, что
+# был у DRIVER_CHAT_LINK_PLACEHOLDER).
+CATEGORY_CHAT_LINK_PLACEHOLDER = "https://t.me/+taxihelper_chat_placeholder"
+
+# chat_id каждой группы (InlineKeyboardButton.url ждёт ССЫЛКУ, а не сам
+# chat_id - ссылки создаются автоматически через Bot API, см.
+# ensure_category_chat_invite_link/warm_category_chat_invite_links ниже) -
+# отрицательные числа вида -100XXXXXXXXXX, как отдаёт сам Telegram для
+# супергрупп/каналов.
+CATEGORY_CHAT_IDS = {
+    'taxi': None,
+    'ultima': None,
+    'courier': None,
+    'cargo': None,
+}
+
+# Текущая лучшая известная ссылка на чат каждой категории - заглушка, пока
+# CATEGORY_CHAT_IDS[category] не задан ИЛИ пока ссылка-приглашение с
+# подтверждением заявки ещё не создана (см. ensure_category_chat_invite_
+# link) - обновляется ПРЯМО В ЭТОМ словаре (мутация на месте), поэтому и
+# бот (build_category_chat_keyboard), и unified_app_html (встраивает этот
+# же словарь в JS, см. блок "ЕДИНОЕ ПРИЛОЖЕНИЕ") сразу видят актуальное
+# значение без перезапуска - как только warm_category_chat_invite_links
+# отработает при старте.
+CATEGORY_CHAT_LINKS = {category: CATEGORY_CHAT_LINK_PLACEHOLDER for category in CATEGORIES}
 
 
 def chats_menu_button_text(user_id):
@@ -9109,14 +9212,17 @@ def chats_menu_button_text(user_id):
     return "💬 ЧАТЫ/ЧАЕВЫЕ" if is_shift_active(user_state.get(user_id, {})) else "💬 ЧАТЫ"
 
 
-def build_driver_chats_keyboard(city):
-    """Инлайн-кнопка(и) со ссылкой на групповой чат водителей текущего
-    города - см. DRIVER_CHAT_LINKS/⚠️ ЗАГЛУШКА выше. Один ряд на город
-    (сейчас у всех городов одна и та же ссылка-заглушка, но словарь уже
-    позволяет держать разные ссылки под разные города без изменений тут)."""
-    url = DRIVER_CHAT_LINKS.get(city, DRIVER_CHAT_LINK_PLACEHOLDER)
+def build_category_chat_keyboard(category):
+    """Инлайн-кнопка со ссылкой на групповой чат ТЕКУЩЕЙ категории
+    водителя - см. CATEGORY_CHAT_LINKS выше. Сама ссылка - с подтверждением
+    заявки (creates_join_request=True, см. ensure_category_chat_invite_link)
+    - переход по ней НЕ добавляет в группу сразу, а шлёт боту заявку,
+    которую handle_category_chat_join_request одобрит/отклонит по
+    действующей подписке ЭТОЙ категории."""
+    url = CATEGORY_CHAT_LINKS.get(category, CATEGORY_CHAT_LINK_PLACEHOLDER)
+    label = CATEGORIES.get(category, {}).get('name', category)
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💬 ЧАТ ВОДИТЕЛЕЙ", url=url)],
+        [InlineKeyboardButton(text=f"💬 ЧАТ «{label}»", url=url)],
     ])
 
 
@@ -9124,19 +9230,23 @@ def build_driver_chats_keyboard(city):
 async def show_chats_menu(message: types.Message):
     """"💬 ЧАТЫ" / "💬 ЧАТЫ/ЧАЕВЫЕ" - главное меню (см. chats_menu_button_text/
     services_keyboard - сам текст кнопки уже отражает статус смены). Здесь
-    показываем контент по факту: ссылку на чат водителей ВСЕГДА, и (только
-    если смена сейчас реально активна - на случай, если водитель успел
-    завершить смену между тем, как увидел кнопку, и нажатием) следом ещё
-    "💳 Получить чаевые" - тот же контент, что был у отдельной кнопки
+    показываем контент по факту: ссылку на чат водителей СВОЕЙ категории
+    (доступ по подписке - см. комментарий у CATEGORY_CHAT_LINKS выше), и
+    (только если смена сейчас реально активна - на случай, если водитель
+    успел завершить смену между тем, как увидел кнопку, и нажатием) следом
+    ещё "💳 Получить чаевые" - тот же контент, что был у отдельной кнопки
     "💳 ЧАЕВЫЕ" (см. show_tips_app_main_menu выше, кнопка которой теперь
     объединена с этой)."""
     user_id = message.from_user.id
     state = user_state.get(user_id, {})
     city = state.get('city')
+    category = state.get('category')
     await message.answer(
-        "💬 *Чаты водителей*\n\n"
-        "Общайся с другими водителями - обмен новостями, вопросы, помощь на линии.",
-        reply_markup=build_driver_chats_keyboard(city), parse_mode='Markdown',
+        "💬 *Чат водителей твоей категории*\n\n"
+        "Общайся с другими водителями - обмен новостями, вопросы, помощь на линии. "
+        "Доступ в чат даёт только действующая подписка - если подписка закончится, "
+        "бот автоматически уберёт из чата (после оплаты можно зайти снова).",
+        reply_markup=build_category_chat_keyboard(category), parse_mode='Markdown',
     )
     if is_shift_active(state):
         tips_text = (
@@ -9147,7 +9257,7 @@ async def show_chats_menu(message: types.Message):
         await message.answer(tips_text, reply_markup=build_tips_keyboard(user_id), parse_mode='Markdown')
     await message.answer(
         "Выбери, что нужно дальше 👇",
-        reply_markup=services_keyboard(state.get('category'), city, user_id),
+        reply_markup=services_keyboard(category, city, user_id),
     )
 
 @router.message(lambda message: message.text == "📈 СПРОС СЕЙЧАС" and user_state.get(message.from_user.id, {}).get('in_courier_module'))
@@ -12590,6 +12700,12 @@ def get_gas_fuel_statuses():
     return result
 
 def set_gas_fuel_status(station_id, fuel_type, available, user_id):
+    """Возвращает True/False - удалось ли реально сохранить отметку.
+    ИЗМЕНЕНО 30.09.2026 (аудит - раньше функция ничего не возвращала, а все
+    3 вызывающих API-хендлера безусловно отвечали клиенту {'ok': True}/
+    показывали "✅ Отмечено" даже если запись в БД упала по исключению -
+    водитель видел "успех", а статус на самом деле не обновлялся ни для
+    него, ни для остальных)."""
     try:
         init_db()
         conn = get_db_connection()
@@ -12602,8 +12718,10 @@ def set_gas_fuel_status(station_id, fuel_type, available, user_id):
         )
         conn.commit()
         conn.close()
+        return True
     except Exception as e:
         logger.error(f"❌ Не удалось сохранить отметку по заправке {station_id}/{fuel_type}: {e}")
+        return False
 
 def get_charging_statuses():
     """dict {station_id: {'status': str, 'updated_at': iso_str}}."""
@@ -12620,6 +12738,8 @@ def get_charging_statuses():
     return {station_id: {'status': status, 'updated_at': updated_at} for station_id, status, updated_at in rows}
 
 def set_charging_status(station_id, status, user_id):
+    """Возвращает True/False - удалось ли реально сохранить статус (см.
+    комментарий у set_gas_fuel_status - тот же фикс, тот же класс бага)."""
     try:
         init_db()
         conn = get_db_connection()
@@ -12633,8 +12753,10 @@ def set_charging_status(station_id, status, user_id):
         )
         conn.commit()
         conn.close()
+        return True
     except Exception as e:
         logger.error(f"❌ Не удалось сохранить статус зарядки {station_id}: {e}")
+        return False
 
 def get_gas_queue_statuses():
     """dict {station_id: {'status': str, 'reported_at': iso_str}} - крауд-
@@ -12653,6 +12775,8 @@ def get_gas_queue_statuses():
     return {station_id: {'status': status, 'reported_at': reported_at} for station_id, status, reported_at in rows}
 
 def set_gas_queue_status(station_id, status, user_id):
+    """Возвращает True/False - удалось ли реально сохранить статус (см.
+    комментарий у set_gas_fuel_status - тот же фикс, тот же класс бага)."""
     try:
         init_db()
         conn = get_db_connection()
@@ -12665,8 +12789,10 @@ def set_gas_queue_status(station_id, status, user_id):
         )
         conn.commit()
         conn.close()
+        return True
     except Exception as e:
         logger.error(f"❌ Не удалось сохранить статус очереди на заправке {station_id}: {e}")
+        return False
 
 # Категории, чья очередь показывается в попапе аэропорта на карте (по
 # просьбе пользователя, 22.09.2026: "названия и очереди какие сейчас там
@@ -13306,12 +13432,20 @@ async def handle_fuel_reminder_mark(callback_query: types.CallbackQuery):
         return
     available = avail_str == '1'
     user_id = callback_query.from_user.id
-    set_gas_fuel_status(station_id, fuel_type, available, user_id)
+    saved_ok = set_gas_fuel_status(station_id, fuel_type, available, user_id)
     label = FUEL_TYPE_LABELS.get(fuel_type, fuel_type)
+    # ИЗМЕНЕНО 30.09.2026 (аудит - set_gas_fuel_status теперь возвращает
+    # True/False; раньше при неудачной записи в БД пользователь всё равно
+    # видел "Отмечено ✅", хотя статус на самом деле не сохранился).
     try:
-        await callback_query.answer(f"Отмечено: {label} {'есть ✅' if available else 'нет ❌'}")
+        if saved_ok:
+            await callback_query.answer(f"Отмечено: {label} {'есть ✅' if available else 'нет ❌'}")
+        else:
+            await callback_query.answer("Не получилось сохранить отметку, попробуй ещё раз", show_alert=True)
     except Exception:
         pass
+    if not saved_ok:
+        return
     # Обновляем текст кнопки этого вида топлива, чтобы было видно, что уже
     # отмечено - остальные виды топлива в клавиатуре не трогаем.
     try:
@@ -15942,6 +16076,23 @@ def map_webapp_html():
   const ssfResultEl = document.getElementById('ssfResult');
   const ssfBackBtn = document.getElementById('ssfBack');
   const ssfCalcBtn = document.getElementById('ssfCalcBtn');
+  // ДОБАВЛЕНО 30.09.2026 (аудит Android/iOS совместимости) - вся страница
+  // зафиксирована через position:fixed (см. html,body в <style> выше), а
+  // .ssf-fields - собственный прокручиваемый блок внутри неё. На iOS
+  // WKWebView (в отличие от Android WebView) появление системной клавиатуры
+  // НЕ уменьшает layout viewport при position:fixed - страница не знает,
+  // что нужно прокрутить фокусный инпут выше клавиатуры, и нижние поля
+  // (например "Часов за рулём"/кнопка "Рассчитать") могут оказаться под
+  // клавиатурой. Явно прокручиваем фокусный инпут в видимую область сами -
+  // задержка нужна, чтобы клавиатура успела начать анимацию появления
+  // (visualViewport меняется не мгновенно на iOS).
+  document.querySelectorAll('.ssf-fields input, .ssf-fields select').forEach(function (el) {{
+    el.addEventListener('focus', function () {{
+      setTimeout(function () {{
+        try {{ el.scrollIntoView({{ block: 'center', behavior: 'smooth' }}); }} catch (e) {{}}
+      }}, 300);
+    }});
+  }});
   async function openShiftSummaryFinanceForm() {{
     if (shiftSummaryActions) shiftSummaryActions.style.display = 'none';
     if (shiftSummaryFinanceForm) shiftSummaryFinanceForm.style.display = 'block';
@@ -18522,14 +18673,26 @@ def map_webapp_html():
   }}
 
   window.reportFuel = async function(stationId, fuelType, available) {{
+    // ИЗМЕНЕНО 30.09.2026 (аудит - раньше ответ fetch полностью
+    // игнорировался, попап всегда оптимистично показывал "успех", даже
+    // если сервер вернул ошибку/статус реально не сохранился в БД -
+    // см. set_gas_fuel_status). Теперь локально обновляем попап ТОЛЬКО
+    // если сервер подтвердил сохранение - иначе короткая haptic-отдача об
+    // ошибке (если доступна) и попап остаётся как был, а не врёт об успехе.
+    let ok = false;
     try {{
       const initData = _mapInitData();
-      await fetch('{MAP_FUEL_REPORT_API_PATH}', {{
+      const resp = await fetch('{MAP_FUEL_REPORT_API_PATH}', {{
         method: 'POST',
         headers: {{ 'Content-Type': 'application/json', 'X-Telegram-Init-Data': initData }},
         body: JSON.stringify({{ station_id: stationId, fuel_type: fuelType, available: available }}),
       }});
+      ok = resp.ok;
     }} catch (e) {{ /* тихо */ }}
+    if (!ok) {{
+      try {{ if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('error'); }} catch (e) {{}}
+      return;
+    }}
     const p = fuelStations.find(s => s.id === stationId);
     if (p) {{
       p.fuel = p.fuel || {{}};
@@ -18543,14 +18706,20 @@ def map_webapp_html():
   }};
 
   window.reportGasQueue = async function(stationId, status) {{
+    let ok = false;
     try {{
       const initData = _mapInitData();
-      await fetch('{MAP_GAS_QUEUE_REPORT_API_PATH}', {{
+      const resp = await fetch('{MAP_GAS_QUEUE_REPORT_API_PATH}', {{
         method: 'POST',
         headers: {{ 'Content-Type': 'application/json', 'X-Telegram-Init-Data': initData }},
         body: JSON.stringify({{ station_id: stationId, status: status }}),
       }});
+      ok = resp.ok;
     }} catch (e) {{ /* тихо */ }}
+    if (!ok) {{
+      try {{ if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('error'); }} catch (e) {{}}
+      return;
+    }}
     const p = fuelStations.find(s => s.id === stationId);
     if (p) {{
       p.queue = status;
@@ -18608,14 +18777,20 @@ def map_webapp_html():
   }}
 
   window.reportCharging = async function(stationId, status) {{
+    let ok = false;
     try {{
       const initData = _mapInitData();
-      await fetch('{MAP_CHARGING_REPORT_API_PATH}', {{
+      const resp = await fetch('{MAP_CHARGING_REPORT_API_PATH}', {{
         method: 'POST',
         headers: {{ 'Content-Type': 'application/json', 'X-Telegram-Init-Data': initData }},
         body: JSON.stringify({{ station_id: stationId, status: status }}),
       }});
+      ok = resp.ok;
     }} catch (e) {{ /* тихо */ }}
+    if (!ok) {{
+      try {{ if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('error'); }} catch (e) {{}}
+      return;
+    }}
     const p = chargingStations.find(s => s.id === stationId);
     if (p) {{
       p.status = status;
@@ -20992,13 +21167,20 @@ def unified_app_html():
   // заказ", "Где бензин", "Чаты/Чаевые", "Реферальная программа",
   // "Бесплатный VPN", "Оплатить подписку", "Поддержка", "Выбор города" - в
   // вкладку "Сервисы", прямая просьба пользователя "прям все бери и
-  // переноси в тг апс"). Три словаря ниже - те же данные, что уже строит
-  // Python для старого меню (CATEGORIES/DRIVER_CHAT_LINKS), просто отданы
-  // на клиент как JSON, чтобы строить те же ссылки/подписи, что и раньше -
-  // никакие значения не придуманы заново.
+  // переноси в тг апс"). Словари ниже - те же данные, что уже строит
+  // Python для старого меню (CATEGORIES/CATEGORY_CHAT_LINKS), просто
+  // отданы на клиент как JSON, чтобы строить те же ссылки/подписи, что и
+  // раньше - никакие значения не придуманы заново.
   const CATEGORY_NAMES = """ + json.dumps({k: v['name'] for k, v in CATEGORIES.items()}, ensure_ascii=False) + """;
   const CATEGORY_TARIFFS = """ + json.dumps({k: ','.join(v.get('tariffs', [])) for k, v in CATEGORIES.items()}, ensure_ascii=False) + """;
-  const DRIVER_CHAT_LINKS = """ + json.dumps(DRIVER_CHAT_LINKS, ensure_ascii=False) + """;
+  // ИЗМЕНЕНО 30.09.2026 (прямая просьба пользователя - "создать 4 чата
+  // такси/Ultima/курьеры/грузовое такси, доступ только по подписке") -
+  // был DRIVER_CHAT_LINKS по ГОРОДУ (одна и та же ссылка-заглушка всем),
+  // стал CATEGORY_CHAT_LINKS по КАТЕГОРИИ - доступ в саму группу теперь
+  // решает handle_category_chat_join_request на сервере (ссылка ведёт не
+  // сразу в группу, а через заявку на вступление), здесь только подбор
+  // правильной ссылки под категорию водителя (см. chatUrl ниже).
+  const CATEGORY_CHAT_LINKS = """ + json.dumps(CATEGORY_CHAT_LINKS, ensure_ascii=False) + """;
   const TIPS_APP_URL_IOS = """ + json.dumps(TIPS_APP_URL_IOS) + """;
   const TIPS_APP_URL_ANDROID = """ + json.dumps(TIPS_APP_URL_ANDROID) + """;
   // ДОБАВЛЕНО 28.09.2026 (см. BOT_USERNAME/initialize_bot в main.py) - для
@@ -21676,7 +21858,8 @@ def unified_app_html():
     // ordersHubUrl (см. orders_hub_webapp_html), откуда уже 3 отдельные
     // кнопки: АКТИВНЫЕ ЗАКАЗЫ / ПРЕДЗАКАЗЫ / ОТДАТЬ ЗАКАЗ.
     const ordersHubUrl = '""" + ORDERS_HUB_WEBAPP_PATH + """?city=' + cityQ + '&category=' + catQ + tgInitDataParam();
-    const chatUrl = DRIVER_CHAT_LINKS[city] || '';
+    // ИЗМЕНЕНО 30.09.2026 - по категории, не по городу (см. CATEGORY_CHAT_LINKS выше).
+    const chatUrl = CATEGORY_CHAT_LINKS[category] || '';
 
     const tiles = [
       // ДОБАВЛЕНО 27.09.2026 (прямая просьба пользователя - "на эти кнопки
@@ -23026,12 +23209,26 @@ def unified_app_html():
           '<div class="svc-row"><span>' + g.label + (g.is_current ? ' <span style="opacity:.5;font-size:10.5px;">· текущая</span>' : '') + '</span><span class="v">' + gLabel + '</span></div>' +
           '<div class="svc-row"><span>Осталось дней</span><span class="v">' + g.days_left + '</span></div>' +
           (g.pay_url
-            ? '<a class="svc-btn" href="' + g.pay_url + '" target="_blank" rel="noopener">Оплатить ' + g.price_rub + ' ₽</a>'
+            ? '<button type="button" class="svc-btn pay-btn" data-payurl="' + g.pay_url.replace(/"/g, '&quot;') + '">Оплатить ' + g.price_rub + ' ₽</button>'
             : '<div class="svc-note">Не получилось создать ссылку на оплату - попробуй ещё раз чуть позже.</div>') +
           '</div>';
       });
     }
     box.innerHTML = html;
+    // ИЗМЕНЕНО 30.09.2026 (аудит платежей - на Android WebView внутри
+    // Telegram Mini App обычная <a target="_blank">/window.open на внешний
+    // домен ненадёжно открывается (молчаливый no-op) - см. тот же самый
+    // паттерн, уже исправленный в subscription_lock_snippet_html
+    // (subLockPayBtns) и в renderReferralLegalDetail: сначала пробуем
+    // официальный tg.openLink, и только если его нет - обычный window.open.
+    box.querySelectorAll('.pay-btn').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        const url = btn.getAttribute('data-payurl');
+        if (!url) return;
+        try { if (tg && typeof tg.openLink === 'function') { tg.openLink(url); return; } } catch (e) {}
+        window.open(url, '_blank');
+      });
+    });
     const emailBtn = document.getElementById('subEmailBtn');
     if (emailBtn) {
       emailBtn.addEventListener('click', async function () {
@@ -25592,7 +25789,8 @@ async def handle_map_fuel_report_api(request):
         return web.json_response({'error': 'invalid_body'}, status=400)
     if not station_id or fuel_type not in FUEL_TYPES:
         return web.json_response({'error': 'invalid_params'}, status=400)
-    set_gas_fuel_status(station_id, fuel_type, available, user_id)
+    if not set_gas_fuel_status(station_id, fuel_type, available, user_id):
+        return web.json_response({'error': 'save_failed'}, status=500)
     return web.json_response({'ok': True})
 
 async def handle_map_gas_queue_report_api(request):
@@ -25619,7 +25817,8 @@ async def handle_map_gas_queue_report_api(request):
         return web.json_response({'error': 'invalid_body'}, status=400)
     if not station_id or status not in GAS_QUEUE_STATUSES:
         return web.json_response({'error': 'invalid_params'}, status=400)
-    set_gas_queue_status(station_id, status, user_id)
+    if not set_gas_queue_status(station_id, status, user_id):
+        return web.json_response({'error': 'save_failed'}, status=500)
     return web.json_response({'ok': True})
 
 async def handle_map_queue_report_api(request):
@@ -25768,7 +25967,8 @@ async def handle_map_charging_report_api(request):
         return web.json_response({'error': 'invalid_body'}, status=400)
     if not station_id or status not in CHARGING_STATUSES:
         return web.json_response({'error': 'invalid_params'}, status=400)
-    set_charging_status(station_id, status, user_id)
+    if not set_charging_status(station_id, status, user_id):
+        return web.json_response({'error': 'save_failed'}, status=500)
     return web.json_response({'ok': True})
 
 MAP_PARKING_API_PATH = '/map/parking'
@@ -28200,12 +28400,22 @@ async def handle_legal_cabinet_data_api(request):
                 return web.json_response({'error': 'empty_text'}, status=400)
             driver_ids = get_referral_downline_user_ids(user_id)
             sent = 0
+            failed = 0
             for uid in driver_ids:
                 try:
                     await bot.send_message(uid, f"📢 *{entity['name']}*\n\n{text}", parse_mode='Markdown')
                     sent += 1
-                except Exception:
-                    pass
+                except Exception as e:
+                    # ИЗМЕНЕНО 30.09.2026 (аудит - раньше ошибка отправки
+                    # молча проглатывалась без единой строки в логе; если
+                    # рассылка проваливалась массово (например из-за
+                    # невалидной Markdown-разметки в тексте от админа), не
+                    # было никакой возможности понять почему sent пришёл
+                    # маленьким).
+                    failed += 1
+                    logger.warning(f"⚠️ Не удалось отправить рассылку entity_id={entity_id} uid={uid}: {e}")
+            if failed:
+                logger.info(f"📢 Рассылка entity_id={entity_id}: отправлено {sent}, не доставлено {failed}")
             conn = get_db_connection()
             conn.execute(
                 'INSERT INTO legal_entity_notifications (entity_id, sender_user_id, text, recipients_count) VALUES (?, ?, ?, ?)',
@@ -29372,15 +29582,22 @@ def cabinet_webapp_html():
 </style>
 </head>
 <body>""" + subscription_lock_snippet_html() + """
-<!-- УБРАНО 27.09.2026 (прямая просьба пользователя - та же логика, что и
-     у карты, см. комментарий в map_webapp_html выше по файлу: "Кабинет" -
-     это вкладка нижнего меню unified_app_html, встраивается через
-     вложенный #cabinetFrame iframe, а не отдельная страница "поверх"
-     чего-то - переключение между вкладками и так всегда доступно снизу в
-     родительском shell, кнопка "Назад" внутри вложенного iframe была
-     лишней). Раньше здесь стояла кнопка "← Назад" (position:relative;
-     z-index:2 - тот же фикс перекрытия #bgCanvas/стековым контекстом, что
-     у остальных "плоских" страниц) - убрана целиком. -->
+<!-- ИЗМЕНЕНО 30.09.2026 (аудит навигации - "настрой корректные выходы со
+     страниц кнопками назад где это надо") - кнопка "Назад" была убрана
+     27.09.2026 в предположении, что эта страница ВСЕГДА встраивается
+     iframe'ом во вкладку "Кабинет" unified_app_html. Это предположение
+     неверно: страница по-прежнему открывается ОТДЕЛЬНЫМ (standalone)
+     Mini App как минимум в двух местах - open_cabinet_from_menu (кнопка
+     "👤 ЛИЧНЫЙ КАБИНЕТ" в reply-клавиатуре) и start_courier_finance
+     (инлайн-кнопка "👤 ЛИЧНЫЙ КАБИНЕТ" во флоу финансов курьера) - в обоих
+     случаях без кнопки "Назад"/закрытия пользователь мог выйти только
+     системным жестом Telegram (тупик навигации). Кнопка ниже скрыта по
+     умолчанию (display:none) и показывается JS-кодом ТОЛЬКО когда
+     isEmbeddedCabinet===false (см. чуть ниже по файлу, там же где раньше
+     решался тот же вопрос для paddingTop) - когда страница встроена
+     iframe'ом во вкладку "Кабинет", ничего не меняется: кнопка остаётся
+     скрытой, переключение вкладок снизу как и было. -->
+<button type="button" id="cabinetBackBtn" onclick="try{if(window.history.length>1){history.back();}else if(window.Telegram&&Telegram.WebApp&&Telegram.WebApp.close){Telegram.WebApp.close();}}catch(e){}" style="display:none;position:relative;z-index:2;align-items:center;gap:5px;margin:4px 0 10px;padding:8px 14px 8px 10px;background:#1c1c1c;border:1px solid rgba(255,255,255,.12);border-radius:10px;color:#fff;font-size:13px;font-weight:600;cursor:pointer;">← Назад</button>
 <div id="state">Загружаю данные…</div>
 <div id="cabinetApp" style="display:none">
 
@@ -29703,6 +29920,9 @@ def cabinet_webapp_html():
     var isEmbeddedCabinet = true;
     try { isEmbeddedCabinet = window.self !== window.top; } catch (e) { isEmbeddedCabinet = true; }
     if (!isEmbeddedCabinet) {
+      // ДОБАВЛЕНО 30.09.2026 (см. комментарий у #cabinetBackBtn в HTML выше) -
+      // показываем кнопку "Назад" только в standalone-случае.
+      try { var _cbb = document.getElementById('cabinetBackBtn'); if (_cbb) _cbb.style.display = 'inline-flex'; } catch (e) {}
       // Пишем прямо в document.body.style.paddingTop (а не в CSS-переменную,
       // как раньше) - в CSS body ниже теперь просто плоские 16px без ссылки
       // на --tg-chrome-top (см. комментарий там), т.к. embedded-случай
@@ -35890,10 +36110,30 @@ def save_subscription_order(user_id, sub_group, order_id, amount_kopecks):
     conn.close()
 
 
+_tinkoff_payment_url_cache = {}
+TINKOFF_PAYMENT_URL_CACHE_MINUTES = 20
+
+
 async def create_tinkoff_payment(user_id: int, sub_group=None):
     """Создаёт заказ в Tinkoff Kassa (Init) и возвращает ссылку на оплату,
     либо None при ошибке (нет ключей, сеть недоступна, провайдер отказал,
     email для чека ещё не собран - см. ниже).
+
+    ДОБАВЛЕНО 30.09.2026 (аудит платежей - "проверь на баги"): краткий
+    in-memory кэш уже созданной ссылки на оплату на TINKOFF_PAYMENT_URL_
+    CACHE_MINUTES минут, ключ (user_id, sub_group). Раньше КАЖДЫЙ вызов
+    (а send_subscription_paywall зовёт эту функцию на КАЖДОЕ заблокированное
+    сообщение/нажатие лапсед-пользователя, см. SubscriptionMiddleware) бил
+    реальным сетевым запросом в Tinkoff Init и плодил НОВУЮ запись в
+    subscription_payments - то же явление, что уже один раз ловило лимиты
+    Tinkoff и роняло Init другим пользователям (см. подробный комментарий у
+    _subscription_status_payload выше, need_pay_url), только там источником
+    был опрос статуса, а здесь - обычная переписка лапсед-пользователя с
+    ботом. Побочный эффект: заодно резко сужает окно, в которое пользователь
+    может получить ДВЕ разные живые ссылки на оплату одной и той же группы
+    (см. docstring confirm_subscription_payment) - повторный вызов в
+    пределах TTL просто отдаёт ту же самую, ещё не протухшую ссылку вместо
+    создания второго заказа.
 
     ДОБАВЛЕНО 23.09.2026 (по факту - Init отказывал с ErrorCode 309
     "request.validate.expected.receipt"): для этого терминала обязателен
@@ -35915,6 +36155,10 @@ async def create_tinkoff_payment(user_id: int, sub_group=None):
     группа вообще не привязана к категории)."""
     if sub_group is None:
         sub_group = get_user_subscription_group(user_id)
+    cache_key = (user_id, sub_group)
+    _cached = _tinkoff_payment_url_cache.get(cache_key)
+    if _cached and _cached[1] > _sub_now():
+        return _cached[0]
     if not TINKOFF_TERMINAL_KEY or not TINKOFF_PASSWORD:
         logger.warning(f"⚠️ TINKOFF_TERMINAL_KEY/TINKOFF_PASSWORD не заданы - не могу создать ссылку на оплату для user_id={user_id}")
         return None
@@ -35996,7 +36240,10 @@ async def create_tinkoff_payment(user_id: int, sub_group=None):
         logger.error(f"❌ Tinkoff Init отказал для user_id={user_id}: {data}")
         return None
     save_subscription_order(user_id, sub_group, order_id, price_kopecks)
-    return data.get('PaymentURL')
+    payment_url = data.get('PaymentURL')
+    if payment_url:
+        _tinkoff_payment_url_cache[cache_key] = (payment_url, _sub_now() + timedelta(minutes=TINKOFF_PAYMENT_URL_CACHE_MINUTES))
+    return payment_url
 
 
 async def subscription_paywall_pay_urls(user_id):
@@ -36409,7 +36656,7 @@ def subscription_lock_snippet_html():
     <div id="subLockText" style="font-size:13.5px;color:#555;line-height:1.5;margin-bottom:14px;">Проверяем статус подписки...</div>
     <div id="subLockPayBtns" style="margin-bottom:8px;"></div>
     <div id="subLockEmailBox" style="display:none;margin-bottom:8px;">
-      <input type="email" id="subLockEmail" placeholder="email@example.com" style="width:100%;box-sizing:border-box;border:1px solid #ddd;border-radius:10px;padding:11px;font-size:14px;margin-bottom:8px;">
+      <input type="email" id="subLockEmail" placeholder="email@example.com" style="width:100%;box-sizing:border-box;border:1px solid #ddd;border-radius:10px;padding:11px;font-size:16px;margin-bottom:8px;">
       <button type="button" id="subLockEmailBtn" style="width:100%;background:#2AABEE;color:#fff;border:none;border-radius:10px;padding:13px;font-size:15px;font-weight:600;cursor:pointer;">Продолжить</button>
     </div>
     <button type="button" id="subLockCheckBtn" style="width:100%;background:#f2f2f2;color:#333;border:none;border-radius:10px;padding:12px;font-size:13.5px;cursor:pointer;">🔄 Я оплатил(а), проверить</button>
@@ -36894,10 +37141,22 @@ def confirm_subscription_payment(order_id):
         conn.close()
         return {'user_id': user_id, 'already_processed': True, 'referral_notifications': []}
     now = _sub_now()
+    # ИЗМЕНЕНО 30.09.2026 (аудит платежей - защита от гонки на уровне БД, а
+    # не только проверкой status ВЫШЕ по коду, которая сама по себе
+    # check-then-act и в теории уязвима к параллельной обработке двух
+    # вебхуков с одним order_id) - UPDATE условный (status != 'CONFIRMED'),
+    # rowcount==0 значит кто-то другой уже применил этот платёж между SELECT
+    # и этим UPDATE - считаем already_processed и не продлеваем повторно.
+    # Сейчас это невозможно (весь путь синхронный, без await внутри, один
+    # процесс/один event loop), но это свойство текущей модели исполнения,
+    # а не гарантия на будущее - защита теперь не полагается на неё.
     cursor.execute(
-        "UPDATE subscription_payments SET status = 'CONFIRMED', confirmed_at = ? WHERE order_id = ?",
+        "UPDATE subscription_payments SET status = 'CONFIRMED', confirmed_at = ? WHERE order_id = ? AND status != 'CONFIRMED'",
         (_sub_format(now), order_id)
     )
+    if cursor.rowcount < 1:
+        conn.close()
+        return {'user_id': user_id, 'already_processed': True, 'referral_notifications': []}
     cursor.execute('SELECT paid_until FROM subscription_state WHERE user_id = ? AND sub_group = ?', (user_id, sub_group))
     sub_row = cursor.fetchone()
     base = now
@@ -36966,7 +37225,358 @@ async def handle_tinkoff_webhook(request):
                     )
                 except Exception:
                     logger.warning(f"⚠️ Не удалось уведомить о реферальном начислении earner_id={earner_id}")
+    elif order_id:
+        # ДОБАВЛЕНО 30.09.2026 (аудит платежей - "проверь на баги") - раньше
+        # любой статус, кроме CONFIRMED/AUTHORIZED (например REJECTED -
+        # карта отклонена, CANCELED, DEADLINE_EXPIRED - просрочена ссылка),
+        # полностью игнорировался: ни строчки в БД, узнать, что платёж не
+        # прошёл, можно было только в личном кабинете Tinkoff. Здесь только
+        # обновляем статус заказа для видимости - НЕ трогаем уже
+        # подтверждённые заказы (status != 'CONFIRMED' в WHERE, на случай
+        # если Tinkoff всё же пришлёт более старый статус ПОСЛЕ CONFIRMED),
+        # не начисляем и не уведомляем пользователя - сама заглушка оплаты
+        # и так позволяет нажать "🔄 Я оплатил(а), проверить" ещё раз.
+        try:
+            conn = get_db_connection()
+            conn.execute(
+                "UPDATE subscription_payments SET status = ? WHERE order_id = ? AND status != 'CONFIRMED'",
+                (status, order_id)
+            )
+            conn.commit()
+            conn.close()
+        except Exception:
+            logger.exception(f"❌ Не удалось записать статус={status} для OrderId={order_id}")
     return web.Response(text='OK')
+
+
+# ============================================================
+# МОБИЛЬНОЕ ПРИЛОЖЕНИЕ (iOS/Android, ВНЕ Telegram)
+# ============================================================
+# ДОБАВЛЕНО 30.09.2026 (прямая просьба пользователя - "хочу чтобы ты собрал
+# мне приложение на ios"). MVP: вход по номеру телефона (SMS-код) + карта +
+# личный кабинет (без оплаты - см. README мобильного проекта). Вне
+# Telegram нет initData, поэтому нужен свой вход и своя схема сессий -
+# bearer-токен, аналог того, как web_app_data/initData сейчас удостоверяют
+# личность в вебаппе. Существующие Telegram-эндпоинты (/map/..., /cabinet/
+# ... и т.д.) НЕ ТРОГАЮТСЯ - это ПАРАЛЛЕЛЬНЫЙ набор /mobile/... эндпоинтов,
+# переиспользующий ту же бизнес-логику (get_map_positions/
+# update_map_position/is_subscription_enforced_and_active и т.д.) через
+# синтетический отрицательный user_id (см. mobile_user_id ниже), чтобы не
+# дублировать её заново и не трогать поведение бота/вебаппа.
+
+MOBILE_USER_ID_OFFSET = -1_000_000_000_000
+MOBILE_OTP_TTL_MINUTES = 10
+MOBILE_OTP_MAX_ATTEMPTS = 5
+MOBILE_OTP_RESEND_COOLDOWN_SECONDS = 60
+MOBILE_SESSION_TTL_DAYS = 90
+MOBILE_PHONE_REGEX = re.compile(r'^\+[1-9]\d{7,14}$')
+
+MOBILE_AUTH_REQUEST_CODE_API_PATH = '/mobile/auth/request_code'
+MOBILE_AUTH_VERIFY_CODE_API_PATH = '/mobile/auth/verify_code'
+MOBILE_PROFILE_API_PATH = '/mobile/profile'
+MOBILE_MAP_POSITIONS_API_PATH = '/mobile/map/positions'
+MOBILE_MAP_UPDATE_POSITION_API_PATH = '/mobile/map/update_position'
+MOBILE_MAP_FUEL_STATIONS_API_PATH = '/mobile/map/fuel_stations'
+
+
+def _mobile_normalize_phone(raw):
+    """Приводит телефон к единому формату +7999... - принимает 8999...,
+    7999..., +7999... Возвращает None, если явно не похоже на телефон
+    (короче 8 цифр, длиннее 15 - см. E.164)."""
+    if not raw:
+        return None
+    digits = re.sub(r'[^\d+]', '', str(raw).strip())
+    if digits.startswith('8') and len(digits) == 11:
+        digits = '+7' + digits[1:]
+    elif digits.startswith('7') and len(digits) == 11:
+        digits = '+' + digits
+    elif not digits.startswith('+'):
+        digits = '+' + digits
+    if not MOBILE_PHONE_REGEX.match(digits):
+        return None
+    return digits
+
+
+def _mobile_hash(value):
+    return hashlib.sha256(value.encode('utf-8')).hexdigest()
+
+
+async def send_mobile_sms_code(phone, code):
+    """Отправляет SMS с кодом входа через провайдера (URL/ключ - переменные
+    окружения MOBILE_SMS_PROVIDER_URL/MOBILE_SMS_PROVIDER_API_KEY). Формат
+    запроса ниже - самый общий (POST {phone, message} + Bearer-заголовок) -
+    под конкретного провайдера (SMS.ru/Twilio/UniSender и т.п.) адаптировать
+    при подключении, у каждого свой формат.
+
+    Если провайдер НЕ настроен (переменная не задана) - DEV-режим: код
+    просто пишется в лог, чтобы тестировать вход без реального SMS-аккаунта.
+    ВАЖНО - только для разработки: в проде без реального провайдера любой
+    смог бы войти под чужим номером, просто прочитав код в ответе API (см.
+    dev_code в handle_mobile_auth_request_code) или в логах."""
+    provider_url = os.getenv('MOBILE_SMS_PROVIDER_URL')
+    provider_key = os.getenv('MOBILE_SMS_PROVIDER_API_KEY')
+    message = f"Taxi Helper: код входа {code}"
+    if not provider_url:
+        logger.warning(f"📱 [DEV-режим, SMS-провайдер не настроен - MOBILE_SMS_PROVIDER_URL пуст] Код для {phone}: {code}")
+        return True
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                provider_url,
+                json={'phone': phone, 'message': message},
+                headers={'Authorization': f'Bearer {provider_key}'} if provider_key else {},
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                return resp.status < 400
+    except Exception:
+        logger.exception(f"❌ Не удалось отправить SMS-код на {phone}")
+        return False
+
+
+def create_mobile_otp(phone):
+    """Генерирует и сохраняет новый код, возвращает сам код (для отправки).
+    Действует MOBILE_OTP_RESEND_COOLDOWN_SECONDS - повторный запрос раньше
+    этого времени вернёт None (клиент показывает "подожди N секунд")."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT created_at FROM mobile_otp WHERE phone = ?', (phone,))
+    row = cursor.fetchone()
+    if row:
+        try:
+            created_at = datetime.fromisoformat(row[0])
+        except Exception:
+            created_at = None
+        if created_at and (datetime.utcnow() - created_at).total_seconds() < MOBILE_OTP_RESEND_COOLDOWN_SECONDS:
+            conn.close()
+            return None
+    code = f"{secrets.randbelow(1000000):06d}"
+    expires_at = datetime.utcnow() + timedelta(minutes=MOBILE_OTP_TTL_MINUTES)
+    cursor.execute(
+        'INSERT OR REPLACE INTO mobile_otp (phone, code_hash, attempts, expires_at, created_at) VALUES (?, ?, 0, ?, ?)',
+        (phone, _mobile_hash(code), expires_at.isoformat(), datetime.utcnow().isoformat())
+    )
+    conn.commit()
+    conn.close()
+    return code
+
+
+def verify_mobile_otp(phone, code):
+    """True/False - совпал ли код и не истёк ли срок/лимит попыток. При
+    успехе строка удаляется (код одноразовый). При неудачном совпадении
+    увеличивает attempts - после MOBILE_OTP_MAX_ATTEMPTS даже верный код
+    перестаёт приниматься (нужно запросить новый) - защита от перебора."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT code_hash, attempts, expires_at FROM mobile_otp WHERE phone = ?', (phone,))
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        return False
+    code_hash, attempts, expires_at_str = row
+    try:
+        expires_at = datetime.fromisoformat(expires_at_str)
+    except Exception:
+        conn.close()
+        return False
+    if attempts >= MOBILE_OTP_MAX_ATTEMPTS or datetime.utcnow() > expires_at:
+        conn.close()
+        return False
+    if code_hash != _mobile_hash(str(code)):
+        cursor.execute('UPDATE mobile_otp SET attempts = attempts + 1 WHERE phone = ?', (phone,))
+        conn.commit()
+        conn.close()
+        return False
+    cursor.execute('DELETE FROM mobile_otp WHERE phone = ?', (phone,))
+    conn.commit()
+    conn.close()
+    return True
+
+
+def get_or_create_mobile_account(phone):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT id FROM mobile_accounts WHERE phone = ?', (phone,))
+    row = cursor.fetchone()
+    if row:
+        conn.close()
+        return row[0]
+    cursor.execute('INSERT INTO mobile_accounts (phone) VALUES (?)', (phone,))
+    conn.commit()
+    account_id = cursor.lastrowid
+    conn.close()
+    return account_id
+
+
+def create_mobile_session(account_id):
+    """Возвращает СЫРОЙ токен (отдаётся клиенту ровно один раз - в БД
+    хранится только его хэш, тот же принцип, что и у паролей)."""
+    token = secrets.token_hex(32)
+    expires_at = datetime.utcnow() + timedelta(days=MOBILE_SESSION_TTL_DAYS)
+    conn = get_db_connection()
+    conn.execute(
+        'INSERT INTO mobile_sessions (token_hash, mobile_account_id, expires_at) VALUES (?, ?, ?)',
+        (_mobile_hash(token), account_id, expires_at.isoformat())
+    )
+    conn.commit()
+    conn.close()
+    return token
+
+
+def resolve_mobile_account_id(request):
+    """Достаёт account_id из заголовка Authorization: Bearer <token>, или
+    None, если токена нет / он не найден / истёк."""
+    auth = request.headers.get('Authorization', '')
+    if not auth.startswith('Bearer '):
+        return None
+    token = auth[len('Bearer '):].strip()
+    if not token:
+        return None
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT mobile_account_id, expires_at FROM mobile_sessions WHERE token_hash = ?', (_mobile_hash(token),))
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        return None
+    account_id, expires_at_str = row
+    try:
+        if datetime.utcnow() > datetime.fromisoformat(expires_at_str):
+            return None
+    except Exception:
+        return None
+    return account_id
+
+
+def mobile_user_id(account_id):
+    """Синтетический user_id для переиспользования существующей бизнес-
+    логики (карта/подписка и т.д.), которая везде ключуется по user_id -
+    гарантированно отрицательный: настоящие Telegram user_id всегда
+    положительные, пересечение исключено."""
+    return MOBILE_USER_ID_OFFSET - account_id
+
+
+async def handle_mobile_auth_request_code(request):
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({'error': 'invalid_body'}, status=400)
+    phone = _mobile_normalize_phone(body.get('phone'))
+    if not phone:
+        return web.json_response({'error': 'invalid_phone'}, status=400)
+    code = create_mobile_otp(phone)
+    if code is None:
+        return web.json_response({'error': 'too_soon', 'retry_after_seconds': MOBILE_OTP_RESEND_COOLDOWN_SECONDS}, status=429)
+    sent = await send_mobile_sms_code(phone, code)
+    resp = {'ok': True}
+    if not os.getenv('MOBILE_SMS_PROVIDER_URL'):
+        # DEV-режим (см. send_mobile_sms_code) - код возвращаем и в самом
+        # ответе API, чтобы тестировать без доступа к логам сервера.
+        # ОБЯЗАТЕЛЬНО пропадает само собой при подключении реального
+        # SMS-провайдера (условие выше перестаёт выполняться).
+        resp['dev_code'] = code
+    if not sent:
+        resp['warning'] = 'sms_send_failed'
+    return web.json_response(resp)
+
+
+async def handle_mobile_auth_verify_code(request):
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({'error': 'invalid_body'}, status=400)
+    phone = _mobile_normalize_phone(body.get('phone'))
+    code = str(body.get('code') or '').strip()
+    if not phone or not code:
+        return web.json_response({'error': 'invalid_params'}, status=400)
+    if not verify_mobile_otp(phone, code):
+        return web.json_response({'error': 'invalid_code'}, status=401)
+    account_id = get_or_create_mobile_account(phone)
+    token = create_mobile_session(account_id)
+    return web.json_response({
+        'token': token,
+        'account': {'id': account_id, 'phone': phone},
+    })
+
+
+async def handle_mobile_profile(request):
+    account_id = resolve_mobile_account_id(request)
+    if account_id is None:
+        return web.json_response({'error': 'unauthorized'}, status=401)
+    if request.method == 'POST':
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({'error': 'invalid_body'}, status=400)
+        city = str(body.get('city') or '').strip()[:64] or None
+        category = str(body.get('category') or '').strip()[:32] or None
+        conn = get_db_connection()
+        conn.execute(
+            'UPDATE mobile_accounts SET city = COALESCE(?, city), category = COALESCE(?, category) WHERE id = ?',
+            (city, category, account_id)
+        )
+        conn.commit()
+        conn.close()
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT phone, city, category FROM mobile_accounts WHERE id = ?', (account_id,))
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        return web.json_response({'error': 'not_found'}, status=404)
+    phone, city, category = row
+    uid = mobile_user_id(account_id)
+    sub_group = get_subscription_group(category)
+    active_until = subscription_active_until(uid, sub_group)
+    return web.json_response({
+        'phone': phone,
+        'city': city,
+        'category': category,
+        'subscription': {
+            # ДОБАВЛЕНО 30.09.2026 - MVP БЕЗ оплаты в приложении (см. задачу
+            # про Apple In-App Purchase, это отдельный следующий шаг) -
+            # здесь только ЧТЕНИЕ статуса, никакая функция не блокирует
+            # доступ и не создаёт платёж (в отличие от _subscription_status_
+            # payload/create_tinkoff_payment, которые здесь намеренно НЕ
+            # вызываются).
+            'active': is_subscription_enforced_and_active(uid, sub_group),
+            'active_until': active_until.strftime('%d.%m.%Y') if active_until else None,
+        },
+    })
+
+
+async def handle_mobile_map_positions(request):
+    account_id = resolve_mobile_account_id(request)
+    if account_id is None:
+        return web.json_response({'error': 'unauthorized'}, status=401)
+    city = request.query.get('city', '')
+    category = request.query.get('category', '') or None
+    positions = get_map_positions(city, category=category, exclude_user_id=mobile_user_id(account_id))
+    return web.json_response({'positions': positions})
+
+
+async def handle_mobile_map_update_position(request):
+    account_id = resolve_mobile_account_id(request)
+    if account_id is None:
+        return web.json_response({'error': 'unauthorized'}, status=401)
+    try:
+        body = await request.json()
+        lat = float(body.get('lat'))
+        lon = float(body.get('lon'))
+        city = str(body.get('city') or '')
+        category = str(body.get('category') or '')
+        shift_active = bool(body.get('shift_active', True))
+    except Exception:
+        return web.json_response({'error': 'invalid_body'}, status=400)
+    if not city or not category:
+        return web.json_response({'error': 'invalid_params'}, status=400)
+    update_map_position(mobile_user_id(account_id), city, category, lat, lon, shift_active=shift_active)
+    return web.json_response({'ok': True})
+
+
+async def handle_mobile_map_fuel_stations(request):
+    # Публичные данные, как handle_map_fuel_stations_api - авторизация не
+    # обязательна, это просто чтение (та же логика, тот же путь один в один).
+    return await handle_map_fuel_stations_api(request)
 
 
 async def start_subscription_webhook_server():
@@ -37085,6 +37695,16 @@ async def start_subscription_webhook_server():
     app.router.add_get(LEGAL_CABINET_DATA_API_PATH, handle_legal_cabinet_data_api)
     app.router.add_post(LEGAL_CABINET_DATA_API_PATH, handle_legal_cabinet_data_api)
     app.router.add_get(CABINET_RENT_API_PATH, handle_cabinet_rent_api)
+    # Мобильное приложение (iOS/Android, вне Telegram) - см. блок
+    # "МОБИЛЬНОЕ ПРИЛОЖЕНИЕ" выше. Отдельное REST API поверх той же бизнес-
+    # логики (карта/подписки), не затрагивает существующие Telegram-роуты.
+    app.router.add_post(MOBILE_AUTH_REQUEST_CODE_API_PATH, handle_mobile_auth_request_code)
+    app.router.add_post(MOBILE_AUTH_VERIFY_CODE_API_PATH, handle_mobile_auth_verify_code)
+    app.router.add_get(MOBILE_PROFILE_API_PATH, handle_mobile_profile)
+    app.router.add_post(MOBILE_PROFILE_API_PATH, handle_mobile_profile)
+    app.router.add_get(MOBILE_MAP_POSITIONS_API_PATH, handle_mobile_map_positions)
+    app.router.add_post(MOBILE_MAP_UPDATE_POSITION_API_PATH, handle_mobile_map_update_position)
+    app.router.add_get(MOBILE_MAP_FUEL_STATIONS_API_PATH, handle_mobile_map_fuel_stations)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', SUBSCRIPTION_WEBHOOK_PORT)
@@ -37242,6 +37862,295 @@ async def subscription_expiry_reminder_checker():
         except Exception:
             logger.exception("❌ Ошибка в subscription_expiry_reminder_checker")
         await asyncio.sleep(SUBSCRIPTION_REMINDER_CHECK_INTERVAL_MINUTES * 60)
+
+
+# ==================== ЧАТЫ ПО КАТЕГОРИЯМ (доступ по подписке) ====================
+# ДОБАВЛЕНО 30.09.2026 (прямая просьба пользователя - "создать 4 чата такси/
+# Ultima/курьеры/грузовое такси, доступ только пока действует подписка, как
+# только подписка заканчивается человек теряет доступ в этот чат").
+#
+# Механика (Telegram Bot API не даёт "временное членство" само по себе -
+# это всё собирается вручную):
+#   1. Ссылка на каждый чат создаётся с creates_join_request=True (см.
+#      ensure_category_chat_invite_link) - переход по ней не добавляет в
+#      группу сразу, а шлёт боту СОБЫТИЕ chat_join_request. Это обязательно
+#      (не обычная ссылка-приглашение) - иначе ссылку можно переслать в
+#      обход подписки, и проверка сработала бы только один раз при выдаче
+#      ссылки, а не при каждом реальном входе.
+#   2. handle_category_chat_join_request одобряет/отклоняет заявку по
+#      category_chat_access_allowed - решение пользователя 30.09.2026:
+#      доступ только в чат СВОЕЙ ТЕКУЩЕЙ категории (даже если Такси и Ultima
+#      физически делят одну оплату - см. get_subscription_group), не в оба
+#      чата сразу.
+#   3. category_chat_members - кто сейчас реально состоит в каком чате (Bot
+#      API не даёт получить список участников большой группы напрямую,
+#      без своей таблицы periodic-проверка не знала бы, кого проверять).
+#   4. category_chat_access_checker (тот же 5-минутный цикл, что и у пушей-
+#      напоминаний об окончании подписки, а не часовой - "как только
+#      подписка заканчивается" из просьбы пользователя ближе к "сразу", чем
+#      к "в течение часа") - для каждой строки в category_chat_members
+#      повторно проверяет category_chat_access_allowed; если условия больше
+#      не выполняются (подписка закончилась ИЛИ пользователь сменил
+#      категорию) - "мягко" исключает (ban_chat_member сразу за которым
+#      unban_chat_member(only_if_banned=True) - убирает из группы, но НЕ
+#      банит навсегда, так что после новой оплаты можно снова подать заявку
+#      на вступление и её одобрят).
+#   5. handle_category_chat_member_update - если водитель вышел из чата САМ
+#      (или его исключил админ вручную) - чистим category_chat_members, не
+#      дожидаясь ближайшего прогона проверки.
+
+
+def get_category_chat_invite_link_from_db(category):
+    """Уже сохранённая ссылка-приглашение для категории - None, если ещё не
+    создавали ЛИБО chat_id в БД не совпадает с текущим CATEGORY_CHAT_IDS
+    (значит, группу пересоздали - нужна новая ссылка, см.
+    ensure_category_chat_invite_link)."""
+    chat_id = CATEGORY_CHAT_IDS.get(category)
+    if not chat_id:
+        return None
+    conn = get_db_connection()
+    row = conn.execute(
+        'SELECT invite_link, chat_id FROM category_chat_invite_links WHERE category = ?', (category,)
+    ).fetchone()
+    conn.close()
+    if row and row[1] == chat_id:
+        return row[0]
+    return None
+
+
+async def ensure_category_chat_invite_link(category):
+    """Возвращает рабочую ссылку с подтверждением заявки для чата этой
+    категории - либо уже сохранённую (см. get_category_chat_invite_link_
+    from_db), либо создаёт новую через Bot API и сохраняет. Обновляет
+    CATEGORY_CHAT_LINKS[category] на месте, поэтому и бот (build_category_
+    chat_keyboard), и unified_app_html сразу видят актуальную ссылку - см.
+    комментарий у CATEGORY_CHAT_LINKS."""
+    cached = get_category_chat_invite_link_from_db(category)
+    if cached:
+        CATEGORY_CHAT_LINKS[category] = cached
+        return cached
+    chat_id = CATEGORY_CHAT_IDS.get(category)
+    if not chat_id or not bot:
+        return None
+    try:
+        link_obj = await bot.create_chat_invite_link(
+            chat_id=chat_id,
+            name=f"Taxi Helper - {CATEGORIES.get(category, {}).get('name', category)}",
+            creates_join_request=True,
+        )
+        invite_link = link_obj.invite_link
+    except Exception:
+        logger.exception(f"❌ Не удалось создать ссылку-приглашение для чата категории {category} (chat_id={chat_id})")
+        return None
+    conn = get_db_connection()
+    conn.execute(
+        'INSERT OR REPLACE INTO category_chat_invite_links (category, chat_id, invite_link, created_at) VALUES (?, ?, ?, ?)',
+        (category, chat_id, invite_link, _sub_format(_sub_now()))
+    )
+    conn.commit()
+    conn.close()
+    CATEGORY_CHAT_LINKS[category] = invite_link
+    logger.info(f"✅ Ссылка-приглашение для чата категории {category} готова: {invite_link}")
+    return invite_link
+
+
+async def warm_category_chat_invite_links():
+    """Вызывается один раз при старте бота (см. asyncio.create_task в самом
+    низу файла) - создаёт/подгружает ссылки для ВСЕХ категорий, у которых
+    уже задан CATEGORY_CHAT_IDS (пока все None - просто ничего не
+    делает, безопасно)."""
+    for category, chat_id in CATEGORY_CHAT_IDS.items():
+        if not chat_id:
+            continue
+        try:
+            await ensure_category_chat_invite_link(category)
+        except Exception:
+            logger.exception(f"❌ warm_category_chat_invite_links: не удалось подготовить чат категории {category}")
+
+
+def category_chat_access_allowed(user_id, category):
+    """True, если ЭТОМУ Telegram-пользователю сейчас можно быть в чате этой
+    категории - ДВЕ проверки (решение пользователя, 30.09.2026 - "только
+    свой чат"):
+      1. category должна совпадать с ТЕКУЩЕЙ выбранной категорией в боте
+         (user_state) - а не просто входить в ту же платёжную группу: Такси
+         и Ultima физически делят одну оплату (get_subscription_group), но
+         это РАЗНЫЕ чаты, доступ только в свой.
+      2. Подписка СООТВЕТСТВУЮЩЕЙ группы должна быть активна прямо сейчас
+         (is_subscription_enforced_and_active - та же единая точка входа,
+         что и у блокировки мини-приложения).
+    Возвращает (allowed: bool, reason: str|None) - reason нужен, чтобы
+    отличить "не та категория" от "подписка кончилась" в сообщении
+    пользователю (см. handle_category_chat_join_request/
+    category_chat_access_checker)."""
+    user_category = user_state.get(user_id, {}).get('category')
+    if user_category != category:
+        return False, 'wrong_category'
+    sub_group = get_subscription_group(category)
+    if not is_subscription_enforced_and_active(user_id, sub_group):
+        return False, 'subscription_inactive'
+    return True, None
+
+
+def add_category_chat_member(user_id, category, chat_id):
+    conn = get_db_connection()
+    conn.execute(
+        'INSERT OR REPLACE INTO category_chat_members (user_id, category, chat_id, joined_at) VALUES (?, ?, ?, ?)',
+        (user_id, category, chat_id, _sub_format(_sub_now()))
+    )
+    conn.commit()
+    conn.close()
+
+
+def remove_category_chat_member(user_id, category):
+    conn = get_db_connection()
+    conn.execute('DELETE FROM category_chat_members WHERE user_id = ? AND category = ?', (user_id, category))
+    conn.commit()
+    conn.close()
+
+
+def get_all_category_chat_members():
+    conn = get_db_connection()
+    rows = conn.execute('SELECT user_id, category, chat_id FROM category_chat_members').fetchall()
+    conn.close()
+    return rows
+
+
+async def send_category_chat_decline_dm(user_id, category, reason):
+    """Личное сообщение после отклонённой заявки на вступление - см.
+    handle_category_chat_join_request. Для 'subscription_inactive'
+    переиспользуем готовый пейволл (subscription_paywall_text/keyboard) -
+    те же кнопки оплаты, что и везде в боте, ничего не дублируем заново."""
+    label = CATEGORIES.get(category, {}).get('name', category)
+    if reason == 'wrong_category':
+        user_category = user_state.get(user_id, {}).get('category')
+        user_label = CATEGORIES.get(user_category, {}).get('name', user_category or '?')
+        text = (
+            f"💬 Чат «{label}» - это чат другой категории.\n\n"
+            f"Сейчас у тебя в боте выбрана категория «{user_label}» - доступен только чат своей категории. "
+            "Если работаешь в нескольких категориях - смени категорию в боте и зайди в чат снова."
+        )
+        try:
+            if bot:
+                await bot.send_message(user_id, text)
+        except Exception:
+            logger.warning(f"⚠️ Не удалось отправить DM (wrong_category) user_id={user_id}")
+        return
+    # reason == 'subscription_inactive'
+    pay_urls = await subscription_paywall_pay_urls(user_id)
+    text = f"💬 Чат «{label}» доступен только по действующей подписке.\n\n" + subscription_paywall_text(user_id)
+    try:
+        if bot:
+            await bot.send_message(user_id, text, reply_markup=subscription_paywall_keyboard(pay_urls, user_id), parse_mode='Markdown')
+    except Exception:
+        logger.warning(f"⚠️ Не удалось отправить DM (subscription_inactive) user_id={user_id}")
+
+
+@router.chat_join_request()
+async def handle_category_chat_join_request(update: types.ChatJoinRequest):
+    """Заявка на вступление в один из 4 чатов категорий (ссылка создана с
+    creates_join_request=True, см. ensure_category_chat_invite_link) -
+    единственное место, где реально принимается решение "пускать/не
+    пускать" (см. блок-комментарий "ЧАТЫ ПО КАТЕГОРИЯМ" выше)."""
+    chat_id = update.chat.id
+    user_id = update.from_user.id
+    category = next((cat for cat, cid in CATEGORY_CHAT_IDS.items() if cid == chat_id), None)
+    if category is None:
+        # Заявка в чат, которого нет в CATEGORY_CHAT_IDS (бот админ ещё
+        # где-то ещё, или конфигурация не совпала) - не наш случай, ничего
+        # не решаем молча отклонять/одобрять чужую группу небезопасно.
+        return
+    allowed, reason = category_chat_access_allowed(user_id, category)
+    try:
+        if allowed:
+            await bot.approve_chat_join_request(chat_id, user_id)
+            add_category_chat_member(user_id, category, chat_id)
+            label = CATEGORIES.get(category, {}).get('name', category)
+            try:
+                await bot.send_message(user_id, f"✅ Заявка в чат «{label}» одобрена, добро пожаловать!")
+            except Exception:
+                pass
+        else:
+            await bot.decline_chat_join_request(chat_id, user_id)
+            await send_category_chat_decline_dm(user_id, category, reason)
+    except Exception:
+        logger.exception(f"❌ Ошибка обработки заявки на вступление chat_id={chat_id} user_id={user_id}")
+
+
+@router.chat_member()
+async def handle_category_chat_member_update(update: types.ChatMemberUpdated):
+    """Если водитель САМ вышел из чата категории, или его исключил
+    (вручную, не через нашу проверку) кто-то из живых админов группы -
+    убираем строку из category_chat_members, не дожидаясь ближайшего
+    прогона category_chat_access_checker (иначе таблица считала бы его
+    участником, хотя он уже не в группе - не критично, но лишние попытки
+    исключить того, кого и так уже нет, только шумят в логах)."""
+    chat_id = update.chat.id
+    category = next((cat for cat, cid in CATEGORY_CHAT_IDS.items() if cid == chat_id), None)
+    if category is None:
+        return
+    new_status = update.new_chat_member.status
+    if new_status in ('left', 'kicked', 'banned'):
+        remove_category_chat_member(update.new_chat_member.user.id, category)
+
+
+async def check_category_chat_access():
+    """Проходит по ВСЕМ строкам category_chat_members и для каждой
+    перепроверяет category_chat_access_allowed - см. блок-комментарий
+    "ЧАТЫ ПО КАТЕГОРИЯМ" выше, пункт 4. Вызывается из category_chat_
+    access_checker (тот же 5-минутный цикл, что и у пушей-напоминаний)."""
+    for user_id, category, chat_id in get_all_category_chat_members():
+        allowed, reason = category_chat_access_allowed(user_id, category)
+        if allowed:
+            continue
+        try:
+            # "Мягкое" исключение - ban сразу за которым unban(only_if_
+            # banned=True): убирает из группы, но НЕ банит навсегда, чтобы
+            # после новой оплаты/смены категории назад можно было подать
+            # новую заявку на вступление и её снова одобрили.
+            await bot.ban_chat_member(chat_id, user_id)
+            await bot.unban_chat_member(chat_id, user_id, only_if_banned=True)
+        except Exception:
+            logger.exception(f"❌ Не удалось исключить user_id={user_id} из чата категории {category} (chat_id={chat_id})")
+            continue
+        remove_category_chat_member(user_id, category)
+        label = CATEGORIES.get(category, {}).get('name', category)
+        if reason == 'subscription_inactive':
+            text = f"⛔️ Доступ к чату «{label}» закрыт - подписка закончилась. Оплати, чтобы вернуться."
+        else:
+            text = f"⛔️ Доступ к чату «{label}» закрыт - ты сменил категорию в боте. Зайди в чат своей новой категории через «💬 ЧАТЫ»."
+        try:
+            await bot.send_message(user_id, text)
+        except Exception:
+            logger.warning(f"⚠️ Не удалось отправить DM об исключении из чата user_id={user_id}")
+        await asyncio.sleep(0.05)
+
+
+async def category_chat_access_checker():
+    while True:
+        try:
+            await check_category_chat_access()
+        except Exception:
+            logger.exception("❌ Ошибка в category_chat_access_checker")
+        await asyncio.sleep(SUBSCRIPTION_REMINDER_CHECK_INTERVAL_MINUTES * 60)
+
+
+@router.message(lambda message: message.text == "/chatid")
+async def cmd_chatid(message: types.Message):
+    """Служебная команда - нужна один раз при настройке: добавь бота
+    админом в группу категории и пришли туда "/chatid" - бот ответит её
+    chat_id, который нужно вписать в CATEGORY_CHAT_IDS выше (после этого
+    перезапуск бота сам создаст рабочую ссылку-приглашение, см.
+    warm_category_chat_invite_links). Доступ - ADMIN_TELEGRAM_ID (тот же
+    паттерн проверки, что у /backup_now//referral_paid) ИЛИ админ-партнёр
+    (get_referrer_type - пароли AdminDmitry/AdminRuslan/AdminMike) - любой
+    из двух, чтобы команда работала и до того, как кто-то из них вводил
+    пароль."""
+    is_owner = ADMIN_TELEGRAM_ID and str(message.from_user.id) == str(ADMIN_TELEGRAM_ID)
+    if not is_owner and get_referrer_type(message.from_user.id) != 'admin':
+        return
+    await message.answer(f"chat_id: `{message.chat.id}`\nТип чата: {message.chat.type}", parse_mode='Markdown')
+
 
 # ==================== РЕФЕРАЛЬНАЯ ПРОГРАММА ====================
 # По просьбе пользователя (20.09.2026): кнопка "Реферальная программа" в
@@ -41859,6 +42768,13 @@ async def main():
     asyncio.create_task(start_subscription_webhook_server())
     asyncio.create_task(subscription_expiry_checker())
     asyncio.create_task(subscription_expiry_reminder_checker())
+    # ДОБАВЛЕНО 30.09.2026 (см. блок "ЧАТЫ ПО КАТЕГОРИЯМ" выше) -
+    # warm_category_chat_invite_links готовит ссылки-приглашения один раз
+    # при старте (безопасно, пока CATEGORY_CHAT_IDS пуст - просто ничего не
+    # делает), category_chat_access_checker - тот же цикл, что и у пушей-
+    # напоминаний, только исключает из чатов, у кого пропало право доступа.
+    asyncio.create_task(warm_category_chat_invite_links())
+    asyncio.create_task(category_chat_access_checker())
     dp.include_router(router)
     if os.getenv('YANDEX_RASP_API_KEY'):
         asyncio.create_task(airports_data_updater())
@@ -41912,8 +42828,15 @@ async def main():
     # обрабатываемом виде. message/edited_message/callback_query - все типы
     # апдейтов, которые реально используются хендлерами в этом файле (см.
     # @router.message/@router.edited_message/@router.callback_query).
+    #
+    # ДОБАВЛЕНО 30.09.2026 (см. блок "ЧАТЫ ПО КАТЕГОРИЯМ" выше) -
+    # chat_join_request/chat_member ОБЯЗАТЕЛЬНО нужны в этом списке, иначе
+    # ровно та же проблема, что описана в комментарии выше про
+    # edited_message - Telegram просто не станет присылать эти апдейты, и
+    # @router.chat_join_request()/@router.chat_member() никогда не
+    # сработают, хотя код формально рабочий.
     try:
-        await dp.start_polling(bot, allowed_updates=['message', 'edited_message', 'callback_query'])
+        await dp.start_polling(bot, allowed_updates=['message', 'edited_message', 'callback_query', 'chat_join_request', 'chat_member'])
     finally:
         # На штатном рестарте/редеплое (SIGTERM, aiogram корректно
         # завершает start_polling) досбрасываем всё, что ещё не успел
