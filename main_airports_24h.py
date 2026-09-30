@@ -9898,8 +9898,17 @@ async def score_district_candidates(city, category, user_lat=None, user_lon=None
                 # попадать в топ районов "Куда ехать" - Premier(4)/Elite(5)
                 # и все индексы такси/доставки не трогаются (проверяется
                 # внутри самого хелпера).
+                # ЕЩЁ РАЗ ИЗМЕНЕНО 30.09.2026 (см. COMFORT_PLUS_TARIFF_DEMAND_
+                # PENALTY/_adjust_comfort_plus_demand_value выше) -
+                # симметрично, индекс 2 (Комфорт+, только для category='taxi')
+                # получает здесь же -10% ДО max() ниже, чтобы реже выигрывать
+                # сравнение с Эконом/Комфортом и реже попадать в топ районов.
                 values = [
-                    _boost_business_demand_value(category, slot[2 + i], index=i)
+                    _adjust_comfort_plus_demand_value(
+                        category,
+                        _boost_business_demand_value(category, slot[2 + i], index=i),
+                        index=i,
+                    )
                     for i in indices if slot[2 + i] is not None
                 ]
                 if values:
@@ -24159,6 +24168,30 @@ def _boost_business_demand_value(category, value, tariff=None, index=None):
         return value
     return min(100, value * BUSINESS_TARIFF_DEMAND_BOOST)
 
+# ДОБАВЛЕНО 30.09.2026 (прямая просьба пользователя - "на 10% матрицу
+# комфорт плюса занизь") - симметричная BUSINESS_TARIFF_DEMAND_BOOST выше
+# поправка, но для Комфорт+/taxi (индекс 2 матрицы taxi) и в ОБРАТНУЮ
+# сторону: -10% к сырому значению спроса. Применяется В ТЕХ ЖЕ ТРЁХ местах,
+# тем же способом - к сырому значению, ДО дождя/дня-времени/праздника, а не
+# как отдельный порог/ранжирование - дальше значение идёт через все обычные
+# корректировки уже от сниженной базы. Эконом/Комфорт/все тарифы Ultima
+# нигде не трогаются - см. is_comfort_plus ниже.
+COMFORT_PLUS_TARIFF_DEMAND_PENALTY = 0.90
+
+def _adjust_comfort_plus_demand_value(category, value, tariff=None, index=None):
+    """-10% к сырому значению спроса Комфорт+/taxi (см.
+    COMFORT_PLUS_TARIFF_DEMAND_PENALTY выше) - тот же интерфейс, что и у
+    _boost_business_demand_value (tariff='Комфорт+', путь
+    _district_tariff_demand_value, либо index=2, путь
+    handle_map_district_demand_api/score_district_candidates).
+    value=None проходит без изменений (данных для этого слота просто нет)."""
+    if value is None or category != 'taxi':
+        return value
+    is_comfort_plus = (tariff == 'Комфорт+') if tariff is not None else (index == MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_COMFORT_PLUS[0])
+    if not is_comfort_plus:
+        return value
+    return value * COMFORT_PLUS_TARIFF_DEMAND_PENALTY
+
 # Комбинированные индексы (максимум по всем тарифам категории) - используются
 # ТОЛЬКО для общего ранжирования районов в "Куда ехать" (score_district_candidates),
 # где нужен один общий балл района на категорию, а не отдельные слои облаков.
@@ -24927,6 +24960,10 @@ async def handle_map_district_demand_api(request):
                 econom = _district_slot_value(slots, now.hour, MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_ECONOM)
                 comfort = _district_slot_value(slots, now.hour, MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_COMFORT)
                 comfort_plus = _district_slot_value(slots, now.hour, MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_COMFORT_PLUS)
+                # ДОБАВЛЕНО 30.09.2026 (см. COMFORT_PLUS_TARIFF_DEMAND_PENALTY
+                # выше) - -10% к сырому Комфорт+ ДО дождя/дневных корректировок
+                # ниже (тот же приём, что и у Business в ultima-ветке ниже).
+                comfort_plus = _adjust_comfort_plus_demand_value(category, comfort_plus, index=MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_COMFORT_PLUS[0])
                 if econom is None and comfort is None and comfort_plus is None and not district_raining:
                     continue
                 in_city = _district_in_city_limits(city, lat, lon)
@@ -35652,9 +35689,10 @@ SUBSCRIPTION_DISPLAY_GROUPS = (
     (SUBSCRIPTION_GROUP_COURIER_CARGO, 'Курьеры / грузовое такси'),
 )
 
-async def _subscription_group_payload(user_id, sub_group, has_email):
-    """Статус + (если есть email для чека) ссылка на оплату ДЛЯ ОДНОЙ
-    группы подписки - та же логика, что раньше жила прямо внутри
+async def _subscription_group_payload(user_id, sub_group, has_email, need_pay_url=True):
+    """Статус + (если есть email для чека И реально нужна ссылка на оплату -
+    см. need_pay_url и комментарий у _subscription_status_payload ниже) для
+    ОДНОЙ группы подписки - та же логика, что раньше жила прямо внутри
     _subscription_status_payload (см. ниже), просто вынесена в отдельную
     функцию, чтобы применить её к каждой из SUBSCRIPTION_DISPLAY_GROUPS."""
     active_until = subscription_active_until(user_id, sub_group)
@@ -35685,16 +35723,45 @@ async def _subscription_group_payload(user_id, sub_group, has_email):
         # чате (SubscriptionMiddleware), а не приблизительный по дням.
         'active': is_subscription_enforced_and_active(user_id, sub_group),
     }
-    if has_email:
+    if has_email and need_pay_url:
         payload['pay_url'] = await create_tinkoff_payment(user_id, sub_group)
     return payload
 
 async def _subscription_status_payload(user_id):
     has_email = bool(get_receipt_email(user_id))
     current_group = get_user_subscription_group(user_id)
+    # ИСПРАВЛЕНО 30.09.2026 (жалоба пользователя со скриншотом - "неактивные
+    # кнопки не одна из [не работает]" на заглушке "Пробный период
+    # закончился") - create_tinkoff_payment (реальный сетевой запрос Init к
+    # Tinkoff, до 15с + новая запись заказа в БД, см. save_subscription_order)
+    # раньше вызывался ЗДЕСЬ для ОБЕИХ групп подписки БЕЗУСЛОВНО при КАЖДОМ
+    # обращении к /subscription/status - а это не только при реальном показе
+    # самой заглушки, но и при обычной фоновой проверке доступа на КАЖДОЙ из
+    # 11 платных WebApp-страниц ПРИ КАЖДОЙ их загрузке
+    # (window.checkSubscriptionLock() в конце subscription_lock_snippet_html
+    # ниже), и ЕЩЁ РАЗ на каждую попытку открыть любой платный раздел внутри
+    # unified_app_html (ensureSubActiveChecked). При этом pay_url реально
+    # читается JS-кодом ТОЛЬКО когда заглушка/блокировка вообще показывается
+    # (data.active===false у ТЕКУЩЕЙ группы) - если подписка активна, оверлей
+    # сразу скрывается, groups[].pay_url ни разу не используется. Для
+    # подавляющего большинства обращений (активные/оплаченные водители,
+    # просто открывшие карту) это означало два полностью бесполезных
+    # Init-запроса к Tinkoff на каждое открытие страницы - при таком объёме
+    # легко упереться в лимиты/квоты Tinkoff, из-за чего у ДРУГИХ
+    # водителей, которым ссылка на оплату реально нужна именно сейчас, Init
+    # начинал отказывать (Success:false) -> create_tinkoff_payment вернёт
+    # None -> pay_url=None -> кнопка в subLockPayBtns рисуется disabled
+    # (opacity .5, cursor:default) - визуально ровно "кнопки не активны".
+    # Теперь узнаём активность ТЕКУЩЕЙ группы заранее (это чистая проверка по
+    # уже загруженным данным подписки, без сети) и просим
+    # create_tinkoff_payment только когда она реально не активна (то есть
+    # заглушка действительно будет показана) - в остальных случаях pay_url
+    # остаётся None, но он в этих случаях и не читается.
+    current_active = is_subscription_enforced_and_active(user_id, current_group)
+    need_pay_url = not current_active
     groups = []
     for grp, label in SUBSCRIPTION_DISPLAY_GROUPS:
-        g = await _subscription_group_payload(user_id, grp, has_email)
+        g = await _subscription_group_payload(user_id, grp, has_email, need_pay_url=need_pay_url)
         g['label'] = label
         g['is_current'] = (grp == current_group)
         groups.append(g)
@@ -40515,7 +40582,9 @@ def _district_tariff_demand_value(city, district_name, category, tariff, weekday
     ИЗМЕНЕНО 30.09.2026 (см. BUSINESS_TARIFF_DEMAND_BOOST выше) - Business/
     ultima получает +10% к сырому значению здесь же, у самого источника -
     используется в recommended_district_tariffs (рекомендация тарифа в
-    пушах) и _tariff_demand_and_threshold (проверка порога)."""
+    пушах) и _tariff_demand_and_threshold (проверка порога).
+    ЕЩЁ РАЗ ИЗМЕНЕНО 30.09.2026 (см. COMFORT_PLUS_TARIFF_DEMAND_PENALTY
+    выше) - симметрично, Комфорт+/taxi получает здесь же -10%."""
     table = get_district_demand(city)
     if not table:
         return None
@@ -40527,7 +40596,8 @@ def _district_tariff_demand_value(city, district_name, category, tariff, weekday
         return None
     slots = entry.get('weekday', {}).get(str(weekday), [])
     value = _district_slot_value(slots, hour, (idx,))
-    return _boost_business_demand_value(category, value, tariff=tariff)
+    value = _boost_business_demand_value(category, value, tariff=tariff)
+    return _adjust_comfort_plus_demand_value(category, value, tariff=tariff)
 
 def _district_tariff_demand_threshold(city, category, tariff, lat=None, lon=None):
     """Порог показа облака (см. get_district_cloud_thresholds/
