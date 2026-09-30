@@ -6232,7 +6232,7 @@ def notification_settings_keyboard(state, category=None):
             callback_data=f"notif_toggle_{key}",
         )])
     if category not in CATEGORIES_WITHOUT_AIRPORTS:
-        queue_mark = '✅' if state.get('airport_queue_active') else '☐'
+        queue_mark = '✅' if _airport_queue_pref_active(state) else '☐'
         buttons.append([InlineKeyboardButton(
             text=f"{queue_mark} 📍 Очередь у аэропорта",
             callback_data="notif_toggle_airport_queue",
@@ -10797,7 +10797,7 @@ async def toggle_airport_queue_inline(callback_query: types.CallbackQuery):
     category = state.get('category')
     if category in CATEGORIES_WITHOUT_AIRPORTS:
         return
-    if state.get('airport_queue_active'):
+    if _airport_queue_pref_active(state):
         state['airport_queue_active'] = False
         state['airport_queue'] = {}
         await callback_query.message.edit_reply_markup(reply_markup=notification_settings_keyboard(state, category))
@@ -11576,7 +11576,7 @@ async def toggle_airport_queue_tracking(message: types.Message):
     user_id = message.from_user.id
     state = user_state[user_id]
     category = state.get('category')
-    if state.get('airport_queue_active'):
+    if _airport_queue_pref_active(state):
         state['airport_queue_active'] = False
         state['airport_queue'] = {}
         await message.answer("⏹ Отслеживание очереди у аэропорта остановлено.", reply_markup=types.ReplyKeyboardRemove())
@@ -11788,9 +11788,14 @@ async def process_airport_queue_ping(user_id, lat, lon, live_period=None):
     ближайшей терминальной зоны - см. nearest_airport_zone/
     AIRPORT_TERMINAL_ZONES), шлёт пуши по мере приближения (см.
     AIRPORT_QUEUE_RADIUS_LEVELS_KM), обновляет user_state[uid]['airport_queue']
-    для фонового чекера (30 мин - см. check_airport_queue_timers)."""
+    для фонового чекера (30 мин - см. check_airport_queue_timers).
+
+    ИЗМЕНЕНО 30.09.2026 (жалоба - "уведомление не пришло про отметиться в
+    очереди" в радиусе Шереметьево) - см. _airport_queue_pref_active
+    (default True), раньше здесь читался сырой флаг, отсутствующий у
+    пользователей, ни разу явно не включавших фичу."""
     state = user_state.get(user_id)
-    if not state or not state.get('airport_queue_active'):
+    if not state or not _airport_queue_pref_active(state):
         return
     if state.get('category') in CATEGORIES_WITHOUT_AIRPORTS:
         # Защитный случай - активная трансляция, начатая ДО смены категории
@@ -12125,14 +12130,56 @@ async def send_parking_push(user_id, city, lat=None, lon=None):
     except Exception as e:
         logger.warning(f"⚠️ Не удалось отправить пуш о парковке пользователю {user_id}: {e}")
 
+def _airport_queue_pref_active(state):
+    """Хочет ли пользователь фичу "Очередь у аэропорта" - ПО УМОЛЧАНИЮ True.
+
+    ДОБАВЛЕНО 30.09.2026 (прямая жалоба пользователя со скриншотом - "при
+    входе галочка очередь не стоит а должна стоять по умолчанию", следом -
+    "нахожусь в радиусе аэропорта Шереметьево уведомление не пришло про
+    отметиться в очереди"): ключ 'airport_queue_active' в user_state
+    исторически выставлялся в True только ЯВНЫМ действием (выбор тарифа в
+    чате - см. select_category ниже, или тап переключателя в Настройках) -
+    если пользователь ни разу этот путь не прошёл (зашёл сразу в
+    мини-приложение, минуя чат-флоу выбора категории, или state потерялся
+    при рестарте до фикса хранения БД на Railway Volume), ключ в state
+    просто отсутствует, и ЛЮБАЯ проверка на truthy (`state.get(...)`)
+    читала отсутствие ключа как "выключено" - хотя по прямому неоднократному
+    уточнению пользователя (см. комментарий у select_category - "теперь
+    включаем безусловно при каждом выборе категории... без проверки
+    предыдущего состояния") это должно считаться ВКЛЮЧЕННЫМ. Из-за этого
+    же самого отсутствия ключа реальные пуши о приближении к аэропорту
+    (process_airport_queue_ping) и фоновая обработка живой геопозиции
+    (_location_tracking_active/роутинг хендлеров ниже) молча не
+    срабатывали для таких пользователей - водитель физически стоял в
+    радиусе Шереметьево, но уведомление не приходило.
+
+    Отличаем "никогда не трогал" (default True) от "явно выключил" -
+    только явное False (пользователь сам тапнул тоггл или кнопку
+    выключения) даёт False; отсутствие ключа или True дают True. Для
+    courier/cargo (CATEGORIES_WITHOUT_AIRPORTS) фича вообще не показывается
+    и не участвует - здесь всегда False, как и было, категория не
+    участвовала в этой правке."""
+    if not isinstance(state, dict):
+        return True
+    if state.get('category') in CATEGORIES_WITHOUT_AIRPORTS:
+        return False
+    return state.get('airport_queue_active') is not False
+
 def _location_tracking_active(user_id):
     """True, если хоть одна из фич, использующих живую геопозицию (очередь у
     аэропорта, счётчик км текущей смены), сейчас активна у этого
     пользователя - обе читают ОДНУ и ту же трансляцию (Telegram позволяет
     транслировать только одну геопозицию за раз), см. комментарий у
-    handle_airport_queue_location."""
+    handle_airport_queue_location.
+
+    ИЗМЕНЕНО 30.09.2026 - использует _airport_queue_pref_active (default
+    True) вместо прямого чтения state.get('airport_queue_active'), см. её
+    комментарий - иначе роутинг хендлеров ниже (handle_airport_queue_location*
+    vs handle_passive_live_location*) продолжал бы молча пропускать пинги
+    живой геопозиции мимо process_airport_queue_ping для тех же
+    пользователей."""
     state = user_state.get(user_id, {})
-    return bool(state.get('airport_queue_active') or is_shift_active(state))
+    return bool(_airport_queue_pref_active(state) or is_shift_active(state))
 
 # Сколько минут последняя точка живой трансляции считается ещё актуальной
 # для разовых запросов (Мойки/Шиномонтаж/Туалеты/Парковка и т.п., см.
@@ -27379,7 +27426,7 @@ async def handle_cabinet_settings_api(request):
         if key == 'airport_queue':
             if not show_airport_queue:
                 return web.json_response({'error': 'not_applicable'}, status=400)
-            if state.get('airport_queue_active'):
+            if _airport_queue_pref_active(state):
                 state['airport_queue_active'] = False
                 state['airport_queue'] = {}
             else:
@@ -27401,7 +27448,7 @@ async def handle_cabinet_settings_api(request):
     ]
     result = {'notif_types': notif_types, 'show_airport_queue': show_airport_queue}
     if show_airport_queue:
-        result['airport_queue_active'] = bool(state.get('airport_queue_active'))
+        result['airport_queue_active'] = _airport_queue_pref_active(state)
     return web.json_response(result)
 
 # ДОБАВЛЕНО 26.09.2026 (перенос "🏙 ВЫБОР ГОРОДА" в единое приложение, см.
@@ -30924,11 +30971,21 @@ async def select_category(message: types.Message):
     # пустой, хотя трансляция уже идёт. Короткая пауза перед проверкой даёт
     # первому пингу шанс дойти и попасть в user_state ДО того, как решаем,
     # показывать подсказку или нет.
+    # ИЗМЕНЕНО 30.09.2026 (см. _airport_queue_pref_active выше - default
+    # True) - раньше здесь ЕЩЁ стояло "and not _location_tracking_active
+    # (user_id)". Само условие ниже отсеивало реально уже транслирующих
+    # (get_fresh_live_location), а _location_tracking_active было лишней
+    # ПОВТОРНОЙ проверкой того же самого флага, который теперь по
+    # умолчанию True для любого не-courier/cargo пользователя - с ней это
+    # условие было бы False для ВСЕХ, кроме тех, кто явно выключил
+    # настройку, и подсказка "как включить трансляцию геопозиции" перестала
+    # бы показываться даже совсем новым водителям. get_fresh_live_location
+    # сам по себе - более точный и достаточный сигнал "уже транслирует
+    # прямо сейчас".
     await asyncio.sleep(2)
     if (
         selected_category
         and selected_category not in CATEGORIES_WITHOUT_AIRPORTS
-        and not _location_tracking_active(user_id)
         and not get_fresh_live_location(user_id)
     ):
         # По прямой просьбе пользователя (21.09.2026, повторная жалоба
@@ -34307,10 +34364,16 @@ async def check_airport_queue_timers():
     прервалась: гасит отслеживание и присылает напоминание включить её заново
     (по просьбе пользователя, чтобы водитель не забывал) вместо того, чтобы
     молча пушить бесконечно того, кто уже уехал, ИЛИ молча остановиться без
-    единого слова тому, кто забыл, что нужно включить трансляцию заново."""
+    единого слова тому, кто забыл, что нужно включить трансляцию заново.
+
+    ИЗМЕНЕНО 30.09.2026 - использует _airport_queue_pref_active (default
+    True), как и остальные места чтения этого флага (см. её комментарий) -
+    иначе этот предохранитель (авто-выключение при пропавшей трансляции)
+    не работал бы именно для тех пользователей, кому реальные пуши о
+    приближении к аэропорту теперь тоже включены по умолчанию."""
     now = datetime.now(ZoneInfo('UTC'))
     for user_id, state in list(user_state.items()):
-        if not isinstance(state, dict) or not state.get('airport_queue_active'):
+        if not isinstance(state, dict) or not _airport_queue_pref_active(state):
             continue
         aq = state.get('airport_queue') or {}
 
@@ -35884,9 +35947,28 @@ def subscription_lock_snippet_html():
     экране "Подписка" внутри unified_app_html (renderSubscriptionDetail) и
     в push/чат-заглушке бота (subscription_paywall_keyboard) - ВСЕГДА обе
     группы отдельными кнопками (data.groups, см. _subscription_status_payload),
-    с пометкой, какая из них - текущая категория пользователя."""
+    с пометкой, какая из них - текущая категория пользователя.
+
+    ИЗМЕНЕНО 30.09.2026 (прямая жалоба пользователя - "это всплывает через
+    какое-то время, надо сделать чтобы оно всплывало максимально быстро чтоб
+    человек не успевал зайти в приложение... можно зайти и посмотреть
+    Авиа-ЖД, человек это сделать успевает") - оверлей раньше стартовал
+    СКРЫТЫМ (display:none) и показывался только ВНУТРИ .then() у
+    checkSubscriptionLock(), т.е. только ПОСЛЕ того как реальный сетевой
+    запрос к /subscription/status успевал дойти и вернуться - всё это время
+    (сетевой round-trip, от долей секунды до заметно дольше) страница ПОД
+    оверлеем уже была полностью в DOM и видна/кликабельна, потому что сам
+    этот <script> синхронный и не блокирует разбор/отрисовку остального
+    HTML, идущего следом. Теперь оверлей виден СРАЗУ, ещё ДО первого
+    запроса (тот же текст-заглушка "Проверяем статус подписки..."), и
+    прячется только если запрос подтвердит активную подписку (data.active)
+    - т.е. по умолчанию блокируем, а не по умолчанию пускаем. Для реально
+    активных/оплаченных пользователей это даёт короткий видимый "флеш"
+    заглушки на время запроса вместо мгновенного показа страницы - осознанный
+    компромисс по прямой просьбе пользователя (скорость блокировки важнее
+    отсутствия флеша)."""
     return """
-<div id="subLockOverlay" style="display:none;position:fixed;inset:0;z-index:999999;background:rgba(10,10,18,.94);align-items:center;justify-content:center;padding:20px;box-sizing:border-box;font-family:-apple-system,BlinkMacSystemFont,sans-serif;">
+<div id="subLockOverlay" style="display:flex;position:fixed;inset:0;z-index:999999;background:rgba(10,10,18,.94);align-items:center;justify-content:center;padding:20px;box-sizing:border-box;font-family:-apple-system,BlinkMacSystemFont,sans-serif;">
   <div style="background:#fff;border-radius:16px;padding:26px 22px;max-width:340px;width:100%;text-align:center;box-shadow:0 12px 40px rgba(0,0,0,.45);">
     <div style="font-size:38px;line-height:1;margin-bottom:10px;">🔒</div>
     <div style="font-size:17px;font-weight:700;color:#111;margin-bottom:8px;">Пробный период закончился</div>
