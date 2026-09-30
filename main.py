@@ -9889,7 +9889,19 @@ async def score_district_candidates(city, category, user_lat=None, user_lon=None
                 # остаётся без спроса на этот час (demand=None -> continue
                 # ниже), как и раньше, но ТОЛЬКО для него самого, а не для
                 # всего города разом.
-                values = [slot[2 + i] for i in indices if slot[2 + i] is not None]
+                # ИЗМЕНЕНО 30.09.2026 (прямая просьба пользователя - "бизнес
+                # ... по кнопке куда поехать будет выше приоритет для этого
+                # тарифа", см. BUSINESS_TARIFF_DEMAND_BOOST/_boost_business_
+                # demand_value выше по файлу) - индекс 3 (Business, только
+                # для category='ultima') получает +10% ДО max() ниже, чтобы
+                # реально чаще выигрывать сравнение с другими индексами и
+                # попадать в топ районов "Куда ехать" - Premier(4)/Elite(5)
+                # и все индексы такси/доставки не трогаются (проверяется
+                # внутри самого хелпера).
+                values = [
+                    _boost_business_demand_value(category, slot[2 + i], index=i)
+                    for i in indices if slot[2 + i] is not None
+                ]
                 if values:
                     demand = max(values)
                     slot_start_h, slot_end_h = start_h, end_h
@@ -24118,6 +24130,35 @@ MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_BUSINESS = (3,)
 MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_PREMIUM = (4,)
 MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_ELITE = (5,)  # своя реальная колонка (новая 129-районная матрица)
 
+# ДОБАВЛЕНО 30.09.2026 (прямая просьба пользователя - "бизнес просто сделай
+# спрос увеличь все значения из матрицы на 10% тем самым он будет всегда
+# больше показываться на карте и по кнопке куда поехать будет выше приоритет
+# для этого тарифа"; уточнение к более ранней версии этой же правки, которая
+# сначала трогала Premier/Elite - "премьер и элит не трогай как есть") -
+# сырые значения спроса Business (индекс 3 матрицы ultima) читаются в ТРЁХ
+# независимых местах: здесь же в handle_map_district_demand_api (облака на
+# карте), в _district_tariff_demand_value (рекомендация тарифа в пушах) и в
+# score_district_candidates выше по файлу (сама кнопка "Куда ехать" - именно
+# её пользователь имел в виду). +10% применяется К СЫРОМУ значению в каждом
+# из этих трёх мест ДО остальных корректировок (дождь/день-время/праздник) -
+# то есть увеличенное значение дальше проходит через ВСЕ те же множители,
+# что и обычно, просто от уже поднятой базы. Premier/Elite нигде не трогаем -
+# у них своя ветка кода, эта константа туда не попадает.
+BUSINESS_TARIFF_DEMAND_BOOST = 1.10
+
+def _boost_business_demand_value(category, value, tariff=None, index=None):
+    """+10% к сырому значению спроса Business/ultima (см. BUSINESS_TARIFF_
+    DEMAND_BOOST выше) - принимает либо имя тарифа (tariff='Business', путь
+    _district_tariff_demand_value), либо числовой индекс колонки матрицы
+    (index=3, путь handle_map_district_demand_api/score_district_candidates).
+    value=None проходит без изменений (данных для этого слота просто нет)."""
+    if value is None or category != 'ultima':
+        return value
+    is_business = (tariff == 'Business') if tariff is not None else (index == MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_BUSINESS[0])
+    if not is_business:
+        return value
+    return min(100, value * BUSINESS_TARIFF_DEMAND_BOOST)
+
 # Комбинированные индексы (максимум по всем тарифам категории) - используются
 # ТОЛЬКО для общего ранжирования районов в "Куда ехать" (score_district_candidates),
 # где нужен один общий балл района на категорию, а не отдельные слои облаков.
@@ -24911,6 +24952,11 @@ async def handle_map_district_demand_api(request):
                 # "элит", а не дублирует "премьер" как раньше (в старой
                 # 30-районной таблице отдельной колонки под элит не было).
                 business = _district_slot_value(slots, now.hour, MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_BUSINESS)
+                # ИЗМЕНЕНО 30.09.2026 (см. BUSINESS_TARIFF_DEMAND_BOOST выше) -
+                # +10% к сырому Business ДО дождя/дневных корректировок ниже,
+                # чтобы облако Business показывалось на карте чаще/ярче -
+                # Premier/Elite не трогаем.
+                business = _boost_business_demand_value(category, business, tariff='Business')
                 premium = _district_slot_value(slots, now.hour, MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_PREMIUM)
                 elite = _district_slot_value(slots, now.hour, MOSCOW_DISTRICT_DEMAND_TARIFF_INDICES_ELITE)
                 if business is None and premium is None and elite is None and not district_raining:
@@ -40464,7 +40510,12 @@ def _lower_tariff_candidates(category, tariff):
 def _district_tariff_demand_value(city, district_name, category, tariff, weekday, hour):
     """Значение спроса (0-100) КОНКРЕТНОГО тарифа в КОНКРЕТНОМ районе на
     конкретный час/день недели - или None, если данных для этого слота нет
-    (например, ночью на "мёртвых" часах у некоторых районов)."""
+    (например, ночью на "мёртвых" часах у некоторых районов).
+
+    ИЗМЕНЕНО 30.09.2026 (см. BUSINESS_TARIFF_DEMAND_BOOST выше) - Business/
+    ultima получает +10% к сырому значению здесь же, у самого источника -
+    используется в recommended_district_tariffs (рекомендация тарифа в
+    пушах) и _tariff_demand_and_threshold (проверка порога)."""
     table = get_district_demand(city)
     if not table:
         return None
@@ -40475,7 +40526,8 @@ def _district_tariff_demand_value(city, district_name, category, tariff, weekday
     if idx is None:
         return None
     slots = entry.get('weekday', {}).get(str(weekday), [])
-    return _district_slot_value(slots, hour, (idx,))
+    value = _district_slot_value(slots, hour, (idx,))
+    return _boost_business_demand_value(category, value, tariff=tariff)
 
 def _district_tariff_demand_threshold(city, category, tariff, lat=None, lon=None):
     """Порог показа облака (см. get_district_cloud_thresholds/
@@ -40495,32 +40547,6 @@ def _district_tariff_demand_threshold(city, category, tariff, lat=None, lon=None
     field = _DISTRICT_DEMAND_INDEX_TO_FIELD.get(idx)
     return district_premium_threshold(city, field, lat, lon)
 
-# ДОБАВЛЕНО 30.09.2026 (прямая просьба пользователя - "надо поправить что
-# спрос в тарифах бизнес выше чем premier и elite добавь 20% к нему в
-# рассчетах") - используется ТОЛЬКО в recommended_district_tariffs ниже, при
-# сравнении/сортировке тарифов друг с другом (какой тариф "самый горячий" из
-# уже прошедших свой порог - см. scored.sort ниже). У Business сырые значения
-# спроса структурно ВСЕГДА выше, чем у Premier/Elite - это видно по самой
-# калибровке порогов чуть выше по файлу (DISTRICT_CLOUD_THRESHOLDS_BY_CITY,
-# см. комментарий там же: "по факту новой матрицы Премьер нигде не превышает
-# 31%, а Элит - 16%", тогда как медиана Business - 38-67% в зависимости от
-# города) - у Business просто больше заказов в абсолютных числах, а не
-# "спрос горячее" в смысле, релевантном для водителя. Из-за этого при прямом
-# сравнении сырых значений (как здесь, scored.sort по value) Business
-# практически ВСЕГДА обгонял Premier/Elite и попадал в топ-2 рекомендуемых
-# тарифов, даже когда Premier/Elite показывали относительно СВОЕЙ обычной
-# планки исключительно высокий спрос. Пороги показа "входит тариф в сравнение
-# вообще или нет" (DISTRICT_CLOUD_THRESHOLDS_BY_CITY) уже откалиброваны по
-# перцентилям отдельно на каждый тариф/город (см. историю правок 23-25.09.2026
-# выше) и НЕ трогаем - проблема именно в сравнении МЕЖДУ тарифами после того,
-# как оба уже прошли свой порог. Поэтому 20% добавляются ТОЛЬКО здесь, в
-# ранжировании (не в самих значениях, которые продолжают показываться на
-# карте/в тексте пуша БЕЗ изменений, см. _district_tariff_demand_value) -
-# Premier/Elite получают +20% веса именно при выборе "какой тариф положить
-# в топ-2", чтобы не проигрывать Business исключительно из-за структурно
-# более низкой шкалы своих значений.
-RECOMMENDED_TARIFF_RANK_BOOST = {'Premier': 1.2, 'Elite': 1.2}
-
 def recommended_district_tariffs(city, district_name, category, weekday, hour, lat=None, lon=None):
     """ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - "при таком
     сообщении сразу пиши ещё какие тариф рекомендуешь, один или два" - про
@@ -40534,20 +40560,20 @@ def recommended_district_tariffs(city, district_name, category, weekday, hour, l
     идёт - просто спрос по факту ещё не вырос) ИЛИ категория без тарифной
     колонки в матрице (курьер/грузовое такси, см. SHIFT_TARIFF_TO_DEMAND_INDEX).
 
-    ИЗМЕНЕНО 30.09.2026 (см. RECOMMENDED_TARIFF_RANK_BOOST выше) - сортировка
-    между уже прошедшими порог тарифами теперь идёт по value с поправкой
-    (+20% у Premier/Elite), а не по сырому value - Business больше не
-    вытесняет их из топ-2 только за счёт структурно более высокой шкалы
-    своих цифр. Порог прохождения (if value >= threshold[0]) по-прежнему
-    сравнивается по СЫРОМУ значению - поправка касается только порядка
-    между тарифами, которые и так уже прошли свой порог."""
+    ПРИМЕЧАНИЕ 30.09.2026 (прямая просьба пользователя - см. BUSINESS_TARIFF_
+    DEMAND_BOOST у _district_tariff_demand_value выше) - тут ничего не
+    менялось: Business для этой категории уже приходит с +10% (см. value
+    оттуда), поэтому просто честно сравниваем/сортируем value как раньше -
+    поправка сделана на уровне источника значения, а не здесь (см. историю
+    правок у _district_tariff_demand_value - две предыдущие версии этой самой
+    правки жили именно тут, но пользователь уточнил, что хочет менять сами
+    цифры матрицы у Business, а не сравнение, и не трогать Premier/Elite)."""
     scored = []
     for tariff in shift_tariff_options(category):
         value = _district_tariff_demand_value(city, district_name, category, tariff, weekday, hour)
         threshold = _district_tariff_demand_threshold(city, category, tariff, lat, lon)
         if value is not None and threshold and value >= threshold[0]:
-            rank_value = value * RECOMMENDED_TARIFF_RANK_BOOST.get(tariff, 1.0)
-            scored.append((tariff, rank_value))
+            scored.append((tariff, value))
     scored.sort(key=lambda pair: -pair[1])
     return [tariff for tariff, _value in scored[:2]]
 
