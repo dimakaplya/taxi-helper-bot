@@ -13964,8 +13964,32 @@ MAP_CHROME_CSS = """
      ниже): панель просто накладывается поверх карты под своей кнопкой,
      совсем не участвуя в раскладке строки - соседние кнопки больше не
      двигаются, когда панель открывается или закрывается. */
-  .layer-toggle-wrap { position: relative; z-index: 1000; }
-  .layer-toggle { position: absolute; top: 100%; left: 0; display: flex; flex-direction: row; flex-wrap: wrap; gap: 4px 10px; width: max-content; max-width: 70vw; margin-top: 6px; background: #1c1c1c; color: #fff; border: 1px solid rgba(255,196,0,.4); border-radius: 8px; padding: 6px 10px; font-family: -apple-system, sans-serif; font-size: 12px; box-shadow: 0 1px 4px rgba(0,0,0,.35); }
+  /* ИСПРАВЛЕНО 30.09.2026 (жалоба пользователя со скриншотом - "заезжает
+     выбор слоев на карту давай поправим чтобы все видно было") - панель
+     "🗂 Слои" раньше позиционировалась (position:absolute; left:0)
+     относительно СВОЕГО .layer-toggle-wrap (см. комментарий 28.09.2026
+     выше), а .layer-toggle-wrap - второй по счёту кнопкой в центрированном
+     flex-ряду .map-toggles-row (после "🚕 Тарифы"), т.е. физически смещена
+     от левого края экрана на неизвестную заранее величину. Пока в панели
+     было всего 3-6 чекбоксов (заправки/зарядки/парковки), это визуально не
+     было заметно - панель была узкой и укладывалась в экран даже со
+     смещением. После добавления 17 новых POI-слоёв (см. renderPoiLayer
+     Checkboxes ниже) чекбоксов стало ~21, ширина уперлась в потолок
+     max-width:70vw - и с учётом смещения левого края панели вправо, правый
+     край стабильно вылезал за экран (см. скриншот - "Туалеты"/"Торговые
+     ц[ентры]"/"От[ели]" и т.д. обрезаны). Убрали position:relative у
+     .layer-toggle-wrap - теперь .layer-toggle позиционируется абсолютно
+     относительно .map-toggles-row (следующий предок с position:absolute
+     выше по дереву - см. .map-toggles-row в CSS выше, у неё уже есть
+     безопасные относительно экрана left:80px/right:10px), left:0 и right:0
+     вместо left:0+width:max-content - панель растягивается РОВНО на ширину
+     самого ряда кнопок, которая ГАРАНТИРОВАННО не вылезает за экран, вне
+     зависимости от того, где физически стоит кнопка "Слои" внутри ряда.
+     Заодно добавили max-height/overflow-y - с 21 чекбоксом высота тоже
+     может не влезть на маленьких экранах (тот же приём, что уже давно
+     работает у .tariff-toggle ниже). */
+  .layer-toggle-wrap { z-index: 1000; }
+  .layer-toggle { position: absolute; top: 100%; left: 0; right: 0; display: flex; flex-direction: row; flex-wrap: wrap; gap: 4px 10px; margin-top: 6px; max-height: 55vh; overflow-y: auto; background: #1c1c1c; color: #fff; border: 1px solid rgba(255,196,0,.4); border-radius: 8px; padding: 6px 10px; font-family: -apple-system, sans-serif; font-size: 12px; box-shadow: 0 1px 4px rgba(0,0,0,.35); }
   .layer-toggle.collapsed { display: none; }
   .layer-toggle label { display: flex; align-items: center; gap: 5px; cursor: pointer; user-select: none; white-space: nowrap; }
   /* ДОБАВЛЕНО 23.09.2026 (прямая просьба пользователя - замена сломанного
@@ -18357,8 +18381,17 @@ def map_webapp_html():
       const icon = L.divIcon({{ className: 'poi-icon', html: cfg.emoji, iconSize: [20, 20] }});
       (data.points || []).forEach(p => {{
         const eta = etaText(p.lat, p.lon);
+        // ДОБАВЛЕНО 30.09.2026 (прямая просьба пользователя - "собери данные
+        // о часах работы всех объектов слоёв на карте") - часы работы (OSM
+        // opening_hours) теперь приходят в p.hours (см. handle_map_poi_api
+        // выше) - показываем той же строкой без доп. форматирования, тот же
+        // приём, что и у "рядом" в кабинете (loadNearby/p.hours выше по
+        // файлу). Есть не у всех точек - OSM знает часы не для каждого
+        // объекта, тогда строку просто не показываем (не пишем "не указаны",
+        // чтобы не захламлять маленький попап на карте).
         const popup = `<div class="fuel-popup"><h4>${{cfg.emoji}} ${{p.name || cfg.label}}</h4>` +
           (eta ? `<div class="sub">${{eta}} (~${{AVG_SPEED_KMH}} км/ч)</div>` : '') +
+          (p.hours ? `<div class="sub">🕐 ${{p.hours}}</div>` : '') +
           `${{goButtonHtml(p.lat, p.lon)}}</div>`;
         const marker = L.marker([p.lat, p.lon], {{ icon }}).bindPopup(popup);
         cluster.addLayer(marker);
@@ -25319,7 +25352,18 @@ async def handle_map_poi_api(request):
         data = load_map_poi_data(key) or {}
         points = (data.get('cities', {}).get(city) or [])
         for p in points:
-            result.append({'lat': p['lat'], 'lon': p['lon'], 'name': p.get('name')})
+            # ДОБАВЛЕНО 30.09.2026 (прямая просьба пользователя - "собери
+            # данные о часах работы всех объектов слоёв на карте") - часы
+            # работы (opening_hours из OSM) на самом деле УЖЕ собирались для
+            # всех 17 категорий вместе с остальными точками (см. schema в
+            # docstring MAP_POI_LAYERS выше, поле 'hours' есть в файлах
+            # <category>_data.json там, где OSM его знает) - но этот
+            # обработчик их обрезал, отдавая на фронт только lat/lon/name.
+            # Из-за этого loadPoiLayer ниже физически не мог их показать,
+            # даже когда они были в данных. Теперь отдаём 'hours', если он
+            # есть в источнике (p.get вместо p[...] - опущен у точек, для
+            # которых OSM часы не знает, см. poi_master.pkl/итоговые файлы).
+            result.append({'lat': p['lat'], 'lon': p['lon'], 'name': p.get('name'), 'hours': p.get('hours')})
     except Exception:
         logger.exception(f"❌ Ошибка при получении слоя POI '{key}' для карты водителей")
         result = []
@@ -35318,7 +35362,23 @@ async def create_tinkoff_payment(user_id: int, sub_group=None):
     if not receipt_email:
         logger.warning(f"⚠️ Email для чека ещё не собран - не могу создать ссылку на оплату для user_id={user_id}")
         return None
-    order_id = f"sub_{user_id}_{int(time.time())}"
+    # ИСПРАВЛЕНО 30.09.2026 (жалоба пользователя со скриншотом - "нужен выбор
+    # подписки а он не дает выбор только 149") - order_id раньше не включал
+    # sub_group и был секундной точности (int(time.time())). subscription_
+    # paywall_pay_urls зовёт create_tinkoff_payment ПОСЛЕДОВАТЕЛЬНО для ОБЕИХ
+    # групп подряд (такси/Ultima, потом курьер/грузовое) - оба вызова почти
+    # всегда попадают в одну и ту же секунду, поэтому order_id получался
+    # ОДИНАКОВЫМ у обеих групп. Tinkoff Init отказывает второму запросу с тем
+    # же OrderId (уже использован), Init возвращает Success:false -> функция
+    # возвращает None -> subscription_paywall_keyboard молча пропускает
+    # кнопку второй группы (курьер/грузовое, 89₽) без всякого фолбэка, если
+    # вызывающий код не передал app_url (см. check_subscription_expirations
+    # ниже - именно так и было в проактивном пуше "пробный период
+    # закончился"). Добавили sub_group в order_id и подняли точность до
+    # миллисекунд - гарантированно разные order_id у разных групп одного
+    # пользователя, даже если оба запроса Tinkoff улетают в один и тот же
+    # момент.
+    order_id = f"sub_{user_id}_{sub_group}_{int(time.time() * 1000)}"
     price_kopecks = get_subscription_group_price_rub(sub_group) * 100
     description = (
         'Подписка на реферальную систему юрлиц Taxi Helper на 1 месяц'
@@ -35414,8 +35474,29 @@ def subscription_paywall_keyboard(pay_urls, user_id=None, app_url=None):
     обе группы отдельными кнопками, независимо от текущей категории:
     пользователь может заранее оплатить и вторую (например, если работает в
     двух категориях сразу или планирует сменить), и цена каждой группы
-    видна сразу на самой кнопке, а не только внутри текста."""
+    видна сразу на самой кнопке, а не только внутри текста.
+
+    ИСПРАВЛЕНО 30.09.2026 (жалоба пользователя со скриншотом - "нужен выбор
+    подписки а он не дает выбор только 149") - раньше, если pay_urls.get(grp)
+    оказывался None ТОЛЬКО для ОДНОЙ группы (например Tinkoff Init отказал ей
+    одной по коллизии order_id - см. исправление там же - при том что другая
+    группа только что успешно получила ссылку), а вызывающий код не передал
+    свой app_url (так было у check_subscription_expirations - проактивного
+    пуша "пробный период закончился"), кнопка этой группы просто пропадала
+    ПОЛНОСТЬЮ без всякого запасного варианта - пользователь видел только
+    кнопку другой группы (обычно такси/Ultima, т.к. она в SUBSCRIPTION_
+    DISPLAY_GROUPS идёт первой и почти всегда успевает получить ссылку
+    раньше). Теперь в этом случае (хотя бы одна из групп реально получила
+    pay_url - значит Tinkoff в целом настроен и работает, просто ЭТОЙ группе
+    не повезло) кнопка всё равно строится, ведёт в приложение через запасной
+    _subscription_app_url. НЕ трогаем сценарий "ни одна группа не получила
+    pay_url" (например TINKOFF_TERMINAL_KEY вообще не задан - см.
+    test_subscription_dual_price.py/test_paywall_no_separate_email_message.py)
+    - там по-прежнему нет ни одной платёжной кнопки, кроме явно переданного
+    app_url (email не собран), т.к. открыть приложение в этом случае тоже
+    ничем не поможет - Tinkoff там точно так же откажет."""
     current_group = get_user_subscription_group(user_id) if user_id is not None else None
+    any_group_succeeded = bool(pay_urls) and any(pay_urls.values())
     buttons = []
     for grp, label in SUBSCRIPTION_DISPLAY_GROUPS:
         price_rub = get_subscription_group_price_rub(grp)
@@ -35424,8 +35505,12 @@ def subscription_paywall_keyboard(pay_urls, user_id=None, app_url=None):
         url = pay_urls.get(grp) if pay_urls else None
         if url:
             buttons.append([InlineKeyboardButton(text=btn_text, url=url)])
-        elif app_url:
-            buttons.append([InlineKeyboardButton(text=btn_text, web_app=WebAppInfo(url=app_url))])
+        else:
+            fallback_app_url = app_url
+            if not fallback_app_url and any_group_succeeded and user_id is not None:
+                fallback_app_url = _subscription_app_url(user_id, 'subscription')
+            if fallback_app_url:
+                buttons.append([InlineKeyboardButton(text=btn_text, web_app=WebAppInfo(url=fallback_app_url))])
     buttons.append([InlineKeyboardButton(text="🔄 Я ОПЛАТИЛ(А), ПРОВЕРИТЬ", callback_data="sub_pay_check")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -40410,6 +40495,32 @@ def _district_tariff_demand_threshold(city, category, tariff, lat=None, lon=None
     field = _DISTRICT_DEMAND_INDEX_TO_FIELD.get(idx)
     return district_premium_threshold(city, field, lat, lon)
 
+# ДОБАВЛЕНО 30.09.2026 (прямая просьба пользователя - "надо поправить что
+# спрос в тарифах бизнес выше чем premier и elite добавь 20% к нему в
+# рассчетах") - используется ТОЛЬКО в recommended_district_tariffs ниже, при
+# сравнении/сортировке тарифов друг с другом (какой тариф "самый горячий" из
+# уже прошедших свой порог - см. scored.sort ниже). У Business сырые значения
+# спроса структурно ВСЕГДА выше, чем у Premier/Elite - это видно по самой
+# калибровке порогов чуть выше по файлу (DISTRICT_CLOUD_THRESHOLDS_BY_CITY,
+# см. комментарий там же: "по факту новой матрицы Премьер нигде не превышает
+# 31%, а Элит - 16%", тогда как медиана Business - 38-67% в зависимости от
+# города) - у Business просто больше заказов в абсолютных числах, а не
+# "спрос горячее" в смысле, релевантном для водителя. Из-за этого при прямом
+# сравнении сырых значений (как здесь, scored.sort по value) Business
+# практически ВСЕГДА обгонял Premier/Elite и попадал в топ-2 рекомендуемых
+# тарифов, даже когда Premier/Elite показывали относительно СВОЕЙ обычной
+# планки исключительно высокий спрос. Пороги показа "входит тариф в сравнение
+# вообще или нет" (DISTRICT_CLOUD_THRESHOLDS_BY_CITY) уже откалиброваны по
+# перцентилям отдельно на каждый тариф/город (см. историю правок 23-25.09.2026
+# выше) и НЕ трогаем - проблема именно в сравнении МЕЖДУ тарифами после того,
+# как оба уже прошли свой порог. Поэтому 20% добавляются ТОЛЬКО здесь, в
+# ранжировании (не в самих значениях, которые продолжают показываться на
+# карте/в тексте пуша БЕЗ изменений, см. _district_tariff_demand_value) -
+# Premier/Elite получают +20% веса именно при выборе "какой тариф положить
+# в топ-2", чтобы не проигрывать Business исключительно из-за структурно
+# более низкой шкалы своих значений.
+RECOMMENDED_TARIFF_RANK_BOOST = {'Premier': 1.2, 'Elite': 1.2}
+
 def recommended_district_tariffs(city, district_name, category, weekday, hour, lat=None, lon=None):
     """ДОБАВЛЕНО 25.09.2026 (прямая просьба пользователя - "при таком
     сообщении сразу пиши ещё какие тариф рекомендуешь, один или два" - про
@@ -40421,13 +40532,22 @@ def recommended_district_tariffs(city, district_name, category, weekday, hour, l
     значению спроса первыми. Пустой список - ни для одного тарифа этой
     категории спрос сейчас не поднялся выше порога (не значит, что дождь не
     идёт - просто спрос по факту ещё не вырос) ИЛИ категория без тарифной
-    колонки в матрице (курьер/грузовое такси, см. SHIFT_TARIFF_TO_DEMAND_INDEX)."""
+    колонки в матрице (курьер/грузовое такси, см. SHIFT_TARIFF_TO_DEMAND_INDEX).
+
+    ИЗМЕНЕНО 30.09.2026 (см. RECOMMENDED_TARIFF_RANK_BOOST выше) - сортировка
+    между уже прошедшими порог тарифами теперь идёт по value с поправкой
+    (+20% у Premier/Elite), а не по сырому value - Business больше не
+    вытесняет их из топ-2 только за счёт структурно более высокой шкалы
+    своих цифр. Порог прохождения (if value >= threshold[0]) по-прежнему
+    сравнивается по СЫРОМУ значению - поправка касается только порядка
+    между тарифами, которые и так уже прошли свой порог."""
     scored = []
     for tariff in shift_tariff_options(category):
         value = _district_tariff_demand_value(city, district_name, category, tariff, weekday, hour)
         threshold = _district_tariff_demand_threshold(city, category, tariff, lat, lon)
         if value is not None and threshold and value >= threshold[0]:
-            scored.append((tariff, value))
+            rank_value = value * RECOMMENDED_TARIFF_RANK_BOOST.get(tariff, 1.0)
+            scored.append((tariff, rank_value))
     scored.sort(key=lambda pair: -pair[1])
     return [tariff for tariff, _value in scored[:2]]
 
