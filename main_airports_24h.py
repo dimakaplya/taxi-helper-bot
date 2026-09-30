@@ -35966,7 +35966,27 @@ def subscription_lock_snippet_html():
     активных/оплаченных пользователей это даёт короткий видимый "флеш"
     заглушки на время запроса вместо мгновенного показа страницы - осознанный
     компромисс по прямой просьбе пользователя (скорость блокировки важнее
-    отсутствия флеша)."""
+    отсутствия флеша).
+
+    ИЗМЕНЕНО 30.09.2026 #2 (жалоба сразу после деплоя правки выше - "теперь
+    каждая страница открывает и быстро закрывает это окно, даже когда
+    подписка куплена") - флеш из правки выше оказался виден АБСОЛЮТНО ВСЕМ
+    на КАЖДОЙ платной странице (у каждой свой independent HTML-документ,
+    свой запуск этого скрипта с нуля - переход map -> заказы -> погода и
+    т.д. каждый раз новый "холодный" запрос). Добавлен клиентский кэш в
+    localStorage (ключ per Telegram user id, TTL 5 минут) - если недавно
+    (< TTL) уже подтверждали active:true, оверлей прячется СИНХРОННО сразу
+    же, ещё до первой отрисовки, без флеша. Настоящий сетевой запрос
+    (checkSubscriptionLock) всё равно выполняется ВСЕГДА, в фоне, независимо
+    от кэша - так что если подписка истекла только что, блокировка всё
+    равно сработает почти мгновенно (одна сетевая задержка, как и раньше),
+    просто без гарантии видимости с самого первого кадра. Кэш пишется/
+    стирается при каждом реальном ответе (checkSubscriptionLock и ручная
+    проверка email/кнопки "Я оплатил(а)"), так что протухшая/отозванная
+    подписка перестаёт "тихо" пропускать уже на следующей проверке. Для
+    пользователей БЕЗ кэша (первый заход, либо кэш старше 5 минут, либо
+    подписка неактивна) поведение полностью как в правке выше - оверлей
+    виден мгновенно, без изменений."""
     return """
 <div id="subLockOverlay" style="display:flex;position:fixed;inset:0;z-index:999999;background:rgba(10,10,18,.94);align-items:center;justify-content:center;padding:20px;box-sizing:border-box;font-family:-apple-system,BlinkMacSystemFont,sans-serif;">
   <div style="background:#fff;border-radius:16px;padding:26px 22px;max-width:340px;width:100%;text-align:center;box-shadow:0 12px 40px rgba(0,0,0,.45);">
@@ -35984,6 +36004,49 @@ def subscription_lock_snippet_html():
 <script>
 (function () {
   var _slTg = window.Telegram && window.Telegram.WebApp;
+
+  // ДОБАВЛЕНО 30.09.2026 #2 (жалоба сразу после правки #1 - "теперь каждая
+  // страница открывает и быстро закрывает это окно, даже когда подписка
+  // куплена") - см. докстринг у subscription_lock_snippet_html. Кэш в
+  // localStorage: если недавно (< TTL) реальный ответ сервера подтвердил
+  // active:true, прячем оверлей СИНХРОННО прямо здесь, до первой отрисовки
+  // - без него из-за правки #1 оверлей стартует видимым (display:flex) на
+  // КАЖДОЙ платной странице заново. Настоящая проверка всё равно всегда
+  // выполняется в фоне (window.checkSubscriptionLock() в самом низу) - при
+  // истёкшей/отозванной подписке блокировка сработает всё так же быстро
+  // (одна сетевая задержка), кэш лишь убирает лишний "флеш" для реально
+  // активных.
+  var _slUid = (function () {
+    try {
+      return (_slTg && _slTg.initDataUnsafe && _slTg.initDataUnsafe.user && _slTg.initDataUnsafe.user.id) || 'anon';
+    } catch (e) { return 'anon'; }
+  })();
+  var _slCacheKey = 'sl_active_' + _slUid;
+  var _slCacheTtlMs = 5 * 60 * 1000; // 5 минут
+  function _slReadCache() {
+    try {
+      var raw = localStorage.getItem(_slCacheKey);
+      if (!raw) return null;
+      var obj = JSON.parse(raw);
+      if (!obj || typeof obj.ts !== 'number') return null;
+      if (Date.now() - obj.ts > _slCacheTtlMs) return null;
+      return obj;
+    } catch (e) { return null; }
+  }
+  function _slWriteCache(active) {
+    try {
+      if (active) {
+        localStorage.setItem(_slCacheKey, JSON.stringify({ ts: Date.now() }));
+      } else {
+        localStorage.removeItem(_slCacheKey);
+      }
+    } catch (e) {}
+  }
+  if (_slReadCache()) {
+    var _slOverlayEarly = document.getElementById('subLockOverlay');
+    if (_slOverlayEarly) _slOverlayEarly.style.display = 'none';
+  }
+
   function _slFetchStatus() {
     var initData = (_slTg && _slTg.initData) || '';
     return fetch('""" + SUBSCRIPTION_STATUS_API_PATH + """', { headers: { 'X-Telegram-Init-Data': initData } })
@@ -36040,8 +36103,10 @@ def subscription_lock_snippet_html():
   window.checkSubscriptionLock = function () {
     return _slFetchStatus().then(function (data) {
       var overlay = document.getElementById('subLockOverlay');
+      var active = !!(data && data.active);
+      _slWriteCache(active);
       if (!overlay) return true;
-      if (data && data.active) {
+      if (active) {
         overlay.style.display = 'none';
         return true;
       }
@@ -36064,6 +36129,7 @@ def subscription_lock_snippet_html():
         body: JSON.stringify({ email: email }),
       }).then(function (r) { return r.json(); }).then(function (data) {
         emailBtn.disabled = false;
+        _slWriteCache(!!(data && data.active));
         _slRender(data);
       }).catch(function () { emailBtn.disabled = false; });
     });
