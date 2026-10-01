@@ -24102,10 +24102,12 @@ def _generate_other_drivers(city, city_coords, category=None):
     "давай сделаем 100 на каждый тариф") - ИЗМЕНЕНО 01.10.2026 (прямая просьба
     пользователя - "сделай перемещение меток нереальных водителей по всей зоне
     города плюс за её пределами пусть ездят по дорогам со скоросью 60 км час") -
-    генерирует "других" водителей (имитированные маркеры, не реальные позиции)
-    вокруг центра города, которые движутся по городу через JavaScript-анимацию.
-    По 100 водителей на каждый тариф. Каждый водитель имеет маршрут (waypoints)
-    по городу и за его пределы, движется со скоростью 60 км/ч."""
+    ИЗМЕНЕНО 01.10.2026 ("30 на весь город итого 45") - генерирует "других" водителей
+    (имитированные маркеры, не реальные позиции) вокруг центра города, которые
+    движутся по городу через JavaScript-анимацию. Всего 30 водителей в городе,
+    распределены поровну между тарифами (30 / количество_тарифов на каждый).
+    Каждый водитель имеет маршрут (waypoints) по городу и за его пределы,
+    движется со скоростью 60 км/ч."""
     if not city_coords or city not in RAIN_CITY_COORDS:
         return []
 
@@ -24167,8 +24169,8 @@ def _generate_other_drivers(city, city_coords, category=None):
         if not tariffs:
             continue
 
-        # 100 водителей на каждый тариф
-        drivers_per_tariff = 100
+        # 15 водителей на каждый тариф (по просьбе пользователя 01.10.2026)
+        drivers_per_tariff = 15
 
         for tariff in tariffs:
             for i in range(drivers_per_tariff):
@@ -24260,11 +24262,10 @@ def _generate_airport_taxis(airport_coords, total_taxis=15):
 
         return waypoints
 
-    # Сначала собрать все доступные тарифы из обеих категорий
+    # Сначала собрать все доступные тарифы только из taxi_ultima
     all_tariffs = []
-    for cat in ['taxi_ultima', 'courier_cargo']:
-        if cat not in CATEGORIES:
-            continue
+    cat = 'taxi_ultima'
+    if cat in CATEGORIES:
         cat_info = CATEGORIES[cat]
         tariffs = cat_info.get('tariffs', [])
         for tariff in tariffs:
@@ -24274,44 +24275,44 @@ def _generate_airport_taxis(airport_coords, total_taxis=15):
         return []
 
     airport_taxis = []
-    # Распределить total_taxis водителей между всеми доступными тарифами
-    for i in range(total_taxis):
-        # Выбрать случайный тариф
-        cat, tariff = all_tariffs[i % len(all_tariffs)]
+    # total_taxis водителей на каждый тариф taxi_ultima
+    for tariff_idx, (cat, tariff) in enumerate(all_tariffs):
+        for i in range(total_taxis):
+            tariff_driver_idx = tariff_idx * total_taxis + i
 
-        # Начальная случайная позиция вокруг аэропорта
-        angle = (i + secrets.randbelow(100) / 100.0) * (2 * 3.14159265359) / total_taxis
-        dist = secrets.randbelow(int(radius_km * 100)) / 100.0  # 0 до radius_km
+            # Начальная случайная позиция вокруг аэропорта
+            angle = (i + secrets.randbelow(100) / 100.0) * (2 * 3.14159265359) / total_taxis
+            dist = secrets.randbelow(int(radius_km * 100)) / 100.0  # 0 до radius_km
 
-        dlat = dist * lat_km_deg * cos(angle)
-        dlon = dist * lon_km_deg * sin(angle)
+            dlat = dist * lat_km_deg * cos(angle)
+            dlon = dist * lon_km_deg * sin(angle)
 
-        start_lat = airport_lat + dlat
-        start_lon = airport_lon + dlon
+            start_lat = airport_lat + dlat
+            start_lon = airport_lon + dlon
 
-        # Примерно половина такси стоят на месте, половина движутся вокруг аэропорта
-        is_moving = (i % 2) == 0  # чередуем: стоит, едет, стоит, едет...
+            # Примерно половина такси стоят на месте, половина движутся вокруг аэропорта
+            is_moving = (i % 2) == 0  # чередуем: стоит, едет, стоит, едет...
 
-        if is_moving:
-            waypoints = generate_waypoints_for_airport_taxi(start_lat, start_lon)
-            heading = int(degrees(atan2(waypoints[1]['lon'] - start_lon,
-                                       waypoints[1]['lat'] - start_lat))) % 360
-        else:
-            # Водитель стоит на месте - один waypoint (сам)
-            waypoints = [{'lat': round(start_lat, 6), 'lon': round(start_lon, 6)}]
-            heading = secrets.randbelow(360)
+            if is_moving:
+                waypoints = generate_waypoints_for_airport_taxi(start_lat, start_lon)
+                heading = int(degrees(atan2(waypoints[1]['lon'] - start_lon,
+                                           waypoints[1]['lat'] - start_lat))) % 360
+            else:
+                # Водитель стоит на месте - один waypoint (сам)
+                waypoints = [{'lat': round(start_lat, 6), 'lon': round(start_lon, 6)}]
+                heading = secrets.randbelow(360)
 
-        airport_taxis.append({
-            'category': cat,
-            'tariffs': [tariff],
-            'lat': round(start_lat, 6),
-            'lon': round(start_lon, 6),
-            'heading': heading,
-            'is_other_driver': True,  # флаг для JS, чтобы применить анимацию
-            'speed_kmh': speed_kmh,  # скорость 40 км/ч
-            'waypoints': waypoints,  # маршрут для плавного движения
-            'current_waypoint_idx': 0,  # текущая точка маршрута
-        })
+            airport_taxis.append({
+                'category': cat,
+                'tariffs': [tariff],
+                'lat': round(start_lat, 6),
+                'lon': round(start_lon, 6),
+                'heading': heading,
+                'is_other_driver': True,  # флаг для JS, чтобы применить анимацию
+                'speed_kmh': speed_kmh,  # скорость 40 км/ч
+                'waypoints': waypoints,  # маршрут для плавного движения
+                'current_waypoint_idx': 0,  # текущая точка маршрута
+            })
 
     return airport_taxis
 
@@ -24775,10 +24776,8 @@ async def handle_map_airports_api(request):
     result = []
     try:
         airports_list = AIRPORTS_INFO.get(city, [])
-        airports_count = len(airports_list)
-        # ИЗМЕНЕНО 01.10.2026 ("15 водителей всего на город") - распределяем
-        # 15 такси поровну между всеми аэропортами в городе
-        taxis_per_airport = max(1, 15 // airports_count) if airports_count > 0 else 0
+        # ИЗМЕНЕНО 01.10.2026 ("15 на каждый тариф кроме курьеров... тока такси и ультима") -
+        # каждый аэропорт получает по 15 такси на каждый тариф taxi_ultima (без курьеров/грузовых)
         for airport in airports_list:
             icao = airport['icao']
             zone_key = airport.get('zone_key')
@@ -24934,12 +24933,12 @@ async def handle_map_airports_api(request):
                     entry['parking_polygons'].append(poly_entry)
             # ДОБАВЛЕНО 01.10.2026 (прямая просьба пользователя - "сделай чтобы ещё в
             # аэропорту тоже отображались... таксисты... по 10-15 в каждом тарифе"):
-            # ИЗМЕНЕНО 01.10.2026 ("15 водителей всего на город") - генерируем
-            # такси при аэропорте, только для категорий taxi_ultima и
-            # courier_cargo (нельзя связывать их координаты с реальными водителями,
+            # ИЗМЕНЕНО 01.10.2026 ("15 на каждый тариф кроме курьеров... тока такси и ультима") -
+            # генерируем такси при аэропорте, только для taxi_ultima
+            # (нельзя связывать их координаты с реальными водителями,
             # это просто визуализация движущихся машин, как на городской карте).
-            # 15 такси распределены поровну между всеми аэропортами города.
-            entry['taxis'] = _generate_airport_taxis(coords, total_taxis=taxis_per_airport)
+            # 15 такси на каждый тариф taxi_ultima.
+            entry['taxis'] = _generate_airport_taxis(coords, total_taxis=15)
 
             result.append(entry)
     except Exception:
