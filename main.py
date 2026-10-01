@@ -17523,6 +17523,35 @@ def map_webapp_html():
           .addTo(map);
         airportMarkers.push(marker);
         airportMarkerById[_airportKey(a)] = marker;
+
+        // ДОБАВЛЕНО 01.10.2026 (прямая просьба пользователя - "сделай чтобы в
+        // аэропорту тоже отображались... таксисты... по 10-15 в каждом тарифе"
+        // + уточнение пользователя - "сделай их привязку в нашей карте чтобы
+        // они по дороге ехали... не перемещались сквозь дома") - обработка
+        // таксистов при аэропорту, которые двигаются по маршрутам с waypoints
+        // (аналогично городским водителям).
+        (a.taxis || []).forEach(taxi => {{
+          const style = CATEGORY_STYLE[taxi.category] || {{ color: '#888', label: taxi.category, icon: '🚗' }};
+          const taxiArrowHtml = `<div style="position:absolute; top:50%; left:50%; width:0; height:0; transform:translate(-50%, -50%) rotateZ(${{taxi.heading}}deg); font-size:14px;">⬆️</div>`;
+          const taxiIcon = L.divIcon({{
+            className: 'car-icon',
+            html: `<div class="car-icon-wrap"><div class="car-icon-inner" style="background:${{style.color}}; width:24px; height:24px; display:flex; align-items:center; justify-content:center; border-radius:50%;">${{style.icon || '🚗'}}</div>${{taxiArrowHtml}}</div>`,
+            iconSize: [28, 28]
+          }});
+          const taxiMarker = L.marker([taxi.lat, taxi.lon], {{ icon: taxiIcon }}).addTo(map);
+          taxiMarker._otherDriver = {{
+            startLat: taxi.lat,
+            startLon: taxi.lon,
+            marker: taxiMarker,
+            angle: taxi.heading || 0,
+            speed_kmh: taxi.speed_kmh || 60.0,
+            waypoints: taxi.waypoints,
+            currentWaypointIdx: taxi.current_waypoint_idx || 0,
+            updateTime: Date.now(),
+            segmentProgress: 0
+          }};
+          markers.push(taxiMarker);
+        }});
       }});
       // Единая перерисовка слитых облаков спроса (матрица + дождь +
       // аэропорты) - см. _redrawUnifiedDemandClouds ниже.
@@ -17538,6 +17567,10 @@ def map_webapp_html():
         _airportCloudSignature = airportCloudSignature;
         _redrawUnifiedDemandClouds();
       }}
+      // ДОБАВЛЕНО 01.10.2026 (прямая просьба пользователя - "сделай их привязку
+      // в нашей карте чтобы они по дороге ехали") - перезапускаем анимацию,
+      // чтобы добавленные таксисты при аэропорту тоже начали двигаться.
+      startOtherDriversAnimation();
       airportsLoaded = true;
   }}
 
@@ -24177,6 +24210,111 @@ def _generate_other_drivers(city, city_coords, category=None):
     return other_drivers
 
 
+def _generate_airport_taxis(airport_coords, num_per_tariff=12):
+    """ДОБАВЛЕНО 01.10.2026 (прямая просьба пользователя - "сделай чтобы ещё в
+    аэропорту тоже отображались но только таксисты просто могли стоять штук по
+    10-15 в каждом тарифе") - генерирует "других" водителей такси при аэропортах.
+    По 10-15 тарифов на каждый тариф категории такси. Каждый водитель имеет
+    маршрут (waypoints) вокруг аэропорта и на короткие расстояния, движется со
+    скоростью 60 км/ч (как и городские водители)."""
+    if not airport_coords:
+        return []
+
+    airport_lat, airport_lon = airport_coords
+    # Радиус вокруг аэропорта - водители ездят в пределах аэропорта и за его пределы до 5 км
+    radius_km = 2.0
+    lat_km_deg = 1.0 / 111.0
+    lon_km_deg = 1.0 / (111.0 * cos(radians(airport_lat)))
+
+    speed_kmh = 60.0
+
+    def generate_waypoints_for_airport_taxi(start_lat, start_lon, num_points=6):
+        """Генерирует маршрут такси при аэропорту - более короткие маршруты,
+        чем у городских водителей (они не уезжают далеко от аэропорта)."""
+        waypoints = [{'lat': start_lat, 'lon': start_lon}]
+
+        current_lat = start_lat
+        current_lon = start_lon
+
+        for _ in range(num_points - 1):
+            # Случайное направление движения
+            angle = secrets.randbelow(360) * 3.14159265359 / 180.0
+
+            # Случайное расстояние 0.5-2 км (водители крутятся вокруг аэропорта)
+            distance_km = 0.5 + (secrets.randbelow(150) / 100.0)
+
+            # Редко (10% вероятность) уезжают подальше до 3-5 км
+            if secrets.randbelow(100) < 10:
+                distance_km = 3.0 + (secrets.randbelow(200) / 100.0)
+
+            # Пересчитываем координаты
+            dlat = distance_km * lat_km_deg * cos(angle)
+            dlon = distance_km * lon_km_deg * sin(angle)
+
+            current_lat += dlat
+            current_lon += dlon
+
+            waypoints.append({
+                'lat': round(current_lat, 6),
+                'lon': round(current_lon, 6),
+                'distance_km': distance_km
+            })
+
+        return waypoints
+
+    airport_taxis = []
+    # Только категория taxi_ultima и couriers_cargo (те что ходят по аэропортам)
+    for cat in ['taxi_ultima', 'courier_cargo']:
+        if cat not in CATEGORIES:
+            continue
+        cat_info = CATEGORIES[cat]
+        tariffs = cat_info.get('tariffs', [])
+        if not tariffs:
+            continue
+
+        # 10-15 водителей на каждый тариф
+        drivers_per_tariff = num_per_tariff
+
+        for tariff in tariffs:
+            for i in range(drivers_per_tariff):
+                # Начальная случайная позиция вокруг аэропорта
+                angle = (i + secrets.randbelow(100) / 100.0) * (2 * 3.14159265359) / drivers_per_tariff
+                dist = secrets.randbelow(int(radius_km * 100)) / 100.0  # 0 до radius_km
+
+                dlat = dist * lat_km_deg * cos(angle)
+                dlon = dist * lon_km_deg * sin(angle)
+
+                start_lat = airport_lat + dlat
+                start_lon = airport_lon + dlon
+
+                # Генерируем маршрут из 4-8 точек (более короткий, чем у городских)
+                num_waypoints = 4 + secrets.randbelow(5)
+                waypoints = generate_waypoints_for_airport_taxi(start_lat, start_lon, num_waypoints)
+
+                # Начальное направление - в сторону первой точки маршрута
+                if len(waypoints) > 1:
+                    next_wp = waypoints[1]
+                    dlat_to_next = next_wp['lat'] - start_lat
+                    dlon_to_next = next_wp['lon'] - start_lon
+                    heading = int(degrees(atan2(dlon_to_next, dlat_to_next))) % 360
+                else:
+                    heading = secrets.randbelow(360)
+
+                airport_taxis.append({
+                    'category': cat,
+                    'tariffs': [tariff],
+                    'lat': round(start_lat, 6),
+                    'lon': round(start_lon, 6),
+                    'heading': heading,
+                    'is_other_driver': True,  # флаг для JS, чтобы применить анимацию
+                    'speed_kmh': speed_kmh,  # скорость 60 км/ч
+                    'waypoints': waypoints,  # маршрут для плавного движения
+                    'current_waypoint_idx': 0,  # текущая точка маршрута
+                })
+
+    return airport_taxis
+
+
 async def handle_map_webapp(request):
     # Telegram WebView иногда агрессивно кэширует открытую внутри мини-аппа
     # страницу - по жалобе пользователя (22.09.2026, "карта не открывается,
@@ -24788,6 +24926,13 @@ async def handle_map_airports_api(request):
                     else:
                         poly_entry['cars'] = {}
                     entry['parking_polygons'].append(poly_entry)
+            # ДОБАВЛЕНО 01.10.2026 (прямая просьба пользователя - "сделай чтобы ещё в
+            # аэропорту тоже отображались... таксисты... по 10-15 в каждом тарифе"):
+            # генерируем такси при аэропорте, только для категорий taxi_ultima и
+            # courier_cargo (нельзя связывать их координаты с реальными водителями,
+            # это просто визуализация движущихся машин, как на городской карте).
+            entry['taxis'] = _generate_airport_taxis(coords, num_per_tariff=12)
+
             result.append(entry)
     except Exception:
         logger.exception("❌ Ошибка при получении аэропортов для карты водителей")
