@@ -24772,7 +24772,12 @@ async def handle_map_airports_api(request):
     city = request.query.get('city', '')
     result = []
     try:
-        for airport in AIRPORTS_INFO.get(city, []):
+        airports_list = AIRPORTS_INFO.get(city, [])
+        airports_count = len(airports_list)
+        # ИЗМЕНЕНО 01.10.2026 ("15 водителей всего на город") - распределяем
+        # 15 такси поровну между всеми аэропортами в городе
+        taxis_per_airport = max(1, 15 // airports_count) if airports_count > 0 else 0
+        for airport in airports_list:
             icao = airport['icao']
             zone_key = airport.get('zone_key')
             # ИСПРАВЛЕНО 20.09.2026 (жалоба пользователя - на карте Шереметьево
@@ -24927,10 +24932,12 @@ async def handle_map_airports_api(request):
                     entry['parking_polygons'].append(poly_entry)
             # ДОБАВЛЕНО 01.10.2026 (прямая просьба пользователя - "сделай чтобы ещё в
             # аэропорту тоже отображались... таксисты... по 10-15 в каждом тарифе"):
-            # генерируем такси при аэропорте, только для категорий taxi_ultima и
+            # ИЗМЕНЕНО 01.10.2026 ("15 водителей всего на город") - генерируем
+            # такси при аэропорте, только для категорий taxi_ultima и
             # courier_cargo (нельзя связывать их координаты с реальными водителями,
             # это просто визуализация движущихся машин, как на городской карте).
-            entry['taxis'] = _generate_airport_taxis(coords, total_taxis=15)
+            # 15 такси распределены поровну между всеми аэропортами города.
+            entry['taxis'] = _generate_airport_taxis(coords, total_taxis=taxis_per_airport)
 
             result.append(entry)
     except Exception:
