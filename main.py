@@ -4039,11 +4039,152 @@ def init_db():
             PRIMARY KEY (entity_id, driver_user_id)
         )
     ''')
+    # ДОБАВЛЕНО 01.10.2026 (прямая просьба пользователя - "видимость что кто то что то нажимает на всех заправках и очередь в аэропорту")
+    # Таблица для хранения активности: реальные отметки водителей о топливе/зарядке/очереди в аэропорту + имитационные
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS activity_reports (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            city TEXT NOT NULL,
+            report_type TEXT NOT NULL,
+            location_id TEXT NOT NULL,
+            category TEXT,
+            tariff TEXT,
+            data TEXT NOT NULL,
+            is_real INTEGER DEFAULT 0,
+            user_id INTEGER,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_activity_reports_lookup ON activity_reports (city, report_type, created_at)')
     conn.commit()
     conn.close()
     _db_initialized = True
 
 SHIFT_HISTORY_MONTHS = 6  # сколько месяцев хранить/показывать в статистике (по просьбе пользователя)
+
+def save_activity_report(city, report_type, location_id, data, user_id=None, category=None, tariff=None, is_real=True):
+    """Сохраняет отметку активности (реальную или имитационную) для визуализации на карте.
+
+    report_type: 'fuel' | 'charging' | 'airport_queue'
+    location_id: station_id (для fuel/charging) или airport_code (для airport_queue)
+    data: JSON-данные отметки
+    is_real: 1 = реальная отметка от пользователя, 0 = имитационная
+    """
+    try:
+        init_db()
+        conn = get_db_connection()
+        conn.execute(
+            'INSERT INTO activity_reports (city, report_type, location_id, category, tariff, data, is_real, user_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+            (city, report_type, location_id, category, tariff, data, 1 if is_real else 0, user_id)
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"❌ Ошибка при сохранении отметки активности: {e}")
+
+def get_activity_reports(city, report_type=None, hours=3):
+    """Получает отметки активности за последние N часов (реальные + имитационные).
+
+    Реальные отметки показываются приоритетно. Если 3+ часа без новых реальных отметок,
+    продолжаются имитационные.
+    """
+    try:
+        init_db()
+        conn = get_db_connection()
+        cutoff_time = datetime.utcnow() - timedelta(hours=hours)
+        cutoff_str = cutoff_time.isoformat()
+
+        if report_type:
+            rows = conn.execute(
+                'SELECT id, location_id, category, tariff, data, is_real, created_at FROM activity_reports WHERE city = ? AND report_type = ? AND created_at > ? ORDER BY is_real DESC, created_at DESC LIMIT 500',
+                (city, report_type, cutoff_str)
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                'SELECT id, location_id, category, tariff, data, is_real, created_at FROM activity_reports WHERE city = ? AND created_at > ? ORDER BY is_real DESC, created_at DESC LIMIT 500',
+                (city, cutoff_str)
+            ).fetchall()
+
+        result = []
+        for row in rows:
+            try:
+                report_data = json.loads(row[4])
+            except:
+                report_data = row[4]
+            result.append({
+                'id': row[0],
+                'location_id': row[1],
+                'category': row[2],
+                'tariff': row[3],
+                'data': report_data,
+                'is_real': bool(row[5]),
+                'created_at': row[6]
+            })
+        conn.close()
+        return result
+    except Exception as e:
+        logger.error(f"❌ Ошибка при получении отметок активности: {e}")
+        return []
+
+def generate_simulated_activity_reports(city, report_type, num_reports=15):
+    """Генерирует случайные имитационные отметки для показа активности на карте."""
+    try:
+        init_db()
+        conn = get_db_connection()
+
+        # Получаем список существующих локаций
+        if report_type == 'fuel':
+            locations = conn.execute('SELECT DISTINCT location_id FROM activity_reports WHERE city = ? AND report_type = ? LIMIT 20', (city, 'fuel')).fetchall()
+            if not locations:
+                # Если нет реальных, берём из карты
+                locations = [(str(i),) for i in range(1, 6)]  # fallback
+        elif report_type == 'charging':
+            locations = conn.execute('SELECT DISTINCT location_id FROM activity_reports WHERE city = ? AND report_type = ? LIMIT 20', (city, 'charging')).fetchall()
+            if not locations:
+                locations = [(str(i),) for i in range(1, 4)]
+        elif report_type == 'airport_queue':
+            locations = conn.execute('SELECT DISTINCT location_id FROM activity_reports WHERE city = ? AND report_type = ? LIMIT 10', (city, 'airport_queue')).fetchall()
+            if not locations:
+                # Fallback к аэропортам города
+                locations = [('SVO',), ('VKO',), ('DME',)]  # для Москвы
+        else:
+            locations = []
+
+        conn.close()
+
+        generated = []
+        fuel_types = ['ai-92', 'ai-95', 'ai-98', 'diesel']
+        categories = ['taxi_ultima', 'courier_cargo']
+        tariffs = ['econom', 'comfort', 'comfort+', 'easy', 'medium', 'heavy']
+
+        for _ in range(num_reports):
+            if locations:
+                location_id = secrets.choice(locations)[0]
+            else:
+                location_id = str(secrets.randbelow(20))
+
+            if report_type == 'fuel':
+                data = {'fuel_type': secrets.choice(fuel_types), 'available': secrets.choice([True, False])}
+            elif report_type == 'charging':
+                data = {'status': secrets.choice(['free', 'busy', 'queue'])}
+            elif report_type == 'airport_queue':
+                data = {'category': secrets.choice(categories), 'queue_time': secrets.randbelow(120)}
+            else:
+                data = {}
+
+            generated.append({
+                'location_id': location_id,
+                'category': secrets.choice(categories) if report_type != 'fuel' else None,
+                'tariff': secrets.choice(tariffs) if secrets.choice([True, False]) else None,
+                'data': data,
+                'is_real': False,
+                'created_at': (datetime.utcnow() - timedelta(minutes=secrets.randbelow(180))).isoformat()
+            })
+
+        return generated
+    except Exception as e:
+        logger.error(f"❌ Ошибка при генерировании имитационных отметок: {e}")
+        return []
 
 def save_shift_record(user_id, started_at, duration_minutes, km, airport_wait_minutes=0):
     """Сохраняет одну завершённую смену в историю (см. finish_shift) -
@@ -16647,11 +16788,103 @@ def map_webapp_html():
         }});
         const marker = L.marker([p.lat, p.lon], {{ icon }}).bindPopup(popupText).addTo(map);
         markers.push(marker);
+        // ДОБАВЛЕНО 01.10.2026 (прямая просьба пользователя - "добавить
+        // визуализацию других водителей... не более 100 штук пусть катаются
+        // по городу") - если это имитационный водитель (is_other_driver=true),
+        // сохраняем для анимации движения (startOtherDriversAnimation).
+        if (p.is_other_driver) {{
+          marker._otherDriver = {{
+            startLat: p.lat,
+            startLon: p.lon,
+            marker: marker,
+            speed: 0.3 + Math.random() * 0.7,  // км/ч, имитация движения
+            angle: Math.random() * 360,
+            updateTime: Date.now(),
+          }};
+        }}
         bounds.push([p.lat, p.lon]);
       }});
       if (bounds.length && !airportsLoaded) map.fitBounds(bounds, {{ padding: [30, 30], maxZoom: 13 }});
+      // Запускаем анимацию других водителей
+      startOtherDriversAnimation();
     }} catch (e) {{ /* тихо - карта просто останется пустой до следующего опроса */ }}
   }}
+  // ДОБАВЛЕНО 01.10.2026 (прямая просьба пользователя - "пусть катаются по
+  // городу") - анимирует движение имитационных водителей по городу.
+  // Маркеры двигаются небольшими скачками (обновляются при каждом вызове),
+  // симулируя точки GPS-отслеживания, смена угла движения даёт более
+  // реалистичное поведение, чем движение по прямой.
+  function startOtherDriversAnimation() {{
+    if (!animationFrameId) {{
+      const animate = () => {{
+        let hasAnimatedMarkers = false;
+        markers.forEach(m => {{
+          if (m._otherDriver) {{
+            hasAnimatedMarkers = true;
+            const od = m._otherDriver;
+            const now = Date.now();
+            const deltaMs = now - od.updateTime;
+            od.updateTime = now;
+
+            // ИЗМЕНЕНО 01.10.2026: движение по маршрутам (waypoints) со скоростью 60 км/ч
+            if (od.waypoints && od.waypoints.length > 1) {{
+              // Скорость 60 км/ч = 1 км/мин = 1000м/60сек
+              const speedKmPerMs = (od.speed_kmh || 60.0) / 3600000.0;  // км/мс
+              const distKm = speedKmPerMs * deltaMs;
+
+              // Текущий отрезок маршрута
+              let currentWp = od.waypoints[od.currentWaypointIdx];
+              let nextWp = od.waypoints[(od.currentWaypointIdx + 1) % od.waypoints.length];
+
+              // Расстояние между текущей и следующей точкой
+              const dlat = nextWp.lat - currentWp.lat;
+              const dlon = nextWp.lon - currentWp.lon;
+              const segmentDistKm = Math.sqrt(dlat * dlat + dlon * dlon) * 111.0;  // примерно 111 км на 1 градус
+
+              od.segmentProgress = (od.segmentProgress || 0) + distKm;
+
+              // Если прошли текущий отрезок - переходим на следующий
+              if (od.segmentProgress >= segmentDistKm) {{
+                od.segmentProgress = 0;
+                od.currentWaypointIdx = (od.currentWaypointIdx + 1) % od.waypoints.length;
+                currentWp = od.waypoints[od.currentWaypointIdx];
+                nextWp = od.waypoints[(od.currentWaypointIdx + 1) % od.waypoints.length];
+              }}
+
+              // Интерполируем позицию между двумя точками
+              const progress = od.segmentProgress / segmentDistKm;
+              od.startLat = currentWp.lat + (nextWp.lat - currentWp.lat) * progress;
+              od.startLon = currentWp.lon + (nextWp.lon - currentWp.lon) * progress;
+
+              // Обновляем направление в сторону следующей точки
+              od.angle = Math.atan2(dlon, dlat) * 180 / Math.PI;
+            }} else {{
+              // Fallback: простое движение если нет waypoints (старая логика)
+              const distKm = (od.speed * deltaMs) / 3600000.0;
+              const dlat = distKm * 0.009 * Math.cos(od.angle * Math.PI / 180);
+              const dlon = distKm * 0.012 * Math.sin(od.angle * Math.PI / 180);
+
+              od.startLat += dlat;
+              od.startLon += dlon;
+
+              if (Math.random() < 0.02) {{
+                od.angle += (Math.random() - 0.5) * 45;
+              }}
+            }}
+
+            m.setLatLng([od.startLat, od.startLon]);
+          }}
+        }});
+        if (hasAnimatedMarkers) {{
+          animationFrameId = requestAnimationFrame(animate);
+        }} else {{
+          animationFrameId = null;
+        }}
+      }};
+      animationFrameId = requestAnimationFrame(animate);
+    }}
+  }}
+  let animationFrameId = null;
   // ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "сгладь края
   // облака, сделай более мягкими, размазанными") - облака спроса (и у
   // аэропортов, и городское) строились из 24-28 точек, соединённых ПРЯМЫМИ
@@ -18758,7 +18991,9 @@ def map_webapp_html():
       // дожидаясь следующей перезагрузки списка станций с сервера.
       p.fuel[fuelType] = {{ available: available, reported_at: new Date().toISOString() }};
       const marker = fuelMarkerById[stationId];
-      if (marker) marker.setPopupContent(buildFuelPopup(p));
+      if (marker) {{
+        marker.setPopupContent(buildFuelPopup(p));
+      }}
     }}
   }};
 
@@ -18796,6 +19031,7 @@ def map_webapp_html():
       const icon = L.divIcon({{ className: 'fuel-icon', html: '⛽', iconSize: [22, 22] }});
       fuelStations.forEach(p => {{
         const marker = L.marker([p.lat, p.lon], {{ icon }}).bindPopup(buildFuelPopup(p));
+        marker._fuelData = p;
         fuelMarkerById[p.id] = marker;
         fuelCluster.addLayer(marker);
       }});
@@ -18852,7 +19088,10 @@ def map_webapp_html():
     if (p) {{
       p.status = status;
       const marker = chargingMarkerById[stationId];
-      if (marker) marker.setPopupContent(buildChargingPopup(p));
+      if (marker) {{
+        marker._chargingData = p;
+        marker.setPopupContent(buildChargingPopup(p));
+      }}
     }}
   }}
 
@@ -18867,6 +19106,7 @@ def map_webapp_html():
       const icon = L.divIcon({{ className: 'charging-icon', html: '🔌', iconSize: [22, 22] }});
       chargingStations.forEach(p => {{
         const marker = L.marker([p.lat, p.lon], {{ icon }}).bindPopup(buildChargingPopup(p));
+        marker._chargingData = p;
         chargingMarkerById[p.id] = marker;
         chargingCluster.addLayer(marker);
       }});
@@ -23800,6 +24040,121 @@ async def handle_where_to_go_data_api(request):
         'footnote': footnote,
     })
 
+def _generate_other_drivers(city, city_coords, category=None):
+    """ДОБАВЛЕНО 01.10.2026 (прямая просьба пользователя - "добавить визуализацию
+    других водителей каждом тарифе в каждом городе не более 100 штук пусть
+    катаются по городу") - ИЗМЕНЕНО 01.10.2026 (прямая просьба пользователя -
+    "давай сделаем 100 на каждый тариф") - ИЗМЕНЕНО 01.10.2026 (прямая просьба
+    пользователя - "сделай перемещение меток нереальных водителей по всей зоне
+    города плюс за её пределами пусть ездят по дорогам со скоросью 60 км час") -
+    генерирует "других" водителей (имитированные маркеры, не реальные позиции)
+    вокруг центра города, которые движутся по городу через JavaScript-анимацию.
+    По 100 водителей на каждый тариф. Каждый водитель имеет маршрут (waypoints)
+    по городу и за его пределы, движется со скоростью 60 км/ч."""
+    if not city_coords or city not in RAIN_CITY_COORDS:
+        return []
+
+    center_lat, center_lon = city_coords
+    # Радиус в км вокруг центра для генерирования позиций
+    radius_km = 15.0  # расширили до 15 км для охвата большей зоны
+    # Примерно на 1 км ~ 0.009 градусов широты, ~0.012 град долготы
+    lat_km_deg = 1.0 / 111.0
+    lon_km_deg = 1.0 / (111.0 * cos(radians(center_lat)))
+
+    # Скорость 60 км/час = 1 км/минуту = 1000 м/60 сек ≈ 16.67 м/сек
+    # На фронте: расстояние в метрах между двумя точками = 1000м (1км)
+    # Время пути = 60 секунд
+    speed_kmh = 60.0
+
+    def generate_waypoints_for_driver(start_lat, start_lon, num_points=10):
+        """Генерирует маршрут водителя (набор точек для движения)."""
+        waypoints = [{'lat': start_lat, 'lon': start_lon}]
+
+        current_lat = start_lat
+        current_lon = start_lon
+
+        for _ in range(num_points - 1):
+            # Случайное направление движения
+            angle = secrets.randbelow(360) * 3.14159265359 / 180.0
+
+            # Случайное расстояние 1-4 км за раз (имитирует реальное движение по дорогам)
+            distance_km = 1.0 + (secrets.randbelow(300) / 100.0)  # 1 до 4 км
+
+            # Случайно выбираем выходит ли за пределы города (30% вероятность)
+            if secrets.randbelow(100) < 30:
+                # За пределы города - до 20 км
+                distance_km = 5.0 + (secrets.randbelow(1500) / 100.0)
+
+            # Пересчитываем координаты
+            dlat = distance_km * lat_km_deg * cos(angle)
+            dlon = distance_km * lon_km_deg * sin(angle)
+
+            current_lat += dlat
+            current_lon += dlon
+
+            waypoints.append({
+                'lat': round(current_lat, 6),
+                'lon': round(current_lon, 6),
+                'distance_km': distance_km
+            })
+
+        return waypoints
+
+    other_drivers = []
+    # Если категория не задана, генерируем всех
+    categories_to_gen = [category] if category else list(CATEGORIES.keys())
+
+    for cat in categories_to_gen:
+        if cat not in CATEGORIES:
+            continue
+        cat_info = CATEGORIES[cat]
+        tariffs = cat_info.get('tariffs', [])
+        if not tariffs:
+            continue
+
+        # 100 водителей на каждый тариф
+        drivers_per_tariff = 100
+
+        for tariff in tariffs:
+            for i in range(drivers_per_tariff):
+                # Начальная случайная позиция в радиусе города
+                angle = (i + secrets.randbelow(100) / 100.0) * (2 * 3.14159265359) / drivers_per_tariff
+                dist = secrets.randbelow(int(radius_km * 100)) / 100.0  # 0 до radius_km
+
+                dlat = dist * lat_km_deg * cos(angle)
+                dlon = dist * lon_km_deg * sin(angle)
+
+                start_lat = center_lat + dlat
+                start_lon = center_lon + dlon
+
+                # Генерируем маршрут из 8-15 точек
+                num_waypoints = 8 + secrets.randbelow(8)
+                waypoints = generate_waypoints_for_driver(start_lat, start_lon, num_waypoints)
+
+                # Начальное направление - в сторону первой точки маршрута
+                if len(waypoints) > 1:
+                    next_wp = waypoints[1]
+                    dlat_to_next = next_wp['lat'] - start_lat
+                    dlon_to_next = next_wp['lon'] - start_lon
+                    heading = int(degrees(atan2(dlon_to_next, dlat_to_next))) % 360
+                else:
+                    heading = secrets.randbelow(360)
+
+                other_drivers.append({
+                    'category': cat,
+                    'tariffs': [tariff],
+                    'lat': round(start_lat, 6),
+                    'lon': round(start_lon, 6),
+                    'heading': heading,
+                    'is_other_driver': True,  # флаг для JS, чтобы применить анимацию
+                    'speed_kmh': speed_kmh,  # скорость 60 км/ч
+                    'waypoints': waypoints,  # маршрут для плавного движения
+                    'current_waypoint_idx': 0,  # текущая точка маршрута
+                })
+
+    return other_drivers
+
+
 async def handle_map_webapp(request):
     # Telegram WebView иногда агрессивно кэширует открытую внутри мини-аппа
     # страницу - по жалобе пользователя (22.09.2026, "карта не открывается,
@@ -23894,6 +24249,14 @@ async def handle_map_positions_api(request):
         # Тарифы уже человекочитаемые строки (см. CATEGORIES[cat]['tariffs'] /
         # shift_tariff_options) - WebApp просто склеивает их через запятую в
         # подписи маркера (см. map_webapp_html), переводить не нужно.
+
+        # ДОБАВЛЕНО 01.10.2026 (прямая просьба пользователя - "добавить
+        # визуализацию других водителей") - генерируем имитационных водителей
+        # вокруг города для визуализации в режиме реального времени. Не более
+        # 100 штук, по разным тарифам, с анимацией движения по городу.
+        city_coords = RAIN_CITY_COORDS.get(city)
+        other_drivers = _generate_other_drivers(city, city_coords, category)
+        positions.extend(other_drivers)
     except Exception:
         logger.exception("❌ Ошибка при получении позиций для карты водителей")
         positions = []
@@ -25848,6 +26211,27 @@ async def handle_map_fuel_report_api(request):
         return web.json_response({'error': 'invalid_params'}, status=400)
     if not set_gas_fuel_status(station_id, fuel_type, available, user_id):
         return web.json_response({'error': 'save_failed'}, status=500)
+    # ДОБАВЛЕНО 01.10.2026: сохраняем отметку активности для визуализации на карте
+    try:
+        data = load_fuel_charging_data() or {}
+        station_data = {}
+        for city_name, points in (data.get('cities') or {}).items():
+            for p in points:
+                if p.get('kind') == 'fuel' and p.get('id') == station_id:
+                    station_data = p
+                    city_name = city_name
+                    break
+        if station_data:
+            save_activity_report(
+                city=city_name,
+                report_type='fuel',
+                location_id=station_id,
+                data=json.dumps({'fuel_type': fuel_type, 'available': available}),
+                user_id=user_id,
+                is_real=True
+            )
+    except Exception as e:
+        logger.error(f"❌ Ошибка при сохранении отметки топлива: {e}")
     return web.json_response({'ok': True})
 
 async def handle_map_gas_queue_report_api(request):
@@ -25876,6 +26260,26 @@ async def handle_map_gas_queue_report_api(request):
         return web.json_response({'error': 'invalid_params'}, status=400)
     if not set_gas_queue_status(station_id, status, user_id):
         return web.json_response({'error': 'save_failed'}, status=500)
+    # ДОБАВЛЕНО 01.10.2026: сохраняем отметку активности для визуализации на карте
+    try:
+        data = load_fuel_charging_data() or {}
+        city_name = ''
+        for c, points in (data.get('cities') or {}).items():
+            for p in points:
+                if p.get('id') == station_id:
+                    city_name = c
+                    break
+        if city_name:
+            save_activity_report(
+                city=city_name,
+                report_type='fuel_queue',
+                location_id=station_id,
+                data=json.dumps({'queue_status': status}),
+                user_id=user_id,
+                is_real=True
+            )
+    except Exception as e:
+        logger.error(f"❌ Ошибка при сохранении отметки очереди на заправке: {e}")
     return web.json_response({'ok': True})
 
 async def handle_map_queue_report_api(request):
@@ -25937,6 +26341,20 @@ async def handle_map_queue_report_api(request):
     range_str = queue_range_label(range_idx)
     class_key = f"{category}:{tariff}" if tariff else category
     queue_submit_report(user_id, city, icao, class_key, range_str, zone_key=zone_key)
+    # ДОБАВЛЕНО 01.10.2026: сохраняем отметку активности для визуализации на карте
+    try:
+        save_activity_report(
+            city=city,
+            report_type='airport_queue',
+            location_id=icao,
+            data=json.dumps({'category': category, 'tariff': tariff, 'range': range_str}),
+            user_id=user_id,
+            category=category,
+            tariff=tariff,
+            is_real=True
+        )
+    except Exception as e:
+        logger.error(f"❌ Ошибка при сохранении отметки очереди в аэропорту: {e}")
     local_time = format_airport_local_time(datetime.now(ZoneInfo('UTC')).strftime('%Y-%m-%d %H:%M:%S'), icao)
     return web.json_response({'ok': True, 'range': range_str, 'local_time': local_time, 'category': category, 'tariff': tariff})
 
@@ -26026,6 +26444,26 @@ async def handle_map_charging_report_api(request):
         return web.json_response({'error': 'invalid_params'}, status=400)
     if not set_charging_status(station_id, status, user_id):
         return web.json_response({'error': 'save_failed'}, status=500)
+    # ДОБАВЛЕНО 01.10.2026: сохраняем отметку активности для визуализации на карте
+    try:
+        data = load_fuel_charging_data() or {}
+        city_name = ''
+        for c, points in (data.get('cities') or {}).items():
+            for p in points:
+                if p.get('kind') == 'charging' and p.get('id') == station_id:
+                    city_name = c
+                    break
+        if city_name:
+            save_activity_report(
+                city=city_name,
+                report_type='charging',
+                location_id=station_id,
+                data=json.dumps({'status': status}),
+                user_id=user_id,
+                is_real=True
+            )
+    except Exception as e:
+        logger.error(f"❌ Ошибка при сохранении отметки зарядки: {e}")
     return web.json_response({'ok': True})
 
 MAP_PARKING_API_PATH = '/map/parking'
