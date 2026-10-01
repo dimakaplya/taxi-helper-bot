@@ -24213,41 +24213,36 @@ def _generate_other_drivers(city, city_coords, category=None):
 def _generate_airport_taxis(airport_coords, num_per_tariff=12):
     """ДОБАВЛЕНО 01.10.2026 (прямая просьба пользователя - "сделай чтобы ещё в
     аэропорту тоже отображались но только таксисты просто могли стоять штук по
-    10-15 в каждом тарифе") - генерирует "других" водителей такси при аэропортах.
-    По 10-15 тарифов на каждый тариф категории такси. Каждый водитель имеет
-    маршрут (waypoints) вокруг аэропорта и на короткие расстояния, движется со
-    скоростью 60 км/ч (как и городские водители)."""
+    10-15 в каждом тарифе") - ИЗМЕНЕНО 01.10.2026 (прямая просьба пользователя -
+    "в аэропортах они должны стоять просто рядом с аэропортом а не двигаться
+    условно 20 стоят 20 еду") - генерирует "других" водителей такси при
+    аэропортах. По 10-15 на каждый тариф. Примерно половина стоят на месте,
+    половина движутся вокруг аэропорта со скоростью 40 км/ч."""
     if not airport_coords:
         return []
 
     airport_lat, airport_lon = airport_coords
-    # Радиус вокруг аэропорта - водители ездят в пределах аэропорта и за его пределы до 5 км
-    radius_km = 2.0
+    # Радиус вокруг аэропорта - водители стоят и ездят в пределах 1 км
+    radius_km = 1.0
     lat_km_deg = 1.0 / 111.0
     lon_km_deg = 1.0 / (111.0 * cos(radians(airport_lat)))
 
-    speed_kmh = 60.0
+    speed_kmh = 40.0  # Скорость 40 км/ч вместо 60
 
-    def generate_waypoints_for_airport_taxi(start_lat, start_lon, num_points=6):
-        """Генерирует маршрут такси при аэропорту - более короткие маршруты,
-        чем у городских водителей (они не уезжают далеко от аэропорта)."""
+    def generate_waypoints_for_airport_taxi(start_lat, start_lon):
+        """Генерирует короткий циклический маршрут вокруг аэропорта - водитель
+        крутится на малой площади возле паркинга."""
         waypoints = [{'lat': start_lat, 'lon': start_lon}]
 
         current_lat = start_lat
         current_lon = start_lon
 
-        for _ in range(num_points - 1):
-            # Случайное направление движения
+        # Всего 3-4 точки маршрута, совсем рядом (200-500м)
+        for _ in range(2 + secrets.randbelow(2)):
             angle = secrets.randbelow(360) * 3.14159265359 / 180.0
+            # Очень короткие расстояния - 0.2-0.4 км (200-400м)
+            distance_km = 0.2 + (secrets.randbelow(20) / 100.0)
 
-            # Случайное расстояние 0.5-2 км (водители крутятся вокруг аэропорта)
-            distance_km = 0.5 + (secrets.randbelow(150) / 100.0)
-
-            # Редко (10% вероятность) уезжают подальше до 3-5 км
-            if secrets.randbelow(100) < 10:
-                distance_km = 3.0 + (secrets.randbelow(200) / 100.0)
-
-            # Пересчитываем координаты
             dlat = distance_km * lat_km_deg * cos(angle)
             dlon = distance_km * lon_km_deg * sin(angle)
 
@@ -24287,17 +24282,17 @@ def _generate_airport_taxis(airport_coords, num_per_tariff=12):
                 start_lat = airport_lat + dlat
                 start_lon = airport_lon + dlon
 
-                # Генерируем маршрут из 4-8 точек (более короткий, чем у городских)
-                num_waypoints = 4 + secrets.randbelow(5)
-                waypoints = generate_waypoints_for_airport_taxi(start_lat, start_lon, num_waypoints)
+                # Примерно половина такси стоят на месте (waypoints = None),
+                # половина движутся вокруг аэропорта
+                is_moving = (i % 2) == 0  # чередуем: стоит, едет, стоит, едет...
 
-                # Начальное направление - в сторону первой точки маршрута
-                if len(waypoints) > 1:
-                    next_wp = waypoints[1]
-                    dlat_to_next = next_wp['lat'] - start_lat
-                    dlon_to_next = next_wp['lon'] - start_lon
-                    heading = int(degrees(atan2(dlon_to_next, dlat_to_next))) % 360
+                if is_moving:
+                    waypoints = generate_waypoints_for_airport_taxi(start_lat, start_lon)
+                    heading = int(degrees(atan2(waypoints[1]['lon'] - start_lon,
+                                               waypoints[1]['lat'] - start_lat))) % 360
                 else:
+                    # Водитель стоит на месте - один waypoint (сам)
+                    waypoints = [{'lat': round(start_lat, 6), 'lon': round(start_lon, 6)}]
                     heading = secrets.randbelow(360)
 
                 airport_taxis.append({
@@ -24307,7 +24302,7 @@ def _generate_airport_taxis(airport_coords, num_per_tariff=12):
                     'lon': round(start_lon, 6),
                     'heading': heading,
                     'is_other_driver': True,  # флаг для JS, чтобы применить анимацию
-                    'speed_kmh': speed_kmh,  # скорость 60 км/ч
+                    'speed_kmh': speed_kmh,  # скорость 40 км/ч
                     'waypoints': waypoints,  # маршрут для плавного движения
                     'current_waypoint_idx': 0,  # текущая точка маршрута
                 })
