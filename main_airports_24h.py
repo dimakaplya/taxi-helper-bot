@@ -3460,6 +3460,54 @@ def init_db():
             PRIMARY KEY (user_id, threshold, sub_group)
         )
     ''')
+    # ИСПРАВЛЕНО 01.10.2026 (найдено по факту в логах Railway - "❌ Ошибка в
+    # subscription_expiry_reminder_checker ... sqlite3.OperationalError: no
+    # such column: sub_group") - эта таблица была впервые создана в проде
+    # ЕЩЁ ДО того, как в неё добавили колонку sub_group (CREATE TABLE IF NOT
+    # EXISTS выше - no-op, раз таблица уже есть на Railway Volume с 23.09.2026
+    # без sub_group). В отличие от subscription_payments чуть выше, для этой
+    # таблицы миграцию ALTER TABLE тогда забыли добавить - из-за этого
+    # check_subscription_expiry_reminders падал на каждом цикле проверки
+    # (SELECT/INSERT с sub_group в WHERE/VALUES).
+    try:
+        cursor.execute("ALTER TABLE subscription_expiry_reminders ADD COLUMN sub_group TEXT NOT NULL DEFAULT 'taxi_ultima'")
+    except Exception:
+        pass  # колонка уже существует - обычная ситуация при каждом рестарте
+    # Просто ADD COLUMN чинит падение SELECT/INSERT, но НЕ чинит сам
+    # PRIMARY KEY - у старой таблицы (созданной до sub_group) он был
+    # (user_id, threshold), и SQLite не умеет расширять PK существующей
+    # таблицы через ALTER TABLE. Если оставить как есть, для старых строк
+    # пороги двух РАЗНЫХ sub_group одного user_id будут конфликтовать в
+    # INSERT OR IGNORE (решат, что напоминание уже отправлено, хотя оно было
+    # отправлено для другой группы подписки). Поэтому ниже - проверка
+    # реального PRIMARY KEY через PRAGMA table_info и, если он не совпадает
+    # с ожидаемым (user_id, threshold, sub_group), пересборка таблицы с
+    # переносом данных. На новых установках, где таблица создаётся прямо
+    # сейчас с уже правильным PK (см. CREATE TABLE IF NOT EXISTS выше) -
+    # блок ничего не делает.
+    try:
+        cursor.execute("PRAGMA table_info(subscription_expiry_reminders)")
+        pk_cols = sorted(row[1] for row in cursor.fetchall() if row[5] > 0)
+        if pk_cols != ['sub_group', 'threshold', 'user_id']:
+            cursor.execute('DROP TABLE IF EXISTS subscription_expiry_reminders_pkfix_old')
+            cursor.execute('ALTER TABLE subscription_expiry_reminders RENAME TO subscription_expiry_reminders_pkfix_old')
+            cursor.execute('''
+                CREATE TABLE subscription_expiry_reminders (
+                    user_id INTEGER NOT NULL,
+                    threshold TEXT NOT NULL,
+                    sub_group TEXT NOT NULL DEFAULT 'taxi_ultima',
+                    sent_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (user_id, threshold, sub_group)
+                )
+            ''')
+            cursor.execute('''
+                INSERT OR IGNORE INTO subscription_expiry_reminders (user_id, threshold, sub_group, sent_at)
+                SELECT user_id, threshold, sub_group, sent_at FROM subscription_expiry_reminders_pkfix_old
+            ''')
+            cursor.execute('DROP TABLE subscription_expiry_reminders_pkfix_old')
+            logger.info("✅ subscription_expiry_reminders: пересобран PRIMARY KEY (добавлен sub_group), старые данные перенесены")
+    except Exception:
+        logger.exception("❌ Не удалось пересобрать PRIMARY KEY subscription_expiry_reminders")
     # ДОБАВЛЕНО 22.09.2026 (прямая просьба пользователя - "надо сделать
     # чтобы логика была что за такси и ультим плати отдельно за курьеры
     # грузовые отдельно цена 149 и 89 соответственно", см.
